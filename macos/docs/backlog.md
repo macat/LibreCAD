@@ -38,6 +38,13 @@ pass or by the relevant downstream owner. Each cites its source.
 - Comment the faithful upstream-bug carry in `simultaneousQuadraticFull` (`+f` vs `+l`, rs_math.cpp:1157)
   so it isn't "fixed" accidentally. *(review-math #2)*
 
+## Render gate — viewport (G)
+- `Viewport.worldToClip(drawableSize:)` — `drawableSize` is currently a dead param. Either assert its
+  aspect ≈ `size`'s aspect, or drop it + document `size` as authoritative. *(review-viewport #1)*
+- **Wave-2 renderer MUST set the canvas `NSView.isFlipped = true`** (Viewport assumes top-left Y-down
+  screen) or picking/pan is vertically mirrored — add a runtime assert at the view seam. *(review-viewport #2)*
+- Add a far-origin precision-bound assertion + document worst-case ULP (~3e-4 NDC at 1e6 offset). *(review-viewport #3)*
+
 ## Cross-cutting / later phases
 - **Zoom-bucketed LOD** for curve tessellation (ellipse/arc/spline/lff bulges) — currently fixed-by-tolerance,
   marked `// TODO` in Resolve.swift / LFFParser.swift. *(ADR-003 / rendering-performance.md)*
