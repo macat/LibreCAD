@@ -96,6 +96,13 @@ Engine modules on native-macos: CADEngine core (Vector/Geometry/Pen/Entity/Resol
 ### Tool fan-out (Phase 4 broad parity) — user confirmed drawing visible + Line works (reported small cursor offset); "fan out, 5-10 small agents" (2026-06-11)
 - [2026-06-11 23:10] 📋 coordinator — wrote tools-fanout.md. Wave A = 7 parallel agents (each own tool file + tests; NONE edit ToolKind — coordinator wires it). Dispatched: app-fix (cursor offset + ⌫ delete), entity-transform (shared Affine2D + EntityKind.transformed for modify tools), tool-circle, tool-arc, tool-rect, tool-polyline, tool-point. Wave B (modify: move/copy/rotate/scale/mirror) after entity-transform merges.
 
+#### Wave A reviews + integration
+- 🔍 review-transform — APPROVE (math exact, re-derived to machine precision; composed arc/ellipse mirror correct). "doc deletion must-fix" = diff-direction red-herring (confirmed: branch touched only its 2 files). Should-fix (composed-arc test, non-uniform assert)→backlog.
+- 🔍 review-draw-tools (batch ×5) — APPROVE all, no must-fix; collision-safety verified (names distinct, ToolKind/Tool/LineTool untouched, sequential merge 0 conflicts). Should-fix (polyline "near first" is exact-match)→backlog.
+- 🔍 review-appfix — REVISE: confirmed offset=grid-snapping (transform exact); MUST-FIX (1) bare-⌫ menu key-equiv pre-empts tool-backspace via performKeyEquivalent → gate on isToolActive; (2) no delete/undo/redo test → add engine-level. Should-fix (grid-snap opt-in toggle)→backlog.
+- [2026-06-11 23:55] 📋 coordinator — MERGED ws/transform + 5 draw tools → native-macos (all clean, non-doc overlap none). Combined build+test: **388 tests in 43 suites green**. Cleaned 6 worktrees. Tools NOT yet wired into ToolKind/toolbar (coordinator does that AFTER app-fix merges, to avoid app-file collision).
+- [2026-06-12 00:00] 🔨 appfix-fixer (worktree on ws/appfix) — must-fix ⌫ gating (focused isToolActive → disable Delete menu during tool run) + delete/undo/redo engine test. Outcome: running.
+
 #### Wave A results (all 7 DONE/GREEN; reviews in flight)
 - 🔨 tool-rect (RectangleTool, 2 corners→closed polyline) — 295 tests — ws/tool-rect @ b90de6a2a
 - 🔨 tool-polyline (PolylineTool, multi-vertex→one polyline) — 296 — ws/tool-polyline @ c410ca839
