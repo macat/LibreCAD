@@ -52,6 +52,11 @@ and as the home of `libraries/libdxfrw` (DXF/DWG), which we bridge via Swift/C++
 - [2026-06-11 16:55] 🔨 foundation-fixer (general-purpose, worktree on ws/foundation) — apply review fixes. Outcome: DONE/GREEN. Analytic arc bbox (maxY 10.0 exact); closed-polyline no-dup (first!=last); ResolvedFill→loops:[[Vector]] (outer CCW/holes CW); ResolveContext block arg + reserved dim/font hooks; CADEngine.init internal (.shared only); mintID-only docs + EntityID(0) seed. swift build 0 warnings; 49/49 tests (+8). Tricky: kept @MainActor out of render loop via EntityID(0) placeholder. Receipts: ws/foundation @ b6f3c3636,a951286c0.
 - [2026-06-11 17:10] 📋 coordinator — MERGED ws/foundation → native-macos (--no-ff, clean, zero overlap). Verified merged tree: swift build green + swift test 49/49. Phase 0.5 DONE, contract FROZEN. Cleaned worktrees/branches. Wrote phase1-fanout.md (5 disjoint workstreams A-E).
 - [2026-06-11 17:15] 📋 coordinator — Phase 1 fan-out: dispatching 5 parallel builders (ws/math, ws/entities, ws/document, ws/spatial, ws/lff), each worktree-isolated, disjoint file ownership. See phase1-fanout.md.
+- [2026-06-11 17:15] 🔨 ws-math, ws-entities, ws-document, ws-spatial, ws-lff (general-purpose, worktrees) — Phase 1 engine core, 5 parallel. Outcome: running.
+
+### Phase 1 fan-out results (as they land)
+- [2026-06-11 17:40] 🔨 ws-lff (E) — .lff stroke-font loader. Outcome: DONE/GREEN. LFFGlyph/StrokeFont(Sendable)/LFFParser/StrokeFontProvider(@unchecked Sendable, NSLock); bulge pre-tessellated; C<hex> refs resolved w/ cycle guard; makeProvider()→@Sendable (String)->StrokeFont? matches ResolveContext.fontProvider. swift build 0 warnings; 65 tests (49+16). FLAG: test font read by repo #filePath (Package.swift .copy single-file, couldn't add resource) → fix manifest later to bundle fonts. Receipts: ws/lff @ 7a34576a7.
+- [2026-06-11 17:42] 🔍 review-lff (general-purpose) — review ws/lff before merge. Outcome: running.
 
 ## Environment gotchas (recorded)
 - `git push` / `brew install` / any network op: sandbox blocks them ("port 22: Operation not permitted") → run with sandbox disabled.
