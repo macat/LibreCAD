@@ -1,0 +1,16 @@
+# SwiftPM build products
+engine/.build/
+.build/
+
+# Assembled app bundles
+build/
+
+# macOS / Xcode noise
+.DS_Store
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+
+# The repo-root .gitignore globally ignores "Info.plist"; our committed app
+# bundle template under App/ is intentional, so re-include it here.
+!App/Info.plist
