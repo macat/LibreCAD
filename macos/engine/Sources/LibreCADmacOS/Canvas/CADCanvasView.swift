@@ -62,6 +62,15 @@ final class FlippedMTKView: MTKView {
 
     // MARK: Event routing — all in the flipped (top-left, Y-down) space.
 
+    /// The flipped-view location of the last mouse-down / drag step. Used to derive
+    /// the drag-pan delta from successive cursor positions (so drag-pan uses the
+    /// SAME flipped point space as scroll-pan — fixing the prior `event.deltaX/Y`
+    /// device-space mismatch) and to measure click-vs-drag travel.
+    private var lastDragLocation: CGPoint?
+    /// The flipped-view location of the mouse-down, to classify the gesture as a
+    /// click (small travel) vs a pan (large travel) on mouse-up.
+    private var mouseDownLocation: CGPoint?
+
     private func locationInView(_ event: NSEvent) -> CGPoint {
         convert(event.locationInWindow, from: nil)
     }
@@ -75,13 +84,37 @@ final class FlippedMTKView: MTKView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        controller?.mouseDown(at: locationInView(event))
+        let loc = locationInView(event)
+        mouseDownLocation = loc
+        lastDragLocation = loc
     }
 
     override func mouseDragged(with event: NSEvent) {
         // Left-drag pans the canvas (in addition to scroll), matching a grab gesture.
-        controller?.panDrag(deltaX: event.deltaX, deltaY: event.deltaY)
+        // Derive the delta from successive FLIPPED-view locations (same point space
+        // as scroll-pan and `screenToWorld`), so drag-pan direction matches
+        // scroll-pan and the content follows the cursor in the flipped view.
+        let loc = locationInView(event)
+        let prev = lastDragLocation ?? loc
+        lastDragLocation = loc
+        controller?.panDrag(deltaX: loc.x - prev.x, deltaY: loc.y - prev.y)
     }
+
+    override func mouseUp(with event: NSEvent) {
+        let up = locationInView(event)
+        defer { mouseDownLocation = nil; lastDragLocation = nil }
+        guard let down = mouseDownLocation else { return }
+        // Only treat it as a click (toggle selection) if the pointer barely moved —
+        // a larger travel means it was a pan, not a click (click-vs-drag threshold).
+        let dx = up.x - down.x, dy = up.y - down.y
+        if (dx * dx + dy * dy) <= Self.clickThreshold * Self.clickThreshold {
+            controller?.mouseClick(at: up)
+        }
+    }
+
+    /// Max pointer travel (points) between down and up that still counts as a click
+    /// rather than a pan (so a grab-drag doesn't toggle selection on release).
+    private static let clickThreshold: CGFloat = 3
 
     override func scrollWheel(with event: NSEvent) {
         let loc = locationInView(event)
@@ -205,7 +238,9 @@ final class CADCanvasController {
         redraw()
     }
 
-    func mouseDown(at point: CGPoint) {
+    /// A classified click (down→up with negligible travel) → toggle selection.
+    /// (A larger-travel down→up is a pan and is handled by `panDrag`, NOT here.)
+    func mouseClick(at point: CGPoint) {
         if model.toggleSelection(atScreenPoint: point) {
             redraw()
         }
@@ -237,13 +272,16 @@ struct CADCanvasView: NSViewRepresentable {
     func makeNSView(context: Context) -> FlippedMTKView {
         let view = FlippedMTKView()
 
+        // Enforce the Viewport top-left Y-down contract at the seam UNCONDITIONALLY
+        // — checked before the device guard so it is not dead on the
+        // device-failure path (the flipped contract holds regardless of Metal).
+        precondition(view.isFlipped, "CADCanvasView host MUST be isFlipped (Viewport contract).")
+
         guard let device = MTLCreateSystemDefaultDevice() else {
             assertionFailure("CADCanvasView: no Metal device.")
             NSLog("CADCanvasView: FATAL — no Metal device; canvas will not render.")
             return view
         }
-        // Enforce the Viewport top-left Y-down contract at the seam.
-        precondition(view.isFlipped, "CADCanvasView host MUST be isFlipped (Viewport contract).")
 
         view.device = device
         view.enableSetNeedsDisplay = true     // on-demand draw (rendering-perf §4.3)
