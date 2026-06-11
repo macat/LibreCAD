@@ -147,7 +147,7 @@ public extension Vector {
     static func / (v: Vector, s: Double) -> Vector { Vector(v.x / s, v.y / s, v.z / s) }
 }
 
-// MARK: - Equatable
+// MARK: - Equatable / Hashable
 
 extension Vector: Equatable {
     /// Component-wise equality that also requires matching validity, mirroring
@@ -155,6 +155,25 @@ extension Vector: Equatable {
     public static func == (lhs: Vector, rhs: Vector) -> Bool {
         lhs.valid == rhs.valid && lhs.x == rhs.x && lhs.y == rhs.y && lhs.z == rhs.z
     }
+}
+
+extension Vector: Hashable {
+    /// Hashes the components and validity, consistent with `==`. (Bit-exact: two
+    /// vectors that compare equal hash equal; this is a cache/dictionary key, not
+    /// a tolerance-based geometric comparison.)
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(valid)
+        hasher.combine(x)
+        hasher.combine(y)
+        hasher.combine(z)
+    }
+}
+
+// MARK: - Codable
+
+extension Vector: Codable {
+    // Default member-wise coding (x, y, z, valid) — kept explicit so the on-disk
+    // shape is a stable, documented contract for the entity model's Codable use.
 }
 
 // MARK: - CustomStringConvertible

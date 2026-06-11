@@ -21,23 +21,34 @@ extern "C" {
 #endif
 
 /**
- * Count the geometric entities in a DXF file by streaming it through
- * libdxfrw's DRW_Interface. Pure C ABI so Swift can import it as a plain
- * C module (no Swift C++ interop required).
- *
- * @param path UTF-8 filesystem path to a DXF file.
- * @return number of entities counted, or a negative value on failure
- *         (-1 = null/empty path, -2 = libdxfrw reported a read error,
- *          -3 = an exception escaped the parse).
+ * Status codes returned by the bridge. Replaces the previous process-global
+ * error-string scheme: every call now returns an explicit, thread-safe status,
+ * and outputs are written through out-parameters. Swift maps these to a thrown
+ * `CADEngineError`.
  */
-int lc_dxf_count_entities(const char *path);
+typedef enum LCStatus {
+    LC_OK = 0,                /**< Success. */
+    LC_ERR_INVALID_PATH = 1,  /**< path was null or empty. */
+    LC_ERR_READ_FAILED = 2    /**< libdxfrw could not read the file (bad/missing/corrupt). */
+} LCStatus;
 
 /**
- * Returns a human-readable description of the last error produced by the
- * most recent bridge call, or NULL if it succeeded. The returned pointer is
- * owned by the bridge and remains valid until the next bridge call.
+ * Count the geometric entities in a DXF file by streaming it through libdxfrw's
+ * DRW_Interface. Pure C ABI so Swift can import it as a plain C module (no
+ * Swift C++ interop required).
+ *
+ * No process-global state: the result is written to *out_count and the outcome
+ * is the returned status, so concurrent/serialized callers never race on a
+ * shared error buffer.
+ *
+ * @param path       UTF-8 filesystem path to a DXF file.
+ * @param out_count  On LC_OK, receives the entity count (>= 0). Untouched on
+ *                   error. May be NULL (the count is then discarded).
+ * @return LC_OK on success; LC_ERR_INVALID_PATH for a null/empty path;
+ *         LC_ERR_READ_FAILED if libdxfrw fails to read (also covers any
+ *         exception escaping the parse — caught at the C boundary).
  */
-const char *lc_dxf_last_error(void);
+LCStatus lc_dxf_count_entities(const char *path, int *out_count);
 
 #ifdef __cplusplus
 }

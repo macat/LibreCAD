@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 //
 //  Package.swift
 //  LibreCAD macOS port (GPLv2-or-later)
@@ -13,6 +13,11 @@
 //
 
 import PackageDescription
+
+/// Pin the Swift 6 language mode on every Swift target so strict concurrency is
+/// an explicit, frozen part of the build contract — not something inherited from
+/// the toolchain default (which can drift between Xcode releases).
+let swift6: [SwiftSetting] = [.swiftLanguageMode(.v6)]
 
 let package = Package(
     name: "LibreCADmacOS",
@@ -73,14 +78,16 @@ let package = Package(
         .target(
             name: "CADEngine",
             dependencies: ["DxfBridge"],
-            path: "Sources/CADEngine"
+            path: "Sources/CADEngine",
+            swiftSettings: swift6
         ),
 
         // MARK: - SwiftUI + Metal app.
         .executableTarget(
             name: "LibreCADmacOS",
             dependencies: ["CADEngine"],
-            path: "Sources/LibreCADmacOS"
+            path: "Sources/LibreCADmacOS",
+            swiftSettings: swift6
         ),
 
         // MARK: - Tests.
@@ -90,7 +97,8 @@ let package = Package(
             path: "Tests/CADEngineTests",
             resources: [
                 .copy("Resources/dim_sample.dxf")
-            ]
+            ],
+            swiftSettings: swift6
         ),
     ],
     cxxLanguageStandard: .cxx20

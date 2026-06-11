@@ -16,19 +16,11 @@
 #include "lcdxf.h"
 
 #include <exception>
-#include <string>
 
 #include "libdxfrw.h"
 #include "drw_interface.h"
 
 namespace {
-
-// Thread-local-free: this bridge is documented as single-threaded per call.
-// A single static string holds the last error for lc_dxf_last_error().
-std::string &lastError() {
-    static std::string s;
-    return s;
-}
 
 /**
  * CountingReader implements every pure-virtual of DRW_Interface. The entity
@@ -104,32 +96,25 @@ public:
 
 }  // namespace
 
-extern "C" int lc_dxf_count_entities(const char *path) {
-    lastError().clear();
+extern "C" LCStatus lc_dxf_count_entities(const char *path, int *out_count) {
     if (path == nullptr || path[0] == '\0') {
-        lastError() = "null or empty path";
-        return -1;
+        return LC_ERR_INVALID_PATH;
     }
+    // try/catch keeps any libdxfrw exception from crossing the C boundary; both
+    // a clean read failure and an escaping exception map to LC_ERR_READ_FAILED.
     try {
         CountingReader reader;
         dxfRW dxf(path);
         // ext=false: do not run the (slower) extended/raw parse path.
         const bool ok = dxf.read(&reader, /*ext=*/false);
         if (!ok) {
-            lastError() = "libdxfrw failed to read DXF (code " +
-                          std::to_string(static_cast<int>(dxf.getError())) + ")";
-            return -2;
+            return LC_ERR_READ_FAILED;
         }
-        return reader.count;
-    } catch (const std::exception &e) {
-        lastError() = std::string("exception: ") + e.what();
-        return -3;
+        if (out_count != nullptr) {
+            *out_count = reader.count;
+        }
+        return LC_OK;
     } catch (...) {
-        lastError() = "unknown exception during DXF parse";
-        return -3;
+        return LC_ERR_READ_FAILED;
     }
-}
-
-extern "C" const char *lc_dxf_last_error(void) {
-    return lastError().empty() ? nullptr : lastError().c_str();
 }
