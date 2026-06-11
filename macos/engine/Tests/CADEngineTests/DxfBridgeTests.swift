@@ -24,7 +24,7 @@ struct DxfBridgeTests {
 
     @Test("counts entities in the bundled sample DXF")
     func countsSample() async throws {
-        let engine = CADEngine()
+        let engine = CADEngine.shared
         let count = try await engine.entityCount(atPath: samplePath())
         // The sample is non-trivial; the exact count is asserted in
         // `stableCount` once observed on this toolchain.
@@ -33,7 +33,7 @@ struct DxfBridgeTests {
 
     @Test("entity count is stable")
     func stableCount() async throws {
-        let engine = CADEngine()
+        let engine = CADEngine.shared
         let count = try await engine.entityCount(atPath: samplePath())
         // Observed count for librecad/res/dxf/dim_sample.dxf via libdxfrw.
         // Update this expectation if the bridge's counted-entity set changes.
@@ -42,7 +42,7 @@ struct DxfBridgeTests {
 
     @Test("missing file throws readFailed")
     func missingFileThrows() async throws {
-        let engine = CADEngine()
+        let engine = CADEngine.shared
         // A path that points nowhere reaches libdxfrw and fails the read, which
         // the status ABI maps to LC_ERR_READ_FAILED -> .readFailed.
         await #expect(throws: CADEngineError.readFailed) {
@@ -52,7 +52,7 @@ struct DxfBridgeTests {
 
     @Test("empty path throws invalidPath")
     func emptyPathThrows() async throws {
-        let engine = CADEngine()
+        let engine = CADEngine.shared
         // LC_ERR_INVALID_PATH is returned before any parse is attempted.
         await #expect(throws: CADEngineError.invalidPath) {
             _ = try await engine.entityCount(atPath: "")

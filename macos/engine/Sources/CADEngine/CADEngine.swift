@@ -39,10 +39,16 @@ public enum CADEngineError: Error, Equatable, Sendable {
 /// heavy work runs to completion inside the call; this is acceptable for the
 /// spine and can later move to a detached task if needed.
 public actor CADEngine {
-    /// The process-wide shared engine. Prefer this over constructing your own.
+    /// The process-wide shared engine — the ONLY public way to reach the engine.
     public static let shared = CADEngine()
 
-    public init() {}
+    /// `internal`, not `public`: external callers MUST go through
+    /// `CADEngine.shared`. libdxfrw is non-reentrant, so there is exactly one
+    /// engine actor per process (foundation rule above); a `public init` would
+    /// let the Phase-1 fan-out spin up parallel engine actors and race the C
+    /// library. `internal` keeps `.shared` constructible and lets `@testable`
+    /// tests build instances without opening the door to the wider codebase.
+    init() {}
 
     /// Counts the geometric entities in the DXF at `path` by streaming it
     /// through libdxfrw's `DRW_Interface`.

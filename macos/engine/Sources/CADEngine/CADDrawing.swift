@@ -86,6 +86,13 @@ public final class CADDrawing {
     ///
     /// If the entity's id is the placeholder `EntityID(0)` it is minted a fresh
     /// id here; otherwise its id is honored (used by document load).
+    ///
+    /// - Important: Callers MUST use `mintID()` for new entities (or leave the id
+    ///   as the placeholder `EntityID(0)` to have one minted here). Only
+    ///   `load(...)` supplies external ids (from a parsed file). Supplying a
+    ///   hand-picked, non-minted id risks colliding with a minted or loaded id;
+    ///   the `precondition` below aborts on a duplicate id as a programmer-error
+    ///   guard — it is NOT a recoverable runtime path.
     @discardableResult
     public func add(_ entity: EntityRecord) -> EntityID {
         var e = entity
