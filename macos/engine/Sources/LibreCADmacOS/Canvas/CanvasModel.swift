@@ -69,9 +69,18 @@ final class CanvasModel {
     @ObservationIgnored
     var modelVersion = 0
 
-    /// Enabled snap modes (foundation default: the standard CAD set).
+    /// Enabled snap modes. The *interactive* default deliberately OMITS `.grid`:
+    /// with grid-snap on, a click in empty space rounds the cursor's world point to
+    /// the nearest grid node (up to the 8-pt aperture away), so a drawn line lands
+    /// with a small visible offset FROM the cursor — the reported "cursor↔point
+    /// offset" bug. The transform is exact (ViewportTests round-trip); the offset
+    /// was grid-snap moving the click. We keep the geometry snaps (endpoint/center/
+    /// middle/intersection/onEntity) so clicks still bind to real geometry, and
+    /// `.free` as the always-available fallback so an empty-area click lands EXACTLY
+    /// under the cursor. The grid is still drawn as a visual guide. (Engine
+    /// `SnapMode.standard` is unchanged; this is the app-level interactive policy.)
     @ObservationIgnored
-    var snapModes: SnapMode = .standard
+    var snapModes: SnapMode = [.endpoint, .center, .middle, .intersection, .onEntity, .free]
 
     /// The grid step (world units) last seen via `updateSnap`/`snappedWorldPoint`.
     /// The renderer owns the live grid spacing and the canvas view passes it down
@@ -368,5 +377,26 @@ final class CanvasModel {
         selection.clear()
         modelDirty = true
         modelVersion &+= 1
+    }
+
+    // MARK: - Delete selection (Edit ▸ Delete / ⌫)
+
+    /// Removes every entity in the current selection as ONE undoable group, reusing
+    /// the existing `applyCommit` edit path: it removes each entity from the drawing
+    /// (undoable, ADR-002), drops it from the quadtree, and clears it from the
+    /// selection (the `.remove` case already does all three), then marks the GPU
+    /// model buffer dirty. A single undo restores the whole deletion. No-op (returns
+    /// `false`) when the selection is empty, so the caller can skip a redraw.
+    @discardableResult
+    func deleteSelection() -> Bool {
+        guard !selection.isEmpty else { return false }
+        // Snapshot the ids first: `applyCommit`'s `.remove` mutates `selection`
+        // while iterating, so we must not iterate `selection.ids` directly.
+        let edits: [ToolEdit] = selection.ids.map { .remove($0) }
+        applyCommit(edits)
+        // `applyCommit` removes each id from `selection`; clear any residue so the
+        // selection is empty and the highlight overlay disappears.
+        selection.clear()
+        return true
     }
 }

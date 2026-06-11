@@ -170,6 +170,10 @@ final class CADCanvasController {
 
     private func redraw() { view?.setNeedsDisplay(view?.bounds ?? .zero) }
 
+    /// Public redraw hook for SwiftUI commands (e.g. Edit ▸ Delete) that mutate the
+    /// model directly and need the canvas to repaint.
+    func requestRedraw() { redraw() }
+
     /// Enter continuous-redraw mode for a smooth gesture, scheduling a return to
     /// on-demand after a short idle (so the last frame settles).
     private func beginGesture() {
@@ -282,7 +286,8 @@ final class CADCanvasController {
     ///   L            → activate the Line tool.
     ///   V / Esc      → return to select mode (Esc also cancels an in-progress run).
     ///   Return/Enter → commit the current tool run.
-    ///   Delete/⌫     → backspace the current tool run.
+    ///   Delete/⌫     → backspace the current tool run (tool active) OR delete the
+    ///                  current selection (select mode, if non-empty).
     func handleKey(_ event: NSEvent) -> Bool {
         let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
         // Esc is key code 53 (no reliable character).
@@ -303,9 +308,22 @@ final class CADCanvasController {
             return true
         }
         if model.isToolActive, isDelete {
+            // While a draw tool is mid-run, ⌫ backspaces the run (undo last point),
+            // NOT delete-selection — the tool consumes it.
             model.handleToolInput(.backspace)
             redraw()
             return true
+        }
+        if !model.isToolActive, isDelete {
+            // Select mode: ⌫/Delete removes the current selection (undoable). Only
+            // claim the key if there is actually a selection to delete, so an empty
+            // ⌫ falls through to the responder chain (e.g. system beep) rather than
+            // being silently swallowed.
+            if model.deleteSelection() {
+                redraw()
+                return true
+            }
+            return false
         }
         switch chars {
         case "l":

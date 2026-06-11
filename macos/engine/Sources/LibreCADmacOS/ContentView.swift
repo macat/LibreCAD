@@ -52,6 +52,9 @@ struct ContentView: View {
             }
             .focusedSceneValue(\.undoAction) { model.undo() }
             .focusedSceneValue(\.redoAction) { model.redo() }
+            .focusedSceneValue(\.deleteSelection) {
+                if model.deleteSelection() { controllerBox.controller?.requestRedraw() }
+            }
             .fileImporter(
                 isPresented: $showOpen,
                 allowedContentTypes: Self.dxfTypes,
@@ -249,6 +252,12 @@ extension FocusedValues {
         get { self[RedoActionKey.self] }
         set { self[RedoActionKey.self] = newValue }
     }
+
+    /// Delete the focused window's current selection (Edit ▸ Delete, ⌫).
+    var deleteSelection: (() -> Void)? {
+        get { self[DeleteSelectionKey.self] }
+        set { self[DeleteSelectionKey.self] = newValue }
+    }
 }
 
 private struct ZoomToFitKey: FocusedValueKey {
@@ -268,5 +277,9 @@ private struct UndoActionKey: FocusedValueKey {
 }
 
 private struct RedoActionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct DeleteSelectionKey: FocusedValueKey {
     typealias Value = () -> Void
 }

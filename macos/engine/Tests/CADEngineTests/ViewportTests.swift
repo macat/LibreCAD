@@ -352,4 +352,66 @@ struct ViewportTransformTests {
         let vp = Viewport(scale: 1, center: .invalid, size: CGSize(width: 100, height: 100))
         #expect(vp.center == Vector(0, 0))
     }
+
+    // MARK: - Cursor↔world commit round-trip (cursor-offset regression)
+
+    /// Pins the EXACT screen→world→screen identity the interaction layer relies on
+    /// when a draw tool commits a point: a click at view-point `P` maps to world `W`
+    /// via `screenToWorld`, and `worldToScreen(W)` must land back ON `P` (to f64
+    /// precision). If this holds, any perceived "the line is offset from the cursor"
+    /// is NOT a transform error — it is snapping moving the click (the real cause;
+    /// see `SnapOffsetRegressionTests`). This is the regression guard the cursor-
+    /// offset bug asked for: a representative view config (off-origin center, a
+    /// non-1 scale, a non-square view) with clicks at concrete view points
+    /// including the edges and arbitrary interior points.
+    @Test("a click at view-point P round-trips: worldToScreen(screenToWorld(P)) == P")
+    func clickCommitRoundTrip() {
+        // A representative live config: non-1 scale, off-origin center, 16:10 view.
+        let size = CGSize(width: 1280, height: 800)
+        let vp = Viewport(scale: 3.5, center: Vector(420.25, -137.5), size: size)
+
+        let clicks: [CGPoint] = [
+            CGPoint(x: 0, y: 0),                       // top-left corner
+            CGPoint(x: 1280, y: 800),                  // bottom-right corner
+            CGPoint(x: 640, y: 400),                   // exact view center
+            CGPoint(x: 17.5, y: 783.25),              // arbitrary interior
+            CGPoint(x: 999.9, y: 12.3),               // arbitrary interior
+        ]
+        for p in clicks {
+            // What the tool actually receives for a click at P (the raw, unsnapped
+            // world point — this is exactly `CanvasModel.snappedWorldPoint`'s free
+            // fallback when no snap fires).
+            let world = vp.screenToWorld(p)
+            // Where that committed world point is then drawn — must be UNDER P.
+            let back = vp.worldToScreen(world)
+            #expect(abs(back.x - Double(p.x)) < 1e-9, "x off at \(p): \(back.x)")
+            #expect(abs(back.y - Double(p.y)) < 1e-9, "y off at \(p): \(back.y)")
+        }
+    }
+
+    /// The conversion the host view performs (`convert(event.locationInWindow,
+    /// from: nil)`) yields a point in the FLIPPED view's local space whose origin is
+    /// the view's top-left — independent of any title-bar / toolbar inset, because
+    /// the conversion is into the view's own coordinate space, not the window's.
+    /// This test documents that the Viewport math is keyed off the view's POINT size
+    /// only (never the window size or a drawable-pixel size), so a title-bar/toolbar
+    /// offset cannot leak into world coords: the same local point gives the same
+    /// world point regardless of where the view sits in its window.
+    @Test("world mapping depends only on view-local point + view point-size, not window placement")
+    func worldMappingIsViewLocalOnly() {
+        let size = CGSize(width: 800, height: 600)
+        let vp = Viewport(scale: 2, center: Vector(0, 0), size: size)
+        // A view-local click 100 pts right and 50 pts down from the view's top-left.
+        let local = CGPoint(x: 100, y: 50)
+        let world = vp.screenToWorld(local)
+        // Y-down local → world is Y-up: 50 pts down from center-relative math.
+        // Center is at (400,300) local; (100,50) is (-300,-250) pts from center.
+        // world = center + (dx/scale, -dy/scale) = (-150, +125).
+        #expect(abs(world.x - (-150)) < 1e-9)
+        #expect(abs(world.y - 125) < 1e-9)
+        // And it round-trips back to the SAME view-local point (no inset term).
+        let back = vp.worldToScreen(world)
+        #expect(abs(back.x - 100) < 1e-9)
+        #expect(abs(back.y - 50) < 1e-9)
+    }
 }

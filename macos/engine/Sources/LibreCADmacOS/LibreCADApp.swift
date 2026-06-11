@@ -37,6 +37,8 @@ struct LibreCADApp: App {
     /// Undo / redo actions published by the focused window.
     @FocusedValue(\.undoAction) private var undoAction
     @FocusedValue(\.redoAction) private var redoAction
+    /// Delete-selection action published by the focused window (Edit ▸ Delete, ⌫).
+    @FocusedValue(\.deleteSelection) private var deleteSelection
 
     var body: some Scene {
         WindowGroup {
@@ -56,6 +58,14 @@ struct LibreCADApp: App {
                 Button("Redo") { redoAction?() }
                     .keyboardShortcut("z", modifiers: [.command, .shift])
                     .disabled(redoAction == nil)
+            }
+            // Edit ▸ Delete — removes the current selection (undoable). The ⌫ key on
+            // the canvas is also handled directly by the controller (select mode);
+            // this menu item makes it discoverable and gives it a standard shortcut.
+            CommandGroup(after: .pasteboard) {
+                Button("Delete") { deleteSelection?() }
+                    .keyboardShortcut(.delete, modifiers: [])
+                    .disabled(deleteSelection == nil)
             }
             CommandGroup(after: .toolbar) {
                 Button("Zoom to Fit") { zoomToFit?() }
