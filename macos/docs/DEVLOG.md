@@ -96,6 +96,16 @@ Engine modules on native-macos: CADEngine core (Vector/Geometry/Pen/Entity/Resol
 ### Tool fan-out (Phase 4 broad parity) — user confirmed drawing visible + Line works (reported small cursor offset); "fan out, 5-10 small agents" (2026-06-11)
 - [2026-06-11 23:10] 📋 coordinator — wrote tools-fanout.md. Wave A = 7 parallel agents (each own tool file + tests; NONE edit ToolKind — coordinator wires it). Dispatched: app-fix (cursor offset + ⌫ delete), entity-transform (shared Affine2D + EntityKind.transformed for modify tools), tool-circle, tool-arc, tool-rect, tool-polyline, tool-point. Wave B (modify: move/copy/rotate/scale/mirror) after entity-transform merges.
 
+#### Wave A results (all 7 DONE/GREEN; reviews in flight)
+- 🔨 tool-rect (RectangleTool, 2 corners→closed polyline) — 295 tests — ws/tool-rect @ b90de6a2a
+- 🔨 tool-polyline (PolylineTool, multi-vertex→one polyline) — 296 — ws/tool-polyline @ c410ca839
+- 🔨 tool-point (PointTool) — 293 — ws/tool-point @ 365516b58
+- 🔨 tool-circle (CircleTool, center+radius) — 295 — ws/tool-circle @ a7451edd9
+- 🔨 tool-arc (ArcTool, center→start→end CCW) — 296 — ws/tool-arc @ 84a119352
+- 🔨 entity-transform (Affine2D + EntityKind.transformed all 8 kinds; arc/ellipse angle + polyline bulge-mirror; non-uniform-scale-on-circle limitation documented) — 308 — ws/transform @ 17e5a5a4d
+- 🔨 app-fix — OFFSET ROOT CAUSE = grid-snapping (default snap set included .grid → empty clicks rounded to grid node within 8pt aperture); transform proven correct via round-trip tests. Fix: drop .grid from interactive default (empty=exact cursor; geometry snaps still fire; grid stays visual). + ⌫ delete-selection (undoable) + Edit▸Delete. — 284 — ws/appfix @ 481107a6f
+- Reviews dispatched: review-draw-tools (5 tools, batch), review-transform, review-appfix. Each tool/util built ONLY its own files (ToolKind untouched — coordinator wires at integration).
+
 ### Tool phase (editor) — user confirmed app launches; "let's continue" (2026-06-11)
 - [2026-06-11 21:40] 🔨 tool-framework (general-purpose, worktree) — interactive Tool framework + LineTool + app wiring. Outcome: DONE/GREEN. Tool protocol (ToolInput move/click/commit/cancel/backspace → ToolOutcome none/preview/commit([EntityRecord])/finished; pure value tools, per-tool enum State); LineTool (rubber-band+chain); CanvasModel active tool + own UndoManager + applyCommit(add+quadtree.insert)+undo rebuilds index; CADCanvasView events→snap→tool; preview overlay (distinct color); L/V/Esc/Return/Delete keys + toolbar + Tools/Edit menus (⌘Z/⇧⌘Z). Central reg surface = ToolKind.swift (append-only). swift build 0 warnings; 274 tests (254+20); no new crash. Receipts: ws/toolframework @ f9cf715.
 - [2026-06-11 21:55] 🔍 review-toolframework (general-purpose) — gate before merge; forward-fit for MODIFY tools. Outcome: FAILED (agent stalled 600s, infra watchdog — no verdict). Recovery: coordinator read Tool.swift + CanvasModel.applyCommit directly → confirmed the gap (contract is draw-only: .commit([EntityRecord])→drawing.add; tools get no selection/entity access). Forward-fit call made directly: WIDEN before fan-out.
