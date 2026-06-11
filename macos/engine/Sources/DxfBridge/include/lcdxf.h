@@ -16,6 +16,9 @@
 #ifndef LCDXF_H
 #define LCDXF_H
 
+#include <stddef.h>
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -32,21 +35,167 @@ typedef enum LCStatus {
     LC_ERR_READ_FAILED = 2    /**< libdxfrw could not read the file (bad/missing/corrupt). */
 } LCStatus;
 
-/**
- * Count the geometric entities in a DXF file by streaming it through libdxfrw's
- * DRW_Interface. Pure C ABI so Swift can import it as a plain C module (no
- * Swift C++ interop required).
+/* ------------------------------------------------------------------------- *
+ *  Flattened entity model
  *
- * No process-global state: the result is written to *out_count and the outcome
- * is the returned status, so concurrent/serialized callers never race on a
- * shared error buffer.
+ *  The reader streams a DXF file through libdxfrw's DRW_Interface and flattens
+ *  every supported geometric entity into a trivially-copyable POD struct here.
+ *  DRW_Header / DRW_Variant / std::shared_ptr graphs NEVER cross to Swift: all
+ *  strings are copied into a per-handle pool and referenced by `const char*`
+ *  whose lifetime is tied to the LCEntityList that owns them. Variable-length
+ *  data (polyline vertices, spline control/knot/weight arrays) live in flat
+ *  arrays owned by the handle and are referenced by (pointer + count).
+ * ------------------------------------------------------------------------- */
+
+/** Discriminator for `LCEntity::kind`. */
+typedef enum LCEntityKind {
+    LC_ENT_LINE = 0,
+    LC_ENT_POINT = 1,
+    LC_ENT_CIRCLE = 2,
+    LC_ENT_ARC = 3,
+    LC_ENT_ELLIPSE = 4,
+    LC_ENT_LWPOLYLINE = 5,
+    LC_ENT_POLYLINE = 6,
+    LC_ENT_SPLINE = 7,
+    /** An entity libdxfrw delivered but the reader does not flatten
+     *  (TEXT/MTEXT/INSERT/DIMENSION/HATCH/SOLID/IMAGE/...). Carries only its
+     *  `typeName` so Swift can collect a warning; geometry fields are unset. */
+    LC_ENT_UNSUPPORTED = 100
+} LCEntityKind;
+
+/** One flattened polyline vertex: a 2D point plus a DXF bulge. */
+typedef struct LCVertex {
+    double x;
+    double y;
+    double bulge;   /**< tan(includedAngle/4) of the following segment; 0 == straight. */
+} LCVertex;
+
+/**
+ * A single flattened entity. Plain-old-data: trivially copyable, no owning
+ * pointers except the borrowed `const char*` strings and the borrowed flat
+ * arrays, all of which live in the owning LCEntityList. Which fields are
+ * meaningful depends on `kind`:
+ *
+ *  - LINE:        p1, p2
+ *  - POINT:       p1
+ *  - CIRCLE:      center, radius
+ *  - ARC:         center, radius, startAngle, endAngle (radians)
+ *  - ELLIPSE:     center, majorEnd (major-axis endpoint RELATIVE to center),
+ *                 ratio, startAngle, endAngle (ellipse parameters, radians)
+ *  - LWPOLYLINE / POLYLINE: vertices[vertexCount], closed
+ *  - SPLINE:      degree, controlPoints (as vertices[].x/.y), knots/weights,
+ *                 closed
+ *  - UNSUPPORTED: typeName only
+ */
+typedef struct LCEntity {
+    int32_t kind;          /**< an LCEntityKind value. */
+
+    /* Common attributes (flattened from DRW_Entity). */
+    const char *layer;     /**< layer name (never NULL; "0" if absent). */
+    const char *lineType;  /**< linetype name (never NULL; "BYLAYER" if absent). */
+    int32_t color;         /**< ACI color index, code 62 (0=ByBlock, 256=ByLayer). */
+    int32_t color24;       /**< true-color 0x00RRGGBB, code 420, or -1 if unset. */
+    int32_t lineWeightMM100;/**< lineweight in mm*100; -1 ByLayer, -2 ByBlock, -3 default. */
+
+    /* Geometry (meaning per `kind`). */
+    double p1x, p1y, p1z;  /**< line start / point / generic base point. */
+    double p2x, p2y, p2z;  /**< line end / ellipse major-axis endpoint (relative). */
+    double cx, cy, cz;     /**< center (circle / arc / ellipse). */
+    double radius;
+    double startAngle;     /**< arc/ellipse start (radians). */
+    double endAngle;       /**< arc/ellipse end (radians). */
+    double ratio;          /**< ellipse minor/major ratio. */
+
+    int32_t closed;        /**< polyline/spline closed flag (0/1). */
+    int32_t degree;        /**< spline degree. */
+
+    /* Variable-length data — borrowed pointers into the owning list's pools. */
+    const LCVertex *vertices;   /**< polyline vertices, or spline control points (x/y). */
+    int32_t vertexCount;
+    const double *knots;        /**< spline knot vector (may be NULL/0). */
+    int32_t knotCount;
+    const double *weights;      /**< spline rational weights (may be NULL/0). */
+    int32_t weightCount;
+
+    const char *typeName;       /**< DXF type name (e.g. "TEXT"); set for UNSUPPORTED. */
+} LCEntity;
+
+/**
+ * A flattened layer-table entry (from DRW_Layer). Strings borrow the owning
+ * list's pool. `flags` is the DXF code-70 bitfield (1=frozen, 4=locked).
+ */
+typedef struct LCLayer {
+    const char *name;
+    const char *lineType;
+    int32_t color;          /**< ACI color index (code 62; sign carries the off/frozen bit in DXF, abs() here). */
+    int32_t color24;        /**< true-color 0x00RRGGBB or -1. */
+    int32_t lineWeightMM100;/**< lineweight in mm*100; -1 ByLayer, -3 default, etc. */
+    int32_t flags;          /**< code 70: bit0 frozen, bit2 locked. */
+    int32_t plot;           /**< code 290: 1 printable, 0 not. */
+} LCLayer;
+
+/** Opaque owned result handle. Free with `lc_entity_list_free`. */
+typedef struct LCEntityList LCEntityList;
+
+/**
+ * Read a DXF file and flatten every supported geometric entity, the layer
+ * table, and the warning list into an owned handle.
+ *
+ * Pure C ABI: the whole libdxfrw graph is flattened in-callback into POD copies,
+ * so Swift never touches a C++ type. The body is wrapped in try/catch — no
+ * exception ever crosses this boundary.
+ *
+ * libdxfrw is non-reentrant; callers MUST serialize through the single shared
+ * engine actor (see CADEngine).
+ *
+ * @param path  UTF-8 filesystem path to a DXF file.
+ * @param out   On LC_OK, receives a newly-allocated handle the caller owns and
+ *              must free with `lc_entity_list_free`. Untouched on error.
+ * @return LC_OK on success; LC_ERR_INVALID_PATH for a null/empty path or null
+ *         out; LC_ERR_READ_FAILED if libdxfrw fails to read (also covers any
+ *         exception escaping the parse).
+ */
+LCStatus lc_dxf_read(const char *path, LCEntityList **out);
+
+/** Number of flattened entities in the list (>= 0). NULL-safe (returns 0). */
+int lc_entity_list_count(const LCEntityList *list);
+
+/**
+ * Pointer to the contiguous flat array of `lc_entity_list_count` entities, or
+ * NULL if empty. The pointer (and every string / vertex / array it references)
+ * stays valid until `lc_entity_list_free`.
+ */
+const LCEntity *lc_entity_list_entities(const LCEntityList *list);
+
+/** Number of geometric entities libdxfrw delivered (supported + unsupported).
+ *  This matches the old `lc_dxf_count_entities` semantics. NULL-safe. */
+int lc_entity_list_geometry_count(const LCEntityList *list);
+
+/** Number of layers in the flattened layer table (>= 0). NULL-safe. */
+int lc_layer_count(const LCEntityList *list);
+
+/** Pointer to the contiguous flat array of `lc_layer_count` layers, or NULL. */
+const LCLayer *lc_layers(const LCEntityList *list);
+
+/** Frees a handle returned by `lc_dxf_read`. NULL-safe. */
+void lc_entity_list_free(LCEntityList *list);
+
+/**
+ * Map an AutoCAD Color Index (1..255) to a packed 0x00RRGGBB true color using
+ * libdxfrw's standard ACI palette (`DRW::dxfColors`). Returns -1 for the
+ * sentinels (0 == ByBlock, 256 == ByLayer) and for any out-of-range index, so
+ * callers treat those as "inherit". ACI 7 maps to black in the palette.
+ */
+int32_t lc_aci_to_rgb(int32_t aci);
+
+/**
+ * Count the geometric entities in a DXF file. Reimplemented atop the reader:
+ * counts every entity libdxfrw delivers (supported + unsupported), matching the
+ * historical counting-reader semantics. Kept for the existing count tests.
  *
  * @param path       UTF-8 filesystem path to a DXF file.
- * @param out_count  On LC_OK, receives the entity count (>= 0). Untouched on
- *                   error. May be NULL (the count is then discarded).
- * @return LC_OK on success; LC_ERR_INVALID_PATH for a null/empty path;
- *         LC_ERR_READ_FAILED if libdxfrw fails to read (also covers any
- *         exception escaping the parse — caught at the C boundary).
+ * @param out_count  On LC_OK, receives the entity count (>= 0). May be NULL.
+ * @return LC_OK / LC_ERR_INVALID_PATH / LC_ERR_READ_FAILED.
  */
 LCStatus lc_dxf_count_entities(const char *path, int *out_count);
 
