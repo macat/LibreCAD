@@ -3,31 +3,325 @@
 //  CADEngine
 //
 //  The document model (ADR-001 / ADR-002): an ordered store of value-type
-//  entities keyed by stable `EntityID`, plus the layer table and the id-minting
-//  counter. Mirrors LibreCAD's RS_Graphic / RS_EntityContainer, but holds value
-//  records by id (NO object pointers, NO child graph) and registers undo as
-//  value snapshots of the touched entities (ADR-002) — not LibreCAD's flag-based
-//  RS_Undo scheme.
+//  entities keyed by stable `EntityID`, plus the layer table, the block table,
+//  graphic variables, drawing units, and the id-minting counter. Mirrors
+//  LibreCAD's RS_Graphic / RS_EntityContainer, but holds value records by id (NO
+//  object pointers, NO child graph) and registers undo as value snapshots of the
+//  touched state (ADR-002) — not LibreCAD's flag-based RS_Undo scheme.
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //
 //  Copyright (C) 2026 LibreCAD macOS contributors.
-//  Copyright (C) 2001-2003 RibbonSoft (original RS_Graphic / RS_Undo model).
+//  Copyright (C) 2001-2003 RibbonSoft (original RS_Graphic / RS_Undo / RS_Units).
 //
 
 import Foundation
 import Observation
 
-/// The drawing — entities, layers, and the metadata the engine/render/tools all
-/// read. `@MainActor` so it integrates cleanly with SwiftUI's `@Observable`
-/// document machinery and `UndoManager` (which runs on the main thread for
-/// document apps); `@Observable` so views update on mutation.
+// MARK: - Drawing units (RS2::Unit + RS_Units conversion)
+
+/// The drawing's measurement unit — the value-type port of `RS2::Unit`
+/// (librecad/src/lib/engine/rs.h). Raw values match the DXF `$INSUNITS` integer
+/// codes so `init(dxf:)` / `dxfCode` round-trip a parsed header.
+public enum DrawingUnit: Int, Sendable, Hashable, Codable, CaseIterable {
+    case none = 0
+    case inch = 1
+    case foot = 2
+    case mile = 3
+    case millimeter = 4
+    case centimeter = 5
+    case meter = 6
+    case kilometer = 7
+    case microinch = 8
+    case mil = 9
+    case yard = 10
+    case angstrom = 11
+    case nanometer = 12
+    case micron = 13
+    case decimeter = 14
+    case decameter = 15
+    case hectometer = 16
+    case gigameter = 17
+    case astro = 18
+    case lightyear = 19
+    case parsec = 20
+
+    /// The DXF `$INSUNITS` integer code for this unit.
+    public var dxfCode: Int { rawValue }
+
+    /// Builds a unit from a DXF `$INSUNITS` code, falling back to `.none` for an
+    /// unknown code (`RS_Units::dxfint2unit` clamps the same way).
+    public init(dxf code: Int) {
+        self = DrawingUnit(rawValue: code) ?? .none
+    }
+
+    /// Multiplicative factor to convert a value in this unit into **millimeters**
+    /// (`RS_Units::getFactorToMM`). `.none` is treated as millimeters (factor 1).
+    public var factorToMM: Double {
+        switch self {
+        case .none, .millimeter: return 1.0
+        case .inch:        return 25.4
+        case .foot:        return 304.8
+        case .mile:        return 1.609344e6   // international mile
+        case .centimeter:  return 10
+        case .meter:       return 1e3
+        case .kilometer:   return 1e6
+        case .microinch:   return 2.54e-5
+        case .mil:         return 0.0254
+        case .yard:        return 914.4
+        case .angstrom:    return 1e-7
+        case .nanometer:   return 1e-6
+        case .micron:      return 1e-3
+        case .decimeter:   return 100.0
+        case .decameter:   return 1e4
+        case .hectometer:  return 1e5
+        case .gigameter:   return 1e9
+        case .astro:       return 1.495978707e14
+        case .lightyear:   return 9.4607304725808e18
+        case .parsec:      return 3.0856776e19
+        }
+    }
+
+    /// Whether this unit is metric (`RS_Units::isMetric`).
+    public var isMetric: Bool {
+        switch self {
+        case .millimeter, .centimeter, .meter, .kilometer, .angstrom, .nanometer,
+             .micron, .decimeter, .decameter, .hectometer, .gigameter, .astro,
+             .lightyear, .parsec:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// The short display sign for this unit (`RS_Units::unitToSign`).
+    public var sign: String {
+        switch self {
+        case .none:        return ""
+        case .inch:        return "\""
+        case .foot:        return "'"
+        case .mile:        return "mi"
+        case .millimeter:  return "mm"
+        case .centimeter:  return "cm"
+        case .meter:       return "m"
+        case .kilometer:   return "km"
+        case .microinch:   return "µ\""
+        case .mil:         return "mil"
+        case .yard:        return "yd"
+        case .angstrom:    return "A"
+        case .nanometer:   return "nm"
+        case .micron:      return "µm"
+        case .decimeter:   return "dm"
+        case .decameter:   return "dam"
+        case .hectometer:  return "hm"
+        case .gigameter:   return "Gm"
+        case .astro:       return "astro"
+        case .lightyear:   return "ly"
+        case .parsec:      return "pc"
+        }
+    }
+
+    /// Converts `value` from `src` to `dst` units via millimeters
+    /// (`RS_Units::convert(val, src, dest)`).
+    public static func convert(_ value: Double, from src: DrawingUnit, to dst: DrawingUnit) -> Double {
+        let dstFactor = dst.factorToMM
+        guard dstFactor > 0 else { return value }
+        return value * src.factorToMM / dstFactor
+    }
+
+    /// Convenience: convert `value` in `self` into millimeters.
+    public func toMM(_ value: Double) -> Double { value * factorToMM }
+
+    /// Convenience: convert `value` (millimeters) into `self`.
+    public func fromMM(_ valueMM: Double) -> Double {
+        factorToMM > 0 ? valueMM / factorToMM : valueMM
+    }
+}
+
+// MARK: - Linear / angle format (RS2::LinearFormat / AngleFormat)
+
+/// How linear measurements are displayed (`RS2::LinearFormat`).
+public enum LinearFormat: Int, Sendable, Hashable, Codable, CaseIterable {
+    case scientific = 0
+    case decimal = 1
+    case engineering = 2
+    case architectural = 3
+    case fractional = 4
+    case architecturalMetric = 5
+}
+
+/// How angles are displayed (`RS2::AngleFormat`).
+public enum AngleFormat: Int, Sendable, Hashable, Codable, CaseIterable {
+    case degreesDecimal = 0
+    case degreesMinutesSeconds = 1
+    case gradians = 2
+    case radians = 3
+    case surveyors = 4
+}
+
+// MARK: - Graphic variables (RS_Variable / RS_VariableDict / LC_GraphicVariables)
+
+/// A typed graphic-variable value — the value-type port of `RS_Variable`'s
+/// tagged contents (string / int / double / vector). Carries the DXF group code
+/// so a parsed header variable round-trips (`RS_Variable::getCode`).
+public enum GraphicVariable: Sendable, Hashable, Codable {
+    case string(String)
+    case int(Int)
+    case double(Double)
+    case vector(Vector)
+
+    /// The value as a string, if it is one.
+    public var stringValue: String? { if case .string(let s) = self { return s } else { return nil } }
+    /// The value as an int, if it is one.
+    public var intValue: Int? { if case .int(let i) = self { return i } else { return nil } }
+    /// The value as a double, if it is one.
+    public var doubleValue: Double? { if case .double(let d) = self { return d } else { return nil } }
+    /// The value as a vector, if it is one.
+    public var vectorValue: Vector? { if case .vector(let v) = self { return v } else { return nil } }
+}
+
+/// The drawing's variable bag — the value-type port of `RS_VariableDict` plus the
+/// typed accessors `LC_GraphicVariables` exposes over the essential DXF header
+/// variables (`$INSUNITS`, `$LUNITS`, `$LUPREC`, `$AUNITS`, `$AUPREC`,
+/// `$ANGBASE`, `$ANGDIR`, `$GRIDMODE`, ...).
+///
+/// Variables are stored by DXF name (the `$`-prefixed key). The typed accessors
+/// read/write those well-known keys; `set`/`get` cover everything else.
+public struct GraphicVariables: Sendable, Hashable, Codable {
+    /// Raw variable storage keyed by DXF variable name.
+    public private(set) var values: [String: GraphicVariable]
+
+    public init(values: [String: GraphicVariable] = [:]) {
+        self.values = values
+    }
+
+    // MARK: Raw access (RS_VariableDict::add / get* / remove / has)
+
+    public var count: Int { values.count }
+    public func has(_ key: String) -> Bool { values[key] != nil }
+    public func get(_ key: String) -> GraphicVariable? { values[key] }
+
+    public mutating func set(_ key: String, _ value: GraphicVariable) { values[key] = value }
+    public mutating func setString(_ key: String, _ v: String) { values[key] = .string(v) }
+    public mutating func setInt(_ key: String, _ v: Int) { values[key] = .int(v) }
+    public mutating func setDouble(_ key: String, _ v: Double) { values[key] = .double(v) }
+    public mutating func setVector(_ key: String, _ v: Vector) { values[key] = .vector(v) }
+    public mutating func remove(_ key: String) { values.removeValue(forKey: key) }
+
+    public func string(_ key: String, default def: String = "") -> String { values[key]?.stringValue ?? def }
+    public func int(_ key: String, default def: Int = 0) -> Int { values[key]?.intValue ?? def }
+    public func double(_ key: String, default def: Double = 0) -> Double { values[key]?.doubleValue ?? def }
+    public func vector(_ key: String, default def: Vector = .invalid) -> Vector { values[key]?.vectorValue ?? def }
+    public func bool(_ key: String, default def: Bool = false) -> Bool {
+        if let i = values[key]?.intValue { return i != 0 }
+        return def
+    }
+
+    // MARK: Typed header accessors (LC_GraphicVariables)
+
+    /// `$INSUNITS` — the drawing unit. Defaults to millimeter (LibreCAD default).
+    public var unit: DrawingUnit {
+        get { DrawingUnit(dxf: int("$INSUNITS", default: DrawingUnit.millimeter.dxfCode)) }
+        set { setInt("$INSUNITS", newValue.dxfCode) }
+    }
+
+    /// `$LUNITS` — linear display format. DXF `$LUNITS` codes: 1=Scientific,
+    /// 2=Decimal, 3=Engineering, 4=Architectural, 5=Fractional. Defaults Decimal.
+    public var linearFormat: LinearFormat {
+        get { Self.linearFormat(fromDXF: int("$LUNITS", default: 2)) }
+        set { setInt("$LUNITS", Self.dxfLUNITS(for: newValue)) }
+    }
+
+    /// `$LUPREC` — linear precision (decimal places). Defaults 4.
+    public var linearPrecision: Int {
+        get { int("$LUPREC", default: 4) }
+        set { setInt("$LUPREC", newValue) }
+    }
+
+    /// `$AUNITS` — angle display format. DXF codes: 0=Decimal degrees,
+    /// 1=Deg/Min/Sec, 2=Gradians, 3=Radians, 4=Surveyor's. Defaults decimal.
+    public var angleFormat: AngleFormat {
+        get { Self.angleFormat(fromDXF: int("$AUNITS", default: 0)) }
+        set { setInt("$AUNITS", newValue.rawValue) }
+    }
+
+    /// `$AUPREC` — angle precision (decimal places). Defaults 4.
+    public var anglePrecision: Int {
+        get { int("$AUPREC", default: 4) }
+        set { setInt("$AUPREC", newValue) }
+    }
+
+    /// `$ANGBASE` — base angle (radians) measurements are taken from. Defaults 0.
+    public var anglesBase: Double {
+        get { double("$ANGBASE", default: 0) }
+        set { setDouble("$ANGBASE", newValue) }
+    }
+
+    /// `$ANGDIR` — angle direction. DXF: 0 == counter-clockwise, 1 == clockwise.
+    /// LibreCAD's `areAnglesCounterClockWise()`.
+    public var anglesCounterClockwise: Bool {
+        get { int("$ANGDIR", default: 0) == 0 }
+        set { setInt("$ANGDIR", newValue ? 0 : 1) }
+    }
+
+    /// `$GRIDMODE` — whether the grid is shown (`isGridOn`). Defaults on.
+    public var gridOn: Bool {
+        get { bool("$GRIDMODE", default: true) }
+        set { setInt("$GRIDMODE", newValue ? 1 : 0) }
+    }
+
+    /// `$PINSBASE` — paper-space insertion base point. Defaults (0,0).
+    public var paperInsertionBase: Vector {
+        get { vector("$PINSBASE", default: Vector(0, 0)) }
+        set { setVector("$PINSBASE", newValue) }
+    }
+
+    // MARK: DXF code ↔ enum (LC_GraphicVariables::convertLinearFormatDXF2LC etc.)
+
+    /// Maps a DXF `$LUNITS` code to a `LinearFormat`
+    /// (`LC_GraphicVariables::convertLinearFormatDXF2LC`).
+    public static func linearFormat(fromDXF f: Int) -> LinearFormat {
+        switch f {
+        case 1: return .scientific
+        case 3: return .engineering
+        case 4: return .architectural
+        case 5: return .fractional
+        default: return .decimal      // 2 (and unknown) → Decimal
+        }
+    }
+
+    /// The DXF `$LUNITS` code for a `LinearFormat`.
+    public static func dxfLUNITS(for f: LinearFormat) -> Int {
+        switch f {
+        case .scientific:          return 1
+        case .decimal:             return 2
+        case .engineering:         return 3
+        case .architectural:       return 4
+        case .fractional:          return 5
+        case .architecturalMetric: return 4   // no distinct DXF code; map to architectural
+        }
+    }
+
+    /// Maps a DXF `$AUNITS` code to an `AngleFormat`
+    /// (`LC_GraphicVariables::angleUnitsDXF2LC`).
+    public static func angleFormat(fromDXF a: Int) -> AngleFormat {
+        AngleFormat(rawValue: a) ?? .degreesDecimal
+    }
+}
+
+// MARK: - The drawing
+
+/// The drawing — entities, layers, blocks, graphic variables, units, and the
+/// metadata the engine/render/tools all read. `@MainActor` so it integrates
+/// cleanly with SwiftUI's `@Observable` document machinery and `UndoManager`
+/// (which runs on the main thread for document apps); `@Observable` so views
+/// update on mutation.
 ///
 /// ## Threading
-/// All mutation/read of `CADDrawing` happens on the main actor. Heavy,
-/// off-thread work (DXF parsing, geometry kernels) runs through the single
-/// shared `CADEngine` actor (see `CADEngine.swift`) and returns value types that
-/// are then applied here on the main actor.
+/// All mutation/read of `CADDrawing` happens on the main actor. Heavy, off-thread
+/// work (DXF parsing, geometry kernels) runs through the single shared
+/// `CADEngine` actor (see `CADEngine.swift`) and returns value types that are then
+/// applied here on the main actor.
 @MainActor
 @Observable
 public final class CADDrawing {
@@ -40,16 +334,17 @@ public final class CADDrawing {
     /// Fast id → index lookup, kept in sync with `entities`.
     private var indexByID: [EntityID: Int] = [:]
 
-    /// The layer registry.
-    public var layers = LayerTable()
+    /// The layer registry (`RS_LayerList`).
+    public private(set) var layers = LayerTable()
 
-    /// Drawing units / graphic variables — placeholder for the full
-    /// `RS_Graphic` variable bag (units, dim styles, grid, ...). Phase 1 expands.
-    public var graphicVariables: [String: String] = [:]
+    /// The block-definition registry (`RS_BlockList`). Block contents are id-refs
+    /// into `entities` (ADR-001); this table holds the definitions, not objects.
+    public private(set) var blocks = BlockTable()
 
-    /// Block definitions — placeholder for the `RS_BlockList` (ADR-001 stores
-    /// block contents as id references in the document). Phase 1 expands.
-    public var blocks: [String: [EntityID]] = [:]
+    /// The drawing's graphic variables (`RS_VariableDict` + `LC_GraphicVariables`).
+    /// Use the typed accessors (`graphicVariables.unit`, `.linearFormat`, ...) or
+    /// `convenience` `drawingUnit` below.
+    public var graphicVariables = GraphicVariables()
 
     /// The `UndoManager` mutations register with. Injected by the document layer
     /// (SwiftUI hands one in from `DocumentGroup`); nil == undo disabled.
@@ -79,6 +374,15 @@ public final class CADDrawing {
     }
 
     public func contains(_ id: EntityID) -> Bool { indexByID[id] != nil }
+
+    // MARK: - Units convenience
+
+    /// The drawing unit (`$INSUNITS` via `graphicVariables.unit`). Shorthand for
+    /// the most-read header variable.
+    public var drawingUnit: DrawingUnit {
+        get { graphicVariables.unit }
+        set { graphicVariables.unit = newValue }
+    }
 
     // MARK: - Mutations (each registers a value-snapshot undo per ADR-002)
 
@@ -157,6 +461,138 @@ public final class CADDrawing {
         }
     }
 
+    // MARK: - Layer mutations (value-snapshot undo of the whole LayerTable)
+
+    /// Whole-table layer mutation with undo. Because `LayerTable` is a value type,
+    /// the undo snapshot is one struct copy (ADR-002) — cheap, and the redo comes
+    /// for free via the standard `UndoManager` re-registration pattern.
+    ///
+    /// All the `*Layer*` helpers below funnel through this, so any layer edit is
+    /// undoable and SwiftUI sees the `layers` mutation.
+    public func mutateLayers(_ body: (inout LayerTable) -> Void) {
+        let prior = layers
+        body(&layers)
+        guard layers != prior else { return }   // no-op edits don't pollute undo
+        registerUndo { drawing in
+            drawing.mutateLayers { $0 = prior }
+        }
+    }
+
+    /// Adds a layer (no-op + no undo if the name is taken). Returns `true` if added.
+    @discardableResult
+    public func addLayer(_ layer: Layer) -> Bool {
+        guard !layers.contains(layer.name) else { return false }
+        mutateLayers { _ = $0.add(layer) }
+        return true
+    }
+
+    /// Removes a layer record by name. Entities on the layer are handled per
+    /// `reassignTo`: if non-nil, every entity on `name` is moved to that layer
+    /// (registered as part of the same undo group); if nil, entity layer refs are
+    /// left as-is (they'll resolve with the default pen — see `LayerTable`'s
+    /// removal-policy note). The default layer "0" is never removed.
+    public func removeLayer(_ name: String, reassignTo: String? = nil) {
+        guard name != "0", layers.contains(name) else { return }
+        if let target = reassignTo {
+            for e in entities where e.layer.name == name {
+                var moved = e
+                moved.layer = LayerID(target)
+                replace(moved)
+            }
+        }
+        mutateLayers { $0.remove(named: name) }
+    }
+
+    /// Renames a layer; referencing entities are re-pointed to the new name so
+    /// they keep their layer (registered in the same undo group). Returns `true`
+    /// on success.
+    @discardableResult
+    public func renameLayer(_ oldName: String, to newName: String) -> Bool {
+        guard layers.contains(oldName), !layers.contains(newName) else { return false }
+        // Re-point entities first (each undoable), then rename the record.
+        for e in entities where e.layer.name == oldName {
+            var moved = e
+            moved.layer = LayerID(newName)
+            replace(moved)
+        }
+        var ok = false
+        mutateLayers { ok = $0.rename(oldName, to: newName) }
+        return ok
+    }
+
+    /// Sets the active layer (where new entities land). Undoable.
+    public func setActiveLayer(_ name: String) {
+        mutateLayers { $0.activate(name) }
+    }
+
+    /// Sets a layer's visibility (frozen == hidden). Undoable.
+    public func setLayerVisible(_ name: String, _ visible: Bool) {
+        mutateLayers { $0.setVisible(name, visible) }
+    }
+
+    /// Sets a layer's locked flag. Undoable.
+    public func setLayerLocked(_ name: String, _ locked: Bool) {
+        mutateLayers { $0.setLocked(name, locked) }
+    }
+
+    /// Sets a layer's printable flag. Undoable.
+    public func setLayerPrintable(_ name: String, _ printable: Bool) {
+        mutateLayers { $0.setPrintable(name, printable) }
+    }
+
+    /// Sets a layer's construction flag. Undoable.
+    public func setLayerConstruction(_ name: String, _ construction: Bool) {
+        mutateLayers { $0.setConstruction(name, construction) }
+    }
+
+    // MARK: - Block mutations (value-snapshot undo of the whole BlockTable)
+
+    /// Whole-table block mutation with undo (same value-snapshot scheme as
+    /// `mutateLayers`).
+    public func mutateBlocks(_ body: (inout BlockTable) -> Void) {
+        let prior = blocks
+        body(&blocks)
+        guard blocks != prior else { return }
+        registerUndo { drawing in
+            drawing.mutateBlocks { $0 = prior }
+        }
+    }
+
+    /// Adds a block definition (no-op + no undo if the name is taken). Returns
+    /// `true` if added. Member entities (referenced by `block.entityIDs`) must
+    /// already be added to the drawing via `add(_:)`.
+    @discardableResult
+    public func addBlock(_ block: Block) -> Bool {
+        guard !blocks.contains(block.name) else { return false }
+        mutateBlocks { _ = $0.add(block) }
+        return true
+    }
+
+    /// Removes a block *definition* by name. If `deletingContents` is true, the
+    /// block's member entities are also removed from the drawing (same undo group);
+    /// otherwise they remain as ordinary top-level entities. The active block, if
+    /// removed, is cleared.
+    public func removeBlock(_ name: String, deletingContents: Bool = false) {
+        guard let block = blocks.block(named: name) else { return }
+        if deletingContents {
+            for id in block.entityIDs { remove(id) }
+        }
+        mutateBlocks { $0.remove(named: name) }
+    }
+
+    /// Renames a block definition. Returns `true` on success.
+    @discardableResult
+    public func renameBlock(_ oldName: String, to newName: String) -> Bool {
+        var ok = false
+        mutateBlocks { ok = $0.rename(oldName, to: newName) }
+        return ok
+    }
+
+    /// Sets the active block (`nil` clears). Undoable.
+    public func setActiveBlock(_ name: String?) {
+        mutateBlocks { $0.activate(name) }
+    }
+
     // MARK: - Undo plumbing
 
     /// Registers a value-snapshot undo closure. The closure captures the prior
@@ -176,9 +612,18 @@ public final class CADDrawing {
     // MARK: - Bulk load (no undo — used by document open)
 
     /// Replaces all content without registering undo (used when loading a file).
-    public func load(entities newEntities: [EntityRecord], layers newLayers: LayerTable) {
+    /// Blocks/variables default to empty/fresh so existing two-arg callers keep
+    /// working; pass them when loading a parsed DXF header + block table.
+    public func load(
+        entities newEntities: [EntityRecord],
+        layers newLayers: LayerTable,
+        blocks newBlocks: BlockTable = BlockTable(),
+        graphicVariables newVariables: GraphicVariables = GraphicVariables()
+    ) {
         entities = newEntities
         layers = newLayers
+        blocks = newBlocks
+        graphicVariables = newVariables
         indexByID.removeAll(keepingCapacity: true)
         for (i, e) in entities.enumerated() { indexByID[e.id] = i }
         // Advance the id counter past the highest loaded id.
@@ -196,9 +641,27 @@ public final class CADDrawing {
         return box
     }
 
-    /// Resolves every entity to renderable geometry. Convenience for the
-    /// renderer seam; production rendering caches per-entity by id + version.
-    public func resolveAll(_ ctx: ResolveContext = .default) -> [ResolvedGeometry] {
-        entities.map { $0.resolve(ctx) }
+    /// A `ResolveContext` backed by this drawing's real `LayerTable`, so
+    /// `.byLayer` pens resolve against actual layer attributes (not the stub
+    /// default). The block hook still defers to `currentBlockPen` (the Insert/
+    /// Block-resolve owner sets that when recursing).
+    public func makeResolveContext(tessellationTolerance: Double = 0.05) -> ResolveContext {
+        // Snapshot the layer table into a Sendable closure (value type copy).
+        let table = layers
+        return ResolveContext(
+            tessellationTolerance: tessellationTolerance,
+            layerAttributes: { layerID in
+                table.layer(layerID)?.resolvedPen
+                    ?? ResolvedPen(color: .librecadGreen, lineType: .solid, lineWidth: .default)
+            }
+        )
+    }
+
+    /// Resolves every entity to renderable geometry against this drawing's layer
+    /// table. Convenience for the renderer seam; production rendering caches
+    /// per-entity by id + version.
+    public func resolveAll(_ ctx: ResolveContext? = nil) -> [ResolvedGeometry] {
+        let context = ctx ?? makeResolveContext()
+        return entities.map { $0.resolve(context) }
     }
 }
