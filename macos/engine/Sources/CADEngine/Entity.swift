@@ -87,6 +87,141 @@ public struct PolylineData: Sendable, Hashable, Codable {
     }
 }
 
+/// `RS_EllipseData` — an ellipse or elliptic arc (ported from `rs_ellipse.h`).
+///
+/// Mirrors LibreCAD's `RS_EllipseData` field-for-field (the render-cache fields
+/// `isArc`/`angleDegrees`/… are NOT stored here — they're derived on demand per
+/// ADR-001). All angles are in radians.
+///
+/// - `center`:     ellipse center.
+/// - `majorP`:     endpoint of the major axis **relative to the center**. Its
+///                 magnitude is the major radius; its `.angle` is the rotation
+///                 of the ellipse (`RS_Ellipse::getAngle()`).
+/// - `ratio`:      minor/major radius ratio. The minor radius is
+///                 `majorP.magnitude() * ratio`.
+/// - `startAngle`: start *ellipse angle* (the parametric angle `a` fed to
+///                 `ellipsePoint(a)`), `RS_EllipseData::angle1`.
+/// - `endAngle`:   end ellipse angle, `RS_EllipseData::angle2`.
+/// - `reversed`:   clockwise sweep flag (`RS_EllipseData::reversed`).
+///
+/// `startAngle == endAngle == 0` is the LibreCAD convention for a **whole**
+/// ellipse (see `isArc`); any other pair makes it an elliptic arc.
+public struct EllipseData: Sendable, Hashable, Codable {
+    public var center: Vector
+    /// Endpoint of the major axis, relative to the center.
+    public var majorP: Vector
+    /// Ratio of minor radius to major radius.
+    public var ratio: Double
+    /// Start ellipse angle (radians).
+    public var startAngle: Double
+    /// End ellipse angle (radians).
+    public var endAngle: Double
+    /// Clockwise sweep flag.
+    public var reversed: Bool
+
+    public init(
+        center: Vector,
+        majorP: Vector,
+        ratio: Double,
+        startAngle: Double = 0,
+        endAngle: Double = 0,
+        reversed: Bool = false
+    ) {
+        self.center = center
+        self.majorP = majorP
+        self.ratio = ratio
+        self.startAngle = startAngle
+        self.endAngle = endAngle
+        self.reversed = reversed
+    }
+
+    /// The major radius (`RS_Ellipse::getMajorRadius()` — `majorP.magnitude()`).
+    public var majorRadius: Double { majorP.magnitude }
+
+    /// The minor radius (`RS_Ellipse::getMinorRadius()`).
+    public var minorRadius: Double { majorP.magnitude * ratio }
+
+    /// The rotation angle of the major axis (`RS_Ellipse::getAngle()`).
+    public var rotationAngle: Double { majorP.angle }
+
+    /// Whether this is an elliptic **arc** (not a whole ellipse). Mirrors
+    /// `RS_Ellipse::isEllipticArc()` / `calculateBorders`'s `isArc` test:
+    /// `angle1`/`angle2` not both within the angular tolerance of 0.
+    public var isArc: Bool {
+        !(abs(startAngle) < Tolerance.angle && abs(endAngle) < Tolerance.angle)
+    }
+
+    /// The world point at *ellipse angle* `a` (parametric angle), ported from
+    /// `RS_Ellipse::getEllipsePoint`: take the unit vector `(cos a, sin a)`,
+    /// scale by `(majorRadius, minorRadius)`, rotate by the major-axis angle,
+    /// then translate to the center.
+    public func ellipsePoint(_ a: Double) -> Vector {
+        let ra = majorRadius
+        // unit vector at parametric angle, scaled to the ellipse axes
+        let scaled = Vector(ra * cos(a), ra * ratio * sin(a))
+        return center + scaled.rotated(by: rotationAngle)
+    }
+}
+
+/// `RS_SplineData` — a (rational) B-spline / NURBS (ported from `rs_spline.h`).
+///
+/// Stores only the defining NURBS data (ADR-001); the tessellated polyline is
+/// produced on demand by `resolve()`. The `controlPoints`/`knots`/`weights` are
+/// the **evaluation-ready** vectors (already wrapped for a closed/periodic
+/// spline, as LibreCAD stores them internally in `RS_SplineData`).
+///
+/// - `degree`:        spline degree (1–3 in LibreCAD).
+/// - `controlPoints`: control polygon (wrapped if closed).
+/// - `knots`:         non-decreasing knot vector. If empty, `resolve()`
+///                    generates a clamped (open) uniform knot vector so the
+///                    curve interpolates its endpoints (Piegl & Tiller).
+/// - `weights`:       rational weights, one per control point. If empty, the
+///                    spline is treated as non-rational (all weights == 1).
+/// - `closed`:        periodic/closed flag (`SplineType::WrappedClosed`).
+public struct SplineData: Sendable, Hashable, Codable {
+    public var degree: Int
+    public var controlPoints: [Vector]
+    public var knots: [Double]
+    public var weights: [Double]
+    public var closed: Bool
+
+    public init(
+        degree: Int,
+        controlPoints: [Vector],
+        knots: [Double] = [],
+        weights: [Double] = [],
+        closed: Bool = false
+    ) {
+        self.degree = degree
+        self.controlPoints = controlPoints
+        self.knots = knots
+        self.weights = weights
+        self.closed = closed
+    }
+}
+
+/// `LC_SplinePointsData` — an interpolation spline drawn as a chain of
+/// **quadratic Bézier** segments (ported from `lc_splinepoints.h`).
+///
+/// LibreCAD's `LC_SplinePoints` keeps both the on-curve `splinePoints` (fit
+/// data) and the derived quadratic-Bézier `controlPoints`. The render path
+/// (`fillStrokePoints` → `GetQuadPoints` → `StrokeQuad`) draws entirely from
+/// `controlPoints`, so that is what we store and tessellate. The fit-point →
+/// control-point banded solve (`UpdateControlPoints`) is an editing-time
+/// concern not needed for `resolve()`/`boundingBox()` and is not ported here.
+///
+/// - `controlPoints`: the quadratic-Bézier control polygon.
+/// - `closed`:        whether the spline wraps (`LC_SplinePointsData::closed`).
+public struct SplinePointsData: Sendable, Hashable, Codable {
+    public var controlPoints: [Vector]
+    public var closed: Bool
+
+    public init(controlPoints: [Vector], closed: Bool = false) {
+        self.controlPoints = controlPoints
+        self.closed = closed
+    }
+}
+
 // MARK: - The entity-kind sum type
 
 /// The discriminated union of entity geometry. This is the **seed set** for the
@@ -100,6 +235,12 @@ public enum EntityKind: Sendable, Hashable, Codable {
     case circle(CircleData)
     case arc(ArcData)
     case polyline(PolylineData)
+    /// An ellipse or elliptic arc (`RS_Ellipse`).
+    case ellipse(EllipseData)
+    /// A (rational) B-spline / NURBS curve (`RS_Spline`).
+    case spline(SplineData)
+    /// An interpolation spline drawn as quadratic Béziers (`LC_SplinePoints`).
+    case splinePoints(SplinePointsData)
 }
 
 // MARK: - Per-entity flags
