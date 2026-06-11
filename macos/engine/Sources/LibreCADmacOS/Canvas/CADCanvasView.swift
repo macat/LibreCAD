@@ -1,0 +1,276 @@
+//
+//  CADCanvasView.swift
+//  LibreCADmacOS
+//
+//  The interactive Metal canvas: a FLIPPED `MTKView` subclass wrapped in an
+//  `NSViewRepresentable`, wired to the `LineRenderer` and `CanvasModel`.
+//
+//  ## isFlipped contract (Viewport / backlog item)
+//  `Viewport` is defined for a TOP-LEFT, Y-DOWN screen space (the convention of a
+//  *flipped* NSView and of SwiftUI). The host view MUST therefore return
+//  `isFlipped == true`, or `screenToWorld`/picking/pan would be vertically
+//  mirrored. `FlippedMTKView` returns `true` and a `precondition` at the seam
+//  documents + enforces the contract.
+//
+//  ## Navigation
+//  - scroll  → pan (matrix-only).
+//  - magnify (pinch) / scroll+⌥ → zoom about the cursor (Viewport.zoom).
+//  - mouse-move → snap (Snapping.snap) → snap marker + HUD.
+//  - click → hitTest → toggle selection.
+//  During an active gesture the view flips to continuous redraw (isPaused=false)
+//  for smooth 120 Hz, then back to on-demand (rendering-performance.md §4.3).
+//
+//  GPLv2-or-later (LibreCAD derivative).
+//
+//  Copyright (C) 2026 LibreCAD macOS contributors.
+//
+
+import SwiftUI
+import MetalKit
+import CoreGraphics
+import CADEngine
+
+// MARK: - Flipped MTKView (enforces the Viewport top-left Y-down contract)
+
+/// An `MTKView` whose coordinate space is top-left origin, Y-down — the space
+/// `Viewport` is defined for. It also routes mouse/scroll/magnify events to the
+/// owning `CADCanvasController`.
+final class FlippedMTKView: MTKView {
+
+    /// Set by the representable so events reach the interaction logic.
+    weak var controller: CADCanvasController?
+
+    /// THE Viewport contract: a flipped view has a top-left origin with Y growing
+    /// downward, matching `Viewport`'s screen space. Without this, picking/pan are
+    /// vertically mirrored (backlog render-gate viewport item #2).
+    override var isFlipped: Bool { true }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    // Mouse tracking for snap-on-move even without a button held.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.activeInKeyWindow, .mouseMoved, .mouseEnteredAndExited, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+    }
+
+    // MARK: Event routing — all in the flipped (top-left, Y-down) space.
+
+    private func locationInView(_ event: NSEvent) -> CGPoint {
+        convert(event.locationInWindow, from: nil)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        controller?.mouseMoved(to: locationInView(event))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        controller?.mouseExited()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        controller?.mouseDown(at: locationInView(event))
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        // Left-drag pans the canvas (in addition to scroll), matching a grab gesture.
+        controller?.panDrag(deltaX: event.deltaX, deltaY: event.deltaY)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        let loc = locationInView(event)
+        if event.modifierFlags.contains(.option) {
+            // ⌥+scroll → zoom about the cursor.
+            controller?.zoom(byWheelDelta: event.scrollingDeltaY, at: loc)
+        } else {
+            // Plain scroll → pan. Natural-direction handled by the sign of delta.
+            controller?.scrollPan(deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY)
+        }
+    }
+
+    override func magnify(with event: NSEvent) {
+        let loc = locationInView(event)
+        controller?.magnify(by: event.magnification, at: loc, phase: event.phase)
+    }
+}
+
+// MARK: - Interaction controller (bridges events → CanvasModel + redraw)
+
+/// Owns the live interaction state for one canvas: the model, the renderer, the
+/// MTKView, and the gesture lifecycle (on-demand vs continuous redraw).
+@MainActor
+final class CADCanvasController {
+    let model: CanvasModel
+    private(set) var renderer: LineRenderer?
+    weak var view: FlippedMTKView?
+
+    /// While true the view draws continuously (smooth gesture); set during an
+    /// active pan/zoom and reset shortly after the gesture ends.
+    private var gestureActive = false
+    private var gestureEndWorkItem: DispatchWorkItem?
+
+    init(model: CanvasModel) {
+        self.model = model
+    }
+
+    func attach(view: FlippedMTKView, renderer: LineRenderer) {
+        self.view = view
+        self.renderer = renderer
+    }
+
+    // MARK: Redraw helpers
+
+    private func redraw() { view?.setNeedsDisplay(view?.bounds ?? .zero) }
+
+    /// Enter continuous-redraw mode for a smooth gesture, scheduling a return to
+    /// on-demand after a short idle (so the last frame settles).
+    private func beginGesture() {
+        gestureEndWorkItem?.cancel()
+        if !gestureActive {
+            gestureActive = true
+            view?.isPaused = false
+        }
+    }
+
+    private func endGestureSoon() {
+        gestureEndWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.gestureActive = false
+            self.view?.isPaused = true
+            self.redraw()
+        }
+        gestureEndWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+
+    // MARK: Navigation
+
+    func scrollPan(deltaX: CGFloat, deltaY: CGFloat) {
+        beginGesture()
+        // Scroll delta is in points; pan the content with it (natural direction).
+        model.pan(byScreenDelta: CGSize(width: deltaX, height: deltaY))
+        endGestureSoon()
+        redraw()
+    }
+
+    func panDrag(deltaX: CGFloat, deltaY: CGFloat) {
+        beginGesture()
+        model.pan(byScreenDelta: CGSize(width: deltaX, height: deltaY))
+        endGestureSoon()
+        redraw()
+    }
+
+    func zoom(byWheelDelta delta: CGFloat, at point: CGPoint) {
+        beginGesture()
+        // Map wheel delta to a multiplicative zoom factor (clamped per tick).
+        let step = 1.0 + Double(delta) * 0.01
+        let factor = Swift.min(Swift.max(step, 0.5), 2.0)
+        model.zoom(by: factor, about: point)
+        endGestureSoon()
+        redraw()
+    }
+
+    func magnify(by magnification: CGFloat, at point: CGPoint, phase: NSEvent.Phase) {
+        beginGesture()
+        // `magnification` is a delta (e.g. +0.02 per event); 1 + delta is the factor.
+        model.zoom(by: 1.0 + Double(magnification), about: point)
+        endGestureSoon()
+        redraw()
+    }
+
+    func zoomToFit() {
+        model.zoomToFit()
+        redraw()
+    }
+
+    // MARK: Cursor interaction (snap + select)
+
+    func mouseMoved(to point: CGPoint) {
+        let spacing = renderer?.lastGridSpacing
+        model.updateSnap(atScreenPoint: point, gridSpacing: spacing)
+        // Redraw the coordinate HUD + snap marker on every move (overlay-only;
+        // the model instance buffer is untouched — rendering-performance.md §5).
+        redraw()
+    }
+
+    func mouseExited() {
+        model.clearCursor()
+        redraw()
+    }
+
+    func mouseDown(at point: CGPoint) {
+        if model.toggleSelection(atScreenPoint: point) {
+            redraw()
+        }
+    }
+}
+
+// MARK: - SwiftUI representable
+
+/// SwiftUI wrapper that hosts the flipped Metal canvas and binds it to a
+/// `CanvasModel`. The model is the single source of truth; the controller bridges
+/// AppKit events into it.
+struct CADCanvasView: NSViewRepresentable {
+    let model: CanvasModel
+    /// A weak hook so the enclosing view can invoke "Zoom to Fit" from a command.
+    let controllerBox: ControllerBox
+
+    /// A tiny reference box so SwiftUI commands (menu/key) can reach the
+    /// per-instance controller without it being part of the `View` value.
+    final class ControllerBox {
+        weak var controller: CADCanvasController?
+    }
+
+    func makeCoordinator() -> CADCanvasController {
+        let c = CADCanvasController(model: model)
+        controllerBox.controller = c
+        return c
+    }
+
+    func makeNSView(context: Context) -> FlippedMTKView {
+        let view = FlippedMTKView()
+
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            assertionFailure("CADCanvasView: no Metal device.")
+            NSLog("CADCanvasView: FATAL — no Metal device; canvas will not render.")
+            return view
+        }
+        // Enforce the Viewport top-left Y-down contract at the seam.
+        precondition(view.isFlipped, "CADCanvasView host MUST be isFlipped (Viewport contract).")
+
+        view.device = device
+        view.enableSetNeedsDisplay = true     // on-demand draw (rendering-perf §4.3)
+        view.isPaused = true
+        view.autoResizeDrawable = true
+        view.colorPixelFormat = .bgra8Unorm_srgb   // sRGB drawable (rendering-perf §4.4)
+        view.clearColor = MTLClearColor(red: 0.07, green: 0.08, blue: 0.10, alpha: 1.0)
+        view.preferredFramesPerSecond = 120
+
+        guard let renderer = LineRenderer(model: model, device: device) else {
+            NSLog("CADCanvasView: renderer init failed.")
+            return view
+        }
+        view.delegate = renderer
+
+        let controller = context.coordinator
+        view.controller = controller
+        controller.attach(view: view, renderer: renderer)
+
+        view.setNeedsDisplay(view.bounds)
+        return view
+    }
+
+    func updateNSView(_ nsView: FlippedMTKView, context: Context) {
+        // Keep the model's view size in sync (drives Viewport.fit on resize-aware
+        // commands). The drawable auto-resizes; we only need the point size.
+        model.setViewSize(nsView.bounds.size)
+        nsView.setNeedsDisplay(nsView.bounds)
+    }
+}
