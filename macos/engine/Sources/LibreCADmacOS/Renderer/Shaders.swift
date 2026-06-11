@@ -87,9 +87,9 @@ vertex LineVaryings line_vertex(uint vid [[vertex_id]],
     float4 c1 = u.transform * float4(inst.p1, 0.0, 1.0);
     float2 ndc0 = c0.xy / c0.w;
     float2 ndc1 = c1.xy / c1.w;
-    float2 half = u.viewportPx * 0.5;
-    float2 px0 = ndc0 * half;   // pixel-space (origin at center; y up)
-    float2 px1 = ndc1 * half;
+    float2 halfPx = u.viewportPx * 0.5;   // NB: `half` is a reserved MSL type — do not name a var `half`
+    float2 px0 = ndc0 * halfPx;   // pixel-space (origin at center; y up)
+    float2 px1 = ndc1 * halfPx;
 
     // Segment direction + perpendicular in pixel space.
     float2 d = px1 - px0;
@@ -109,7 +109,7 @@ vertex LineVaryings line_vertex(uint vid [[vertex_id]],
     float2 px = mid + dir * along + perp * side;
 
     // Back to NDC → clip.
-    float2 ndc = px / half;
+    float2 ndc = px / halfPx;
 
     LineVaryings out;
     out.position = float4(ndc, 0.0, 1.0);
