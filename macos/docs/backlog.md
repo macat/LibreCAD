@@ -57,6 +57,16 @@ pass or by the relevant downstream owner. Each cites its source.
 - Comment that `lc_dxf_count_entities` now parses+flattens the whole file (no longer alloc-free). *(review-dxfread #4)*
 - Layer with ACI 256 silently → green instead of inheriting (rare/invalid edge). *(review-dxfread #1)*
 
+## Render gate — renderer/canvas (Wave 2)
+- **Extract a `CADRender` library target** in Package.swift so renderer logic is `@testable import`-able;
+  drop the `_Shared*.swift` test symlinks. (Pattern risk if copied to other exe sources.) *(review-renderer #7)*
+- Cache selection-highlight geometry (currently full `resolve()` per frame of selected entities); key on
+  selection-version + LOD. *(review-renderer #7)*
+- Pixel-scale the single-point selection marker (currently a world-unit constant → changes on-screen size with zoom).
+- Map pen `lineWidth` + dash patterns to pixels (currently constant hairline); miter/bevel joins for thick strokes.
+- Render `ResolvedFill` (hatch/solid triangulation) and `.lff` stroke text (ADR-004) — needed before dimensions show.
+- Zoom-bucketed LOD for curve tessellation (currently fixed tolerance per `resolve()`).
+
 ## Cross-cutting / later phases
 - **Zoom-bucketed LOD** for curve tessellation (ellipse/arc/spline/lff bulges) — currently fixed-by-tolerance,
   marked `// TODO` in Resolve.swift / LFFParser.swift. *(ADR-003 / rendering-performance.md)*

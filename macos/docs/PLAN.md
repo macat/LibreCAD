@@ -46,8 +46,9 @@ real DXF/DWG fidelity, **render with Metal** for fluid pan/zoom at scale, and **
   solvers, B ellipse+spline(NURBS)+splinePoints, C document/layers/blocks/units/vars, D loose quadtree,
   E `.lff` stroke-font loader. 5 parallel builders + 5 reviewers (all APPROVE, no must-fix); one A/B
   test-suite name collision caught at integration + fixed. **174 tests green** on native-macos.
-- **Consolidated gate — Render + Interaction core** 🔄 *(Wave 1 DONE: DXF reader F + Viewport G +
-  Selection/Snapping H all merged, 222 tests green; Wave 2 = Metal renderer/canvas next)*:
+- **Consolidated gate — Render + Interaction core** ✅ *(DONE — Wave 1 (reader/viewport/select-snap)
+  + Wave 2 (Metal renderer/canvas) all merged; renderer reviewed REVISE→fixed; 254 tests green; .app
+  assembles + runs. App OPENS & NAVIGATES dim_sample.dxf: pan/zoom/fit/grid + snap + select + HUD.)*:
   full `DxfBridge` reader (flatten all DRW_* → Swift model); the real Metal pipeline (instanced lines →
   tessellated arcs/curves → fills → `.lff` text) rendering `dim_sample.dxf`; world/screen transform +
   pan/zoom/fit/grid; selection (single/window/crossing); snapping (free/grid/endpoint/center/on-entity)
