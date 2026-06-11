@@ -57,6 +57,10 @@ and as the home of `libraries/libdxfrw` (DXF/DWG), which we bridge via Swift/C++
 ### Phase 1 fan-out results (as they land)
 - [2026-06-11 17:40] 🔨 ws-lff (E) — .lff stroke-font loader. Outcome: DONE/GREEN. LFFGlyph/StrokeFont(Sendable)/LFFParser/StrokeFontProvider(@unchecked Sendable, NSLock); bulge pre-tessellated; C<hex> refs resolved w/ cycle guard; makeProvider()→@Sendable (String)->StrokeFont? matches ResolveContext.fontProvider. swift build 0 warnings; 65 tests (49+16). FLAG: test font read by repo #filePath (Package.swift .copy single-file, couldn't add resource) → fix manifest later to bundle fonts. Receipts: ws/lff @ 7a34576a7.
 - [2026-06-11 17:42] 🔍 review-lff (general-purpose) — review ws/lff before merge. Outcome: running.
+- [2026-06-11 17:50] 🔨 ws-spatial (D) — loose quadtree. Outcome: DONE/GREEN. Quadtree(non-Sendable final class, looseness 2.0, splitThreshold 8, maxDepth 16, auto-grow); insert/remove/update/query(region)/query(point,tol)/nearest; uses Vector/AABB/EntityID. swift build 0 warnings; 62 tests (49+13, incl brute-force equality + 100k smoke in 0.235s). Fixed 2 self-found bugs (grow double-insert; nearest maxDistance=0 edge). Integration notes for cull/snap owners captured. Receipts: ws/spatial @ ee5670493.
+- [2026-06-11 17:52] 🔍 review-spatial (general-purpose) — review ws/spatial before merge. Outcome: running.
+- [2026-06-11 17:55] 🔨 ws-entities (B) — Ellipse + Spline(NURBS+weights) + SplinePoints. Outcome: DONE/GREEN. EllipseData/SplineData/SplinePointsData + 3 EntityKind cases; analytic ellipse bbox; NURBS Piegl&Tiller eval; conservative spline hull bbox (safe for culling). swift build 0 warnings; 70 tests (49+21). Caveats: fit-point solver deferred (editing-time); closed-spline wrapping expected pre-wrapped; spline bbox conservative; spline seg-count heuristic (TODO LOD). Receipts: ws/entities @ 6d51ed4b0.
+- [2026-06-11 17:56] 🔍 review-entities (general-purpose) — review ws/entities before merge. Outcome: running.
 
 ## Environment gotchas (recorded)
 - `git push` / `brew install` / any network op: sandbox blocks them ("port 22: Operation not permitted") → run with sandbox disabled.
