@@ -187,6 +187,9 @@ enum OverlayGeometry {
     /// Builds a line list highlighting the selected entities' resolved polylines
     /// in the selection color (drawn over the model). Curves are tessellated by
     /// the same `resolve()` the model uses.
+    // TODO(backlog): cache the selected entities' resolved polylines and rebuild
+    // only when the selection or model changes, instead of re-`resolve()`ing every
+    // selected entity each frame (render-gate #7 — per-frame resolve caching).
     @MainActor
     static func selectionHighlight(
         selection: Selection,
@@ -206,6 +209,9 @@ enum OverlayGeometry {
                 guard pts.count >= 2 else {
                     if let only = pts.first {
                         // Single point → small marker so it's visible.
+                        // TODO(backlog): scale `r` by worldPerPixel so the single-
+                        // point marker stays a constant pixel size across zoom
+                        // (render-gate backlog — pixel-scaled point marker).
                         let r = 3 * 1.0
                         v.append(FlatVertex(position: off(Vector(only.x - r, only.y), renderOrigin), color: c))
                         v.append(FlatVertex(position: off(Vector(only.x + r, only.y), renderOrigin), color: c))
