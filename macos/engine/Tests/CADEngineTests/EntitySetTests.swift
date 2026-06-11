@@ -21,8 +21,8 @@ private let tol = 1e-9
 
 // MARK: - Ellipse
 
-@Suite("ellipse resolve + bbox")
-struct EllipseTests {
+@Suite("ellipse entity resolve + bbox")
+struct EllipseEntityTests {
 
     /// An axis-aligned ellipse: majorP along +X, so rotation == 0.
     private func axisAlignedFullEllipse() -> EllipseData {
