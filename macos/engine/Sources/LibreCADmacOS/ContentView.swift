@@ -94,8 +94,13 @@ struct ContentView: View {
         if let data = document.openedFileData, !data.isEmpty {
             document.openedFileData = nil   // consume once
             status = "Opening…"
-            Task { await load(path: stage(data: data) ?? Self.launchSamplePath,
-                              label: "opened file", size: size) }
+            if let staged = stage(data: data) {
+                // `isTemp: true` → the temp .dxf is removed once parsing completes
+                // (success OR failure), so File>Open never leaks a temp file.
+                Task { await load(path: staged, label: "opened file", size: size, isTemp: true) }
+            } else {
+                Task { await load(path: Self.launchSamplePath, label: "dim_sample.dxf", size: size) }
+            }
             return
         }
 
@@ -104,9 +109,12 @@ struct ContentView: View {
         Task { await load(path: Self.launchSamplePath, label: "dim_sample.dxf", size: size) }
     }
 
-    /// Parses a DXF at `path` and frames it. Errors surface in the status HUD.
+    /// Parses a DXF at `path` and frames it. Errors surface in the status HUD. When
+    /// `isTemp` is true the file at `path` is a staged temp copy and is deleted once
+    /// parsing completes (success or failure), so File>Open leaves no temp behind.
     @MainActor
-    private func load(path: String, label: String, size: CGSize) async {
+    private func load(path: String, label: String, size: CGSize, isTemp: Bool = false) async {
+        defer { if isTemp { try? FileManager.default.removeItem(atPath: path) } }
         do {
             let drawing = try await loadDrawing(dxfPath: path)
             model.setDrawing(drawing, viewSize: size)
