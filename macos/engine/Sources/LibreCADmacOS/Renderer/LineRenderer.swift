@@ -14,11 +14,12 @@
 //    - Each segment is ONE instance expanded to a screen-space quad in the vertex
 //      shader (constant pixel width) with analytic edge AA + round caps in the
 //      fragment shader (§1.1).
-//    - Each frame, the visible set is gathered via `quadtree.query(region:)`
-//      (§2.3 culling) and the visible entities' segments are packed into the
-//      instance buffer — only when the model OR the visible set changed (a static
-//      view with the same visible set re-uses the buffer; pan/zoom that don't
-//      change the visible set are matrix-only).
+//    - The visible set is gathered via `quadtree.query(region:)` (§2.3 culling)
+//      over a region PADDED past the literal visible rect, and the visible
+//      entities' segments are packed into the instance buffer — only when the
+//      model changed OR the current visible rect ESCAPED the padded region. A
+//      pan/zoom that stays within the cached margin is matrix-only (zero buffer
+//      rebuild), satisfying the §4.1 "pan/zoom only change the matrix" contract.
 //    - Triple-buffered uniforms (§4.5) so the CPU can write frame N+1's matrix
 //      while the GPU renders frame N, gated by a semaphore.
 //
@@ -95,9 +96,31 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     /// The model version the instance buffer was built for. A mismatch forces a
     /// model rebuild.
     private var builtModelVersion = -1
-    /// The visible rect the instance buffer was built for. A new visible rect
-    /// (e.g. pan/zoom that reveals different entities) forces a culled rebuild.
+    /// The PADDED visible rect the instance buffer was built for. We cull a region
+    /// LARGER than the literal visible rect (by `Self.cullMargin`) so steady-state
+    /// pan/zoom that stays WITHIN this margin is matrix-only (no rebuild). A new
+    /// visible rect that escapes the padded region forces a culled rebuild
+    /// (rendering-performance.md §4.1 — pan/zoom must not repack the buffer).
     private var builtVisibleRect: AABB = .empty
+
+    /// How far past the literal visible rect we cull, as a fraction of the rect's
+    /// own extent on each side. A small pan/zoom inside this padded region reuses
+    /// the existing buffer (zero rebuild); only a view change that escapes it
+    /// re-culls. Single source of truth in `RendererCull`.
+    private static let cullMargin = RendererCull.defaultMargin
+
+    // MARK: Cull scratch (reused; no per-frame heap allocation, §2.3)
+
+    /// Persistent scratch the cull rebuild packs into, cleared with
+    /// `keepingCapacity` each rebuild so a steady drawing never re-allocates the
+    /// backing storage (rendering-performance.md §2.3 — no per-frame heap churn).
+    private var instanceScratch: [LineInstance] = []
+
+    /// Cached resolve context, rebuilt ONLY when the model changes (the layer
+    /// table snapshot is stable between edits), not per cull.
+    private var cachedResolveContext: ResolveContext?
+    /// The model version `cachedResolveContext` was built for.
+    private var resolveContextVersion = -1
 
     // MARK: Init
 
@@ -183,8 +206,17 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     // MARK: - MTKViewDelegate
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        // The point size update is driven by the view layer (CanvasModel.setViewSize)
-        // via SwiftUI; here we just request a redraw with the new drawable.
+        // Update the viewport's POINT size from the resize callback directly, so the
+        // first post-resize frame's `worldToClip` matrix already uses the new size —
+        // we do NOT rely solely on SwiftUI's `updateNSView` ordering (which can lag
+        // the drawable-size change by a frame and briefly skew the aspect/scale).
+        // `size` is in device pixels; convert to points via the backing scale.
+        let backing = view.window?.backingScaleFactor
+            ?? view.layer?.contentsScale
+            ?? 1.0
+        let scale = backing > 0 ? backing : 1.0
+        let pointSize = CGSize(width: size.width / scale, height: size.height / scale)
+        model.setViewSize(pointSize)
         view.setNeedsDisplay(view.bounds)
     }
 
@@ -258,19 +290,30 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     // MARK: - Buffer (re)builds
 
     /// Rebuilds the instanced-line buffer from the CULLED visible set, but ONLY
-    /// when the model changed or the visible rect changed (rendering-performance.md
-    /// §2.3 + §4.1). Matrix-only pan/zoom that keeps the same visible set re-uses
-    /// the existing buffer.
+    /// when the model changed or the visible rect escaped the padded built region
+    /// (rendering-performance.md §2.3 + §4.1). Matrix-only pan/zoom that stays
+    /// inside the cached margin re-uses the existing buffer (zero rebuild). The
+    /// pure decision + the padding/containment math live in `RendererCull` (GPU-
+    /// free, unit-tested in `RendererCullTests`).
     private func rebuildLineInstancesIfNeeded(visibleRect: AABB) {
         let modelChanged = model.modelDirty || model.modelVersion != builtModelVersion
-        let viewChanged = visibleRect != builtVisibleRect
-        guard modelChanged || viewChanged || lineInstanceBuffer == nil else { return }
+        guard RendererCull.needsRebuild(builtPaddedRect: builtVisibleRect,
+                                        currentVisibleRect: visibleRect,
+                                        modelChanged: modelChanged,
+                                        hasBuffer: lineInstanceBuffer != nil) else { return }
 
-        // Cull to the visible set via the quadtree, then resolve + pack.
-        var instances: [LineInstance] = []
-        let ctx = model.drawing.makeResolveContext()
+        // Cull a region LARGER than the literal visible rect so subsequent small
+        // pans/zooms stay inside it (matrix-only). Empty rect → fall back to the
+        // raw rect so the quadtree query still runs.
+        let paddedRect = RendererCull.expanded(visibleRect, byFraction: Self.cullMargin)
+        let cullRect = paddedRect.isEmpty ? visibleRect : paddedRect
+
+        // Reuse the persistent scratch (no per-frame heap allocation, §2.3) and the
+        // cached resolve context (rebuilt only on model change, not per cull).
+        instanceScratch.removeAll(keepingCapacity: true)
+        let ctx = resolveContext(modelChanged: modelChanged)
         let origin = model.renderOrigin
-        let visibleIDs = model.quadtree.query(region: visibleRect)
+        let visibleIDs = model.quadtree.query(region: cullRect)
 
         if visibleIDs.isEmpty && model.quadtree.isEmpty {
             // Index empty (e.g. entities with degenerate boxes / no model) — fall
@@ -279,24 +322,38 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             for e in model.drawing.entities {
                 let geo = e.resolve(ctx)
                 for poly in geo.polylines {
-                    RendererGeometry.appendInstances(for: poly, renderOrigin: origin, into: &instances)
+                    RendererGeometry.appendInstances(for: poly, renderOrigin: origin, into: &instanceScratch)
                 }
             }
         } else {
-            instances.reserveCapacity(visibleIDs.count * 2)
+            instanceScratch.reserveCapacity(visibleIDs.count * 2)
             for id in visibleIDs {
                 guard let e = model.drawing.entity(id) else { continue }
                 let geo = e.resolve(ctx)
                 for poly in geo.polylines {
-                    RendererGeometry.appendInstances(for: poly, renderOrigin: origin, into: &instances)
+                    RendererGeometry.appendInstances(for: poly, renderOrigin: origin, into: &instanceScratch)
                 }
             }
         }
 
-        uploadLineInstances(instances)
+        uploadLineInstances(instanceScratch)
         builtModelVersion = model.modelVersion
-        builtVisibleRect = visibleRect
+        builtVisibleRect = cullRect   // cache the PADDED rect we culled
         model.modelDirty = false
+    }
+
+    /// Returns the resolve context, rebuilding it only when the model changed (the
+    /// layer-table snapshot is stable between edits — no need to remake it per
+    /// cull, which would allocate a fresh closure every pan that crosses a margin).
+    private func resolveContext(modelChanged: Bool) -> ResolveContext {
+        if modelChanged || cachedResolveContext == nil
+            || resolveContextVersion != model.modelVersion {
+            let ctx = model.drawing.makeResolveContext()
+            cachedResolveContext = ctx
+            resolveContextVersion = model.modelVersion
+            return ctx
+        }
+        return cachedResolveContext!
     }
 
     /// Uploads `instances` into the persistent line buffer, growing it only when

@@ -17,6 +17,8 @@
 //  tests exercise the EXACT shipping source with zero drift. The proper long-term
 //  fix is to extract a `CADRender` library target in Package.swift (which this
 //  workstream may not edit) and `@testable import` it; tracked as a follow-up.
+//  TODO(backlog): extract a `CADRender` library target (Package.swift) and replace
+//  the symlinked sources with `@testable import CADRender` (out of scope here).
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //
