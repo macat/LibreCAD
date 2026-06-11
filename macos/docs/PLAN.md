@@ -13,39 +13,51 @@ real DXF/DWG fidelity, **render with Metal** for fluid pan/zoom at scale, and **
 
 ## Architecture (decided)
 - **Modules:** `DxfBridge` (C++ shim over libdxfrw, **pure C ABI** so Swift imports it as C — C++ stays internal) → `CADEngine` (pure-Swift engine: math, entities, document, tools, spatial index) → `LibreCADmacOS` (SwiftUI + Metal app). Build: SwiftPM (engine, CLI-testable) + manual `.app` assembly now; add XcodeGen when network returns.
-- **Entity model:** atomic primitives = value `struct`s (RS_*Data maps 1:1); recursive containers
-  (polyline/text/insert/hatch/**all dimensions**) = `final class` with parent links + child ownership.
+- **Entity model (see ADR-001):** ALL entities — atomic AND composite (polyline/text/insert/hatch/
+  **all dimensions**) — are **value `struct`s** holding only defining data; derived geometry is
+  computed via `resolve()` into an invalidatable cache, **never stored as a child graph**. Document
+  holds entities by stable `EntityID`; relationships are ID references, not object pointers.
   `RS2::` enums → Swift enums/OptionSets. `Vector` is 2D-first (drop RS_Vector's Y-flip; Metal is Y-up).
-- **Undo:** snapshot/command stack via AppKit `UndoManager` (free from `DocumentGroup`), NOT LibreCAD's
-  flag-based mark-don't-delete scheme — value-type entity data makes snapshots cheap.
+- **Undo (see ADR-002):** `UndoManager` (free from `DocumentGroup`) restoring **COW value snapshots of
+  the dirty set only** (cheap because entities are value types) — NOT LibreCAD's flag-based scheme.
 - **Rendering (Metal):** geometry in **world coords** in persistent `.shared` MTLBuffers; **single
   world→clip float4x4 uniform** (pan=translate, zoom=scale — buffers never rebuild on pan/zoom).
   Lines/polylines/curves = **instanced screen-space quads** (constant px width, analytic AA). Curves =
-  CPU sagitta tessellation with **zoom-bucketed LOD**. Fills/hatches = **earcut triangulation**. Text/
-  dims = **SDF glyph atlas** from Core Text. **Loose quadtree** shared by viewport culling + CPU
-  snapping. On-demand draw (`enableSetNeedsDisplay`+`isPaused`); continuous only during gestures.
+  CPU sagitta tessellation with **zoom-bucketed LOD**. Fills/hatches = **earcut triangulation**.
+  **CAD text/dims = stroked `.lff` polylines through the line pipeline (ADR-004), NOT SDF**; SDF atlas
+  is for UI chrome only. **Float precision per ADR-003** (f64 engine, f32 floating-origin buffers).
+  **Loose quadtree** shared by viewport culling + CPU snapping. On-demand draw
+  (`enableSetNeedsDisplay`+`isPaused`); continuous only during gestures.
   Budget: ~6 ms of 8.3 ms/frame @120 Hz; single-entity edits <1 ms via dirty-region patching.
 - **Hit-testing/snapping:** CPU only, against exact engine kernels (port of `RS_Information`); never
   GPU readback — snaps stay exact regardless of render LOD. Snapping decoupled from tools.
 - **Tools:** each tool owns a `Snapper` collaborator; per-tool `enum State` (not magic int status).
 
 ## Phased roadmap
-- **Phase 0 — Foundation spine** *(in progress, `ws/scaffold`)*: SwiftPM package builds; libdxfrw
-  compiles (c++20) + entity-counting DXF reader through the C-ABI shim; SwiftUI `DocumentGroup` app
-  with a Metal canvas drawing one line; `.app` assembles + launches; tests green. **Gate for all fan-out.**
-- **Phase 1 — Engine core** *(parallel fan-out)*: math/intersection kernels (port w/ LibreCAD's
-  `math/tests`), Vector/VectorSolutions, the entity model (Point/Line/Circle/Arc/Ellipse/Polyline +
-  base protocols), document model (Graphic/Layer/LayerList/Block/BlockList/Pen/units/variables),
-  bounding boxes, the quadtree spatial index. Each sub-area = its own builder + reviewer + tests.
-- **Phase 2 — DXF read → render** *(parallel)*: expand `DxfBridge` to a full reader (flatten all
-  DRW_* entities → Swift entity model); load `dim_sample.dxf` and **render the real drawing**; the
-  real Metal rendering pipeline (instanced lines first, then arcs/curves via tessellation).
-- **Phase 3 — Interaction core** *(parallel)*: world/screen transform + pan/zoom/fit/grid; selection
-  (single/window/crossing); snapping (free/grid/endpoint/center/on-entity) + ortho; coordinate HUD +
-  typed entry (`@dx,dy`, `dist<angle`); the ⌘K command palette.
+*(Sequencing follows ADR.md, which supersedes prior phase order. Revised per plan-critic 2026-06-11.)*
+- **Phase 0 — Foundation spine** *(building in `ws/scaffold`, NOT yet merged)*: SwiftPM package builds;
+  libdxfrw compiles (c++20) + entity-counting DXF reader through the C-ABI shim; SwiftUI `DocumentGroup`
+  app with a Metal canvas drawing one line; `.app` assembles + launches; tests green. **Gate for all
+  fan-out — nothing parallel starts until this is merged to `native-macos`.**
+- **Phase 0.5 — Freeze foundation ADRs + skeleton** *(serial, single agent)*: land a concrete
+  `Entity`/`Document`/`ResolvedGeometry`/`EntityID` skeleton implementing ADR-001..004, reviewed +
+  merged. **No parallel builder starts before this** — it's the shared type contract.
+- **Phase 1 — Engine core** *(parallel fan-out, AFTER 0.5)*: math/intersection kernels (port w/
+  LibreCAD's `src/lib/math/tests/`), Vector/VectorSolutions, atomic entities + composite `resolve()`s,
+  document model (Graphic/Layer/LayerList/Block/BlockList/Pen/units/variables), bounding boxes, the
+  quadtree spatial index, **`.lff` stroke-font loader (P1, ADR-004)**. Each sub-area = builder + reviewer + tests.
+- **Consolidated gate — Render + Interaction core** *(replaces old Phases 2+3; mostly serial, then small parallel)*:
+  full `DxfBridge` reader (flatten all DRW_* → Swift model); the real Metal pipeline (instanced lines →
+  tessellated arcs/curves → fills → `.lff` text) rendering `dim_sample.dxf`; world/screen transform +
+  pan/zoom/fit/grid; selection (single/window/crossing); snapping (free/grid/endpoint/center/on-entity)
+  + ortho; **preview overlay**; coordinate HUD + typed entry (`@dx,dy`, `dist<angle`); ⌘K palette.
+  **This whole gate must be green before tool fan-out** — tools are untestable without on-screen
+  geometry + selection + snapping + preview.
 - **Phase 4 — Broad tool parity** *(heavy parallel fan-out — the "broad parity" goal)*: P0 wave first
   (Line/Polyline/Rect/Circle/Arc/Point draw; Move/Copy/Rotate/Scale/Trim/Offset/Delete/Props modify),
-  then P1/P2. Each tool = its own worktree/builder/reviewer. Modernized as ~12 tools + variant pickers.
+  then P1/P2. Each independent tool = its own worktree/builder/reviewer. Modernized as ~12 tools +
+  variant pickers. **Hatch, Dimensions, Blocks/Inserts span engine+render+interaction → SINGLE owner,
+  not the wide pool.** Spline = higher-risk P1, port with tests.
 - **Phase 5 — UI shell**: unified toolbar, SwiftUI sidebar (Layers/Blocks/Views), trailing Inspector
   (entity properties + transforms), on-canvas gizmos, status bar, native menus/shortcuts, dark mode.
 - **Phase 6 — File I/O**: DXF **write** (via libdxfrw writer), DWG read; export PDF/PNG/SVG; native
