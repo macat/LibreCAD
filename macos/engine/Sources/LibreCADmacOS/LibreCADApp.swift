@@ -24,6 +24,7 @@
 //
 
 import SwiftUI
+import CADEngine
 
 @main
 struct LibreCADApp: App {
@@ -31,6 +32,11 @@ struct LibreCADApp: App {
     @FocusedValue(\.zoomToFit) private var zoomToFit
     /// The Open action published by the focused window (drives its .fileImporter).
     @FocusedValue(\.openDocument) private var openDocument
+    /// The tool-activation action published by the focused window.
+    @FocusedValue(\.activateTool) private var activateTool
+    /// Undo / redo actions published by the focused window.
+    @FocusedValue(\.undoAction) private var undoAction
+    @FocusedValue(\.redoAction) private var redoAction
 
     var body: some Scene {
         WindowGroup {
@@ -42,10 +48,30 @@ struct LibreCADApp: App {
                     .keyboardShortcut("o", modifiers: .command)
                     .disabled(openDocument == nil)
             }
+            // Undo / redo (replaces the empty default since there's no DocumentGroup).
+            CommandGroup(replacing: .undoRedo) {
+                Button("Undo") { undoAction?() }
+                    .keyboardShortcut("z", modifiers: .command)
+                    .disabled(undoAction == nil)
+                Button("Redo") { redoAction?() }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+                    .disabled(redoAction == nil)
+            }
             CommandGroup(after: .toolbar) {
                 Button("Zoom to Fit") { zoomToFit?() }
                     .keyboardShortcut("0", modifiers: .command)
                     .disabled(zoomToFit == nil)
+            }
+            // The Tools menu — minimal but real tool selection (also bound to the
+            // bare L/V keys on the canvas; these add discoverable menu items +
+            // standalone shortcuts).
+            CommandMenu("Tools") {
+                Button("Select") { activateTool?(.select) }
+                    .keyboardShortcut("v", modifiers: [])
+                    .disabled(activateTool == nil)
+                Button("Line") { activateTool?(.line) }
+                    .keyboardShortcut("l", modifiers: [])
+                    .disabled(activateTool == nil)
             }
         }
     }
