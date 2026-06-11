@@ -147,7 +147,15 @@ final class LineRenderer: NSObject, MTKViewDelegate {
         do {
             library = try device.makeLibrary(source: canvasMetalSource, options: nil)
         } catch {
+            // LOUD in DEBUG (assertionFailure is a no-op in release, so this does
+            // NOT crash shipping builds). A swallowed shader-compile error here
+            // renders a BLANK canvas with no obvious cause — it shipped that way
+            // twice (a var named `half`, a reserved MSL type). Make a future
+            // break impossible to miss during development. The runtime test
+            // `ShaderCompileTests` is the first line of defence; this is the
+            // second, for shader changes that slip past it.
             NSLog("LineRenderer: shader compile failed: \(error)")
+            assertionFailure("LineRenderer: shader compile failed: \(error)")
             return
         }
 
@@ -164,9 +172,11 @@ final class LineRenderer: NSObject, MTKViewDelegate {
                 linePipeline = try device.makeRenderPipelineState(descriptor: desc)
             } catch {
                 NSLog("LineRenderer: line pipeline failed: \(error)")
+                assertionFailure("LineRenderer: line pipeline failed: \(error)")
             }
         } else {
             NSLog("LineRenderer: missing line shader functions")
+            assertionFailure("LineRenderer: missing line shader functions (line_vertex/line_fragment)")
         }
 
         // ---- Flat overlay pipeline.
@@ -181,9 +191,11 @@ final class LineRenderer: NSObject, MTKViewDelegate {
                 flatPipeline = try device.makeRenderPipelineState(descriptor: desc)
             } catch {
                 NSLog("LineRenderer: flat pipeline failed: \(error)")
+                assertionFailure("LineRenderer: flat pipeline failed: \(error)")
             }
         } else {
             NSLog("LineRenderer: missing flat shader functions")
+            assertionFailure("LineRenderer: missing flat shader functions (flat_vertex/flat_fragment)")
         }
     }
 
