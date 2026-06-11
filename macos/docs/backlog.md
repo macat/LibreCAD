@@ -51,6 +51,12 @@ pass or by the relevant downstream owner. Each cites its source.
 - Cache resolved geometry on entity/quadtree (hitTest/snap re-tessellate curves per call). *(review-selectsnap #3)*
 - Test gaps: arc/ellipse window-vs-crossing, closed-loop-encloses-rect crossing, degenerate-entity snap NaN-safety. *(review-selectsnap nice-to-have)*
 
+## Render gate — DXF reader (F)
+- Add a DXF fixture covering SPLINE + ELLIPSE + true-color (color24) to lock the mapping (dim_sample.dxf has none). *(review-dxfread #3)*
+- Strengthen `pensMapped` test (currently `allSatisfy { _ in true }` no-op) with a real pen assertion. *(review-dxfread #2)*
+- Comment that `lc_dxf_count_entities` now parses+flattens the whole file (no longer alloc-free). *(review-dxfread #4)*
+- Layer with ACI 256 silently → green instead of inheriting (rare/invalid edge). *(review-dxfread #1)*
+
 ## Cross-cutting / later phases
 - **Zoom-bucketed LOD** for curve tessellation (ellipse/arc/spline/lff bulges) — currently fixed-by-tolerance,
   marked `// TODO` in Resolve.swift / LFFParser.swift. *(ADR-003 / rendering-performance.md)*
