@@ -74,6 +74,12 @@ and as the home of `libraries/libdxfrw` (DXF/DWG), which we bridge via Swift/C++
 ## PHASE 1 COMPLETE (2026-06-11) — engine core fully merged, 174 tests green, native-macos +37 commits
 Engine modules on native-macos: CADEngine core (Vector/Geometry/Pen/Entity/Resolve/Layer/Block/CADDrawing/CADEngine) + Math/ (VectorSolutions, QuadraticSolver, MathUtils, LCQuadratic, Intersections) + Spatial/ (Quadtree) + Text/ (LFFParser, StrokeFont, StrokeFontProvider) + DxfBridge (libdxfrw C-ABI). App: SwiftUI DocumentGroup + Metal canvas. Next: consolidated Render+Interaction gate (see PLAN.md) before tool fan-out.
 
+### Render+Interaction gate (user chose "Go — render a real DXF", 2026-06-11)
+- [2026-06-11 18:45] 📋 coordinator — wrote render-gate-fanout.md. Wave 1 = 3 parallel disjoint builders (F dxfread, G viewport, H selectsnap); Wave 2 = Metal renderer/canvas integration after. Briefs carry the namespace-test-suites learning.
+- [2026-06-11 18:46] 🔨 ws-dxfread (F) — full DXF reader (DxfBridge flatten + DXFReader.swift→CADDrawing). Outcome: running.
+- [2026-06-11 18:46] 🔨 ws-viewport (G) — pure f64 Viewport transform + world→clip floating-origin matrix. Outcome: running.
+- [2026-06-11 18:46] 🔨 ws-selectsnap (H) — selection (hit/window/crossing) + snapping (endpoint/center/mid/onEntity/intersection/grid). Outcome: running.
+
 ## Environment gotchas (recorded)
 - `git push` / `brew install` / any network op: sandbox blocks them ("port 22: Operation not permitted") → run with sandbox disabled.
 - `swift build` / `swift test`: need `--disable-sandbox` in this env (nested-sandbox error otherwise).
