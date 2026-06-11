@@ -80,7 +80,9 @@ public struct LineTool: Tool {
         return [ResolvedPolyline(points: [last, cursor], closed: false, pen: .toolPreview)]
     }
 
-    public mutating func handle(_ input: ToolInput) -> ToolOutcome {
+    /// A draw tool: it IGNORES `context` (it needs only the snapped world points)
+    /// and emits new geometry as `.add` edits.
+    public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
         switch input {
         case .move(let p):
             cursor = p
@@ -128,7 +130,7 @@ public struct LineTool: Tool {
             )
             state = .settingEnd(last: p)
             cursor = p
-            return .commit([record])
+            return .commit([.add(record)])
         }
     }
 

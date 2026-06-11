@@ -73,6 +73,14 @@ final class CanvasModel {
     @ObservationIgnored
     var snapModes: SnapMode = .standard
 
+    /// The grid step (world units) last seen via `updateSnap`/`snappedWorldPoint`.
+    /// The renderer owns the live grid spacing and the canvas view passes it down
+    /// on every cursor event; we cache the latest here so `handleToolInput` can put
+    /// it in the `ToolContext` without threading it through every call site. `nil`
+    /// until the first snap (or when the grid is off).
+    @ObservationIgnored
+    private var lastGridSpacing: Double?
+
     // MARK: Tool state
 
     /// The active interaction mode: `.select` (default click-to-select / pan) or a
@@ -179,6 +187,7 @@ final class CanvasModel {
     /// Returns whether the snap result changed (so the caller can skip a redraw).
     @discardableResult
     func updateSnap(atScreenPoint screen: CGPoint, gridSpacing: Double?) -> Bool {
+        lastGridSpacing = gridSpacing
         let world = viewport.screenToWorld(screen)
         cursorWorld = world
         let result = Snapping.snap(
@@ -241,7 +250,7 @@ final class CanvasModel {
     @discardableResult
     func handleToolInput(_ input: ToolInput) -> Bool {
         guard tool != nil else { return false }
-        let outcome = tool!.handle(input)
+        let outcome = tool!.handle(input, context: makeToolContext())
         toolStatus = tool!.status
 
         switch outcome {
@@ -249,8 +258,8 @@ final class CanvasModel {
             return false
         case .preview:
             return true
-        case .commit(let records):
-            applyCommit(records)
+        case .commit(let edits):
+            applyCommit(edits)
             return true
         case .finished:
             // The run ended (commit/cancel). Mint a fresh tool of the same kind so
@@ -263,15 +272,70 @@ final class CanvasModel {
         }
     }
 
-    /// Applies a tool's committed records to the drawing via the undoable
-    /// `CADDrawing.add` (which re-mints the placeholder id), then updates the
-    /// quadtree so the new geometry is immediately snappable/selectable. Marks the
-    /// GPU model buffer dirty so the renderer repacks it.
-    private func applyCommit(_ records: [EntityRecord]) {
-        for record in records {
-            let id = drawing.add(record)           // undoable; mints a real id
-            let box = drawing.entity(id)?.boundingBox() ?? record.boundingBox()
-            if !box.isEmpty { quadtree.insert(id, bounds: box) }
+    /// Builds the read-only `ToolContext` snapshot for one `handle` call: the
+    /// current selection resolved to records, a lookup into the drawing, and the
+    /// last-seen grid step. Rebuilt per call so the tool always sees current state
+    /// (cheap: the selection is usually small / empty while drawing).
+    ///
+    /// The `entity` closure captures an immutable value snapshot of the drawing's
+    /// `entities` (a copy-on-write array — cheap, no deep copy), keyed by id. That
+    /// makes the closure genuinely `@Sendable` (it touches only value types, no
+    /// `self`, no actor state), so no isolation assumption is needed.
+    private func makeToolContext() -> ToolContext {
+        let snapshot = drawing.entities          // CoW value snapshot (Sendable)
+        let byID = Dictionary(uniqueKeysWithValues: snapshot.map { ($0.id, $0) })
+        let selected = selection.ids.compactMap { byID[$0] }
+        return ToolContext(
+            selected: selected,
+            entity: { id in byID[id] },
+            gridSpacing: lastGridSpacing
+        )
+    }
+
+    /// Applies a tool's committed edits to the drawing as ONE undoable group, so a
+    /// single undo reverts the whole tool action. Each edit is applied through the
+    /// undoable `CADDrawing` mutations (ADR-002) and mirrored into the quadtree so
+    /// the result is immediately snappable/selectable; the GPU model buffer is
+    /// marked dirty so the renderer repacks it.
+    ///
+    /// Quadtree consistency: the `add`/`replace`/`remove` here keep the index in
+    /// sync directly. On undo/redo the drawing's value-snapshot restore does NOT
+    /// touch the quadtree (the undo closures only know about `entities`), so
+    /// `undo()`/`redo()` rebuild the whole index — see those methods.
+    private func applyCommit(_ edits: [ToolEdit]) {
+        guard !edits.isEmpty else { return }
+
+        // Make the whole commit ONE undo step. UndoManager's default
+        // `groupsByEvent == true` already coalesces registrations made within a
+        // single run-loop event (a tool commit is applied synchronously in one
+        // event), so the edits group automatically in the running app. When
+        // grouping-by-event is off (e.g. a unit test driving applyCommit directly,
+        // with no run loop) we open an explicit group so one undo still reverts the
+        // entire commit rather than one edit at a time.
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+
+        for edit in edits {
+            switch edit {
+            case .add(let record):
+                let id = drawing.add(record)           // undoable; mints a real id
+                let box = drawing.entity(id)?.boundingBox() ?? record.boundingBox()
+                if !box.isEmpty { quadtree.insert(id, bounds: box) }
+
+            case .replace(let id, let newKind):
+                // Preserve the entity's layer/pen/flags; swap only its geometry.
+                guard var record = drawing.entity(id) else { continue }
+                record.kind = newKind
+                drawing.replace(record)                // undoable
+                let box = record.boundingBox()
+                if box.isEmpty { quadtree.remove(id) } else { quadtree.update(id, bounds: box) }
+
+            case .remove(let id):
+                drawing.remove(id)                     // undoable (no-op if absent)
+                quadtree.remove(id)
+                selection.remove(id)
+            }
         }
         modelDirty = true
         modelVersion &+= 1
