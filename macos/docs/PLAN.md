@@ -39,13 +39,13 @@ real DXF/DWG fidelity, **render with Metal** for fluid pan/zoom at scale, and **
   libdxfrw compiles clean (c++20) + entity-counting DXF reader through the C-ABI shim; SwiftUI
   `DocumentGroup` app with a Metal canvas; `.app` assembles. **13/13 tests green; dim_sample.dxf=103
   entities. Reviewed: APPROVE w/ follow-ups (rolled into Phase 0.5).**
-- **Phase 0.5 — Freeze foundation ADRs + skeleton** *(serial, single agent)*: land a concrete
-  `Entity`/`Document`/`ResolvedGeometry`/`EntityID` skeleton implementing ADR-001..004, reviewed +
-  merged. **No parallel builder starts before this** — it's the shared type contract.
-- **Phase 1 — Engine core** *(parallel fan-out, AFTER 0.5)*: math/intersection kernels (port w/
-  LibreCAD's `src/lib/math/tests/`), Vector/VectorSolutions, atomic entities + composite `resolve()`s,
-  document model (Graphic/Layer/LayerList/Block/BlockList/Pen/units/variables), bounding boxes, the
-  quadtree spatial index, **`.lff` stroke-font loader (P1, ADR-004)**. Each sub-area = builder + reviewer + tests.
+- **Phase 0.5 — Freeze foundation ADRs + skeleton** ✅ *(DONE — merged)*: value-type entity model +
+  `resolve()` + `@MainActor CADDrawing` (snapshot-undo) + render seam, reviewed (APPROVE; must-fix +
+  widen-now applied), **49/49 tests green**. Shared type contract FROZEN (see ADR.md / phase1-fanout.md).
+- **Phase 1 — Engine core** 🔄 *(parallel fan-out IN PROGRESS — see `phase1-fanout.md`)*: 5 disjoint
+  workstreams — A math/intersection kernels (port `src/lib/math/tests/`), B entity-set (ellipse+spline),
+  C document/layers/blocks, D quadtree spatial index, E `.lff` stroke-font loader (P1, ADR-004). Each =
+  own `ws/*` branch + builder + reviewer + tests; coordinator merges disjoint branches sequentially.
 - **Consolidated gate — Render + Interaction core** *(replaces old Phases 2+3; mostly serial, then small parallel)*:
   full `DxfBridge` reader (flatten all DRW_* → Swift model); the real Metal pipeline (instanced lines →
   tessellated arcs/curves → fills → `.lff` text) rendering `dim_sample.dxf`; world/screen transform +
