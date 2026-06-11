@@ -67,7 +67,7 @@ and as the home of `libraries/libdxfrw` (DXF/DWG), which we bridge via Swift/C++
 - [2026-06-11 18:10] 🔍 review-spatial — DONE: APPROVE (no must-fix; loose-quadtree prune soundness + 2 bug fixes verified). 🔍 review-lff — DONE: APPROVE (no must-fix; format fidelity verified, DEVLOG diff is non-conflict). Follow-ups→backlog.md.
 - [2026-06-11 18:12] 📋 coordinator — MERGED ws/document, ws/spatial, ws/lff → native-macos (all clean, disjoint). Rebuild+test green: 102 tests in 10 suites. Created backlog.md (non-blocking review follow-ups).
 - [2026-06-11 18:14] 🔍 review-math (general-purpose) — review ws/math (incl. module-scope symbol-collision check vs merged C/D/E). Outcome: running.
-- [2026-06-11 18:00] 🔍 review-entities (general-purpose) — review ws/entities (hot files; NURBS/ellipse math). Outcome: running.
+- [2026-06-11 18:00] 🔍 review-entities (general-purpose) — review ws/entities (hot files; NURBS/ellipse math). Outcome: DONE — APPROVE (no must-fix). Both frozen files strictly additive (0 modified lines, shared types untouched); ellipse/NURBS/SplinePoints verified line-for-line vs LibreCAD; ellipse+spline bbox conservative (no under-report); attribution present. DEVLOG "deletion" = non-conflict red herring (ws/entities never modified DEVLOG). Follow-ups (closed-NURBS test, tight bbox)→backlog.md.
 
 ## Environment gotchas (recorded)
 - `git push` / `brew install` / any network op: sandbox blocks them ("port 22: Operation not permitted") → run with sandbox disabled.
