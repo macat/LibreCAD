@@ -14,8 +14,10 @@ set -euo pipefail
 # cwd and from any git worktree.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MACOS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_DIR="$(cd "${MACOS_DIR}/.." && pwd)"
 ENGINE_DIR="${MACOS_DIR}/engine"
 INFO_PLIST_SRC="${MACOS_DIR}/App/Info.plist"
+SAMPLE_DXF_SRC="${REPO_DIR}/librecad/res/dxf/dim_sample.dxf"
 BUILD_DIR="${MACOS_DIR}/build"
 APP_DIR="${BUILD_DIR}/LibreCADmacOS.app"
 CONFIG="${CONFIG:-debug}"        # set CONFIG=release for a release build
@@ -39,6 +41,15 @@ mkdir -p "${APP_DIR}/Contents/Resources"
 cp "${BIN_PATH}" "${APP_DIR}/Contents/MacOS/${EXE_NAME}"
 cp "${INFO_PLIST_SRC}" "${APP_DIR}/Contents/Info.plist"
 printf 'APPL????' > "${APP_DIR}/Contents/PkgInfo"
+
+# Bundle the launch sample so the .app is path-independent (ContentView loads it
+# from Bundle.main; the repo path is only a dev fallback for the bare binary).
+if [[ -f "${SAMPLE_DXF_SRC}" ]]; then
+    cp "${SAMPLE_DXF_SRC}" "${APP_DIR}/Contents/Resources/dim_sample.dxf"
+    echo "    bundled sample: Contents/Resources/dim_sample.dxf"
+else
+    echo "warning: launch sample not found at ${SAMPLE_DXF_SRC}; app will fall back to the repo path" >&2
+fi
 
 echo "==> Ad-hoc signing"
 codesign --force --sign - "${APP_DIR}"

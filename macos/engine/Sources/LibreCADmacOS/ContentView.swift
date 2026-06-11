@@ -2,34 +2,40 @@
 //  ContentView.swift
 //  LibreCADmacOS
 //
-//  The document window: the interactive Metal canvas (CADCanvasView) plus a
-//  coordinate / status HUD. On appear it loads the document's drawing into a
-//  `CanvasModel` and frames it. For the empty "new document" case it loads the
-//  bundled `dim_sample.dxf` so a fresh launch shows real geometry (the Wave-2
-//  payoff).
+//  The single window: the interactive Metal canvas (CADCanvasView) plus a
+//  coordinate / status HUD. It owns the live model directly — a `@MainActor
+//  @Observable CanvasModel` — so there is no NSDocument and nothing on the
+//  launch path that crosses actor boundaries.
+//
+//  On first appear it loads the bundled `dim_sample.dxf` (falling back to the
+//  repo copy) so a fresh launch shows real geometry. File▸Open uses a SwiftUI
+//  `.fileImporter` driven by the ⌘O command via a focused scene value.
+//
+//  Crash-fix note: the previous DocumentGroup path constructed the document off
+//  the main thread and trapped on `MainActor.assumeIsolated`. There is NO
+//  `assumeIsolated` here: `CanvasModel`/`CADDrawing` are touched only on the
+//  main actor (this whole view runs there), and `loadDrawing(dxfPath:)` is
+//  itself `@MainActor`.
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 import CADEngine
 
 struct ContentView: View {
-    let document: CADDocument
-    /// The document's UndoManager, injected by DocumentGroup (ADR-002).
-    @Environment(\.undoManager) private var undoManager
-
-    /// The canvas state (model, viewport, index, selection, snap). Created per
-    /// window; the document's drawing is loaded into it on appear.
+    /// The canvas state (model, viewport, index, selection, snap). Owned by this
+    /// window; `@MainActor @Observable`, so it is only ever touched on the main
+    /// actor — which is where this whole view runs.
     @State private var model = CanvasModel()
     /// Bridge so the Zoom-to-Fit command can reach the live canvas controller.
     @State private var controllerBox = CADCanvasView.ControllerBox()
     @State private var status: String = "Loading…"
-
-    /// Hard-coded path to the launch sample (per the Wave-2 brief). Used only when
-    /// the document opened empty (a fresh "new document").
-    private static let launchSamplePath =
-        "/Users/macatt/w/LibreCAD/librecad/res/dxf/dim_sample.dxf"
+    /// Drives the File▸Open importer (toggled by the ⌘O command).
+    @State private var showOpen = false
+    /// Set once so the launch sample is loaded exactly one time.
+    @State private var didLoadSample = false
 
     var body: some View {
         CADCanvasView(model: model, controllerBox: controllerBox)
@@ -38,12 +44,18 @@ struct ContentView: View {
             .overlay(alignment: .topLeading) { statusHUD }
             .overlay(alignment: .bottomLeading) { coordinateHUD }
             .focusedSceneValue(\.zoomToFit) { controllerBox.controller?.zoomToFit() }
-            .onAppear {
-                document.drawing.undoManager = undoManager
-                loadInitialDrawing()
+            .focusedSceneValue(\.openDocument) { showOpen = true }
+            .fileImporter(
+                isPresented: $showOpen,
+                allowedContentTypes: Self.dxfTypes,
+                allowsMultipleSelection: false
+            ) { result in
+                handleImport(result)
             }
-            .onChange(of: undoManager) { _, newValue in
-                document.drawing.undoManager = newValue
+            .onAppear {
+                guard !didLoadSample else { return }
+                didLoadSample = true
+                Task { await loadSample() }
             }
     }
 
@@ -83,38 +95,64 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Initial load
+    // MARK: - Open (File▸Open via ⌘O)
 
-    /// Loads the document's drawing into the canvas model. Three cases:
-    ///   1. File>Open of a real .dxf → parse the opened bytes via DXFReader.
-    ///   2. A new/empty document → load the bundled sample DXF (Wave-2 payoff).
-    private func loadInitialDrawing() {
-        let size = CGSize(width: 1000, height: 700)   // a sane first frame size
+    /// Accepted file types for the importer. Prefers the exported DXF UTType but
+    /// always also offers the plain `.dxf` extension type as a robust fallback.
+    private static let dxfTypes: [UTType] = {
+        var types: [UTType] = [.librecadDXF]
+        if let byExt = UTType(filenameExtension: "dxf") { types.append(byExt) }
+        return types
+    }()
 
-        if let data = document.openedFileData, !data.isEmpty {
-            document.openedFileData = nil   // consume once
-            status = "Opening…"
-            if let staged = stage(data: data) {
-                // `isTemp: true` → the temp .dxf is removed once parsing completes
-                // (success OR failure), so File>Open never leaks a temp file.
-                Task { await load(path: staged, label: "opened file", size: size, isTemp: true) }
-            } else {
-                Task { await load(path: Self.launchSamplePath, label: "dim_sample.dxf", size: size) }
-            }
-            return
+    /// Handles the importer result: resolves the security-scoped URL and loads it.
+    private func handleImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            Task { await open(url) }
+        case .failure(let error):
+            status = "Open cancelled: \(error.localizedDescription)"
         }
-
-        // New/empty document → load the launch sample.
-        status = "Loading dim_sample.dxf…"
-        Task { await load(path: Self.launchSamplePath, label: "dim_sample.dxf", size: size) }
     }
 
-    /// Parses a DXF at `path` and frames it. Errors surface in the status HUD. When
-    /// `isTemp` is true the file at `path` is a staged temp copy and is deleted once
-    /// parsing completes (success or failure), so File>Open leaves no temp behind.
+    /// Loads a user-picked file, honoring the security-scoped URL lifecycle. On
+    /// error the message lands in the status HUD — never a crash.
     @MainActor
-    private func load(path: String, label: String, size: CGSize, isTemp: Bool = false) async {
-        defer { if isTemp { try? FileManager.default.removeItem(atPath: path) } }
+    private func open(_ url: URL) async {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        await load(path: url.path, label: url.lastPathComponent)
+    }
+
+    // MARK: - Initial sample load
+
+    /// Loads the launch sample from the app bundle if present, else the repo copy,
+    /// so the bundled app is path-independent. Runs on the main actor; on failure
+    /// the status HUD shows the error rather than crashing.
+    @MainActor
+    private func loadSample() async {
+        status = "Loading dim_sample.dxf…"
+        if let bundled = Bundle.main.url(forResource: "dim_sample", withExtension: "dxf") {
+            await load(path: bundled.path, label: "dim_sample.dxf")
+            return
+        }
+        // Fallback to the in-repo copy (useful when running the bare binary).
+        await load(path: Self.repoSamplePath, label: "dim_sample.dxf")
+    }
+
+    /// Repo-relative fallback path for the launch sample (used only when the
+    /// sample is not bundled, e.g. running the SwiftPM binary directly).
+    private static let repoSamplePath =
+        "/Users/macatt/w/LibreCAD/librecad/res/dxf/dim_sample.dxf"
+
+    // MARK: - Shared load
+
+    /// Parses a DXF at `path` on the main actor, installs it in the model, frames
+    /// it, and updates the HUD. Errors surface in the status HUD (no crash).
+    @MainActor
+    private func load(path: String, label: String) async {
+        let size = model.viewport.size
         do {
             let drawing = try await loadDrawing(dxfPath: path)
             model.setDrawing(drawing, viewSize: size)
@@ -126,34 +164,29 @@ struct ContentView: View {
             NSLog("CADCanvas: load failed: \(error)")
         }
     }
-
-    /// Writes opened bytes to a temp .dxf so the path-based DXFReader/libdxfrw can
-    /// read them. Returns the temp path, or nil on failure.
-    private func stage(data: Data) -> String? {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("librecad-open-\(UUID().uuidString).dxf")
-        do {
-            try data.write(to: url)
-            return url.path
-        } catch {
-            NSLog("CADCanvas: failed to stage opened file: \(error)")
-            return nil
-        }
-    }
 }
 
-// MARK: - Zoom-to-Fit focused command plumbing
+// MARK: - Focused command plumbing
 
-/// A focused scene value carrying the active canvas's "Zoom to Fit" action, so a
-/// menu/keyboard command (⌘0) can drive the focused canvas without a global
-/// singleton (LibreCADApp reads it in its `.commands`).
+/// Focused scene values carrying the active window's "Zoom to Fit" and "Open…"
+/// actions, so menu/keyboard commands (⌘0 / ⌘O) can drive the focused window
+/// without a global singleton (LibreCADApp reads them in its `.commands`).
 extension FocusedValues {
     var zoomToFit: (() -> Void)? {
         get { self[ZoomToFitKey.self] }
         set { self[ZoomToFitKey.self] = newValue }
     }
+
+    var openDocument: (() -> Void)? {
+        get { self[OpenDocumentKey.self] }
+        set { self[OpenDocumentKey.self] = newValue }
+    }
 }
 
 private struct ZoomToFitKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct OpenDocumentKey: FocusedValueKey {
     typealias Value = () -> Void
 }
