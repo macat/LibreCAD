@@ -45,6 +45,12 @@ pass or by the relevant downstream owner. Each cites its source.
   screen) or picking/pan is vertically mirrored — add a runtime assert at the view seam. *(review-viewport #2)*
 - Add a far-origin precision-bound assertion + document worst-case ULP (~3e-4 NDC at 1e6 offset). *(review-viewport #3)*
 
+## Render gate — selection/snapping (H)
+- Snap perf: `appendIfNear` recomputes sqrt per candidate; snap does 7 filter passes — group into one reduce in the perf pass (24-cap makes it fine now). *(review-selectsnap #1)*
+- Thread the caller's `ctx` through `intersections`→`resolvedIntersections` (currently uses `.default` tolerance for polyline/spline intersection snaps). *(review-selectsnap #2)*
+- Cache resolved geometry on entity/quadtree (hitTest/snap re-tessellate curves per call). *(review-selectsnap #3)*
+- Test gaps: arc/ellipse window-vs-crossing, closed-loop-encloses-rect crossing, degenerate-entity snap NaN-safety. *(review-selectsnap nice-to-have)*
+
 ## Cross-cutting / later phases
 - **Zoom-bucketed LOD** for curve tessellation (ellipse/arc/spline/lff bulges) — currently fixed-by-tolerance,
   marked `// TODO` in Resolve.swift / LFFParser.swift. *(ADR-003 / rendering-performance.md)*

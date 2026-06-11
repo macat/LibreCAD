@@ -82,7 +82,8 @@ Engine modules on native-macos: CADEngine core (Vector/Geometry/Pen/Entity/Resol
 - [2026-06-11 19:00] 🔍 review-viewport (general-purpose) — review ws/viewport. Outcome: DONE — APPROVE (no must-fix; transform math verified analytically: round-trip inverse, zoom-about-cursor invariant, worldToClip NDC, fit degenerate guards; collision-clean). Follow-ups (dead drawableSize param; enforce isFlipped at renderer seam; precision-bound test)→backlog.md.
 - [2026-06-11 19:10] 📋 coordinator — MERGED ws/viewport → native-macos (clean). Rebuild+test green: 192 tests in 22 suites.
 - [2026-06-11 18:46] 🔨 ws-selectsnap (H) — selection (hit/window/crossing) + snapping (endpoint/center/mid/onEntity/intersection/grid). Outcome: DONE/GREEN. Selection{ids}+hitTest(quadtree candidates→exact analytic dist)+windowSelect(window vs crossing); Geometry2D static dist helpers; SnapMode OptionSet+SnapKind+SnapResult; Snapping.snap (candidates: endpoint>center>middle>intersection>onEntity>grid>free, intersection via Intersections capped@24). swift build 0 warnings; 196 tests (174+22, 5 domain-prefixed suites). Receipts: ws/selectsnap @ ae2e99de8.
-- [2026-06-11 19:25] 🔍 review-selectsnap (general-purpose) — review ws/selectsnap before merge. Outcome: running.
+- [2026-06-11 19:25] 🔍 review-selectsnap (general-purpose) — review ws/selectsnap. Outcome: DONE — APPROVE (no must-fix; collision-clean — all consumed APIs + 5 suite names verified distinct; hit/window/crossing/snap geometry correct + test-backed; concurrency clean). Follow-ups (sqrt/filter perf; thread ctx through intersection-snap; cache resolved geom)→backlog.md.
+- [2026-06-11 19:50] 📋 coordinator — MERGED ws/selectsnap → native-macos (clean). Rebuild+test green: 214 tests in 27 suites.
 
 ## Environment gotchas (recorded)
 - `git push` / `brew install` / any network op: sandbox blocks them ("port 22: Operation not permitted") → run with sandbox disabled.
