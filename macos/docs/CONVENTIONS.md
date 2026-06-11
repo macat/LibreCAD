@@ -39,6 +39,13 @@ Source: user directives (2026-06-11).
   state explicitly what was NOT verified and ask the user to launch it. (2026-06-11: shipped a
   "working viewer" that crashed on launch — `MainActor.assumeIsolated` in `CADDocument.init` called
   off-main by `NSDocumentController`. Crash report: `~/Library/Logs/DiagnosticReports/`.)
+- **Runtime-compiled Metal shaders ARE headlessly testable** — `MTLCreateSystemDefaultDevice()` +
+  `makeLibrary(source:)` work in `swift test` without a window. So shader correctness has NO excuse to
+  ship unverified: keep a test that compiles the real shader source + asserts the expected functions
+  exist. (2026-06-11: `float2 half = …` — `half` is a reserved MSL type — failed `makeLibrary` →
+  both pipelines never built → app launched but rendered a BLANK canvas. The renderer *swallowed* the
+  compile error with NSLog only, so it "started up" blank.) **Never silently swallow a shader/pipeline
+  compile failure** — `assertionFailure` (debug) + a visible error state; a blank canvas must be loud.
 - **Never `MainActor.assumeIsolated` in a code path the OS/framework may invoke off-main** (NSDocument
   init/snapshot/fileWrapper, delegate callbacks). It traps (SIGTRAP) instead of corrupting — loud, but
   a hard crash. Make such entry points genuinely off-main-safe (Sendable data) and hop to the actor explicitly.
