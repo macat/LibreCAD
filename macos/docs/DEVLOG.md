@@ -102,6 +102,7 @@ Engine modules on native-macos: CADEngine core (Vector/Geometry/Pen/Entity/Resol
 - 🔍 review-appfix — REVISE: confirmed offset=grid-snapping (transform exact); MUST-FIX (1) bare-⌫ menu key-equiv pre-empts tool-backspace via performKeyEquivalent → gate on isToolActive; (2) no delete/undo/redo test → add engine-level. Should-fix (grid-snap opt-in toggle)→backlog.
 - [2026-06-11 23:55] 📋 coordinator — MERGED ws/transform + 5 draw tools → native-macos (all clean, non-doc overlap none). Combined build+test: **388 tests in 43 suites green**. Cleaned 6 worktrees. Tools NOT yet wired into ToolKind/toolbar (coordinator does that AFTER app-fix merges, to avoid app-file collision).
 - [2026-06-12 00:00] 🔨 appfix-fixer (worktree on ws/appfix) — must-fix ⌫ gating (focused isToolActive → disable Delete menu during tool run) + delete/undo/redo engine test. Outcome: running.
+- [2026-06-12 00:10] 🔨 Wave B — 5 modify tools dispatched in parallel (each own Tools/*.swift + tests; use ToolContext.selected + EntityKind.transformed; emit .replace (move/rotate/scale/mirror) or .add (copy); NO ToolKind edit): tool-move (translate, 2-click), tool-copy (duplicate, .add), tool-rotate (center/ref/target), tool-scale (center/ref/target uniform), tool-mirror (2-pt axis). Outcome: running. Wired into ToolKind/toolbar by coordinator after app-fix merges + all tools land.
 
 #### Wave A results (all 7 DONE/GREEN; reviews in flight)
 - 🔨 tool-rect (RectangleTool, 2 corners→closed polyline) — 295 tests — ws/tool-rect @ b90de6a2a
