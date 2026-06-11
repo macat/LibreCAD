@@ -35,10 +35,10 @@ real DXF/DWG fidelity, **render with Metal** for fluid pan/zoom at scale, and **
 
 ## Phased roadmap
 *(Sequencing follows ADR.md, which supersedes prior phase order. Revised per plan-critic 2026-06-11.)*
-- **Phase 0 — Foundation spine** *(building in `ws/scaffold`, NOT yet merged)*: SwiftPM package builds;
-  libdxfrw compiles (c++20) + entity-counting DXF reader through the C-ABI shim; SwiftUI `DocumentGroup`
-  app with a Metal canvas drawing one line; `.app` assembles + launches; tests green. **Gate for all
-  fan-out — nothing parallel starts until this is merged to `native-macos`.**
+- **Phase 0 — Foundation spine** ✅ *(DONE — merged to `native-macos`)*: SwiftPM package builds;
+  libdxfrw compiles clean (c++20) + entity-counting DXF reader through the C-ABI shim; SwiftUI
+  `DocumentGroup` app with a Metal canvas; `.app` assembles. **13/13 tests green; dim_sample.dxf=103
+  entities. Reviewed: APPROVE w/ follow-ups (rolled into Phase 0.5).**
 - **Phase 0.5 — Freeze foundation ADRs + skeleton** *(serial, single agent)*: land a concrete
   `Entity`/`Document`/`ResolvedGeometry`/`EntityID` skeleton implementing ADR-001..004, reviewed +
   merged. **No parallel builder starts before this** — it's the shared type contract.
