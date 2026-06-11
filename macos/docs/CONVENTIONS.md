@@ -59,6 +59,14 @@ Source: user directives (2026-06-11).
 - Source symbols: same hazard at module scope — keep new helpers as `static` members of a namespaced
   type (enum/struct), never module-scope free functions, so parallel modules don't redeclare.
 
+## Reviewer note — the "doc deletions in the diff" red-herring (do NOT flag as must-fix)
+A branch cut before the coordinator committed newer `macos/docs/*` will show those docs as DELETED in
+`git diff native-macos..<branch>` — because native-macos is *ahead* on docs, not because the branch
+removed them. A 3-way `git merge` keeps the docs (the branch never touched them; zero overlap). This has
+falsely tripped 3 reviewers (lff/entities/transform). Reviewers: ignore doc-only deletions unless the
+branch's OWN commits modified docs (`git diff $(git merge-base native-macos <branch>)..<branch> -- macos/docs`).
+Coordinator confirms at merge with the standard overlap check.
+
 ## Integration protocol (coordinator-owned)
 - Coordinator (main session) owns merging worktree outputs onto `native-macos`, running the full
   build+test, and committing. Builders return their changes; they do not push to the branch directly.
