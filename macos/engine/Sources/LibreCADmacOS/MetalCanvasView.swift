@@ -263,15 +263,21 @@ struct MetalCanvasView: NSViewRepresentable {
             )
         }
 
-        /// The seed demo: a line and a circle as real engine entities.
+        /// The seed demo: a line and a circle as real engine entities. These are
+        /// resolve-only records that never enter a `CADDrawing`, so they carry
+        /// the unassigned-id placeholder `EntityID(0)` rather than hardcoded
+        /// distinct ids — id authority belongs to `CADDrawing.mintID()`/`add`
+        /// (which would mint real ids if these were ever inserted). The render
+        /// delegate is intentionally NOT main-actor isolated (it drives the GPU
+        /// draw loop), so it does not construct the `@MainActor CADDrawing` here.
         private func makeDemoEntities() -> [EntityRecord] {
             let line = EntityRecord(
-                id: EntityID(1),
+                id: EntityID(0),
                 pen: Pen(lineColor: .explicit(.librecadGreen), lineType: .solid, lineWidth: .default),
                 kind: .line(LineData(start: Vector(-40, -30), end: Vector(40, 30)))
             )
             let circle = EntityRecord(
-                id: EntityID(2),
+                id: EntityID(0),
                 pen: Pen(lineColor: .explicit(RGBAColor(0.95, 0.55, 0.20)), lineType: .solid, lineWidth: .default),
                 kind: .circle(CircleData(center: Vector(0, 0), radius: 30))
             )

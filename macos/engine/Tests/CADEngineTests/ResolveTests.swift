@@ -124,6 +124,75 @@ struct ResolveTests {
         #expect(mid.y < 0)
     }
 
+    // MARK: - Arc bounding box (truly analytic)
+
+    @Test("arc bbox includes a crossed extreme even with no vertex on it (83°→178°)")
+    func arcBBoxCrossesExtreme() {
+        // Center origin, r=10, CCW from 83° to 178° crosses 90° (the +Y extreme),
+        // so the true maxY is exactly 10.0. A tessellate-and-sample box would
+        // under-report (~9.925) because no vertex lands exactly on 90°.
+        let s = 83.0 * .pi / 180.0
+        let e = 178.0 * .pi / 180.0
+        let arc = EntityRecord(
+            id: EntityID(1),
+            kind: .arc(ArcData(center: Vector(0, 0), radius: 10, startAngle: s, endAngle: e, reversed: false))
+        )
+        let box = arc.boundingBox()
+        #expect(abs(box.max.y - 10.0) < 1e-9)
+        // maxX is the start endpoint (cos 83° ≈ 0.122 * 10), minX is -10 only if
+        // 180° is crossed — 178° < 180°, so minX is the end endpoint (cos 178°).
+        #expect(box.max.x < 10.0)       // +X (0°) is NOT crossed
+        #expect(box.min.x > -10.0)      // -X (180°) is NOT crossed (ends at 178°)
+        // minY: neither endpoint dips below the x-axis and 270° isn't crossed.
+        #expect(box.min.y > 0)
+    }
+
+    @Test("quadrant-spanning arc bbox hits both crossed extremes (-45°→135°)")
+    func arcBBoxQuadrantSpan() {
+        // r=10, CCW from -45° to 135° crosses 0° (+X, maxX=10) and 90° (+Y,
+        // maxY=10) but NOT 180° or 270°. Endpoints are at (±7.071, ∓/±7.071).
+        let s = -45.0 * .pi / 180.0
+        let e = 135.0 * .pi / 180.0
+        let arc = EntityRecord(
+            id: EntityID(1),
+            kind: .arc(ArcData(center: Vector(0, 0), radius: 10, startAngle: s, endAngle: e, reversed: false))
+        )
+        let box = arc.boundingBox()
+        #expect(abs(box.max.x - 10.0) < 1e-9)   // 0° crossed
+        #expect(abs(box.max.y - 10.0) < 1e-9)   // 90° crossed
+        #expect(box.min.x > -10.0)              // 180° NOT crossed
+        // minY is the start endpoint sin(-45°)*10 ≈ -7.071, not -10 (270° uncrossed).
+        #expect(abs(box.min.y - (-10.0 * sin(45.0 * .pi / 180.0))) < 1e-9)
+    }
+
+    @Test("reversed arc bbox crosses the extremes on the CW path")
+    func arcBBoxReversed() {
+        // r=10, reversed (CW) from 178° to 83°: the CW travel from 178° goes
+        // 178°→90°→83°, so it crosses 90° (+Y) — maxY must be 10.0.
+        let s = 178.0 * .pi / 180.0
+        let e = 83.0 * .pi / 180.0
+        let arc = EntityRecord(
+            id: EntityID(1),
+            kind: .arc(ArcData(center: Vector(0, 0), radius: 10, startAngle: s, endAngle: e, reversed: true))
+        )
+        let box = arc.boundingBox()
+        #expect(abs(box.max.y - 10.0) < 1e-9)
+    }
+
+    @Test("full-circle-ish arc (start==end) bbox is the analytic r-box")
+    func arcBBoxFullSweep() {
+        // start == end => sweep is the full circle; every extreme is crossed.
+        let arc = EntityRecord(
+            id: EntityID(1),
+            kind: .arc(ArcData(center: Vector(3, -2), radius: 7, startAngle: 0, endAngle: 0, reversed: false))
+        )
+        let box = arc.boundingBox()
+        #expect(abs(box.min.x - (-4)) < 1e-9)
+        #expect(abs(box.max.x - 10) < 1e-9)
+        #expect(abs(box.min.y - (-9)) < 1e-9)
+        #expect(abs(box.max.y - 5) < 1e-9)
+    }
+
     // MARK: - Polyline
 
     @Test("straight polyline passes vertices through")
@@ -158,6 +227,24 @@ struct ResolveTests {
         #expect(abs(maxY - 5) < 0.1)
     }
 
+    @Test("closed polyline does NOT duplicate the first vertex")
+    func closedPolylineNoDuplicate() {
+        // A closed triangle resolves to exactly its 3 vertices — the closing
+        // edge is implicit (the renderer draws it), so points must NOT wrap.
+        let d = PolylineData(vertices: [
+            PolylineVertex(point: Vector(0, 0)),
+            PolylineVertex(point: Vector(10, 0)),
+            PolylineVertex(point: Vector(5, 8)),
+        ], closed: true)
+        let e = EntityRecord(id: EntityID(1), kind: .polyline(d))
+        let geo = e.resolve()
+        let poly = geo.polylines[0]
+        #expect(poly.closed == true)
+        #expect(poly.points.count == 3)
+        #expect(poly.points.first != poly.points.last)
+        #expect(poly.points == [Vector(0, 0), Vector(10, 0), Vector(5, 8)])
+    }
+
     // MARK: - Pen .byLayer resolution
 
     @Test("pen .byLayer resolves to the layer attributes via the context hook")
@@ -188,6 +275,49 @@ struct ResolveTests {
         )
         let resolved = e.resolve().polylines[0].pen
         #expect(resolved.color == explicit)
+    }
+
+    @Test("pen .byBlock resolves to the current insert's pen (HARDEN 4)")
+    func penByBlockResolvesToCurrentInsert() {
+        // Simulate the block fan-out: the Insert sets currentBlockPen during
+        // recursion, and a nested entity's .byBlock attributes inherit it.
+        let insertPen = ResolvedPen(color: RGBAColor(0.9, 0.1, 0.1), lineType: .center, lineWidth: .millimeters(0.5))
+        let ctx = ResolveContext(currentBlockPen: insertPen)
+        let e = EntityRecord(
+            id: EntityID(1),
+            pen: Pen(lineColor: .byBlock, lineType: .byBlock, lineWidth: .byBlock),
+            kind: .line(LineData(start: Vector(0, 0), end: Vector(1, 1)))
+        )
+        let resolved = e.resolve(ctx).polylines[0].pen
+        #expect(resolved.color == insertPen.color)
+        #expect(resolved.lineType == .center)
+        #expect(resolved.lineWidth == .millimeters(0.5))
+    }
+}
+
+// MARK: - ResolvedFill multi-loop contract (WIDEN-NOW 3)
+
+@Suite("ResolvedFill loops")
+struct ResolvedFillTests {
+    @Test("single-outline init seeds loops[0]")
+    func outlineInitSeedsLoops() {
+        let ring = [Vector(0, 0), Vector(4, 0), Vector(4, 4), Vector(0, 4)]
+        let fill = ResolvedFill(outline: ring, color: .librecadGreen)
+        #expect(fill.loops.count == 1)
+        #expect(fill.loops[0] == ring)
+        #expect(fill.outerLoop == ring)
+    }
+
+    @Test("boundary + holes: loops[0] outer, loops[1...] holes")
+    func boundaryPlusHoles() {
+        let outer = [Vector(0, 0), Vector(10, 0), Vector(10, 10), Vector(0, 10)]   // CCW
+        let hole = [Vector(3, 3), Vector(3, 6), Vector(6, 6), Vector(6, 3)]        // CW
+        let fill = ResolvedFill(loops: [outer, hole], color: .black)
+        #expect(fill.loops.count == 2)
+        #expect(fill.outerLoop == outer)
+        #expect(fill.loops[1] == hole)
+        // Rings carry no duplicated closing vertex (same convention as polylines).
+        #expect(fill.loops[0].first != fill.loops[0].last)
     }
 }
 

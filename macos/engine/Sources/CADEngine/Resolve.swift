@@ -34,12 +34,37 @@ public struct ResolvedPolyline: Sendable, Equatable {
 }
 
 /// A resolved filled region (triangulated by the renderer / later geometry
-/// stage). Seeded as an outline ring for now; hatch fan-out fills this in.
+/// stage). Multi-loop from day one so the Hatch fan-out owner never has to
+/// re-broadcast a contract change.
+///
+/// ## Loop contract (FROZEN — Hatch owner builds on this, do not diverge)
+/// `loops[0]` is the **outer boundary**; `loops[1...]` are **holes** (islands)
+/// cut out of it. Each loop is an ordered ring of world-coord points and does
+/// NOT repeat its first vertex (the closing edge is implicit — same convention
+/// as `circlePoints` / closed `ResolvedPolyline`).
+///
+/// **Winding:** outer boundary CCW, holes CW (the standard even-odd /
+/// nonzero-fill convention the renderer's triangulator will assume). The Hatch
+/// owner is the single authority on enforcing/normalizing winding when it
+/// produces real boundaries; until then this is the documented target and
+/// producers SHOULD emit in this order. (Winding-normalization helper TBD by
+/// the Hatch owner.)
 public struct ResolvedFill: Sendable, Equatable {
-    public var outline: [Vector]
+    /// Boundary + holes. `loops[0]` outer (CCW), `loops[1...]` holes (CW).
+    public var loops: [[Vector]]
     public var color: RGBAColor
+
+    /// The outer boundary loop, if any (`loops[0]`).
+    public var outerLoop: [Vector]? { loops.first }
+
+    public init(loops: [[Vector]], color: RGBAColor) {
+        self.loops = loops
+        self.color = color
+    }
+
+    /// Convenience for the common single-boundary (no holes) case.
     public init(outline: [Vector], color: RGBAColor) {
-        self.outline = outline
+        self.loops = [outline]
         self.color = color
     }
 }
@@ -77,22 +102,38 @@ public struct ResolveContext: Sendable {
     /// attributes. Stub default returns LibreCAD-green solid default-width.
     public var layerAttributes: @Sendable (LayerID) -> ResolvedPen
 
-    /// Resolves a `.byBlock` pen. Stub default mirrors the layer default; the
-    /// block fan-out replaces this with the insert's pen.
-    public var blockAttributes: @Sendable () -> ResolvedPen
+    /// Resolves a `.byBlock` pen. Returns the **current insert's** pen so a
+    /// block-nested entity's `.byBlock` attributes inherit from the Insert that
+    /// placed it. The block (Insert) fan-out owner sets `currentBlockPen` during
+    /// recursion and reads it back here; outside any Insert there is no block, so
+    /// the default mirrors the layer default. Takes the current block context
+    /// explicitly so nested-insert resolution is unambiguous.
+    public var blockAttributes: @Sendable (ResolvedPen?) -> ResolvedPen
+
+    /// The pen of the Insert currently being expanded, or `nil` at top level.
+    /// The block/Insert fan-out owner sets this when recursing into block
+    /// contents so nested entities' `.byBlock` sentinels resolve against the
+    /// placing Insert's pen (ADR-001). It is threaded through `blockAttributes`.
+    public var currentBlockPen: ResolvedPen? = nil
+
+    // Reserved for additive extension by the single owners (do not diverge):
+    // var dimStyleProvider: ((DimStyleID) -> ResolvedDimStyle)? = nil   // Dimension owner
+    // var fontProvider: ((String) -> StrokeFont?)? = nil                // Text owner (.lff, ADR-004)
 
     public init(
         tessellationTolerance: Double = 0.05,
         layerAttributes: @escaping @Sendable (LayerID) -> ResolvedPen = { _ in
             ResolvedPen(color: .librecadGreen, lineType: .solid, lineWidth: .default)
         },
-        blockAttributes: @escaping @Sendable () -> ResolvedPen = {
-            ResolvedPen(color: .librecadGreen, lineType: .solid, lineWidth: .default)
-        }
+        blockAttributes: @escaping @Sendable (ResolvedPen?) -> ResolvedPen = { currentBlockPen in
+            currentBlockPen ?? ResolvedPen(color: .librecadGreen, lineType: .solid, lineWidth: .default)
+        },
+        currentBlockPen: ResolvedPen? = nil
     ) {
         self.tessellationTolerance = tessellationTolerance
         self.layerAttributes = layerAttributes
         self.blockAttributes = blockAttributes
+        self.currentBlockPen = currentBlockPen
     }
 
     /// A sensible default context for tests/previews.
@@ -106,7 +147,7 @@ extension Pen {
     /// using the context's layer/block hooks. Explicit attributes pass through.
     func resolved(layer: LayerID, in ctx: ResolveContext) -> ResolvedPen {
         let layerPen = ctx.layerAttributes(layer)
-        let blockPen = ctx.blockAttributes()
+        let blockPen = ctx.blockAttributes(ctx.currentBlockPen)
 
         let color: RGBAColor
         switch lineColor {
@@ -294,9 +335,20 @@ extension EntityKind {
     /// Expands a polyline's vertices into a flat point list, turning bulged
     /// segments into tessellated arc runs.
     ///
+    /// ## Closed-polyline contract (matches `circlePoints` / `ResolvedFill`)
+    /// When `d.closed == true` the closing edge (last vertex → first vertex) is
+    /// **implicit**: the returned `points` do NOT repeat the first vertex. The
+    /// renderer adds the single closing edge at draw time (it appends the first
+    /// point for a `.lineStrip` of a closed shape). So a closed triangle
+    /// `[A,B,C]` resolves to exactly `[A,B,C]` (count == 3, `first != last`),
+    /// never `[A,B,C,A]`. Only the real inter-vertex segments are expanded here
+    /// (`verts.count - 1` of them); the wrap segment is left to the renderer.
+    ///
     /// TODO: true bulge → arc tessellation is implemented here for nonzero
     /// bulges; verify against DXF round-trip corner cases (bulge sign / >semicircle)
-    /// during Phase 1 once intersection kernels land.
+    /// during Phase 1 once intersection kernels land. A bulge on the *closing*
+    /// edge of a closed polyline is not yet honored (that edge is implicit/
+    /// straight); revisit with the Hatch/round-trip work.
     static func expandPolyline(_ d: PolylineData, ctx: ResolveContext) -> [Vector] {
         let verts = d.vertices
         guard verts.count >= 2 else { return verts.map(\.point) }
@@ -304,10 +356,13 @@ extension EntityKind {
         var out: [Vector] = []
         out.reserveCapacity(verts.count)
 
-        let segmentCount = d.closed ? verts.count : verts.count - 1
+        // Expand only the real inter-vertex segments. For a closed polyline the
+        // closing edge is implicit (the renderer draws it) so we never append
+        // the first vertex again — the data carries no duplicate wrap point.
+        let segmentCount = verts.count - 1
         for i in 0..<segmentCount {
             let a = verts[i]
-            let b = verts[(i + 1) % verts.count]
+            let b = verts[i + 1]
             if i == 0 { out.append(a.point) }
 
             if abs(a.bulge) < Tolerance.distance {
@@ -354,8 +409,61 @@ extension EntityKind {
         return out
     }
 
-    /// Analytic bounding box where cheap (line/point/circle), from the swept
-    /// extent for arcs, and from resolved points otherwise.
+    /// Truly analytic AABB for a circular arc.
+    ///
+    /// The extent of an arc is reached only at its two **endpoints** or at the
+    /// four axis-extreme angles {0, π/2, π, 3π/2} — and only at an extreme that
+    /// the arc's sweep actually *crosses*. Tessellating and taking the sample
+    /// AABB under-reports (a coarse arc that crosses 90° but has no vertex
+    /// exactly at 90° misses maxY = center.y + r). We compute the exact box by
+    /// unioning the endpoints with each crossed extreme.
+    ///
+    /// "Crossed" is decided the same way `arcPoints` decides travel: the signed
+    /// sweep is taken in the `reversed` direction, normalized into (0, 2π] (a
+    /// degenerate start==end arc sweeps the full circle). An extreme at angle
+    /// `ext` is crossed iff the forward angular offset from `startAngle` to
+    /// `ext`, measured in the direction of travel and normalized to [0, 2π),
+    /// is `<= sweep`.
+    static func arcBoundingBox(_ d: ArcData) -> AABB {
+        let r = abs(d.radius)
+        let c = d.center
+        let twoPi = 2 * Double.pi
+
+        // Endpoints (always part of the extent).
+        let p0 = c + Vector.polar(radius: r, angle: d.startAngle)
+        let p1 = c + Vector.polar(radius: r, angle: d.endAngle)
+        var box = AABB(points: [p0, p1])
+
+        // Signed sweep in the travel direction, normalized to (0, 2π] — mirrors
+        // `Tessellation.arcPoints`.
+        var sweep = d.reversed ? (d.startAngle - d.endAngle) : (d.endAngle - d.startAngle)
+        sweep = sweep.truncatingRemainder(dividingBy: twoPi)
+        if sweep <= Tolerance.angle { sweep += twoPi }
+
+        // The four axis extremes and the point each contributes.
+        let extremes: [(angle: Double, point: Vector)] = [
+            (0,                Vector(c.x + r, c.y,     c.z)), // +X  (maxX)
+            (Double.pi / 2,    Vector(c.x,     c.y + r, c.z)), // +Y  (maxY)
+            (Double.pi,        Vector(c.x - r, c.y,     c.z)), // -X  (minX)
+            (3 * Double.pi / 2, Vector(c.x,    c.y - r, c.z)), // -Y  (minY)
+        ]
+        for ext in extremes {
+            // Forward angular offset from start to the extreme in the travel
+            // direction, normalized to [0, 2π).
+            var off = d.reversed ? (d.startAngle - ext.angle) : (ext.angle - d.startAngle)
+            off = off.truncatingRemainder(dividingBy: twoPi)
+            if off < 0 { off += twoPi }
+            // Include the extreme iff the sweep reaches it (small angular slack
+            // so endpoints exactly on an extreme are treated as crossed).
+            if off <= sweep + Tolerance.angle {
+                box.expand(toInclude: ext.point)
+            }
+        }
+        return box
+    }
+
+    /// Analytic bounding box where cheap (line/point/circle), exact for arcs
+    /// (endpoints + crossed axis extremes), and from resolved points otherwise.
     public func boundingBox() -> AABB {
         switch self {
         case .point(let d):
@@ -372,15 +480,7 @@ extension EntityKind {
             )
 
         case .arc(let d):
-            // Endpoints plus any axis-extreme (0/π/2, π, 3π/2) the arc crosses.
-            let pts = Tessellation.arcPoints(
-                center: d.center, radius: d.radius,
-                startAngle: d.startAngle, endAngle: d.endAngle, reversed: d.reversed,
-                // A coarse tessellation is enough to capture the extent; the
-                // endpoints + crossing quadrant points dominate the box.
-                tolerance: max(abs(d.radius) * 0.01, Tolerance.distance)
-            )
-            return AABB(points: pts)
+            return Self.arcBoundingBox(d)
 
         case .polyline(let d):
             return AABB(points: Self.expandPolyline(d, ctx: .default))
