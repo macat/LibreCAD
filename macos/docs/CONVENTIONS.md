@@ -30,6 +30,19 @@ Source: user directives (2026-06-11).
 - Clear module boundaries; no circular deps. (Concrete target layout: see `scaffold-plan.md` once finalized.)
 - License: LibreCAD/libdxfrw are **GPLv2-or-later**; this fork inherits GPL. Keep headers/attribution.
 
+## GUI verification (learned the hard way)
+- **"Binary stays alive headlessly" ≠ "the GUI works."** This sandbox can't reach the window server
+  (`open` → LSError -54; a SwiftUI scene/Metal never initializes when run as a bare process), so a
+  GUI app can pass every build/test/headless-launch check and still crash instantly on a real
+  `open`. **A GUI deliverable is only "verified" when an actual windowed launch is confirmed** — by
+  the USER or a non-sandboxed runner. Never report a GUI app as "working" on headless evidence alone;
+  state explicitly what was NOT verified and ask the user to launch it. (2026-06-11: shipped a
+  "working viewer" that crashed on launch — `MainActor.assumeIsolated` in `CADDocument.init` called
+  off-main by `NSDocumentController`. Crash report: `~/Library/Logs/DiagnosticReports/`.)
+- **Never `MainActor.assumeIsolated` in a code path the OS/framework may invoke off-main** (NSDocument
+  init/snapshot/fileWrapper, delegate callbacks). It traps (SIGTRAP) instead of corrupting — loud, but
+  a hard crash. Make such entry points genuinely off-main-safe (Sendable data) and hop to the actor explicitly.
+
 ## Parallel fan-out hazards (learned)
 - **Namespace test-suite type names by domain.** Parallel builders add test files to the SAME test
   target, so two `struct EllipseTests` (one in intersection tests, one in entity tests) = "invalid

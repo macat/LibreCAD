@@ -57,6 +57,13 @@ pass or by the relevant downstream owner. Each cites its source.
 - Comment that `lc_dxf_count_entities` now parses+flattens the whole file (no longer alloc-free). *(review-dxfread #4)*
 - Layer with ACI 256 silently → green instead of inheriting (rare/invalid edge). *(review-dxfread #1)*
 
+## App shell
+- **Reintroduce DocumentGroup** (native open/save/recents/autosave/versions) with an OFF-MAIN-SAFE
+  `ReferenceFileDocument`: store Sendable parsed data (entities/layers or raw bytes) in
+  `init/snapshot/fileWrapper` (these run off-main), and build the `@MainActor CADDrawing` in the view.
+  NO `MainActor.assumeIsolated` in document entry points. (Replaced by WindowGroup after the launch crash.)
+- DXF/DWG **write** + Save (currently read-only viewer).
+
 ## Render gate — renderer/canvas (Wave 2)
 - **Extract a `CADRender` library target** in Package.swift so renderer logic is `@testable import`-able;
   drop the `_Shared*.swift` test symlinks. (Pattern risk if copied to other exe sources.) *(review-renderer #7)*
