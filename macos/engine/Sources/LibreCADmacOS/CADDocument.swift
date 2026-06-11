@@ -2,45 +2,56 @@
 //  CADDocument.swift
 //  LibreCADmacOS
 //
-//  A placeholder ReferenceFileDocument for the scaffold. It carries a trivial
-//  model (the raw bytes of the opened file) so DocumentGroup has something to
-//  open/save; the real drawing model lands in a later workstream.
+//  The SwiftUI `ReferenceFileDocument` wrapper around the engine's `CADDrawing`.
+//  The drawing is the real model (entities/layers); the document adapts it to
+//  DocumentGroup's open/save/undo machinery.
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //
 
 import SwiftUI
 import UniformTypeIdentifiers
+import CADEngine
 
 /// Reference-type document model used by `DocumentGroup`.
 ///
-/// For the spine this just round-trips the file's bytes. A real `CADDrawing`
-/// model (entities, layers, blocks) replaces `rawData` later.
-///
-/// `ReferenceFileDocument` refines `Sendable`, but the model needs mutable
-/// state. SwiftUI's document machinery serializes access (reads happen via the
-/// `snapshot(contentType:)` it calls before persisting), so the mutable field
-/// is marked `nonisolated(unsafe)`; this is replaced by a properly isolated
-/// drawing model in a later workstream.
+/// Holds a `@MainActor @Observable` `CADDrawing`. `ReferenceFileDocument`'s
+/// requirements are `nonisolated`, and SwiftUI's document machinery invokes
+/// `init(configuration:)` / `snapshot(contentType:)` / `fileWrapper(...)` on the
+/// **main thread**. We honor that with `MainActor.assumeIsolated` to safely touch
+/// the main-actor `CADDrawing` — which lets us delete the old
+/// `nonisolated(unsafe)` escape hatch (review follow-up #2) without lying to the
+/// compiler about isolation.
 final class CADDocument: ReferenceFileDocument {
     typealias Snapshot = Data
 
-    /// Placeholder model: the raw file contents.
-    nonisolated(unsafe) var rawData: Data
+    /// The real drawing model (entities, layers, blocks, undo). Main-actor
+    /// isolated; only touched from main-thread document callbacks / SwiftUI.
+    let drawing: CADDrawing
 
-    static var readableContentTypes: [UTType] { [.librecadDXF, .plainText, .data] }
+    static var readableContentTypes: [UTType] { [.librecadDXF] }
     static var writableContentTypes: [UTType] { [.librecadDXF] }
 
     init() {
-        rawData = Data()
+        // DocumentGroup's newDocument closure runs on the main thread.
+        drawing = MainActor.assumeIsolated { CADDrawing() }
     }
 
     init(configuration: ReadConfiguration) throws {
-        rawData = configuration.file.regularFileContents ?? Data()
+        // SwiftUI calls this on the main thread.
+        drawing = MainActor.assumeIsolated { CADDrawing() }
+        // TODO: real DXF read via DxfBridge (Phase 1 / consolidated gate) — parse
+        // configuration.file.regularFileContents through libdxfrw into the model.
+        // For the skeleton we accept the file but do not yet populate entities,
+        // so DocumentGroup can open .dxf without regressing the build.
+        _ = configuration.file.regularFileContents
     }
 
     func snapshot(contentType: UTType) throws -> Data {
-        rawData
+        // TODO: real DXF write via DxfBridge (Phase 1 / consolidated gate) —
+        // serialize `drawing` through the libdxfrw writer on the main thread.
+        // For now emit empty content so save round-trips without crashing.
+        MainActor.assumeIsolated { Data() }
     }
 
     func fileWrapper(snapshot: Data, configuration: WriteConfiguration) throws -> FileWrapper {
