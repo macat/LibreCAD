@@ -40,10 +40,12 @@ struct DxfBridgeTests {
         #expect(count == DxfBridgeTests.expectedSampleEntityCount)
     }
 
-    @Test("missing file throws")
+    @Test("missing file throws readFailed")
     func missingFileThrows() async throws {
         let engine = CADEngine()
-        await #expect(throws: CADEngineError.self) {
+        // A path that points nowhere reaches libdxfrw and fails the read, which
+        // the status ABI maps to LC_ERR_READ_FAILED -> .readFailed.
+        await #expect(throws: CADEngineError.readFailed) {
             _ = try await engine.entityCount(atPath: "/nonexistent/path/does-not-exist.dxf")
         }
     }
@@ -51,7 +53,8 @@ struct DxfBridgeTests {
     @Test("empty path throws invalidPath")
     func emptyPathThrows() async throws {
         let engine = CADEngine()
-        await #expect(throws: CADEngineError.self) {
+        // LC_ERR_INVALID_PATH is returned before any parse is attempted.
+        await #expect(throws: CADEngineError.invalidPath) {
             _ = try await engine.entityCount(atPath: "")
         }
     }
