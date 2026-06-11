@@ -77,7 +77,8 @@ Engine modules on native-macos: CADEngine core (Vector/Geometry/Pen/Entity/Resol
 ### Render+Interaction gate (user chose "Go — render a real DXF", 2026-06-11)
 - [2026-06-11 18:45] 📋 coordinator — wrote render-gate-fanout.md. Wave 1 = 3 parallel disjoint builders (F dxfread, G viewport, H selectsnap); Wave 2 = Metal renderer/canvas integration after. Briefs carry the namespace-test-suites learning.
 - [2026-06-11 18:46] 🔨 ws-dxfread (F) — full DXF reader (DxfBridge flatten + DXFReader.swift→CADDrawing). Outcome: running.
-- [2026-06-11 18:46] 🔨 ws-viewport (G) — pure f64 Viewport transform + world→clip floating-origin matrix. Outcome: running.
+- [2026-06-11 18:46] 🔨 ws-viewport (G) — pure f64 Viewport transform + world→clip floating-origin matrix. Outcome: DONE/GREEN. Viewport{scale,center,size}: worldToScreen/screenToWorld (Y-flip inside only; world Y-up, screen top-left Y-down), zoom(by:about:), pan, fit(AABB), visibleWorldRect, worldToClip(renderOrigin,drawableSize)→simd_float4x4 (f32 offsets, pan/zoom rebuild matrix only). swift build 0 warnings; 192 tests (174+18, suite ViewportTransformTests). FLAG for renderer: canvas NSView MUST be isFlipped (else picking/pan mirrored); pick renderOrigin near content for f32 precision. Receipts: ws/viewport @ 2b110eb7b.
+- [2026-06-11 19:00] 🔍 review-viewport (general-purpose) — review ws/viewport before merge. Outcome: running.
 - [2026-06-11 18:46] 🔨 ws-selectsnap (H) — selection (hit/window/crossing) + snapping (endpoint/center/mid/onEntity/intersection/grid). Outcome: running.
 
 ## Environment gotchas (recorded)
