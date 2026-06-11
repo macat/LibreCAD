@@ -36,6 +36,9 @@ enum OverlayStyle {
     static let selectionColor = SIMD4<Float>(1.0, 0.85, 0.20, 1.0)   // amber
     static let snapColor      = SIMD4<Float>(0.30, 0.85, 1.0, 1.0)   // cyan
     static let crosshairColor = SIMD4<Float>(1, 1, 1, 0.18)
+    /// The in-progress tool rubber-band color (a distinct, brighter green than the
+    /// committed geometry so the live preview reads as "not yet placed").
+    static let toolPreviewColor = SIMD4<Float>(0.45, 1.0, 0.55, 0.9)
 
     /// Snap marker radius in screen points (converted to world by the builder).
     static let snapMarkerPointRadius: Double = 6
@@ -226,6 +229,33 @@ enum OverlayGeometry {
                     v.append(FlatVertex(position: off(last, renderOrigin), color: c))
                     v.append(FlatVertex(position: off(first, renderOrigin), color: c))
                 }
+            }
+        }
+        return v
+    }
+
+    // MARK: - Tool preview (rubber-band)
+
+    /// Builds a line list for an active tool's `preview` polylines in the distinct
+    /// preview color, drawn over the model each frame. The polylines are the
+    /// world-coord rubber-band the tool emits; this just flattens them to segments
+    /// (honoring `closed`). Pure / GPU-free → unit-testable.
+    static func toolPreview(
+        _ polylines: [ResolvedPolyline],
+        renderOrigin: Vector
+    ) -> [FlatVertex] {
+        let c = OverlayStyle.toolPreviewColor
+        var v: [FlatVertex] = []
+        for poly in polylines {
+            let pts = poly.points
+            guard pts.count >= 2 else { continue }
+            for i in 0..<(pts.count - 1) {
+                v.append(FlatVertex(position: off(pts[i], renderOrigin), color: c))
+                v.append(FlatVertex(position: off(pts[i + 1], renderOrigin), color: c))
+            }
+            if poly.closed, pts.count >= 3, let first = pts.first, let last = pts.last {
+                v.append(FlatVertex(position: off(last, renderOrigin), color: c))
+                v.append(FlatVertex(position: off(first, renderOrigin), color: c))
             }
         }
         return v

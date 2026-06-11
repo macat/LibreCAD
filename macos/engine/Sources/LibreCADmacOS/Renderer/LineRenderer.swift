@@ -78,11 +78,12 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     private var overlayBuffer: MTLBuffer?
     private var overlayVertexCount = 0
     private var overlayCapacity = 0
-    /// Grid line span [0, gridCount), selection span [gridCount, gridCount+selCount),
-    /// snap span after that. All drawn as `.line` primitives in one buffer.
+    /// Grid line span [0, gridCount), selection span next, snap span next, tool-
+    /// preview span last. All drawn as `.line` primitives in one buffer.
     private var gridVertexCount = 0
     private var selectionVertexCount = 0
     private var snapVertexCount = 0
+    private var previewVertexCount = 0
 
     // MARK: Triple-buffered uniforms (§4.5)
 
@@ -274,6 +275,12 @@ final class LineRenderer: NSObject, MTKViewDelegate {
                                        vertexStart: gridVertexCount + selectionVertexCount,
                                        vertexCount: snapVertexCount)
             }
+            if previewVertexCount >= 2 {
+                encoder.drawPrimitives(
+                    type: .line,
+                    vertexStart: gridVertexCount + selectionVertexCount + snapVertexCount,
+                    vertexCount: previewVertexCount)
+            }
         }
 
         encoder.endEncoding()
@@ -397,11 +404,19 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             snapVerts = OverlayGeometry.snapMarker(for: snap, viewport: viewport, renderOrigin: origin)
         }
 
+        // The active tool's rubber-band preview (empty in select mode / before a
+        // first point). Distinct preview color so it reads as "not yet placed".
+        var previewVerts: [FlatVertex] = []
+        if let tool = model.tool {
+            previewVerts = OverlayGeometry.toolPreview(tool.preview, renderOrigin: origin)
+        }
+
         gridVertexCount = gridVerts.count
         selectionVertexCount = selVerts.count
         snapVertexCount = snapVerts.count
+        previewVertexCount = previewVerts.count
 
-        let all = gridVerts + selVerts + snapVerts
+        let all = gridVerts + selVerts + snapVerts + previewVerts
         overlayVertexCount = all.count
         guard !all.isEmpty else { return }
 

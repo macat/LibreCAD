@@ -73,15 +73,43 @@ final class CanvasModel {
     @ObservationIgnored
     var snapModes: SnapMode = .standard
 
+    // MARK: Tool state
+
+    /// The active interaction mode: `.select` (default click-to-select / pan) or a
+    /// concrete draw tool. Set via `activateTool(_:)` so the live `tool` value is
+    /// kept in sync; observed by the HUD/toolbar for the active-tool indicator.
+    private(set) var activeToolKind: ToolKind = .select
+
+    /// The live tool value for `activeToolKind`, or `nil` in `.select` mode. A
+    /// value type the model owns; canvas events are forwarded to it via
+    /// `handleToolInput(_:)`. `@ObservationIgnored` because its mutation is driven
+    /// through explicit methods that also publish the HUD-visible derived state.
+    @ObservationIgnored
+    private(set) var tool: (any Tool)?
+
+    /// The tool's current prompt for the status HUD ("Specify first point" …), or
+    /// empty in select mode. Republished on every tool input so SwiftUI updates.
+    private(set) var toolStatus: String = ""
+
     // MARK: Derived (for the SwiftUI HUD)
 
     var entityCount: Int { drawing.count }
+
+    /// Whether a draw tool is active (vs select/pan mode).
+    var isToolActive: Bool { activeToolKind != .select }
+
+    /// The window's `UndoManager`. We own one (there is no `DocumentGroup` to
+    /// supply one — see LibreCADApp's note) and inject it into the drawing so tool
+    /// commits register undo (ADR-002). Re-injected on `setDrawing`.
+    @ObservationIgnored
+    let undoManager = UndoManager()
 
     // MARK: Init
 
     init(drawing: CADDrawing = CADDrawing(), viewSize: CGSize = CGSize(width: 800, height: 600)) {
         self.drawing = drawing
         self.viewport = Viewport(size: viewSize)
+        drawing.undoManager = undoManager
         rebuildIndex()
     }
 
@@ -92,6 +120,8 @@ final class CanvasModel {
     /// passes the current view size). Marks the GPU buffer dirty.
     func setDrawing(_ newDrawing: CADDrawing, viewSize: CGSize) {
         drawing = newDrawing
+        drawing.undoManager = undoManager
+        undoManager.removeAllActions()
         rebuildIndex()
         let box = drawing.boundingBox()
         renderOrigin = RendererGeometry.renderOrigin(for: box)
@@ -164,6 +194,14 @@ final class CanvasModel {
         return changed
     }
 
+    /// The snapped world point for a screen point — the point a draw tool should
+    /// receive. Runs the snapper (updating the snap marker + cursor HUD) and
+    /// returns the chosen snap point (falling back to the raw world point).
+    func snappedWorldPoint(atScreenPoint screen: CGPoint, gridSpacing: Double?) -> Vector {
+        updateSnap(atScreenPoint: screen, gridSpacing: gridSpacing)
+        return snap?.point ?? viewport.screenToWorld(screen)
+    }
+
     /// Click → hit-test the nearest entity and toggle it into the selection.
     /// Returns whether the selection changed.
     @discardableResult
@@ -184,5 +222,87 @@ final class CanvasModel {
     func clearCursor() {
         cursorWorld = nil
         snap = nil
+    }
+
+    // MARK: - Tool activation + routing
+
+    /// Activates `kind`, minting a fresh tool value (or clearing to select mode).
+    /// Returns to `.select` discards any in-progress preview.
+    func activateTool(_ kind: ToolKind) {
+        activeToolKind = kind
+        tool = kind.makeTool()
+        toolStatus = tool?.status ?? ""
+    }
+
+    /// Forwards a snapped world point as a tool input, applying any committed
+    /// geometry to the drawing (undoable) and updating the spatial index. Returns
+    /// `true` if the canvas should redraw (preview moved, geometry committed, or
+    /// the tool finished). No-op (returns `false`) in select mode.
+    @discardableResult
+    func handleToolInput(_ input: ToolInput) -> Bool {
+        guard tool != nil else { return false }
+        let outcome = tool!.handle(input)
+        toolStatus = tool!.status
+
+        switch outcome {
+        case .none:
+            return false
+        case .preview:
+            return true
+        case .commit(let records):
+            applyCommit(records)
+            return true
+        case .finished:
+            // The run ended (commit/cancel). Mint a fresh tool of the same kind so
+            // the user can immediately start the next run (LibreCAD keeps the tool
+            // active after each line). To leave the tool entirely, the app calls
+            // `activateTool(.select)`.
+            tool = activeToolKind.makeTool()
+            toolStatus = tool?.status ?? ""
+            return true
+        }
+    }
+
+    /// Applies a tool's committed records to the drawing via the undoable
+    /// `CADDrawing.add` (which re-mints the placeholder id), then updates the
+    /// quadtree so the new geometry is immediately snappable/selectable. Marks the
+    /// GPU model buffer dirty so the renderer repacks it.
+    private func applyCommit(_ records: [EntityRecord]) {
+        for record in records {
+            let id = drawing.add(record)           // undoable; mints a real id
+            let box = drawing.entity(id)?.boundingBox() ?? record.boundingBox()
+            if !box.isEmpty { quadtree.insert(id, bounds: box) }
+        }
+        modelDirty = true
+        modelVersion &+= 1
+    }
+
+    // MARK: - Undo / redo (rebuild the index, which the undo closures don't touch)
+
+    /// Whether an undo is available.
+    var canUndo: Bool { undoManager.canUndo }
+    /// Whether a redo is available.
+    var canRedo: Bool { undoManager.canRedo }
+
+    /// Undoes the last drawing mutation and re-syncs the spatial index (the
+    /// drawing's value-snapshot undo restores `entities`, but the quadtree is a
+    /// separate index the undo closures don't touch — so rebuild it).
+    func undo() {
+        guard undoManager.canUndo else { return }
+        undoManager.undo()
+        rebuildIndex()
+        selection.clear()
+        modelDirty = true
+        modelVersion &+= 1
+    }
+
+    /// Redoes the last undone mutation and re-syncs the spatial index.
+    func redo() {
+        guard undoManager.canRedo else { return }
+        undoManager.redo()
+        rebuildIndex()
+        selection.clear()
+        modelDirty = true
+        modelVersion &+= 1
     }
 }

@@ -42,9 +42,16 @@ struct ContentView: View {
             .ignoresSafeArea()
             .frame(minWidth: 480, minHeight: 320)
             .overlay(alignment: .topLeading) { statusHUD }
+            .overlay(alignment: .top) { toolPromptHUD }
             .overlay(alignment: .bottomLeading) { coordinateHUD }
+            .toolbar { toolbarContent }
             .focusedSceneValue(\.zoomToFit) { controllerBox.controller?.zoomToFit() }
             .focusedSceneValue(\.openDocument) { showOpen = true }
+            .focusedSceneValue(\.activateTool) { kind in
+                controllerBox.controller?.activateTool(kind)
+            }
+            .focusedSceneValue(\.undoAction) { model.undo() }
+            .focusedSceneValue(\.redoAction) { model.redo() }
             .fileImporter(
                 isPresented: $showOpen,
                 allowedContentTypes: Self.dxfTypes,
@@ -59,6 +66,37 @@ struct ContentView: View {
             }
     }
 
+    // MARK: - Toolbar (minimal but real: Select + Line)
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItemGroup(placement: .principal) {
+            Button {
+                controllerBox.controller?.activateTool(.select)
+            } label: {
+                Label("Select", systemImage: "cursorarrow")
+            }
+            .help("Select / pan (V)")
+            .background(activeBadge(.select))
+
+            Button {
+                controllerBox.controller?.activateTool(.line)
+            } label: {
+                Label("Line", systemImage: "line.diagonal")
+            }
+            .help("Draw line (L)")
+            .background(activeBadge(.line))
+        }
+    }
+
+    /// A subtle highlight behind the active tool's toolbar button.
+    @ViewBuilder
+    private func activeBadge(_ kind: ToolKind) -> some View {
+        if model.activeToolKind == kind {
+            RoundedRectangle(cornerRadius: 6).fill(.tint.opacity(0.25))
+        }
+    }
+
     // MARK: - HUD
 
     private var statusHUD: some View {
@@ -68,6 +106,20 @@ struct ContentView: View {
             .padding(6)
             .background(.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 6))
             .padding(8)
+    }
+
+    /// The active tool's prompt ("Specify first point" / "Specify next point"),
+    /// shown centered at the top while a draw tool is active.
+    @ViewBuilder
+    private var toolPromptHUD: some View {
+        if model.isToolActive, !model.toolStatus.isEmpty {
+            Text("\(model.activeToolKind.title): \(model.toolStatus)")
+                .font(.callout.monospaced())
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(.tint.opacity(0.30), in: Capsule())
+                .padding(8)
+        }
     }
 
     @ViewBuilder
@@ -181,6 +233,22 @@ extension FocusedValues {
         get { self[OpenDocumentKey.self] }
         set { self[OpenDocumentKey.self] = newValue }
     }
+
+    /// Activate a tool kind in the focused window (Tools menu / shortcuts).
+    var activateTool: ((ToolKind) -> Void)? {
+        get { self[ActivateToolKey.self] }
+        set { self[ActivateToolKey.self] = newValue }
+    }
+
+    /// Undo / redo the focused window's drawing (Edit menu, ⌘Z / ⇧⌘Z).
+    var undoAction: (() -> Void)? {
+        get { self[UndoActionKey.self] }
+        set { self[UndoActionKey.self] = newValue }
+    }
+    var redoAction: (() -> Void)? {
+        get { self[RedoActionKey.self] }
+        set { self[RedoActionKey.self] = newValue }
+    }
 }
 
 private struct ZoomToFitKey: FocusedValueKey {
@@ -188,5 +256,17 @@ private struct ZoomToFitKey: FocusedValueKey {
 }
 
 private struct OpenDocumentKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct ActivateToolKey: FocusedValueKey {
+    typealias Value = (ToolKind) -> Void
+}
+
+private struct UndoActionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct RedoActionKey: FocusedValueKey {
     typealias Value = () -> Void
 }

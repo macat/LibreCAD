@@ -131,6 +131,15 @@ final class FlippedMTKView: MTKView {
         let loc = locationInView(event)
         controller?.magnify(by: event.magnification, at: loc, phase: event.phase)
     }
+
+    // MARK: Keyboard (tool activation + control)
+
+    override func keyDown(with event: NSEvent) {
+        // Let the controller claim tool keys (L / V / Esc / Return / ⌫); fall back
+        // to the default responder chain (so menu shortcuts still work) otherwise.
+        if controller?.handleKey(event) == true { return }
+        super.keyDown(with: event)
+    }
 }
 
 // MARK: - Interaction controller (bridges events → CanvasModel + redraw)
@@ -228,8 +237,15 @@ final class CADCanvasController {
     func mouseMoved(to point: CGPoint) {
         let spacing = renderer?.lastGridSpacing
         model.updateSnap(atScreenPoint: point, gridSpacing: spacing)
-        // Redraw the coordinate HUD + snap marker on every move (overlay-only;
-        // the model instance buffer is untouched — rendering-performance.md §5).
+        // When a draw tool is active, feed it the SNAPPED world point so its
+        // rubber-band preview tracks the cursor. Otherwise this is select mode and
+        // the snap marker / HUD is all that updates.
+        if model.isToolActive {
+            let p = model.snappedWorldPoint(atScreenPoint: point, gridSpacing: spacing)
+            model.handleToolInput(.move(p))
+        }
+        // Redraw the coordinate HUD + snap marker (and tool preview) on every move
+        // (overlay-only; the model instance buffer is untouched — §5).
         redraw()
     }
 
@@ -238,11 +254,68 @@ final class CADCanvasController {
         redraw()
     }
 
-    /// A classified click (down→up with negligible travel) → toggle selection.
+    /// A classified click (down→up with negligible travel). With a draw tool
+    /// active it feeds the tool a snapped `.click`; otherwise it toggles selection.
     /// (A larger-travel down→up is a pan and is handled by `panDrag`, NOT here.)
     func mouseClick(at point: CGPoint) {
+        if model.isToolActive {
+            let spacing = renderer?.lastGridSpacing
+            let p = model.snappedWorldPoint(atScreenPoint: point, gridSpacing: spacing)
+            if model.handleToolInput(.click(p)) { redraw() }
+            return
+        }
         if model.toggleSelection(atScreenPoint: point) {
             redraw()
+        }
+    }
+
+    // MARK: Tool activation + keyboard
+
+    /// Switches the active tool (toolbar/menu/keyboard). Redraws so the preview /
+    /// status clears or appears.
+    func activateTool(_ kind: ToolKind) {
+        model.activateTool(kind)
+        redraw()
+    }
+
+    /// Routes a keyboard event to tool/mode control. Returns `true` if handled.
+    ///   L            → activate the Line tool.
+    ///   V / Esc      → return to select mode (Esc also cancels an in-progress run).
+    ///   Return/Enter → commit the current tool run.
+    ///   Delete/⌫     → backspace the current tool run.
+    func handleKey(_ event: NSEvent) -> Bool {
+        let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        // Esc is key code 53 (no reliable character).
+        let isEscape = event.keyCode == 53
+        let isReturn = event.keyCode == 36 || event.keyCode == 76  // Return / keypad Enter
+        let isDelete = event.keyCode == 51 || event.keyCode == 117 // Delete / Forward-Delete
+
+        if isEscape {
+            // Cancel any in-progress run, then drop to select mode.
+            if model.isToolActive { model.handleToolInput(.cancel) }
+            model.activateTool(.select)
+            redraw()
+            return true
+        }
+        if model.isToolActive, isReturn {
+            model.handleToolInput(.commit)
+            redraw()
+            return true
+        }
+        if model.isToolActive, isDelete {
+            model.handleToolInput(.backspace)
+            redraw()
+            return true
+        }
+        switch chars {
+        case "l":
+            activateTool(.line)
+            return true
+        case "v":
+            activateTool(.select)
+            return true
+        default:
+            return false
         }
     }
 }
