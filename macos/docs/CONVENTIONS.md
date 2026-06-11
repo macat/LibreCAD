@@ -30,6 +30,15 @@ Source: user directives (2026-06-11).
 - Clear module boundaries; no circular deps. (Concrete target layout: see `scaffold-plan.md` once finalized.)
 - License: LibreCAD/libdxfrw are **GPLv2-or-later**; this fork inherits GPL. Keep headers/attribution.
 
+## Parallel fan-out hazards (learned)
+- **Namespace test-suite type names by domain.** Parallel builders add test files to the SAME test
+  target, so two `struct EllipseTests` (one in intersection tests, one in entity tests) = "invalid
+  redeclaration" only visible when both merge. Name suites by domain: `EllipseEntityTests`,
+  `EllipseIntersectionTests`, etc. Source-level reviews can't see this — it's a test-target namespace
+  clash. (Caught + fixed at Phase 1 A/B integration, 2026-06-11.) Put this rule in every fan-out brief.
+- Source symbols: same hazard at module scope — keep new helpers as `static` members of a namespaced
+  type (enum/struct), never module-scope free functions, so parallel modules don't redeclare.
+
 ## Integration protocol (coordinator-owned)
 - Coordinator (main session) owns merging worktree outputs onto `native-macos`, running the full
   build+test, and committing. Builders return their changes; they do not push to the branch directly.

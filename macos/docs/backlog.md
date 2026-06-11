@@ -31,6 +31,13 @@ pass or by the relevant downstream owner. Each cites its source.
   strokes instead of dropping the whole glyph). *(review-lff #3)*
 - Optionally keep raw `(point,bulge)` on glyphs for zoom-LOD re-tessellation later. *(review-lff nice-to-have)*
 
+## Engine — math (Phase 1A)
+- `VectorSolutions.closest(to:)` has a return-type-only overload pair (tuple vs Vector) — ergonomic
+  footgun (call sites must annotate). Rename one (e.g. `closestWithDistance`) before many tool call
+  sites land. *(review-math #1)*
+- Comment the faithful upstream-bug carry in `simultaneousQuadraticFull` (`+f` vs `+l`, rs_math.cpp:1157)
+  so it isn't "fixed" accidentally. *(review-math #2)*
+
 ## Cross-cutting / later phases
 - **Zoom-bucketed LOD** for curve tessellation (ellipse/arc/spline/lff bulges) — currently fixed-by-tolerance,
   marked `// TODO` in Resolve.swift / LFFParser.swift. *(ADR-003 / rendering-performance.md)*

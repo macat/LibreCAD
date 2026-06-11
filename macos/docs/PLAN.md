@@ -42,10 +42,10 @@ real DXF/DWG fidelity, **render with Metal** for fluid pan/zoom at scale, and **
 - **Phase 0.5 — Freeze foundation ADRs + skeleton** ✅ *(DONE — merged)*: value-type entity model +
   `resolve()` + `@MainActor CADDrawing` (snapshot-undo) + render seam, reviewed (APPROVE; must-fix +
   widen-now applied), **49/49 tests green**. Shared type contract FROZEN (see ADR.md / phase1-fanout.md).
-- **Phase 1 — Engine core** 🔄 *(parallel fan-out IN PROGRESS — see `phase1-fanout.md`)*: 5 disjoint
-  workstreams — A math/intersection kernels (port `src/lib/math/tests/`), B entity-set (ellipse+spline),
-  C document/layers/blocks, D quadtree spatial index, E `.lff` stroke-font loader (P1, ADR-004). Each =
-  own `ws/*` branch + builder + reviewer + tests; coordinator merges disjoint branches sequentially.
+- **Phase 1 — Engine core** ✅ *(DONE — all 5 workstreams merged)*: A math/intersection kernels +
+  solvers, B ellipse+spline(NURBS)+splinePoints, C document/layers/blocks/units/vars, D loose quadtree,
+  E `.lff` stroke-font loader. 5 parallel builders + 5 reviewers (all APPROVE, no must-fix); one A/B
+  test-suite name collision caught at integration + fixed. **174 tests green** on native-macos.
 - **Consolidated gate — Render + Interaction core** *(replaces old Phases 2+3; mostly serial, then small parallel)*:
   full `DxfBridge` reader (flatten all DRW_* → Swift model); the real Metal pipeline (instanced lines →
   tessellated arcs/curves → fills → `.lff` text) rendering `dim_sample.dxf`; world/screen transform +
