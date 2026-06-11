@@ -39,6 +39,10 @@ and as the home of `libraries/libdxfrw` (DXF/DWG), which we bridge via Swift/C++
 - [2026-06-11 14:30] 📋 coordinator — added CONVENTIONS.md (user's 7 directives: parallelize, worktrees, review-all, test-before-commit, incremental commits, docs-in-repo, perf-first).
 - [2026-06-11 14:31] 🔬 ui-inventory (general-purpose) — full LibreCAD tool/command/UI inventory + P0/P1/P2 + modern-Mac take. Outcome: DONE. Findings: ~220 live actions (RS2::ActionType in rs.h); ~110 draw tools, ~30 modify, ~14 select, 12 snap+4 restrictions, ~21 layer ops, ~13 block, ~95 .ui dialogs. P0 wave: Line/Polyline/Rect/Circle/Arc/Point + Move/Copy/Rotate/Scale/Trim/Offset/Delete/Props + select(single/window/all/none) + snap(free/grid/endpoint/center/on-entity)+ortho + coord HUD/typed entry + Layers panel + drawing-opts + zoom/pan/grid + File(new/open/save) + DXF r/w + Inspector. UX wins: collapse 110 draw variants→~12 tools+variant pickers; modal dialogs+floating option-toolbars→one Inspector+on-canvas gizmos; snapping/cmdline→toolbar popover+⌘K palette+at-cursor @dx,dy. Receipts: macos/docs/feature-inventory.md.
 
+- [2026-06-11 15:00] 🔨 scaffold-builder (general-purpose, worktree) — Phase 0 spine: SwiftPM engine (DxfBridge C-ABI shim over libdxfrw + entity-count reader; CADEngine Vector seed) + SwiftUI DocumentGroup app w/ Metal canvas (1 line) + .app assembly; offline (no brew/XcodeGen); validate build+test+launch; commit to ws/scaffold. Outcome: running. Receipts: ws/scaffold (pending).
+- [2026-06-11 15:02] 📋 coordinator — wrote macos/docs/PLAN.md (synthesized phased roadmap from all 5 investigations).
+- [2026-06-11 15:02] 🧐 plan-critic (general-purpose) — pressure-test PLAN.md architecture+roadmap before heavy fan-out. Outcome: running. Receipts: critique returned inline (pending).
+
 ## Environment gotchas (recorded)
 - `git push` / `brew install` / any network op: sandbox blocks them ("port 22: Operation not permitted") → run with sandbox disabled.
 - `swift build` / `swift test`: need `--disable-sandbox` in this env (nested-sandbox error otherwise).
