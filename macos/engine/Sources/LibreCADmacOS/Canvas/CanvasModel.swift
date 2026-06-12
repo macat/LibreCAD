@@ -583,6 +583,93 @@ final class CanvasModel {
         }
     }
 
+    // MARK: - Selection gizmo (on-canvas transform handles)
+
+    /// The world-space (Y-up) axis-aligned bounding box that ENCLOSES the current
+    /// selection — the frame the on-canvas transform gizmo is drawn around. `nil`
+    /// when nothing is selected (or no selected id resolves to a real entity), so
+    /// the gizmo overlay is shown only with a non-empty selection in Select mode.
+    ///
+    /// Uses the font-aware `ResolveContext` box (same as `rebuildIndex`) so a text
+    /// selection's frame matches its visible ink extent.
+    var selectionWorldBounds: AABB? {
+        guard !selection.isEmpty else { return nil }
+        let ctx = drawing.makeResolveContext()
+        var box = AABB.empty
+        for id in selection.ids {
+            guard let e = drawing.entity(id) else { continue }
+            box = box.union(e.boundingBox(ctx: ctx))
+        }
+        return box.isEmpty ? nil : box
+    }
+
+    /// The live gizmo drag transform (a preview only; not yet committed). The
+    /// renderer reads it via `gizmoPreviewPolylines` to draw the selection at the
+    /// dragged transform; `nil` when no gizmo drag is in progress. Set on every
+    /// drag step by the interaction layer, cleared on commit/cancel.
+    @ObservationIgnored
+    var gizmoPreviewTransform: Affine2D?
+
+    /// The selection's geometry under the live gizmo drag, resolved to preview
+    /// polylines (the tool-preview pen) for the overlay renderer. Empty when no
+    /// drag is in progress. Mirrors the MODIFY tools' rubber-band preview so the
+    /// gizmo drag reads identically to a Move/Rotate/Scale tool drag.
+    var gizmoPreviewPolylines: [ResolvedPolyline] {
+        guard let t = gizmoPreviewTransform, !selection.isEmpty else { return [] }
+        var out: [ResolvedPolyline] = []
+        for id in selection.ids {
+            guard let record = drawing.entity(id) else { continue }
+            let moved = record.kind.transformed(by: t)
+            for poly in moved.resolve(pen: .toolPreview, ctx: .default).polylines {
+                out.append(ResolvedPolyline(points: poly.points, closed: poly.closed, pen: .toolPreview))
+            }
+        }
+        return out
+    }
+
+    /// Sets the live gizmo preview transform (drag in progress). The overlay
+    /// renderer picks it up via `gizmoPreviewPolylines` on the next redraw.
+    func setGizmoPreview(_ t: Affine2D?) {
+        gizmoPreviewTransform = t
+    }
+
+    /// Clears the live gizmo preview (drag ended / cancelled) WITHOUT committing.
+    func clearGizmoPreview() {
+        gizmoPreviewTransform = nil
+    }
+
+    /// Commits a gizmo transform to the whole current selection as ONE undoable
+    /// edit: applies `t` to each selected entity's geometry via the shared
+    /// `EntityKind.transformed(by:)` and routes the full-record replacements
+    /// through `applyInspectorEdits` (the same undoable path the Inspector uses), so
+    /// a single ⌘Z reverts the entire gizmo drag. The live preview is cleared. A
+    /// near-identity transform (a drag that did not actually move anything) is a
+    /// no-op so an accidental tiny drag never pushes an undo step. Returns whether
+    /// anything was committed.
+    @discardableResult
+    func commitGizmoTransform(_ t: Affine2D) -> Bool {
+        gizmoPreviewTransform = nil
+        guard !selection.isEmpty, !Self.isApproximatelyIdentity(t) else { return false }
+        var records: [EntityRecord] = []
+        for id in selection.ids {
+            guard var record = drawing.entity(id) else { continue }
+            record.kind = record.kind.transformed(by: t)
+            records.append(record)
+        }
+        guard !records.isEmpty else { return false }
+        applyInspectorEdits(records)
+        return true
+    }
+
+    /// Whether `t` is within numeric tolerance of the identity transform (a drag
+    /// that did not actually move/scale/rotate anything). Used to drop a zero-effect
+    /// gizmo drag so it never registers an undo step.
+    private static func isApproximatelyIdentity(_ t: Affine2D) -> Bool {
+        let e = 1e-9
+        return abs(t.a - 1) < e && abs(t.b) < e && abs(t.c) < e && abs(t.d - 1) < e
+            && abs(t.tx) < e && abs(t.ty) < e
+    }
+
     // MARK: - Snap modes (Inspector toggles)
 
     /// Whether a snap mode is currently enabled.
