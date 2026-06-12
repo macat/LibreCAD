@@ -93,6 +93,10 @@ public struct ExtendTool: Tool {
     /// a single `.replace(targetID, extendedKind)` — never `.add`/`.remove`.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
         switch input {
+        case .value:
+            // A typed coordinate doesn't apply to this entity-pick EDITING tool — ignore.
+            return .none
+
         case .move:
             // No preview for the single-click extend.
             return .none

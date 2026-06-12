@@ -111,6 +111,10 @@ public struct CopyTool: Tool {
     /// emits one `.add` per selected entity (a translated COPY; originals stay).
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
         switch input {
+        case .value:
+            // A typed coordinate doesn't apply to this selection-based MODIFY tool — ignore.
+            return .none
+
         case .move(let p):
             cursor = p
             // A move only matters for the preview once a base is fixed.

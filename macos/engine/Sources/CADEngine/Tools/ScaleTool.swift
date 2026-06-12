@@ -130,6 +130,10 @@ public struct ScaleTool: Tool {
     /// `.replace(id, newKind)` edits — never `.add`.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
         switch input {
+        case .value:
+            // A typed coordinate doesn't apply to this selection-based MODIFY tool — ignore.
+            return .none
+
         case .move(let p):
             cursor = p
             // A move only matters once a reference distance is fixed AND there's a

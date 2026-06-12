@@ -90,7 +90,8 @@ public struct RectangleTool: Tool {
             // A move only matters for the preview once the first corner is set.
             return preview.isEmpty ? .none : .preview
 
-        case .click(let p):
+        case .click(let p), .value(let p):
+            // A typed coordinate (U1) places the next point exactly like a click.
             return handleClick(p)
 
         case .backspace:

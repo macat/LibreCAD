@@ -58,7 +58,8 @@ public struct PointTool: Tool {
             // A point has no rubber-band — a move changes nothing.
             return .none
 
-        case .click(let p):
+        case .click(let p), .value(let p):
+            // A typed coordinate (U1) places a point exactly like a click.
             guard p.valid else {
                 // Degenerate (invalid) pick — ignore it, keep waiting.
                 return .none

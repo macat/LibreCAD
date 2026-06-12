@@ -185,6 +185,12 @@ final class CADCanvasController {
     private var gestureActive = false
     private var gestureEndWorkItem: DispatchWorkItem?
 
+    /// A hook ContentView sets so the canvas can hand keyboard focus to the bottom
+    /// command/coordinate line (U1) on Space (D1). `nil` until the view appears; the
+    /// `handleKey` Space branch calls it (and consumes Space) only when set AND a
+    /// tool is active, so Space is otherwise free.
+    var requestCommandFocus: (() -> Void)?
+
     init(model: CanvasModel) {
         self.model = model
     }
@@ -530,6 +536,14 @@ final class CADCanvasController {
         redraw()
     }
 
+    /// Makes the Metal canvas the first responder again (called when the command
+    /// line yields focus on Esc/submit, U1) so bare-letter tool shortcuts route to
+    /// the canvas `keyDown` instead of the text field.
+    func returnFocusToCanvas() {
+        guard let view else { return }
+        view.window?.makeFirstResponder(view)
+    }
+
     /// Routes a keyboard event to tool/mode control. Returns `true` if handled.
     ///   V / Esc      → return to select mode (Esc also cancels an in-progress run).
     ///   Return/Enter → commit the current tool run.
@@ -557,6 +571,16 @@ final class CADCanvasController {
         let isEscape = event.keyCode == 53
         let isReturn = event.keyCode == 36 || event.keyCode == 76  // Return / keypad Enter
         let isDelete = event.keyCode == 51 || event.keyCode == 117 // Delete / Forward-Delete
+        let isSpace = event.keyCode == 49
+
+        // Space (D1) hands focus to the bottom command/coordinate line (U1) while a
+        // tool is active, so the user can type a precise coordinate/length without a
+        // bare letter switching tools. Only claimed when a tool is active AND the
+        // focus hook is wired (ContentView sets it); otherwise Space falls through.
+        if isSpace, !command, model.isToolActive, let focus = requestCommandFocus {
+            focus()
+            return true
+        }
 
         if isEscape {
             // Cancel any in-progress run, then drop to select mode.

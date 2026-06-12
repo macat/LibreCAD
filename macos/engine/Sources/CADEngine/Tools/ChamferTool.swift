@@ -135,6 +135,10 @@ public struct ChamferTool: Tool {
     /// (the bevel line) as a single undoable group.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
         switch input {
+        case .value:
+            // A typed coordinate doesn't apply to this entity-pick EDITING tool — ignore.
+            return .none
+
         case .move(let p):
             cursor = p
             previewContext = context

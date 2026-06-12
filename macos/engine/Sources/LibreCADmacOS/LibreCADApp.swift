@@ -33,6 +33,7 @@ import CADEngine
 struct LibreCADApp: App {
     /// The "open command palette" (⌘K) action published by the focused window.
     @FocusedValue(\.commandPalette) private var commandPalette
+    @FocusedValue(\.focusCommandLine) private var focusCommandLine
     /// The Zoom-to-Fit action published by the focused window.
     @FocusedValue(\.zoomToFit) private var zoomToFit
     /// Export (PDF/PNG/SVG) and Print actions published by the focused window.
@@ -115,6 +116,12 @@ struct LibreCADApp: App {
                 Button("Command Palette…") { commandPalette?() }
                     .keyboardShortcut("k", modifiers: .command)
                     .disabled(commandPalette == nil)
+                // ⇧⌘L — focus the bottom command/coordinate input line (U1, D1) so
+                // the user can type a precise coordinate/length. (Space also focuses
+                // it on the canvas while a tool is active.)
+                Button("Command Line") { focusCommandLine?() }
+                    .keyboardShortcut("l", modifiers: [.command, .shift])
+                    .disabled(focusCommandLine == nil)
                 Button("Zoom to Fit") { zoomToFit?() }
                     .keyboardShortcut("0", modifiers: .command)
                     .disabled(zoomToFit == nil)

@@ -179,7 +179,8 @@ public struct TextTool: Tool {
             // No rubber-band (the editor is the preview) — a move changes nothing.
             return .none
 
-        case .click(let p):
+        case .click(let p), .value(let p):
+            // A typed coordinate (U1) sets the insertion point like a click.
             guard p.valid else { return .none }
             // Pick (or re-pick) the insertion point. Re-clicking before commit just
             // moves the insertion point — the app re-positions the editor.

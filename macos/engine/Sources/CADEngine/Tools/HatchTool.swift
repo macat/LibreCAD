@@ -126,6 +126,10 @@ public struct HatchTool: Tool {
             // No preview geometry; a move never changes anything.
             return .none
 
+        case .value:
+            // A typed coordinate doesn't apply to this selection-based tool — ignore.
+            return .none
+
         case .click, .commit:
             // Both activate the fill (there is no point-picking phase here).
             return fill()
