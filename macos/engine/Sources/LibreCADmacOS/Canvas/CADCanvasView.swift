@@ -35,7 +35,7 @@ import CADEngine
 /// An `MTKView` whose coordinate space is top-left origin, Y-down — the space
 /// `Viewport` is defined for. It also routes mouse/scroll/magnify events to the
 /// owning `CADCanvasController`.
-final class FlippedMTKView: MTKView {
+final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
 
     /// Set by the representable so events reach the interaction logic.
     weak var controller: CADCanvasController?
@@ -185,6 +185,63 @@ final class FlippedMTKView: MTKView {
         // to the default responder chain (so menu shortcuts still work) otherwise.
         if controller?.handleKey(event) == true { return }
         super.keyDown(with: event)
+    }
+
+    // MARK: Edit/View actions (responder-chain targets for the menu)
+    //
+    // The Edit ▸ Select All / Deselect / Invert and View ▸ Ortho menu items are
+    // wired to these `@objc` actions via `NSApp.sendAction(_:to:nil:from:)` (the menu
+    // Buttons in LibreCADApp). Routing through the responder chain — rather than a
+    // SwiftUI focused value — keeps the wiring entirely inside the canvas + app menu:
+    // the FlippedMTKView is the canvas's first responder, so the focused window's
+    // canvas receives the action. Each delegates to the controller (which owns the
+    // model + redraw). `validateUserInterfaceItem` enables/disables them per state.
+
+    /// Edit ▸ Select All (⌘A). Overrides the standard `NSResponder.selectAll` so the
+    /// canvas claims it when focused (rather than a text field's select-all). Selects
+    /// every selectable entity and repaints the highlight.
+    @objc override func selectAll(_ sender: Any?) {
+        controller?.selectAllEntities()
+    }
+
+    /// Edit ▸ Deselect All (⇧⌘A).
+    @objc func deselectAllEntities(_ sender: Any?) {
+        controller?.deselectAllEntities()
+    }
+
+    /// Edit ▸ Invert Selection.
+    @objc func invertSelectionAction(_ sender: Any?) {
+        controller?.invertSelectionEntities()
+    }
+
+    /// View ▸ Ortho (F8) — toggles the persistent ortho restriction.
+    @objc func toggleOrthoAction(_ sender: Any?) {
+        controller?.toggleOrtho()
+    }
+
+    /// Enables the canvas actions when appropriate so the menu items don't gray out
+    /// while the canvas is focused, and drives the Ortho item's checkmark.
+    /// `NSView` is not itself `NSUserInterfaceValidations` (the protocol the menu uses
+    /// to enable/check items), so we adopt it here for our four canvas actions; any
+    /// other selector defaults to enabled (true) — the responder chain still validates
+    /// the rest.
+    func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        guard let controller else { return true }
+        switch item.action {
+        case #selector(NSResponder.selectAll(_:)):
+            // Enabled only when there is selectable geometry to select.
+            return controller.hasSelectableEntities
+        case #selector(deselectAllEntities(_:)), #selector(invertSelectionAction(_:)):
+            return true
+        case #selector(toggleOrthoAction(_:)):
+            // Reflect the persistent ortho state as the menu checkmark.
+            if let menuItem = item as? NSMenuItem {
+                menuItem.state = controller.model.orthoEnabled ? .on : .off
+            }
+            return true
+        default:
+            return true
+        }
     }
 }
 
@@ -389,16 +446,31 @@ final class CADCanvasController {
         if let b = view?.bounds.size { model.setViewSize(b) }
     }
 
+    /// The live ⇧ (Shift) state, read at the point-input call site for the transient
+    /// hold-⇧ ortho override ONLY. We read the GLOBAL `NSEvent.modifierFlags` (the
+    /// current device state) rather than threading the event through every gesture
+    /// callback, so it is correct at the instant the move/click is processed. This is
+    /// deliberately scoped to the ortho point-input path — `handleKey` reads its own
+    /// `event.modifierFlags` Shift for the keymap (⇧C Copy vs C Circle), and the gizmo
+    /// reads its own; none of them consult this, so the existing Shift behavior is
+    /// untouched.
+    static var shiftHeld: Bool {
+        NSEvent.modifierFlags.contains(.shift)
+    }
+
     func mouseMoved(to point: CGPoint) {
         syncViewSizeFromView()
         let spacing = renderer?.lastGridSpacing
         model.updateSnap(atScreenPoint: point, gridSpacing: spacing)
         // When a draw tool is active, feed it the SNAPPED world point so its
         // rubber-band preview tracks the cursor. Otherwise this is select mode and
-        // the snap marker / HUD is all that updates.
+        // the snap marker / HUD is all that updates. Ortho (if effective) axis-locks
+        // the point to the last placed point BEFORE the tool sees it, so the preview
+        // is already constrained; osnap still wins (see `orthoConstrained`).
         if model.isToolActive {
             let p = model.snappedWorldPoint(atScreenPoint: point, gridSpacing: spacing)
-            model.handleToolInput(.move(p))
+            let constrained = model.orthoConstrained(p, shiftHeld: Self.shiftHeld)
+            model.handleToolInput(.move(constrained))
         }
         // Keep the CAD crosshair glued to the (snapped) cursor on every move.
         refreshCrosshair()
@@ -437,7 +509,10 @@ final class CADCanvasController {
         if model.isToolActive {
             let spacing = renderer?.lastGridSpacing
             let p = model.snappedWorldPoint(atScreenPoint: point, gridSpacing: spacing)
-            if model.handleToolInput(.click(p)) { redraw() }
+            // Apply ortho to the CLICKED point too (osnap > ortho > free), so the
+            // committed point matches the constrained preview the user is looking at.
+            let constrained = model.orthoConstrained(p, shiftHeld: Self.shiftHeld)
+            if model.handleToolInput(.click(constrained)) { redraw() }
             return
         }
         if model.toggleSelection(atScreenPoint: point) {
@@ -601,6 +676,37 @@ final class CADCanvasController {
         redraw()
     }
 
+    // MARK: Selection primitives + ortho (Edit / View menu actions)
+
+    /// Whether any entity is currently selectable (drives Edit ▸ Select All enabled
+    /// state via the view's `validateUserInterfaceItem`).
+    var hasSelectableEntities: Bool {
+        !SelectionPolicy.selectableIDs(in: model.drawing).isEmpty
+    }
+
+    /// Edit ▸ Select All — selects every selectable entity and repaints the highlight
+    /// + re-glues the gizmo to the new selection.
+    func selectAllEntities() {
+        if model.selectAll() { refreshGizmo(); redraw() }
+    }
+
+    /// Edit ▸ Deselect All — clears the selection and repaints.
+    func deselectAllEntities() {
+        if model.deselectAll() { refreshGizmo(); redraw() }
+    }
+
+    /// Edit ▸ Invert Selection — selects the selectable complement and repaints.
+    func invertSelectionEntities() {
+        if model.invertSelection() { refreshGizmo(); redraw() }
+    }
+
+    /// View ▸ Ortho — flips the persistent ortho restriction and repaints (the
+    /// status-bar chip + any active rubber-band preview reflect it on the next move).
+    func toggleOrtho() {
+        model.toggleOrtho()
+        redraw()
+    }
+
     /// Makes the Metal canvas the first responder again (called when the command
     /// line yields focus on Esc/submit, U1) so bare-letter tool shortcuts route to
     /// the canvas `keyDown` instead of the text field.
@@ -641,6 +747,15 @@ final class CADCanvasController {
         let isReturn = event.keyCode == 36 || event.keyCode == 76  // Return / keypad Enter
         let isDelete = event.keyCode == 51 || event.keyCode == 117 // Delete / Forward-Delete
         let isSpace = event.keyCode == 49
+        let isF8 = event.keyCode == 100                            // F8 → toggle Ortho
+
+        // F8 toggles ortho (AutoCAD/LibreCAD convention), in any mode and regardless
+        // of modifiers, so a draw run can flip ortho mid-operation without leaving the
+        // canvas. Handled before the tool keys so it never collides with a letter.
+        if isF8 {
+            toggleOrtho()
+            return true
+        }
 
         // Space (D1) hands focus to the bottom command/coordinate line (U1) while a
         // tool is active, so the user can type a precise coordinate/length without a
