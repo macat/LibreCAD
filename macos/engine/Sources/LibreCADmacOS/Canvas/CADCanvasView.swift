@@ -105,8 +105,18 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
     /// device-space mismatch) and to measure click-vs-drag travel.
     private var lastDragLocation: CGPoint?
     /// The flipped-view location of the mouse-down, to classify the gesture as a
-    /// click (small travel) vs a pan (large travel) on mouse-up.
+    /// click (small travel) vs a pan/marquee (large travel) on mouse-up.
     private var mouseDownLocation: CGPoint?
+
+    /// Whether the LEFT-button drag currently in progress is a MARQUEE (rubber-band
+    /// selection) rather than a pan. Set on a select-mode empty-space mouse-down
+    /// (decision D2: empty-space drag selects, Space/middle-drag pans). Reset on up.
+    private var leftDragIsMarquee = false
+
+    /// Whether the Space key is currently held — the pan modifier in SELECT mode
+    /// (D2: Space-drag pans, so a plain select-mode drag is free for the marquee).
+    /// Tracked via `keyDown`/`keyUp` (Space is a key, not an `NSEvent` modifier).
+    private var spaceHeld = false
 
     private func locationInView(_ event: NSEvent) -> CGPoint {
         convert(event.locationInWindow, from: nil)
@@ -133,22 +143,54 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
         }
         mouseDownLocation = loc
         lastDragLocation = loc
+        // Decide up-front whether this LEFT drag will be a marquee or a pan (D2):
+        //   • Space held  → pan (the explicit pan modifier in select mode), OR
+        //   • draw/edit tool active → pan (draw mode never marquees), OR
+        //   • the down hit an entity → NOT a marquee (a click/gizmo interaction).
+        // Otherwise (select mode, empty space, no Space) → a marquee. We arm it only
+        // once the drag passes the click threshold (in `mouseDragged`) so a plain
+        // click on empty space still deselects via `mouseClick`.
+        leftDragIsMarquee = false
+        if !spaceHeld, controller?.beginMarqueeIfEmptySpaceEligible(at: loc) == true {
+            // Eligible (select mode + empty space) — the marquee actually STARTS on
+            // first drag past threshold; mark intent here.
+            leftDragIsMarquee = true
+        }
     }
 
     override func mouseDragged(with event: NSEvent) {
-        // Left-drag pans the canvas (in addition to scroll), matching a grab gesture.
-        // Derive the delta from successive FLIPPED-view locations (same point space
-        // as scroll-pan and `screenToWorld`), so drag-pan direction matches
-        // scroll-pan and the content follows the cursor in the flipped view.
         let loc = locationInView(event)
         let prev = lastDragLocation ?? loc
         lastDragLocation = loc
+
+        if leftDragIsMarquee {
+            // Start the box on the first past-threshold step (so a tiny jitter that
+            // still counts as a click does not flash a marquee), then update it.
+            if controller?.isMarqueeActive != true, let down = mouseDownLocation {
+                let dx = loc.x - down.x, dy = loc.y - down.y
+                guard (dx * dx + dy * dy) > Self.clickThreshold * Self.clickThreshold else { return }
+                controller?.beginMarquee(at: down)
+            }
+            controller?.updateMarquee(to: loc)
+            return
+        }
+
+        // Otherwise this is a PAN (Space-drag, draw-mode drag, or a drag that started
+        // on an entity). Derive the delta from successive FLIPPED-view locations (same
+        // point space as scroll-pan and `screenToWorld`) so the content follows the
+        // cursor in the flipped view.
         controller?.panDrag(deltaX: loc.x - prev.x, deltaY: loc.y - prev.y)
     }
 
     override func mouseUp(with event: NSEvent) {
         let up = locationInView(event)
-        defer { mouseDownLocation = nil; lastDragLocation = nil }
+        defer { mouseDownLocation = nil; lastDragLocation = nil; leftDragIsMarquee = false }
+
+        // A marquee in progress → commit it (window/crossing by direction; ⇧ adds).
+        if controller?.isMarqueeActive == true {
+            controller?.endMarquee(additive: event.modifierFlags.contains(.shift))
+            return
+        }
         guard let down = mouseDownLocation else { return }
         // Only treat it as a click (toggle selection) if the pointer barely moved —
         // a larger travel means it was a pan, not a click (click-vs-drag threshold).
@@ -157,6 +199,91 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
             controller?.mouseClick(at: up)
         }
     }
+
+    // MARK: Middle-button + right-button (pan + context menu, D2 / U5)
+
+    /// Middle-button drag pans the canvas in ANY mode (D2: the always-available pan
+    /// gesture, alongside Space-drag), so a plain left-drag in select mode is free for
+    /// the marquee.
+    override func otherMouseDown(with event: NSEvent) {
+        guard event.buttonNumber == 2 else { super.otherMouseDown(with: event); return }
+        lastDragLocation = locationInView(event)
+    }
+
+    override func otherMouseDragged(with event: NSEvent) {
+        guard event.buttonNumber == 2 else { super.otherMouseDragged(with: event); return }
+        let loc = locationInView(event)
+        let prev = lastDragLocation ?? loc
+        lastDragLocation = loc
+        controller?.panDrag(deltaX: loc.x - prev.x, deltaY: loc.y - prev.y)
+    }
+
+    override func otherMouseUp(with event: NSEvent) {
+        guard event.buttonNumber == 2 else { super.otherMouseUp(with: event); return }
+        lastDragLocation = nil
+    }
+
+    /// Right-click → the canvas context menu (U5). Over a selection: Cut/Copy/
+    /// Duplicate/Delete/Properties; over empty canvas: Paste / Select All / Zoom to
+    /// Fit / toggle Grid / toggle Ortho / Document Settings. The menu items target
+    /// THIS view (an NSObject, so ObjC action dispatch works) and forward to the
+    /// controller. `nil` while a draw tool is active (no menu mid-draw).
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let controller, controller.canShowContextMenu else { return nil }
+        // Stash the click point + select the right-clicked entity (Mac convention).
+        controller.prepareContextMenu(at: locationInView(event))
+
+        let menu = NSMenu()
+        // We set each item's `isEnabled`/`state` explicitly, so turn OFF auto-enabling
+        // (which would otherwise re-derive enablement via the responder chain).
+        menu.autoenablesItems = false
+
+        func item(_ title: String, _ action: Selector, enabled: Bool = true,
+                  state: NSControl.StateValue = .off) -> NSMenuItem {
+            let m = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            m.target = self
+            m.isEnabled = enabled
+            m.state = state
+            return m
+        }
+
+        if controller.hasSelection {
+            menu.addItem(item("Cut", #selector(ctxCut(_:))))
+            menu.addItem(item("Copy", #selector(ctxCopy(_:))))
+            menu.addItem(item("Duplicate", #selector(ctxDuplicate(_:))))
+            menu.addItem(item("Delete", #selector(ctxDelete(_:))))
+            menu.addItem(.separator())
+            menu.addItem(item("Properties…", #selector(ctxProperties(_:))))
+            menu.addItem(.separator())
+        }
+        menu.addItem(item("Paste", #selector(ctxPaste(_:)), enabled: controller.canPaste))
+        menu.addItem(item("Select All", #selector(ctxSelectAll(_:)),
+                          enabled: controller.hasSelectableEntities))
+        menu.addItem(.separator())
+        menu.addItem(item("Zoom to Fit", #selector(ctxZoomToFit(_:))))
+        menu.addItem(item("Show Grid", #selector(ctxToggleGrid(_:)),
+                          state: controller.isGridVisible ? .on : .off))
+        menu.addItem(item("Ortho", #selector(ctxToggleOrtho(_:)),
+                          state: controller.isOrthoEnabled ? .on : .off))
+        menu.addItem(.separator())
+        menu.addItem(item("Document Settings…", #selector(ctxDocumentSettings(_:))))
+        return menu
+    }
+
+    // Context-menu @objc action handlers — forward to the controller's plain verb
+    // methods. They live on the view (an NSObject) so NSMenuItem target/action ObjC
+    // dispatch works; the controller (a plain Swift class) owns the model mutation.
+    @objc private func ctxCut(_ sender: Any?)        { controller?.contextCut() }
+    @objc private func ctxCopy(_ sender: Any?)       { controller?.contextCopy() }
+    @objc private func ctxDuplicate(_ sender: Any?)  { controller?.contextDuplicate() }
+    @objc private func ctxDelete(_ sender: Any?)     { controller?.contextDelete() }
+    @objc private func ctxProperties(_ sender: Any?) { controller?.contextProperties() }
+    @objc private func ctxPaste(_ sender: Any?)      { controller?.contextPaste() }
+    @objc private func ctxSelectAll(_ sender: Any?)  { controller?.contextSelectAll() }
+    @objc private func ctxZoomToFit(_ sender: Any?)  { controller?.contextZoomToFit() }
+    @objc private func ctxToggleGrid(_ sender: Any?) { controller?.contextToggleGrid() }
+    @objc private func ctxToggleOrtho(_ sender: Any?){ controller?.contextToggleOrtho() }
+    @objc private func ctxDocumentSettings(_ sender: Any?) { controller?.contextDocumentSettings() }
 
     /// Max pointer travel (points) between down and up that still counts as a click
     /// rather than a pan (so a grab-drag doesn't toggle selection on release).
@@ -181,10 +308,20 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
     // MARK: Keyboard (tool activation + control)
 
     override func keyDown(with event: NSEvent) {
+        // Track Space-held for the select-mode pan modifier (D2). In select mode the
+        // controller does NOT consume Space (its Space branch needs a tool active), so
+        // tracking it here lets a Space-drag pan instead of marquee. Space is still
+        // forwarded to `handleKey` (which only claims it when a tool is active).
+        if event.keyCode == 49 { spaceHeld = true }
         // Let the controller claim tool keys (L / V / Esc / Return / ⌫); fall back
         // to the default responder chain (so menu shortcuts still work) otherwise.
         if controller?.handleKey(event) == true { return }
         super.keyDown(with: event)
+    }
+
+    override func keyUp(with event: NSEvent) {
+        if event.keyCode == 49 { spaceHeld = false }
+        super.keyUp(with: event)
     }
 
     // MARK: Edit/View actions (responder-chain targets for the menu)
@@ -266,6 +403,15 @@ final class CADCanvasController {
     /// tool is active, so Space is otherwise free.
     var requestCommandFocus: (() -> Void)?
 
+    /// A hook ContentView sets so the canvas context menu's "Properties" verb (U5)
+    /// can reveal + focus the Inspector pane (where entity properties are edited).
+    /// `nil` until the view appears.
+    var requestShowInspector: (() -> Void)?
+
+    /// A hook ContentView sets so the context menu's "Document Settings…" verb can
+    /// raise the per-document settings sheet. `nil` until the view appears.
+    var requestDocumentSettings: (() -> Void)?
+
     init(model: CanvasModel) {
         self.model = model
     }
@@ -282,6 +428,12 @@ final class CADCanvasController {
     /// click-through (`hitTest` returns nil), so it never affects select/draw/pan.
     private(set) var crosshair: CrosshairOverlayView?
 
+    /// The marquee + hover overlay (UX-plan U5, a subview of the MTKView). Draws the
+    /// live rubber-band selection box (blue window / green-dashed crossing) and the
+    /// hover highlight on the entity under the cursor. Always click-through (`hitTest`
+    /// returns nil) so the FlippedMTKView keeps the marquee/click/pan gesture.
+    private(set) var marqueeOverlay: MarqueeHoverOverlayView?
+
     func attach(view: FlippedMTKView, renderer: LineRenderer) {
         self.view = view
         self.renderer = renderer
@@ -295,6 +447,15 @@ final class CADCanvasController {
         crosshairView.isHidden = !model.crosshairVisible
         view.addSubview(crosshairView)
         crosshair = crosshairView
+
+        // Float the marquee + hover overlay (U5) above the crosshair, below the
+        // gizmo. Fully click-through, so the FlippedMTKView keeps the gesture; it
+        // only paints the live selection box + hover highlight.
+        let marqueeView = MarqueeHoverOverlayView(model: model)
+        marqueeView.frame = view.bounds
+        marqueeView.autoresizingMask = [.width, .height]
+        view.addSubview(marqueeView)
+        marqueeOverlay = marqueeView
 
         // Float the transform gizmo over the canvas. It is transparent to clicks
         // that are NOT on a handle (its `hitTest` returns nil there), so normal
@@ -357,6 +518,9 @@ final class CADCanvasController {
         // Keep the crosshair glued to the (snapped) cursor across pan/zoom repaints
         // (its center is `worldToScreen(cursor)`, which moves when the viewport does).
         if let crosshair, !crosshair.isHidden { crosshair.refresh() }
+        // Keep the marquee/hover overlay glued across pan/zoom (its box + highlight
+        // are `worldToScreen`-mapped, so they move when the viewport does).
+        marqueeOverlay?.refresh()
         view?.setNeedsDisplay(view?.bounds ?? .zero)
     }
 
@@ -472,6 +636,11 @@ final class CADCanvasController {
             let constrained = model.orthoConstrained(p, shiftHeld: Self.shiftHeld)
             model.handleToolInput(.move(constrained))
         }
+        // Hover highlight (U5): in SELECT mode, track the entity under the cursor so
+        // the overlay can highlight it as a pre-selection affordance. Cheap — it
+        // reuses the click hit-test (quadtree-prefiltered). No hover while a tool is
+        // active (`updateHover` guards that). Repaint the overlay when it changed.
+        if model.updateHover(atScreenPoint: point) { refreshMarquee() }
         // Keep the CAD crosshair glued to the (snapped) cursor on every move.
         refreshCrosshair()
         // Redraw the coordinate HUD + snap marker (and tool preview) on every move
@@ -481,6 +650,8 @@ final class CADCanvasController {
 
     func mouseExited() {
         model.clearCursor()
+        // Clear the hover highlight (and any in-progress marquee) as the cursor leaves.
+        if model.clearHover() { refreshMarquee() }
         // The cursor left the canvas — repaint so the crosshair (which keys off
         // `cursorWorld`) clears.
         refreshCrosshair()
@@ -519,6 +690,145 @@ final class CADCanvasController {
             redraw()
         }
     }
+
+    // MARK: Marquee (rubber-band) selection (UX-plan U5)
+
+    /// The world anchor of an in-progress marquee drag (the empty-space mouse-down
+    /// point), or `nil` when no marquee is active. Set on a select-mode empty-space
+    /// mouse-down, used to span the box on each drag step, cleared on mouse-up.
+    private var marqueeAnchorWorld: Vector?
+
+    /// Whether a marquee drag is currently in progress (so the view's mouse-up runs
+    /// the box-select instead of the click/pan classification).
+    var isMarqueeActive: Bool { marqueeAnchorWorld != nil }
+
+    /// Whether a select-mode mouse-down at a screen point is ELIGIBLE to begin a
+    /// marquee: select mode (no tool active) AND the down did NOT hit an entity (empty
+    /// space). Returns `false` in draw mode or over an entity (those keep the existing
+    /// click/gizmo/pan behavior). The view uses this to decide a drag's intent at
+    /// mouse-down; the box itself only starts once the drag passes the click threshold
+    /// (`beginMarquee`).
+    func beginMarqueeIfEmptySpaceEligible(at screenPoint: CGPoint) -> Bool {
+        guard !model.isToolActive else { return false }    // draw mode → no marquee
+        syncViewSizeFromView()
+        let world = model.viewport.screenToWorld(screenPoint)
+        // An entity under the cursor ⇒ a click / gizmo interaction, not a marquee.
+        let hit = model.selection.hitTest(
+            worldPoint: world, worldTolerance: model.worldTolerance,
+            in: model.drawing, using: model.quadtree
+        )
+        return hit == nil
+    }
+
+    /// Actually starts the marquee box at a screen anchor (called by the view once a
+    /// drag passes the click threshold). Records the world anchor + seeds the model.
+    func beginMarquee(at screenPoint: CGPoint) {
+        syncViewSizeFromView()
+        let world = model.viewport.screenToWorld(screenPoint)
+        marqueeAnchorWorld = world
+        model.beginMarquee(at: world)
+    }
+
+    /// Updates the in-progress marquee to span from its anchor to the current screen
+    /// point, repainting the marquee overlay. No-op if no marquee is active.
+    func updateMarquee(to screenPoint: CGPoint) {
+        guard let anchor = marqueeAnchorWorld else { return }
+        syncViewSizeFromView()
+        let world = model.viewport.screenToWorld(screenPoint)
+        model.updateMarquee(from: anchor, to: world)
+        refreshMarquee()
+        redraw()
+    }
+
+    /// Commits the in-progress marquee (window vs crossing by drag direction, ⇧ adds
+    /// to the current selection), then clears it + repaints. No-op if no marquee is
+    /// active. Returns whether a marquee was committed (so the view skips the click
+    /// classification).
+    @discardableResult
+    func endMarquee(additive: Bool) -> Bool {
+        guard marqueeAnchorWorld != nil else { return false }
+        marqueeAnchorWorld = nil
+        let crossing = model.marqueeCrossing
+        _ = model.commitMarquee(crossing: crossing, additive: additive)
+        refreshGizmo()
+        refreshMarquee()
+        redraw()
+        return true
+    }
+
+    /// Cancels an in-progress marquee without changing the selection (Esc / mouse
+    /// exit), repainting to erase the box.
+    func cancelMarquee() {
+        guard marqueeAnchorWorld != nil else { return }
+        marqueeAnchorWorld = nil
+        model.cancelMarquee()
+        refreshMarquee()
+        redraw()
+    }
+
+    /// Repaints the marquee + hover overlay so the live box / highlight tracks the
+    /// model state.
+    func refreshMarquee() { marqueeOverlay?.refresh() }
+
+    // MARK: Context menu (right-click, UX-plan U5)
+    //
+    // The NSMenu itself is BUILT by `FlippedMTKView.menu(for:)` (an NSObject, so the
+    // menu items can target it for ObjC action dispatch) and its @objc item handlers
+    // forward to the plain controller methods below. The controller exposes the
+    // model-derived enablement/state + a "prepare" step (selecting the right-clicked
+    // entity + stashing the cursor world point for an anchored Paste); the verb
+    // methods mirror the menu-bar / keyboard actions exactly (Delete → deleteSelection,
+    // Select All → selectAll(), etc.) so a right-click is identical to the real action.
+
+    /// The WORLD point of the last right-click, so the Paste verb anchors there.
+    private var contextMenuWorld: Vector?
+
+    /// Whether a context menu may be shown right now (no draw tool mid-run).
+    var canShowContextMenu: Bool { !model.isToolActive }
+
+    /// Prepares the canvas for a context menu at a screen point: stashes the cursor
+    /// world point (for an anchored Paste) and, if the click is over an entity NOT
+    /// already selected, selects it (replace) — right-clicking an unselected entity
+    /// acts on it (the Mac convention). Repaints if the selection changed.
+    func prepareContextMenu(at screenPoint: CGPoint) {
+        syncViewSizeFromView()
+        let world = model.viewport.screenToWorld(screenPoint)
+        contextMenuWorld = world
+        if let hit = model.selection.hitTest(
+            worldPoint: world, worldTolerance: model.worldTolerance,
+            in: model.drawing, using: model.quadtree
+        ), !model.selection.contains(hit) {
+            model.selection = Selection(ids: [hit])
+            refreshGizmo()
+            redraw()
+        }
+    }
+
+    /// Whether the context menu's selection-dependent verbs (Cut/Copy/Duplicate/
+    /// Delete/Properties) should appear.
+    var hasSelection: Bool { !model.selection.isEmpty }
+    /// Whether Paste is enabled (clipboard has content).
+    var canPaste: Bool { model.hasClipboard }
+    /// Whether the grid is shown (drives the menu checkmark).
+    var isGridVisible: Bool { model.gridVisible }
+    /// Whether ortho is on (drives the menu checkmark).
+    var isOrthoEnabled: Bool { model.orthoEnabled }
+
+    // Context-menu verb handlers (plain methods; the view's @objc items forward here).
+    func contextCut()  { if model.cutSelection() { refreshGizmo(); redraw() } }
+    func contextCopy() { _ = model.copySelection() }
+    func contextDuplicate() { if model.duplicateSelection() { refreshGizmo(); redraw() } }
+    func contextDelete() { if model.deleteSelection() { refreshGizmo(); redraw() } }
+    func contextProperties() { requestShowInspector?() }
+    func contextPaste() {
+        let ok = contextMenuWorld.map { model.paste(at: $0) } ?? model.paste()
+        if ok { refreshGizmo(); redraw() }
+    }
+    func contextSelectAll() { selectAllEntities() }
+    func contextZoomToFit() { zoomToFit() }
+    func contextToggleGrid() { model.gridVisible.toggle(); redraw() }
+    func contextToggleOrtho() { toggleOrtho() }
+    func contextDocumentSettings() { requestDocumentSettings?() }
 
     // MARK: Inline text authoring (the NSTextView editor over the canvas)
 
@@ -671,6 +981,11 @@ final class CADCanvasController {
     func activateTool(_ kind: ToolKind) {
         teardownEditor(commit: false)
         model.activateTool(kind)
+        // Leaving select mode clears the hover highlight + any in-progress marquee
+        // (both are select-mode affordances).
+        cancelMarquee()
+        _ = model.clearHover()
+        refreshMarquee()
         // The mode changed → show/hide the crosshair + swap the system cursor.
         refreshCrosshair()
         redraw()
@@ -767,6 +1082,12 @@ final class CADCanvasController {
         }
 
         if isEscape {
+            // Esc on an in-progress marquee just cancels the box (keeps the mode +
+            // selection), matching the cancel-the-gesture convention.
+            if isMarqueeActive {
+                cancelMarquee()
+                return true
+            }
             // Cancel any in-progress run, then drop to select mode.
             if model.isToolActive { model.handleToolInput(.cancel) }
             model.activateTool(.select)

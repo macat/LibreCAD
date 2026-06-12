@@ -199,6 +199,10 @@ struct ContentView: View {
             // and a tool is active, so a typed length goes to the field, not a tool.
             .onAppear {
                 controllerBox.controller?.requestCommandFocus = { commandFieldFocused = true }
+                // U5 context-menu hooks: "Properties" reveals + focuses the Inspector;
+                // "Document Settings…" raises the per-document settings sheet.
+                controllerBox.controller?.requestShowInspector = { showInspector = true }
+                controllerBox.controller?.requestDocumentSettings = { showSettings = true }
             }
             // View ▸ Show Command Line (⇧⌘L) focuses the field from the menu.
             .focusedSceneValue(\.focusCommandLine) { commandFieldFocused = true }
