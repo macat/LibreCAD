@@ -96,12 +96,16 @@ struct ContentView: View {
             toolButton(.rectangle, symbol: "rectangle", help: "Draw rectangle (R)")
             toolButton(.polyline, symbol: "scribble", help: "Draw polyline (P)")
             toolButton(.point, symbol: "smallcircle.filled.circle", help: "Place point (O)")
+            toolButton(.ellipse, symbol: "oval", help: "Draw ellipse (E)")
+            toolButton(.polygon, symbol: "hexagon", help: "Draw polygon (G)")
 
             Divider()
             // Modify tools (act on the current selection).
             toolButton(.move, symbol: "arrow.up.and.down.and.arrow.left.and.right",
                        help: "Move selection (M)")
             toolButton(.copy, symbol: "plus.square.on.square", help: "Copy selection (⇧C)")
+            toolButton(.offset, symbol: "plus.rectangle.on.rectangle",
+                       help: "Offset selection (⇧O)")
             toolButton(.rotate, symbol: "rotate.right", help: "Rotate selection (⇧R)")
             toolButton(.scale, symbol: "arrow.up.left.and.arrow.down.right",
                        help: "Scale selection (⇧S)")

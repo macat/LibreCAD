@@ -65,9 +65,29 @@ struct ToolKindWiringTests {
         let expected: Set<ToolKind> = [
             .select,
             .line, .circle, .arc, .rectangle, .polyline, .point,   // draw
+            .ellipse, .polygon,                                    // draw (wave 1)
             .move, .copy, .rotate, .scale, .mirror,                // modify
+            .offset,                                               // modify (wave 1)
         ]
         #expect(Set(ToolKind.allCases) == expected,
                 "ToolKind.allCases (\(ToolKind.allCases)) != expected roster")
+    }
+
+    /// The three wave-1 wiring additions specifically: each mints a non-nil tool
+    /// whose own title matches the kind's UI title (Ellipse / Polygon / Offset).
+    @Test func waveOneKindsAreWiredWithMatchingTitles() {
+        let wave1: [ToolKind: String] = [
+            .ellipse: "Ellipse",
+            .polygon: "Polygon",
+            .offset:  "Offset",
+        ]
+        for (kind, title) in wave1 {
+            #expect(kind.title == title,
+                    "ToolKind.\(kind).title (\(kind.title)) != \(title)")
+            let tool = kind.makeTool()
+            #expect(tool != nil, "ToolKind.\(kind) minted a nil Tool")
+            #expect(tool?.title == title,
+                    "ToolKind.\(kind) tool.title (\(tool?.title ?? "nil")) != \(title)")
+        }
     }
 }
