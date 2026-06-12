@@ -18,6 +18,7 @@ REPO_DIR="$(cd "${MACOS_DIR}/.." && pwd)"
 ENGINE_DIR="${MACOS_DIR}/engine"
 INFO_PLIST_SRC="${MACOS_DIR}/App/Info.plist"
 SAMPLE_DXF_SRC="${REPO_DIR}/librecad/res/dxf/dim_sample.dxf"
+FONTS_SRC_DIR="${REPO_DIR}/librecad/support/fonts"
 BUILD_DIR="${MACOS_DIR}/build"
 APP_DIR="${BUILD_DIR}/LibreCADmacOS.app"
 CONFIG="${CONFIG:-debug}"        # set CONFIG=release for a release build
@@ -49,6 +50,24 @@ if [[ -f "${SAMPLE_DXF_SRC}" ]]; then
     echo "    bundled sample: Contents/Resources/dim_sample.dxf"
 else
     echo "warning: launch sample not found at ${SAMPLE_DXF_SRC}; app will fall back to the repo path" >&2
+fi
+
+# Bundle the .lff stroke fonts (ADR-004) so text/dimension text resolves in the
+# bundled app without the repo path. CADFonts looks them up under
+# Contents/Resources/fonts (Bundle.main), falling back to the repo path for the
+# bare binary. standard.lff (the default) is required; the rest are copied so a
+# DXF text style naming another shipped font also resolves.
+FONTS_DST_DIR="${APP_DIR}/Contents/Resources/fonts"
+if [[ -d "${FONTS_SRC_DIR}" ]]; then
+    mkdir -p "${FONTS_DST_DIR}"
+    cp "${FONTS_SRC_DIR}"/*.lff "${FONTS_DST_DIR}/"
+    font_count=$(find "${FONTS_DST_DIR}" -name '*.lff' | wc -l | tr -d ' ')
+    echo "    bundled ${font_count} .lff font(s): Contents/Resources/fonts/"
+    if [[ ! -f "${FONTS_DST_DIR}/standard.lff" ]]; then
+        echo "warning: standard.lff (default font) not among the bundled fonts" >&2
+    fi
+else
+    echo "warning: fonts dir not found at ${FONTS_SRC_DIR}; bundled app will fall back to the repo path for text" >&2
 fi
 
 echo "==> Ad-hoc signing"

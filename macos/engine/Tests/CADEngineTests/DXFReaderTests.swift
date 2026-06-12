@@ -51,6 +51,10 @@ struct DXFReaderTests {
             case .polyline:     t.polyline += 1
             case .spline:       t.spline += 1
             case .splinePoints: t.splinePoints += 1
+            // Display kinds (text/hatch/solid) are not yet produced by the reader
+            // (separate import wave); they don't appear in this sample, so they
+            // are not tallied here.
+            case .text, .hatch, .solid: break
             }
         }
         return t

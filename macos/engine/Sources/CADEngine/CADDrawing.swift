@@ -644,7 +644,8 @@ public final class CADDrawing {
     /// A `ResolveContext` backed by this drawing's real `LayerTable`, so
     /// `.byLayer` pens resolve against actual layer attributes (not the stub
     /// default). The block hook still defers to `currentBlockPen` (the Insert/
-    /// Block-resolve owner sets that when recursing).
+    /// Block-resolve owner sets that when recursing). The text hook is the shared
+    /// `.lff` font provider (ADR-004) so text entities resolve to stroked glyphs.
     public func makeResolveContext(tessellationTolerance: Double = 0.05) -> ResolveContext {
         // Snapshot the layer table into a Sendable closure (value type copy).
         let table = layers
@@ -653,7 +654,8 @@ public final class CADDrawing {
             layerAttributes: { layerID in
                 table.layer(layerID)?.resolvedPen
                     ?? ResolvedPen(color: .librecadGreen, lineType: .solid, lineWidth: .default)
-            }
+            },
+            fontProvider: CADFonts.provider.makeProvider()
         )
     }
 
@@ -663,5 +665,91 @@ public final class CADDrawing {
     public func resolveAll(_ ctx: ResolveContext? = nil) -> [ResolvedGeometry] {
         let context = ctx ?? makeResolveContext()
         return entities.map { $0.resolve(context) }
+    }
+}
+
+// MARK: - Shared stroke-font provider (.lff, ADR-004)
+
+/// Process-wide `.lff` stroke-font registry feeding `ResolveContext.fontProvider`.
+///
+/// One shared `StrokeFontProvider` (its own internal lock makes it thread-safe)
+/// is configured once with the font search directories and a registered default
+/// font ("standard"). `makeResolveContext` hands its `makeProvider()` closure to
+/// the resolve context so text entities (and later dimension text) resolve to
+/// stroked glyphs.
+///
+/// ## Font lookup
+/// - The bundled app: `LibreCADmacOS.app/Contents/Resources/fonts/*.lff`
+///   (copied by `macos/scripts/make-app.sh`), found via `Bundle.main`.
+/// - The bare SwiftPM binary / dev: the in-repo `librecad/support/fonts/`,
+///   derived from this file's `#filePath` (stable absolute path), so the
+///   provider works without a bundle.
+///
+/// An empty/`nil` style name (text with no explicit style) resolves to the
+/// default font, which is also registered under the empty key.
+public enum CADFonts {
+
+    /// The default stroke-font base name (LibreCAD's ISO 3098-2 "standard").
+    public static let defaultFontName = "standard"
+
+    /// The shared provider, configured on first access. `nonisolated(unsafe)` is
+    /// sound: the value is assigned exactly once (here) and `StrokeFontProvider`
+    /// is internally locked, so concurrent reads of the let are safe.
+    public static let provider: StrokeFontProvider = {
+        let p = StrokeFontProvider()
+        for dir in fontSearchDirectories() {
+            p.registerSearchDirectory(dir)
+        }
+        // Register the default font under both its name and the empty key so a
+        // text entity with no explicit style ("") resolves to it.
+        if let url = defaultFontURL() {
+            p.registerFont(at: url, name: defaultFontName)
+            p.registerFont(at: url, name: "")
+        }
+        return p
+    }()
+
+    /// Directories searched for `<name>.lff`, in priority order: the app bundle's
+    /// `Resources/fonts`, then the in-repo `librecad/support/fonts`.
+    static func fontSearchDirectories() -> [URL] {
+        var dirs: [URL] = []
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("fonts"),
+           FileManager.default.fileExists(atPath: bundled.path) {
+            dirs.append(bundled)
+        }
+        if let repo = repoFontsDirectory() {
+            dirs.append(repo)
+        }
+        return dirs
+    }
+
+    /// The default font's URL (bundle first, then repo). `nil` if neither exists.
+    static func defaultFontURL() -> URL? {
+        if let bundled = Bundle.main.url(
+            forResource: defaultFontName, withExtension: "lff", subdirectory: "fonts"
+        ) {
+            return bundled
+        }
+        if let repo = repoFontsDirectory()?
+            .appendingPathComponent("\(defaultFontName).lff"),
+           FileManager.default.fileExists(atPath: repo.path) {
+            return repo
+        }
+        return nil
+    }
+
+    /// The in-repo `librecad/support/fonts` directory, derived from this file's
+    /// source path (dev fallback for the bare binary / tests). `nil` if absent.
+    static func repoFontsDirectory() -> URL? {
+        // <repo>/macos/engine/Sources/CADEngine/CADDrawing.swift -> up 4 -> <repo>
+        let thisFile = URL(fileURLWithPath: #filePath)
+        let repoRoot = thisFile
+            .deletingLastPathComponent()   // CADEngine
+            .deletingLastPathComponent()   // Sources
+            .deletingLastPathComponent()   // engine
+            .deletingLastPathComponent()   // macos
+            .deletingLastPathComponent()   // <repo>
+        let dir = repoRoot.appendingPathComponent("librecad/support/fonts")
+        return FileManager.default.fileExists(atPath: dir.path) ? dir : nil
     }
 }
