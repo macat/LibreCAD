@@ -151,6 +151,14 @@ Engine modules on native-macos: CADEngine core (Vector/Geometry/Pen/Entity/Resol
 
 - [2026-06-12 ~12:50] 📋 coordinator — review-fillet-chamfer APPROVE both (geometry hand-verified). MERGED ws/tool-fillet + ws/tool-chamfer → native-macos. **653 tests, 162 commits.** 18 tool files. Dispatched wire-wave2 (Trim/Extend/Fillet/Chamfer → ToolKind+toolbar+keys T/X/F/⇧F+Tools menu) — last build step before the consolidated GUI verify.
 
+## V3 — TEXT AUTHORING + INSPECTOR + FULL WIRING + LOSSLESS MTEXT (2026-06-12)
+native-macos @ f107dbe00, **936 tests / 99 suites, 212 commits**. The professional-text loop is CLOSED end-to-end (create → edit → style → render → export → save):
+- **Text authoring** (Task #17/#14): `TextTool` + inline `NSTextView` editor over the Metal canvas (click-to-type, double-click-to-edit; single-line → `.text`, multi-line → `.mtext`).
+- **Inspector panel** (Task #14): trailing `.inspector` pane — edit selected entity geometry/layer/pen + **text font/style (native font picker + bold/italic + justification/height/width/oblique)**, all undoable via `.replace`. Snap-mode toggles + grid controls + full tool-config (Fillet/Chamfer/Array/Divide). Added CanvasModel state + edit funnels; merge-conflicted with text-authoring's `applyToolEdits` on CanvasModel — resolved by keeping both.
+- **wire-wave-b** (Task #13/#14): wired Text (⇧T) + 5 dimension tools (Linear=D, Aligned=I, Radius=U, Diameter=B, Angular=N) into ToolKind/toolbar/Tools-menu/keymap; canvas now honors Inspector `gridVisible`/`preferredGridSpacing` (grid draw + snap step).
+- **DXF MTEXT write** (Task #12): writer emits MTEXT (rawCode passthrough or run-tree → coded-string reconstruction via new `MTextEncoder`); lossless MTEXT round-trip. (DIMENSION write still a follow-up — needs dimension read too.)
+- **27 tool files**; Task #13 (authoring tools) DONE. STILL TODO: ⌘K command palette, on-canvas gizmos (modern-UX remainder); DocumentGroup/recents/autosave/dirty + DIMENSION DXF read+write (lossless-save remainder); SHX import (Phase 3); CI/signing.
+
 ## V3 — RICH TEXT + AUTHORING TOOLS + DIMENSIONS + EXPORT (2026-06-12)
 native-macos @ 87167ef96, **892 tests / 92 suites, 203 commits**. Big batch merged on top of the text foundation:
 - **Rich MTEXT** (Task #17): `.mtext` entity, inline-code parser (\f \H \C \S \L \O \P {}), per-run bold/italic/underline/color, stacked fractions, wrapping, attachment; DXF MTEXT import. (rich-mtext agent stalled on its final self-check AFTER committing; recovered — needed only a one-line `.mtext` arm in HatchTool from the parallel merge.)
