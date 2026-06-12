@@ -189,14 +189,55 @@ final class CADCanvasController {
         self.model = model
     }
 
+    /// The on-canvas transform gizmo overlay (a subview of the MTKView). Created in
+    /// `attach` and shown only in Select mode with a non-empty selection. It owns
+    /// the move/scale/rotate handle drag → undoable commit; the controller just
+    /// keeps it sized + refreshed as the view/selection/tool change.
+    private(set) var gizmo: GizmoOverlayView?
+
     func attach(view: FlippedMTKView, renderer: LineRenderer) {
         self.view = view
         self.renderer = renderer
+
+        // Float the transform gizmo over the canvas. It is transparent to clicks
+        // that are NOT on a handle (its `hitTest` returns nil there), so normal
+        // select/draw behavior is unchanged; it only claims a drag that starts on
+        // a handle.
+        let gizmoView = GizmoOverlayView(model: model) { [weak self] in self?.redraw() }
+        gizmoView.frame = view.bounds
+        gizmoView.autoresizingMask = [.width, .height]
+        view.addSubview(gizmoView)
+        gizmo = gizmoView
+        refreshGizmo()
+    }
+
+    /// Recomputes the gizmo handle positions and toggles its visibility: shown only
+    /// in Select mode with a non-empty selection (and never while an inline text
+    /// editor is open, so it doesn't fight the editor). Call after any change to the
+    /// selection, the viewport (pan/zoom), or the active tool.
+    func refreshGizmo() {
+        guard let gizmo else { return }
+        let showable = !model.isToolActive && textEditor == nil
+        if showable {
+            gizmo.refresh()                 // shows itself iff there is a selection
+        } else {
+            model.clearGizmoPreview()
+            gizmo.isHidden = true
+        }
     }
 
     // MARK: Redraw helpers
 
-    private func redraw() { view?.setNeedsDisplay(view?.bounds ?? .zero) }
+    private func redraw() {
+        // Keep the gizmo handles glued to the (possibly panned/zoomed/edited)
+        // selection on every repaint — EXCEPT mid-drag, where the gizmo owns its own
+        // frame (its drag math is relative to the frame captured at mouse-down, and
+        // it repaints itself). Refreshing mid-drag would not move the frame (the
+        // selection bounds are unchanged until commit) but we skip it to avoid any
+        // churn while the user is actively dragging a handle.
+        if let gizmo, !gizmo.isDragging { refreshGizmo() }
+        view?.setNeedsDisplay(view?.bounds ?? .zero)
+    }
 
     /// Public redraw hook for SwiftUI commands (e.g. Edit ▸ Delete) that mutate the
     /// model directly and need the canvas to repaint.
@@ -702,6 +743,13 @@ struct CADCanvasView: NSViewRepresentable {
         // Keep the model's view size in sync (drives Viewport.fit on resize-aware
         // commands). The drawable auto-resizes; we only need the point size.
         model.setViewSize(nsView.bounds.size)
+        // Re-glue the transform gizmo to the selection after any observed model
+        // change SwiftUI funnels through here (e.g. ⌘Z undo / redo, which mutate the
+        // drawing + clear the selection without going through the controller's
+        // `redraw`). Skipped mid-drag (the gizmo owns its frame then).
+        if let gizmo = context.coordinator.gizmo, !gizmo.isDragging {
+            context.coordinator.refreshGizmo()
+        }
         nsView.setNeedsDisplay(nsView.bounds)
     }
 }
