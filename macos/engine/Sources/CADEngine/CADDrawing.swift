@@ -707,6 +707,21 @@ public final class CompositeFontProvider: FontProvider, @unchecked Sendable {
             return nil
         }
     }
+
+    /// Traits-aware resolution: forward the style's bold/italic to the native
+    /// provider so a `TextStyle(bold:true)` selects a heavier face (stroke/SHX
+    /// ignore traits). Without this forwarding the protocol default would drop the
+    /// traits and bold/italic native styles would render Regular.
+    public func resolveFont(_ source: FontSource, bold: Bool, italic: Bool) -> ShapedFont? {
+        switch source {
+        case .native:
+            return native.resolveFont(source, bold: bold, italic: italic)
+        case .stroke:
+            return stroke.resolveFont(source)
+        case .shx:
+            return nil
+        }
+    }
 }
 
 /// Process-wide font registry feeding `ResolveContext.fontProvider`. Combines the

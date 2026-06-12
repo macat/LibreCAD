@@ -150,13 +150,16 @@ final class CanvasModel {
         modelVersion &+= 1
     }
 
-    /// Rebuilds the quadtree from the current drawing's per-entity AABBs.
+    /// Rebuilds the quadtree from the current drawing's per-entity AABBs. Text uses
+    /// the TIGHT font-aware box (via the drawing's ResolveContext) so glyph culling/
+    /// snapping match the real ink extent; all other kinds use the analytic box.
     func rebuildIndex() {
         quadtree.removeAll()
+        let ctx = drawing.makeResolveContext()
         let box = drawing.boundingBox()
         if !box.isEmpty { quadtree.reserveWorld(box) }
         for e in drawing.entities {
-            let b = e.boundingBox()
+            let b = e.boundingBox(ctx: ctx)
             if !b.isEmpty { quadtree.insert(e.id, bounds: b) }
         }
     }

@@ -34,8 +34,10 @@ public enum TextShaper {
     /// One shaped + placed line, in em space (pre-scale, pre-rotation): the
     /// glyph fills/strokes and the line's advance width + vertical metrics.
     struct ShapedLine {
-        /// Native outline loops (em space), grouped per glyph (each is a full
-        /// `GlyphGeometry.fills` already placed at its baseline x).
+        /// Native outline loops (em space), grouped per CONTAINMENT GROUP (one
+        /// `[outer, holes...]` sub-shape), already placed at its baseline x. A glyph
+        /// with disjoint outer blobs (i/j dot, Ø slash, accents) contributes ONE
+        /// entry per blob so each is emitted as its own positive-ink `ResolvedFill`.
         var fillGlyphs: [[[Vector]]]
         /// Stroke polylines (em space), placed at their baseline x.
         var strokePolylines: [[Vector]]
@@ -81,6 +83,16 @@ public enum TextShaper {
         let capHeight = metrics.capHeight > 0 ? metrics.capHeight : 1
         var scale = effectiveHeight / capHeight
 
+        // letterSpacingFactor (DXF / LibreCAD): a multiplier on the font's letter
+        // spacing. We express the EXTRA spacing as em-space `tracking` so both
+        // glyph sources honor it uniformly. The stroke shaper already adds the
+        // font's own `letterSpacing`; our base proxy is capHeight/3 (= the .lff
+        // letterSpacing 3.0 at capHeight 9.0), so total stroke spacing becomes
+        // `letterSpacing * factor` — the LibreCAD semantics. Native fonts get the
+        // same proportional adjustment (Core Text supplies the base advance/kern).
+        let baseLetterSpacing = capHeight / 3.0
+        let tracking = (data.letterSpacingFactor - 1.0) * baseLetterSpacing
+
         // .aligned / .fit consult secondPoint to fit the run between two points.
         // .aligned: rotate to the p1→p2 direction and UNIFORMLY scale so the run
         //           fills the gap (height auto-scales). .fit: same rotation, keep
@@ -95,7 +107,8 @@ public enum TextShaper {
                 // Measure the unscaled (em, widthFactor-applied) run width first.
                 let probeAttrs = RunAttributes(
                     bold: style.bold, italic: style.italic,
-                    obliqueAngle: oblique, widthFactor: widthFactor)
+                    obliqueAngle: oblique, widthFactor: widthFactor,
+                    tracking: tracking)
                 let probe = shapeLine(expanded.replacingOccurrences(of: "\n", with: ""),
                                       shaped: shaped, isNative: isNative,
                                       attrs: probeAttrs,
@@ -116,7 +129,7 @@ public enum TextShaper {
         let attrs = RunAttributes(
             bold: style.bold, italic: style.italic,
             obliqueAngle: oblique, widthFactor: widthFactor,
-            tracking: 0)
+            tracking: tracking)
         let tolerance = (ctx.tessellationTolerance / Swift.max(scale, 1e-9))   // em-space tolerance
 
         // 4. Shape each line (split on \n), collecting em-space geometry.
@@ -235,14 +248,17 @@ public enum TextShaper {
     /// Returns the shaper and whether it is a native (fill) source.
     static func resolveShaper(style: TextStyle, ctx: ResolveContext,
                               provider: any FontProvider) -> (ShapedFont, Bool)? {
-        // 1. Exact match for the style's primary font.
-        if let s = provider.resolveFont(style.primaryFont) {
+        // The style's bold/italic select a native face (stroke providers ignore them).
+        let bold = style.bold, italic = style.italic
+        // 1. Exact match for the style's primary font (with its bold/italic traits).
+        if let s = provider.resolveFont(style.primaryFont, bold: bold, italic: italic) {
             let isNative: Bool
             if case .native = style.primaryFont { isNative = true } else { isNative = false }
             return (s, isNative)
         }
-        // 2. Fall back to the default native family.
-        if let s = provider.resolveFont(.native(family: TextStyle.defaultNativeFamily)) {
+        // 2. Fall back to the default native family (still honoring bold/italic).
+        if let s = provider.resolveFont(.native(family: TextStyle.defaultNativeFamily),
+                                        bold: bold, italic: italic) {
             return (s, true)
         }
         // 3. Last resort: the `.lff` "standard" stroke font.
@@ -275,11 +291,14 @@ public enum TextShaper {
             let geo = shaped.glyphGeometry(pg.glyph, tolerance: tolerance)
             let gx = penX + pg.offset.x
             if isNative {
-                // Group ALL loops of one glyph (outer + counters) into ONE entry,
-                // so the renderer's hole-bridge cuts the counters out (the inside
-                // of O / e / A is loops[1...]).
-                if !geo.fills.isEmpty {
-                    let glyphLoops = geo.fills.map { loop in
+                // Emit ONE entry per CONTAINMENT GROUP (`[outer, holes...]`). Each
+                // group is a self-contained sub-shape: its outer is positive ink and
+                // only its OWN holes (counters) are subtracted by the renderer's
+                // per-fill hole-bridge. Disjoint outer blobs (i/j dot, Ø slash,
+                // accents) are separate groups ⇒ separate positive fills (NOT
+                // subtracted from the body).
+                for group in geo.fillGroups where !group.isEmpty {
+                    let glyphLoops = group.map { loop in
                         loop.map { Vector(($0.x + gx) * wf, $0.y) }
                     }
                     fillGlyphs.append(glyphLoops)

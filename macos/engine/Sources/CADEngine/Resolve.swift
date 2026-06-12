@@ -603,6 +603,15 @@ extension EntityRecord {
     public func boundingBox() -> AABB {
         kind.boundingBox()
     }
+
+    /// Context-aware bounding box: identical to `boundingBox()` except `.text`
+    /// returns the TIGHT, font-aware box when `ctx` carries a font provider (else
+    /// the loose metric estimate). The document/quadtree layer opts in by passing
+    /// its `ResolveContext`; every other caller keeps using the no-arg overload, so
+    /// there is no signature cascade. (text-system-design §8.4 step 6.)
+    public func boundingBox(ctx: ResolveContext) -> AABB {
+        kind.boundingBox(ctx: ctx)
+    }
 }
 
 extension EntityKind {
@@ -1219,6 +1228,20 @@ extension EntityKind {
     /// `RS_Math::correctAngle0ToPi(a1 − a2)` — unsigned angular difference in [0, π].
     static func unsignedAngleDiff(_ a1: Double, _ a2: Double) -> Double {
         abs((a1 - a2).remainder(dividingBy: 2 * Double.pi))
+    }
+
+    /// Context-aware bounding box: delegates to the analytic `boundingBox()` for
+    /// every kind EXCEPT `.text`, which uses the tight font-aware box (the actual
+    /// shaped glyph extents) when `ctx` has a font provider, falling back to the
+    /// loose estimate otherwise. The quadtree/document layer calls this so text
+    /// culling/snapping use the real ink extent. No other arm needs a ctx, so this
+    /// is a thin overlay over the no-arg path (no signature cascade).
+    public func boundingBox(ctx: ResolveContext) -> AABB {
+        if case .text(let d) = self {
+            if let tight = TextShaper.boundingBox(d, ctx: ctx) { return tight }
+            return Self.textBoundingBox(d)
+        }
+        return boundingBox()
     }
 
     /// Analytic bounding box where cheap (line/point/circle), exact for arcs

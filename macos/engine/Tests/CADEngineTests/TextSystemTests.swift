@@ -555,4 +555,303 @@ struct TextSystemBBoxTests {
         let d = TextData(position: Vector(0, 0), height: 10, text: "Hi")
         #expect(TextShaper.boundingBox(d, ctx: ctx) == nil)
     }
+
+    @Test("the ctx-aware EntityKind bbox uses the tight font-aware box for .text")
+    func ctxAwareTextBox() {
+        let ctx = TextSystemFixtures.nativeCtx()
+        let d = TextData(position: Vector(0, 0), height: 10, text: "Hi")
+        let tight = EntityKind.text(d).boundingBox(ctx: ctx)
+        let loose = EntityKind.text(d).boundingBox()         // no-ctx estimate
+        #expect(!tight.isEmpty)
+        // The font-aware box must be no WIDER than the loose estimate.
+        #expect((tight.max.x - tight.min.x) <= (loose.max.x - loose.min.x) + 1e-9)
+    }
+
+    @Test("the ctx-aware bbox without a provider falls back to the loose estimate")
+    func ctxAwareNoProviderFallsBack() {
+        let ctx = ResolveContext()   // no provider
+        let d = TextData(position: Vector(0, 0), height: 10, text: "Hi")
+        let viaCtx = EntityKind.text(d).boundingBox(ctx: ctx)
+        let loose = EntityKind.text(d).boundingBox()
+        #expect(viaCtx == loose)
+    }
+}
+
+// MARK: - Glyph winding by CONTAINMENT (the disjoint-blob bug regression)
+
+@Suite("TextSystem: glyph winding (containment)")
+struct TextSystemWindingTests {
+
+    private func font() throws -> CoreTextFont {
+        try #require(CADFonts.nativeProvider.font(
+            family: "Helvetica Neue", bold: false, italic: false))
+    }
+
+    /// Net POSITIVE ink area of a containment-grouped glyph: for each group, the
+    /// outer area MINUS the (absolute) area of its holes, summed across groups. This
+    /// is exactly what the renderer fills (per-fill hole subtraction). The OLD
+    /// area-heuristic code lumped disjoint blobs into a single fill so the secondary
+    /// blob was SUBTRACTED — this metric catches that.
+    private func netInk(_ geo: GlyphGeometry) -> Double {
+        var total = 0.0
+        for group in geo.fillGroups {
+            guard let outer = group.first else { continue }
+            total += abs(CoreTextFont.signedArea(outer))
+            for hole in group.dropFirst() {
+                total -= abs(CoreTextFont.signedArea(hole))
+            }
+        }
+        return total
+    }
+
+    /// Sum of |area| of EVERY contour (what disjoint positive blobs SHOULD total
+    /// when none of them are holes).
+    private func sumOfAllContourAreas(_ geo: GlyphGeometry) -> Double {
+        geo.fillGroups.flatMap { $0 }.reduce(0) { $0 + abs(CoreTextFont.signedArea($1)) }
+    }
+
+    @Test("':' keeps BOTH dots as positive ink (net ≈ sum of blobs, NOT blob0 − blob1)")
+    func colonDotsArePositive() throws {
+        let f = try font()
+        let glyphs = f.shape(":", attributes: .default)
+        let geo = f.glyphGeometry(glyphs[0].glyph, tolerance: 0.005)
+        // ':' is two disjoint dots, NO holes ⇒ two groups, each a lone outer.
+        #expect(geo.fillGroups.count == 2)
+        #expect(geo.fillGroups.allSatisfy { $0.count == 1 })
+        // Net ink == the sum of both dot areas (the bug would make net = big − small).
+        let net = netInk(geo)
+        let sum = sumOfAllContourAreas(geo)
+        #expect(abs(net - sum) < 1e-9)
+        // Every outer is CCW (positive ink), none flipped to a subtracted hole.
+        for group in geo.fillGroups {
+            #expect(CoreTextFont.signedArea(group[0]) > 0)
+        }
+    }
+
+    @Test("'i' keeps its tittle (dot) as positive ink, not a subtracted hole")
+    func iDotIsPositive() throws {
+        let f = try font()
+        let glyphs = f.shape("i", attributes: .default)
+        let geo = f.glyphGeometry(glyphs[0].glyph, tolerance: 0.005)
+        // The stem and the tittle are two disjoint outer blobs ⇒ ≥ 2 groups.
+        #expect(geo.fillGroups.count >= 2)
+        // No group is a net-negative subtraction: net ink ≈ sum of all blob areas
+        // (because none of i's blobs contain holes).
+        let net = netInk(geo)
+        let sum = sumOfAllContourAreas(geo)
+        #expect(abs(net - sum) < 1e-6)
+        #expect(net > 0)
+    }
+
+    @Test("'8' keeps BOTH counters as holes (two holes, subtracted)")
+    func eightHasTwoCounters() throws {
+        let f = try font()
+        let glyphs = f.shape("8", attributes: .default)
+        let geo = f.glyphGeometry(glyphs[0].glyph, tolerance: 0.005)
+        // ONE outer body with TWO counters ⇒ a single group of [outer, hole, hole].
+        #expect(geo.fillGroups.count == 1)
+        let group = geo.fillGroups[0]
+        #expect(group.count == 3)                              // outer + 2 counters
+        #expect(CoreTextFont.signedArea(group[0]) > 0)         // outer CCW
+        #expect(CoreTextFont.signedArea(group[1]) < 0)         // counter CW
+        #expect(CoreTextFont.signedArea(group[2]) < 0)         // counter CW
+        // Net ink is the body MINUS both counters (they are real holes).
+        let net = netInk(geo)
+        let sum = sumOfAllContourAreas(geo)
+        #expect(net < sum)                                     // holes subtracted
+        #expect(net > 0)
+    }
+
+    @Test("'B' keeps BOTH counters as holes in one group")
+    func bHasTwoCounters() throws {
+        let f = try font()
+        let glyphs = f.shape("B", attributes: .default)
+        let geo = f.glyphGeometry(glyphs[0].glyph, tolerance: 0.005)
+        #expect(geo.fillGroups.count == 1)
+        let group = geo.fillGroups[0]
+        #expect(group.count == 3)                              // outer + 2 counters
+        #expect(CoreTextFont.signedArea(group[0]) > 0)
+        #expect(group.dropFirst().allSatisfy { CoreTextFont.signedArea($0) < 0 })
+    }
+
+    @Test("'Ø' slash is INK: the body is positive, counters are real holes, net > 0")
+    func slashedOIsInk() throws {
+        let f = try font()
+        // In Helvetica Neue the Ø slash is part of the OUTER body and splits the
+        // counter into hole(s); the slash is therefore INK (positive outer), not a
+        // subtracted notch. Whatever the exact contour count, the invariant is:
+        // exactly one positive outer per group and a net-positive ink area.
+        let oxGeo = f.glyphGeometry(f.shape("Ø", attributes: .default)[0].glyph,
+                                    tolerance: 0.005)
+        #expect(!oxGeo.fillGroups.isEmpty)
+        for group in oxGeo.fillGroups {
+            #expect(CoreTextFont.signedArea(group[0]) > 0)               // outer is ink
+            #expect(group.dropFirst().allSatisfy { CoreTextFont.signedArea($0) < 0 })  // holes CW
+        }
+        #expect(netInk(oxGeo) > 0)
+    }
+
+    @Test("'=' bars are TWO disjoint positive blobs (NOT one bar minus the other)")
+    func equalsBarsArePositive() throws {
+        let f = try font()
+        let geo = f.glyphGeometry(f.shape("=", attributes: .default)[0].glyph,
+                                  tolerance: 0.005)
+        // Two disjoint bars, no holes ⇒ two single-outer groups.
+        #expect(geo.fillGroups.count == 2)
+        #expect(geo.fillGroups.allSatisfy { $0.count == 1 })
+        #expect(geo.fillGroups.allSatisfy { CoreTextFont.signedArea($0[0]) > 0 })
+        // Net ink == both bars summed (the OLD code subtracted the smaller bar).
+        #expect(abs(netInk(geo) - sumOfAllContourAreas(geo)) < 1e-9)
+    }
+
+    @Test("an accented 'ñ' keeps its tilde as a POSITIVE disjoint blob")
+    func accentedGlyphMarkIsInk() throws {
+        let f = try font()
+        let geo = f.glyphGeometry(f.shape("ñ", attributes: .default)[0].glyph,
+                                  tolerance: 0.005)
+        // The body + the tilde are disjoint outer blobs ⇒ ≥ 2 groups; the accent
+        // is positive ink (the OLD area-heuristic flipped it to a subtracted hole).
+        #expect(geo.fillGroups.count >= 2)
+        #expect(geo.fillGroups.allSatisfy { CoreTextFont.signedArea($0[0]) > 0 })
+        // No accent is subtracted: net ink ≈ sum of all blob areas (ñ has no
+        // counters, so nothing should be subtracted).
+        #expect(abs(netInk(geo) - sumOfAllContourAreas(geo)) < 1e-6)
+    }
+
+    @Test("point-in-polygon: a point inside a unit square is inside; outside is out")
+    func pointInPolygonBasics() {
+        let square = [Vector(0, 0), Vector(10, 0), Vector(10, 10), Vector(0, 10)]
+        #expect(CoreTextFont.pointInPolygon(Vector(5, 5), square))
+        #expect(!CoreTextFont.pointInPolygon(Vector(15, 5), square))
+        #expect(!CoreTextFont.pointInPolygon(Vector(-1, 5), square))
+    }
+
+    @Test("groupByContainment: nested square-in-square ⇒ one group [outer, hole]")
+    func groupNested() {
+        let outer = [Vector(0, 0), Vector(20, 0), Vector(20, 20), Vector(0, 20)]   // CCW
+        let inner = [Vector(5, 5), Vector(15, 5), Vector(15, 15), Vector(5, 15)]   // CCW too
+        let groups = CoreTextFont.groupByContainment([outer, inner])
+        #expect(groups.count == 1)
+        #expect(groups[0].count == 2)
+        #expect(CoreTextFont.signedArea(groups[0][0]) > 0)   // outer forced CCW
+        #expect(CoreTextFont.signedArea(groups[0][1]) < 0)   // hole forced CW
+    }
+
+    @Test("groupByContainment: two DISJOINT squares ⇒ two groups, both positive")
+    func groupDisjoint() {
+        let a = [Vector(0, 0), Vector(10, 0), Vector(10, 10), Vector(0, 10)]
+        let b = [Vector(20, 0), Vector(30, 0), Vector(30, 10), Vector(20, 10)]
+        let groups = CoreTextFont.groupByContainment([a, b])
+        #expect(groups.count == 2)
+        #expect(groups.allSatisfy { $0.count == 1 })
+        #expect(groups.allSatisfy { CoreTextFont.signedArea($0[0]) > 0 })
+    }
+}
+
+// MARK: - letterSpacingFactor + native bold/italic faces
+
+@Suite("TextSystem: spacing + faces")
+struct TextSystemSpacingFaceTests {
+
+    private func width(_ geo: ResolvedGeometry) -> Double {
+        var lo = Double.greatestFiniteMagnitude, hi = -Double.greatestFiniteMagnitude
+        for f in geo.fills { for loop in f.loops { for p in loop { lo = min(lo, p.x); hi = max(hi, p.x) } } }
+        for pl in geo.polylines { for p in pl.points { lo = min(lo, p.x); hi = max(hi, p.x) } }
+        return hi - lo
+    }
+
+    @Test("a larger letterSpacingFactor widens native text layout")
+    func letterSpacingWidensNative() {
+        let ctx = TextSystemFixtures.nativeCtx()
+        let pen = ResolvedPen(color: .black, lineType: .solid, lineWidth: .default)
+        let normal = TextData(position: Vector(0, 0), height: 10, text: "AAAA",
+                              letterSpacingFactor: 1.0)
+        let wide = TextData(position: Vector(0, 0), height: 10, text: "AAAA",
+                            letterSpacingFactor: 3.0)
+        let wN = width(EntityKind.text(normal).resolve(pen: pen, ctx: ctx))
+        let wW = width(EntityKind.text(wide).resolve(pen: pen, ctx: ctx))
+        #expect(wN > 0)
+        #expect(wW > wN)              // extra tracking pushes glyphs apart
+    }
+
+    @Test("a larger letterSpacingFactor widens .lff stroke text layout")
+    func letterSpacingWidensStroke() throws {
+        let provider = try TextSystemFixtures.strokeProvider()
+        var built = TextStyleTable()
+        built.upsert(TextStyle(name: "S", primaryFont: .stroke(lff: "standard")))
+        let table = built
+        let ctx = ResolveContext(tessellationTolerance: 0.01, fontProvider: provider,
+                                 textStyleProvider: { table.style(named: $0) })
+        let pen = ResolvedPen(color: .black, lineType: .solid, lineWidth: .default)
+        let normal = TextData(position: Vector(0, 0), height: 10, text: "AAAA",
+                              styleName: "S", letterSpacingFactor: 1.0)
+        let wide = TextData(position: Vector(0, 0), height: 10, text: "AAAA",
+                            styleName: "S", letterSpacingFactor: 2.5)
+        let wN = width(EntityKind.text(normal).resolve(pen: pen, ctx: ctx))
+        let wW = width(EntityKind.text(wide).resolve(pen: pen, ctx: ctx))
+        #expect(wN > 0)
+        #expect(wW > wN)
+    }
+
+    @Test("bold selects a heavier face (a glyph advances differently than Regular)")
+    func boldSelectsHeavierFace() throws {
+        let regular = try #require(CADFonts.nativeProvider.font(
+            family: "Helvetica Neue", bold: false, italic: false))
+        let bold = try #require(CADFonts.nativeProvider.font(
+            family: "Helvetica Neue", bold: true, italic: false))
+        // A bold face is a DIFFERENT CTFont: the glyph advance for the same string
+        // differs from Regular (bold glyphs are wider).
+        let aReg = regular.shape("ABCDEF", attributes: .default)
+        let aBold = bold.shape("ABCDEF", attributes: .default)
+        let advReg = aReg.reduce(0) { $0 + $1.advance.x }
+        let advBold = aBold.reduce(0) { $0 + $1.advance.x }
+        #expect(advReg > 0 && advBold > 0)
+        #expect(advReg != advBold)        // a different (heavier) face
+    }
+
+    @Test("a bold TextStyle routes the trait into the face (heavier than Regular)")
+    func boldStyleRoutesTrait() {
+        // A style with bold:true must resolve to a heavier face: the resolved
+        // glyph outline area for a fixed string exceeds the Regular style's.
+        var built = TextStyleTable()
+        built.upsert(TextStyle(name: "Bold",
+                               primaryFont: .native(family: "Helvetica Neue"), bold: true))
+        built.upsert(TextStyle(name: "Reg",
+                               primaryFont: .native(family: "Helvetica Neue"), bold: false))
+        let table = built
+        let ctx = ResolveContext(tessellationTolerance: 0.01,
+                                 fontProvider: CADFonts.provider,
+                                 textStyleProvider: { table.style(named: $0) })
+        let pen = ResolvedPen(color: .black, lineType: .solid, lineWidth: .default)
+        func inkArea(_ name: String) -> Double {
+            let d = TextData(position: Vector(0, 0), height: 10, text: "HELLO", styleName: name)
+            let geo = EntityKind.text(d).resolve(pen: pen, ctx: ctx)
+            var a = 0.0
+            for f in geo.fills {
+                if let outer = f.loops.first { a += abs(CoreTextFont.signedArea(outer)) }
+            }
+            return a
+        }
+        let bold = inkArea("Bold")
+        let reg = inkArea("Reg")
+        #expect(bold > 0 && reg > 0)
+        #expect(bold > reg)              // bold strokes are heavier ⇒ more ink
+    }
+
+    @Test("italic selects a different (slanted) face")
+    func italicSelectsFace() throws {
+        let regular = try #require(CADFonts.nativeProvider.font(
+            family: "Helvetica Neue", bold: false, italic: false))
+        let italic = try #require(CADFonts.nativeProvider.font(
+            family: "Helvetica Neue", bold: false, italic: true))
+        // An italic face is a distinct CTFont: a glyph's outline differs from Regular.
+        let g = regular.shape("a", attributes: .default)[0].glyph
+        let gi = italic.shape("a", attributes: .default)[0].glyph
+        let rGeo = regular.glyphGeometry(g, tolerance: 0.005)
+        let iGeo = italic.glyphGeometry(gi, tolerance: 0.005)
+        #expect(!rGeo.isEmpty && !iGeo.isEmpty)
+        // The slanted face has different glyph extents (top shifted right vs bottom).
+        let rb = rGeo.bounds()!, ib = iGeo.bounds()!
+        #expect(rb.min.x != ib.min.x || rb.max.x != ib.max.x)
+    }
 }
