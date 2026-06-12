@@ -84,6 +84,50 @@ public struct ResolvedGeometry: Sendable, Equatable {
     }
 }
 
+// MARK: - Document dimension style (the resolved dim defaults)
+
+/// The document-default dimension style (decision D4) — the values a dimension
+/// falls back to when it carries no explicit per-entity override. Supplied to the
+/// resolve step via `ResolveContext.dimStyleProvider`, wired by
+/// `CADDrawing.makeResolveContext` from the drawing's `$DIMTXT`/`$DIMASZ`/
+/// `$DIMSCALE`/`$DIMLUNIT`/`$DIMDEC` header vars (the Document Settings sheet
+/// writes those).
+///
+/// ## Precedence (D4: per-entity wins; document default fills in)
+/// A dimension's resolve consults this ONLY when the per-entity value is
+/// non-positive (`<= 0`, the "inherit" sentinel). So a dimension authored with a
+/// real text height keeps it; one born with `0` picks up `textHeight` here. The
+/// `scale` multiplies the effective text height + arrow size at draw time
+/// (`$DIMSCALE`), and `linearFormat`/`linearPrecision` format the measurement text.
+public struct ResolvedDimStyle: Sendable, Hashable {
+    /// Document-default measurement-text cap height (world units, `$DIMTXT`).
+    public var textHeight: Double
+    /// Document-default arrowhead length (world units, `$DIMASZ`).
+    public var arrowSize: Double
+    /// Overall dimension scale (`$DIMSCALE`) — multiplies text + arrow at draw time.
+    public var scale: Double
+    /// How the measurement text's linear value is formatted (`$DIMLUNIT`).
+    public var linearFormat: LinearFormat
+    /// Measurement-text linear precision (decimal places, `$DIMDEC`).
+    public var linearPrecision: Int
+
+    public init(textHeight: Double = 2.5,
+                arrowSize: Double = 2.5,
+                scale: Double = 1.0,
+                linearFormat: LinearFormat = .decimal,
+                linearPrecision: Int = 4) {
+        self.textHeight = textHeight
+        self.arrowSize = arrowSize
+        self.scale = scale
+        self.linearFormat = linearFormat
+        self.linearPrecision = linearPrecision
+    }
+
+    /// The built-in defaults (used when no provider is wired) — matches the
+    /// engine's historical hard-coded dimension defaults.
+    public static let `default` = ResolvedDimStyle()
+}
+
 // MARK: - Resolve context (style / tessellation hooks)
 
 /// Inputs the `resolve()` step needs that are NOT part of the entity: how finely
@@ -122,10 +166,17 @@ public struct ResolveContext: Sendable {
     /// the default) and `StrokeFontProvider` (`.lff` → polyline strokes). `nil`
     /// makes text resolve to empty geometry rather than crash. Wired by
     /// `CADDrawing.makeResolveContext`.
-    ///
-    /// Reserved for additive extension by the other single owners (do not diverge):
-    /// `// var dimStyleProvider: ((DimStyleID) -> ResolvedDimStyle)? = nil` — Dimension owner.
     public var fontProvider: (any FontProvider)? = nil
+
+    /// The document-default dimension style (decision D4). The `.dimension` resolve
+    /// arm consults it for any value a dimension does NOT carry explicitly (a
+    /// non-positive per-entity `textHeight`/`arrowSize` is the "inherit" sentinel),
+    /// and it supplies the overall scale + measurement-text format/precision. `nil`
+    /// (the default) ⇒ the resolve uses the engine's built-in `ResolvedDimStyle`
+    /// defaults, so existing callers/tests are unchanged. Wired by
+    /// `CADDrawing.makeResolveContext` from the drawing's `$DIM*` header vars (the
+    /// Document Settings sheet writes those). Previously the reserved hook.
+    public var dimStyleProvider: (@Sendable () -> ResolvedDimStyle)? = nil
 
     /// Resolves a text-style NAME (DXF code 7, e.g. "Standard") to a concrete
     /// `TextStyle` (font source, height, width factor, oblique, annotative …),
@@ -152,7 +203,8 @@ public struct ResolveContext: Sendable {
         currentBlockPen: ResolvedPen? = nil,
         fontProvider: (any FontProvider)? = nil,
         textStyleProvider: (@Sendable (String) -> TextStyle?)? = nil,
-        annotationScale: Double = 1.0
+        annotationScale: Double = 1.0,
+        dimStyleProvider: (@Sendable () -> ResolvedDimStyle)? = nil
     ) {
         self.tessellationTolerance = tessellationTolerance
         self.layerAttributes = layerAttributes
@@ -161,6 +213,7 @@ public struct ResolveContext: Sendable {
         self.fontProvider = fontProvider
         self.textStyleProvider = textStyleProvider
         self.annotationScale = annotationScale
+        self.dimStyleProvider = dimStyleProvider
     }
 
     /// A sensible default context for tests/previews.
@@ -769,39 +822,61 @@ extension EntityKind {
         }
     }
 
-    /// Effective measurement-text height (style → default fallback).
-    static func dimTextHeight(_ d: DimData) -> Double {
-        d.textHeight > 0 ? d.textHeight : dimDefaultTextHeight
+    /// The document dimension style for this resolve (the wired provider, or the
+    /// engine's built-in defaults when none is supplied).
+    static func dimStyle(_ ctx: ResolveContext) -> ResolvedDimStyle {
+        ctx.dimStyleProvider?() ?? .default
     }
 
-    /// Effective arrow size (style → default fallback).
-    static func dimArrowSize(_ d: DimData) -> Double {
-        d.arrowSize > 0 ? d.arrowSize : dimDefaultArrowSize
+    /// Effective measurement-text height (decision D4): the per-entity value WINS
+    /// when set (`> 0`); otherwise the DOCUMENT default fills in (`$DIMTXT` via the
+    /// `dimStyleProvider`). The result is multiplied by the document's overall
+    /// dimension scale (`$DIMSCALE`). Falls back to the engine default when no
+    /// provider is wired.
+    static func dimTextHeight(_ d: DimData, ctx: ResolveContext = .default) -> Double {
+        let style = dimStyle(ctx)
+        let base = d.textHeight > 0 ? d.textHeight
+            : (style.textHeight > 0 ? style.textHeight : dimDefaultTextHeight)
+        return base * (style.scale > 0 ? style.scale : 1.0)
     }
 
-    /// Formats a measured length/diameter/radius for the label (trims trailing
-    /// zeros so "10.0" reads "10"; falls back to a short decimal otherwise).
-    static func dimFormat(_ value: Double) -> String {
-        let rounded = (value * 1e4).rounded() / 1e4
-        if abs(rounded - rounded.rounded()) < 1e-9 {
+    /// Effective arrow size (decision D4): per-entity wins when set; document
+    /// default (`$DIMASZ`) fills in otherwise, then scaled by `$DIMSCALE`.
+    static func dimArrowSize(_ d: DimData, ctx: ResolveContext = .default) -> Double {
+        let style = dimStyle(ctx)
+        let base = d.arrowSize > 0 ? d.arrowSize
+            : (style.arrowSize > 0 ? style.arrowSize : dimDefaultArrowSize)
+        return base * (style.scale > 0 ? style.scale : 1.0)
+    }
+
+    /// Formats a measured length/diameter/radius for the label at `precision`
+    /// decimal places (the document's `$DIMDEC`; default 4 to match the historical
+    /// behavior + existing tests), trimming trailing zeros so "10.0" reads "10".
+    static func dimFormat(_ value: Double, precision: Int = 4) -> String {
+        let p = Swift.max(0, Swift.min(12, precision))
+        let factor = pow(10.0, Double(p))
+        let rounded = (value * factor).rounded() / factor
+        if abs(rounded - rounded.rounded()) < (0.5 / factor) {
             return String(Int(rounded.rounded()))
         }
-        // Up to 4 decimals, trailing zeros stripped.
-        var s = String(format: "%.4f", rounded)
+        // Up to `p` decimals, trailing zeros stripped.
+        var s = String(format: "%.\(p)f", rounded)
         while s.hasSuffix("0") { s.removeLast() }
         if s.hasSuffix(".") { s.removeLast() }
         return s
     }
 
     /// The label string for a dimension: the explicit override if present
-    /// (a single space suppresses the text), else the computed measurement.
-    static func dimLabel(_ d: DimData, measured: Double, suffix: String = "") -> String {
+    /// (a single space suppresses the text), else the computed measurement
+    /// formatted at the document's `$DIMDEC` precision (via `dimStyleProvider`).
+    static func dimLabel(_ d: DimData, measured: Double, suffix: String = "",
+                         ctx: ResolveContext = .default) -> String {
         if let override = d.textOverride {
             // A single space is the DXF convention for "suppress the text".
             if override == " " { return "" }
             if !override.isEmpty { return override }
         }
-        return suffix + dimFormat(measured)
+        return suffix + dimFormat(measured, precision: dimStyle(ctx).linearPrecision)
     }
 
     /// A filled arrowhead triangle (as a `ResolvedFill`) whose tip is at `tip`
@@ -841,8 +916,8 @@ extension EntityKind {
     static func dimLinearOrAligned(_ d: DimData, p1: Vector, p2: Vector, fixedAngle: Double?,
                                    pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
         guard p1.valid, p2.valid, d.definitionPoint.valid else { return ResolvedGeometry() }
-        let arrow = dimArrowSize(d)
-        let textH = dimTextHeight(d)
+        let arrow = dimArrowSize(d, ctx: ctx)
+        let textH = dimTextHeight(d, ctx: ctx)
 
         // Dimension-line direction (unit). Aligned: along p1→p2. Linear: the
         // fixed angle (the perpendicular distance between the points is measured
@@ -915,7 +990,7 @@ extension EntityKind {
         }
 
         // Measurement text centered above the dimension line.
-        let label = dimLabel(d, measured: measured)
+        let label = dimLabel(d, measured: measured, ctx: ctx)
         let textCenter = (d.textMiddle.flatMap { $0.valid ? $0 : nil })
             ?? (dimP1 + dimP2) * 0.5 + normal * (textH * 0.7)
         // Keep text upright-ish: normalize the baseline angle to [-90°, 90°].
@@ -941,8 +1016,8 @@ extension EntityKind {
     static func dimRadial(_ d: DimData, center: Vector, pointOnCircle: Vector,
                           pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
         guard center.valid, pointOnCircle.valid else { return ResolvedGeometry() }
-        let arrow = dimArrowSize(d)
-        let textH = dimTextHeight(d)
+        let arrow = dimArrowSize(d, ctx: ctx)
+        let textH = dimTextHeight(d, ctx: ctx)
 
         let radial = pointOnCircle - center
         let radius = radial.magnitude
@@ -958,7 +1033,7 @@ extension EntityKind {
         fills.append(dimArrowhead(tip: pointOnCircle, direction: -outward, size: arrow, color: pen.color))
 
         // Label "R<radius>" near the mid-leader, baseline along the leader.
-        let label = dimLabel(d, measured: radius, suffix: "R")
+        let label = dimLabel(d, measured: radius, suffix: "R", ctx: ctx)
         let normal = Vector(-outward.y, outward.x)
         let textCenter = (d.textMiddle.flatMap { $0.valid ? $0 : nil })
             ?? center + outward * (radius * 0.5) + normal * (textH * 0.7)
@@ -974,8 +1049,8 @@ extension EntityKind {
     static func dimDiameter(_ d: DimData, point1: Vector, point2: Vector,
                             pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
         guard point1.valid, point2.valid else { return ResolvedGeometry() }
-        let arrow = dimArrowSize(d)
-        let textH = dimTextHeight(d)
+        let arrow = dimArrowSize(d, ctx: ctx)
+        let textH = dimTextHeight(d, ctx: ctx)
 
         let across = point2 - point1
         let diameter = across.magnitude
@@ -991,7 +1066,7 @@ extension EntityKind {
         fills.append(dimArrowhead(tip: point2, direction: -along, size: arrow, color: pen.color))
 
         // Label "⌀<diameter>" centered above the diameter line.
-        let label = dimLabel(d, measured: diameter, suffix: "\u{2300}")
+        let label = dimLabel(d, measured: diameter, suffix: "\u{2300}", ctx: ctx)
         let normal = Vector(-along.y, along.x)
         let textCenter = (d.textMiddle.flatMap { $0.valid ? $0 : nil })
             ?? (point1 + point2) * 0.5 + normal * (textH * 0.7)
@@ -1043,8 +1118,8 @@ extension EntityKind {
                            pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
         guard line1.0.valid, line1.1.valid, line2.0.valid, line2.1.valid,
               d.definitionPoint.valid else { return ResolvedGeometry() }
-        let arrow = dimArrowSize(d)
-        let textH = dimTextHeight(d)
+        let arrow = dimArrowSize(d, ctx: ctx)
+        let textH = dimTextHeight(d, ctx: ctx)
 
         // Vertex + start angle + SIGNED sweep, with the sector selected by the
         // definition point (M1 — the single shared source of truth).

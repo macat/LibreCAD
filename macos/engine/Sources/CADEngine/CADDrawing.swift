@@ -276,6 +276,79 @@ public struct GraphicVariables: Sendable, Hashable, Codable {
         set { setVector("$PINSBASE", newValue) }
     }
 
+    // MARK: Document Settings additions (V4 — Document Settings sheet)
+    //
+    // The settings sheet (Units / Grid & Snap / Dimensions / Paper) surfaces these
+    // as editable, DXF-round-tripping document state. Each is a standard AutoCAD
+    // header var EXCEPT `$LC_SNAPMODE`, a LibreCAD-private var for the app-only snap
+    // mode set (decision D5). All follow the same one-line typed-accessor pattern as
+    // the accessors above, so they persist + round-trip through the `values` bag for
+    // free (set → read in memory, and via the DXF header bridge when it carries
+    // them — other CAD apps ignore unknown `$`-vars gracefully).
+
+    /// `$GRIDUNIT` — the user's preferred grid spacing in world units (the X
+    /// component; LibreCAD stores grid spacing as a vector but the app uses a single
+    /// uniform spacing). Defaults to 1. Mirrors `model.preferredGridSpacing`.
+    public var gridSpacing: Double {
+        get {
+            // Stored as a vector ($GRIDUNIT is DXF code 10/20); read the X. Fall back
+            // to a scalar double if a prior write used one, then the default.
+            if let v = values["$GRIDUNIT"]?.vectorValue { return v.x }
+            return double("$GRIDUNIT", default: 1.0)
+        }
+        set { setVector("$GRIDUNIT", Vector(newValue, newValue)) }
+    }
+
+    /// `$DIMTXT` — the document-default dimension measurement-text height (world
+    /// units). New dimensions are born with this; existing dims without an explicit
+    /// per-entity height fall back to it via the resolve hook (D4). Defaults 2.5.
+    public var dimTextHeight: Double {
+        get { double("$DIMTXT", default: 2.5) }
+        set { setDouble("$DIMTXT", newValue) }
+    }
+
+    /// `$DIMASZ` — the document-default dimension arrowhead size (world units).
+    /// Defaults 2.5.
+    public var dimArrowSize: Double {
+        get { double("$DIMASZ", default: 2.5) }
+        set { setDouble("$DIMASZ", newValue) }
+    }
+
+    /// `$DIMSCALE` — the overall dimension scale factor (multiplies text + arrow at
+    /// draw time; pairs with `ResolveContext.annotationScale`). Defaults 1.
+    public var dimScale: Double {
+        get { double("$DIMSCALE", default: 1.0) }
+        set { setDouble("$DIMSCALE", newValue) }
+    }
+
+    /// `$DIMLUNIT` — the dimension-text linear unit format. DXF codes match
+    /// `$LUNITS` (1=Scientific, 2=Decimal, 3=Engineering, 4=Architectural,
+    /// 5=Fractional). Defaults Decimal (mirrors the drawing's linear format).
+    public var dimLinearFormat: LinearFormat {
+        get { Self.linearFormat(fromDXF: int("$DIMLUNIT", default: 2)) }
+        set { setInt("$DIMLUNIT", Self.dxfLUNITS(for: newValue)) }
+    }
+
+    /// `$DIMDEC` — the dimension-text linear precision (decimal places). Defaults 4
+    /// (mirrors `$LUPREC`).
+    public var dimLinearPrecision: Int {
+        get { int("$DIMDEC", default: 4) }
+        set { setInt("$DIMDEC", newValue) }
+    }
+
+    /// `$LC_SNAPMODE` — a LibreCAD-PRIVATE header var persisting the app's enabled
+    /// snap-mode set (`SnapMode.rawValue`, decision D5). It has no standard DXF
+    /// header var; we store it as a custom `$`-var so it travels with the document
+    /// and round-trips (other CAD apps ignore unknown header vars). `nil` (unset) ⇒
+    /// the app keeps its built-in interactive default.
+    public var snapModeRaw: Int? {
+        get { values["$LC_SNAPMODE"]?.intValue }
+        set {
+            if let newValue { setInt("$LC_SNAPMODE", newValue) }
+            else { remove("$LC_SNAPMODE") }
+        }
+    }
+
     // MARK: DXF code ↔ enum (LC_GraphicVariables::convertLinearFormatDXF2LC etc.)
 
     /// Maps a DXF `$LUNITS` code to a `LinearFormat`
@@ -600,6 +673,24 @@ public final class CADDrawing {
         mutateBlocks { $0.activate(name) }
     }
 
+    // MARK: - Graphic-variable mutations (value-snapshot undo of the whole bag)
+
+    /// Whole-bag graphic-variable mutation with undo — the same value-snapshot
+    /// scheme as `mutateLayers`/`mutateBlocks` (`GraphicVariables` is a value type,
+    /// so the undo snapshot is one struct copy, ADR-002). The Document Settings
+    /// sheet funnels EVERY header-var edit (units, precision, grid spacing, dim
+    /// defaults, snap modes…) through this so each change is undoable and SwiftUI
+    /// sees the `graphicVariables` mutation. No-op edits don't pollute undo (D3:
+    /// live-apply, one undo step per field).
+    public func mutateGraphicVariables(_ body: (inout GraphicVariables) -> Void) {
+        let prior = graphicVariables
+        body(&graphicVariables)
+        guard graphicVariables != prior else { return }   // no-op edits skip undo
+        registerUndo { drawing in
+            drawing.mutateGraphicVariables { $0 = prior }
+        }
+    }
+
     // MARK: - Undo plumbing
 
     /// Registers a value-snapshot undo closure. The closure captures the prior
@@ -659,6 +750,10 @@ public final class CADDrawing {
         let table = layers
         // Snapshot the STYLE table into a Sendable closure (value type copy).
         let styleTable = textStyles
+        // Snapshot the document dimension style from the header vars (value copy) so
+        // the resolve hook fills document defaults for dims without per-entity
+        // overrides (decision D4). These are the Document Settings sheet's `$DIM*`.
+        let docDimStyle = dimensionStyle
         return ResolveContext(
             tessellationTolerance: tessellationTolerance,
             layerAttributes: { layerID in
@@ -667,7 +762,22 @@ public final class CADDrawing {
             },
             fontProvider: CADFonts.provider,
             textStyleProvider: { name in styleTable.style(named: name) },
-            annotationScale: annotationScale
+            annotationScale: annotationScale,
+            dimStyleProvider: { docDimStyle }
+        )
+    }
+
+    /// The document-default dimension style assembled from the `$DIM*` header vars
+    /// (the Document Settings sheet writes these). Fed to `ResolveContext.
+    /// dimStyleProvider` so dimensions without per-entity overrides pick up the
+    /// document defaults (decision D4).
+    public var dimensionStyle: ResolvedDimStyle {
+        ResolvedDimStyle(
+            textHeight: graphicVariables.dimTextHeight,
+            arrowSize: graphicVariables.dimArrowSize,
+            scale: graphicVariables.dimScale,
+            linearFormat: graphicVariables.dimLinearFormat,
+            linearPrecision: graphicVariables.dimLinearPrecision
         )
     }
 

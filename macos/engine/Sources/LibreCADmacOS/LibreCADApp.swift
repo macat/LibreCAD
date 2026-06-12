@@ -34,6 +34,8 @@ struct LibreCADApp: App {
     /// The "open command palette" (⌘K) action published by the focused window.
     @FocusedValue(\.commandPalette) private var commandPalette
     @FocusedValue(\.focusCommandLine) private var focusCommandLine
+    /// The "open Document Settings" (⌥⌘,) action published by the focused window (D8).
+    @FocusedValue(\.openDocumentSettings) private var openDocumentSettings
     /// The Zoom-to-Fit action published by the focused window.
     @FocusedValue(\.zoomToFit) private var zoomToFit
     /// Export (PDF/PNG/SVG) and Print actions published by the focused window.
@@ -79,6 +81,15 @@ struct LibreCADApp: App {
                 Button("Print…") { printDocument?() }
                     .keyboardShortcut("p", modifiers: .command)
                     .disabled(printDocument == nil)
+
+                Divider()
+                // File ▸ Document Settings… (⌥⌘, — decision D8). The per-document
+                // settings sheet (units / grid & snap / dimensions / layers / paper).
+                // ⌘, is reserved for a future app-level Preferences, so document
+                // settings take ⌥⌘,. Routed to the focused window via a focused value.
+                Button("Document Settings…") { openDocumentSettings?() }
+                    .keyboardShortcut(",", modifiers: [.command, .option])
+                    .disabled(openDocumentSettings == nil)
             }
             // Undo / redo. DocumentGroup provides system Undo/Redo bound to the
             // document's environment UndoManager — which our model now ADOPTS, so
