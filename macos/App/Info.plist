@@ -8,6 +8,8 @@
 	<string>LibreCAD</string>
 	<key>CFBundleExecutable</key>
 	<string>LibreCADmacOS</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>org.librecad.macos</string>
 	<key>CFBundleVersion</key>

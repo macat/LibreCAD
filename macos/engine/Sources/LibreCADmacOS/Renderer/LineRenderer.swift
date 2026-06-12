@@ -392,8 +392,16 @@ final class LineRenderer: NSObject, MTKViewDelegate {
         // (resolve() already falls back to the default pen for a missing layer).
         if layers.layer(e.layer)?.isVisible == false { return }
         let geo = e.resolve(ctx)
+        // In light mode (`OverlayStyle.invertNearWhiteEntities`), flip near-white
+        // "automatic color" pens to near-black so the default drawing color stays
+        // legible on the light canvas; in dark mode this is the identity transform.
+        let identity: (SIMD4<Float>) -> SIMD4<Float> = { $0 }
+        let colorTransform: (SIMD4<Float>) -> SIMD4<Float> =
+            OverlayStyle.invertNearWhiteEntities ? RendererGeometry.autoInvertWhite : identity
         for poly in geo.polylines {
-            RendererGeometry.appendInstances(for: poly, renderOrigin: origin, into: &instanceScratch)
+            RendererGeometry.appendInstances(for: poly, renderOrigin: origin,
+                                             colorTransform: colorTransform,
+                                             into: &instanceScratch)
         }
         for fill in geo.fills {
             RendererGeometry.appendFillVertices(for: fill, renderOrigin: origin, into: &fillScratch)

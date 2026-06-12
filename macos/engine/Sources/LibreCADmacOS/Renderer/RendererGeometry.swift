@@ -201,6 +201,25 @@ enum RendererGeometry {
     /// the foundation every stroke uses this constant — flagged in the brief.)
     static let defaultHalfWidthPx: Float = 0.75
 
+    /// Light-mode "automatic color" auto-invert: a pen whose RGB is near-white
+    /// (the CAD color-7 / "automatic" default the engine resolves to white for a
+    /// dark canvas) is flipped to near-black so it stays legible on a light canvas
+    /// — the standard AutoCAD/LibreCAD behavior. Any pen with an explicit non-white
+    /// color (a layer color, an entity override) is returned UNCHANGED. Alpha is
+    /// preserved. Pure value math → unit-testable.
+    ///
+    /// "Near-white" is min(r,g,b) ≥ `whiteThreshold` so a faint off-white default
+    /// still inverts while a real light-gray drawing color does not.
+    static func autoInvertWhite(_ c: SIMD4<Float>) -> SIMD4<Float> {
+        let whiteThreshold: Float = 0.85
+        if min(c.x, c.y, c.z) >= whiteThreshold {
+            // Near-black with the same alpha (a hair above pure black so it reads
+            // as ink, not a void, against the off-white canvas).
+            return SIMD4<Float>(0.10, 0.10, 0.12, c.w)
+        }
+        return c
+    }
+
     /// Expands one resolved polyline into per-segment `LineInstance`s.
     ///
     /// - A polyline of N points yields N−1 segment instances (open) or N segment
@@ -215,21 +234,28 @@ enum RendererGeometry {
     ///   - polyline: the resolved polyline (world coords, f64).
     ///   - renderOrigin: the per-view f64 floating origin to subtract.
     ///   - halfWidthPx: device-pixel half-width for every emitted segment.
+    ///   - colorTransform: an optional per-pen color remap applied to the pen's
+    ///     RGBA before packing (identity by default). The renderer uses this for
+    ///     the light-mode "automatic color" auto-invert (near-white → near-black)
+    ///     so the default drawing color stays legible on a light canvas; passing
+    ///     nothing leaves the resolved pen color untouched (so this is GPU-free and
+    ///     the unit tests' colors pass through unchanged).
     ///   - into: the instance array to append to (lets the caller pack many
     ///     polylines into one contiguous buffer with no intermediate allocation).
     static func appendInstances(
         for polyline: ResolvedPolyline,
         renderOrigin: Vector,
         halfWidthPx: Float = defaultHalfWidthPx,
+        colorTransform: (SIMD4<Float>) -> SIMD4<Float> = { $0 },
         into instances: inout [LineInstance]
     ) {
         let pts = polyline.points
         guard !pts.isEmpty else { return }
 
-        let color = SIMD4<Float>(
+        let color = colorTransform(SIMD4<Float>(
             polyline.pen.color.r, polyline.pen.color.g,
             polyline.pen.color.b, polyline.pen.color.a
-        )
+        ))
 
         // Degenerate single point → zero-length segment (drawn as a dot).
         if pts.count == 1 {

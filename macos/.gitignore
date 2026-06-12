@@ -5,6 +5,10 @@ engine/.build/
 # Assembled app bundles
 build/
 
+# Regenerated icon intermediate (the .icns + the generator script ARE committed;
+# the .iconset is rebuilt from make-icon.swift by make-app.sh).
+assets/AppIcon/AppIcon.iconset/
+
 # macOS / Xcode noise
 .DS_Store
 DerivedData/

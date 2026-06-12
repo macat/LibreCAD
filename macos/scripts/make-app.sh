@@ -19,6 +19,9 @@ ENGINE_DIR="${MACOS_DIR}/engine"
 INFO_PLIST_SRC="${MACOS_DIR}/App/Info.plist"
 SAMPLE_DXF_SRC="${REPO_DIR}/librecad/res/dxf/dim_sample.dxf"
 FONTS_SRC_DIR="${REPO_DIR}/librecad/support/fonts"
+ICON_DIR="${MACOS_DIR}/assets/AppIcon"
+ICON_GEN="${ICON_DIR}/make-icon.swift"      # programmatic, offline icon generator
+ICON_ICNS="${ICON_DIR}/AppIcon.icns"        # committed fallback (regenerated below)
 BUILD_DIR="${MACOS_DIR}/build"
 APP_DIR="${BUILD_DIR}/LibreCADmacOS.app"
 CONFIG="${CONFIG:-debug}"        # set CONFIG=release for a release build
@@ -68,6 +71,33 @@ if [[ -d "${FONTS_SRC_DIR}" ]]; then
     fi
 else
     echo "warning: fonts dir not found at ${FONTS_SRC_DIR}; bundled app will fall back to the repo path for text" >&2
+fi
+
+# App icon (Info.plist sets CFBundleIconFile = AppIcon, so the bundle needs
+# Contents/Resources/AppIcon.icns). The icon is generated PROGRAMMATICALLY +
+# OFFLINE: regenerate the .iconset PNGs from the checked-in CoreGraphics script and
+# pack them into the .icns with the system iconutil, so the icon is reproducible
+# from source. If regeneration fails (e.g. no Swift on a CI box), fall back to the
+# committed AppIcon.icns. The compass/blueprint source lives in
+# macos/assets/AppIcon/make-icon.swift.
+ICON_DST="${APP_DIR}/Contents/Resources/AppIcon.icns"
+if command -v iconutil >/dev/null 2>&1 && command -v swift >/dev/null 2>&1 \
+   && [[ -f "${ICON_GEN}" ]]; then
+    ICONSET_TMP="${ICON_DIR}/AppIcon.iconset"
+    echo "==> Generating app icon from ${ICON_GEN##*/}"
+    rm -rf "${ICONSET_TMP}"
+    if swift "${ICON_GEN}" "${ICONSET_TMP}" >/dev/null \
+       && iconutil -c icns "${ICONSET_TMP}" -o "${ICON_ICNS}"; then
+        echo "    regenerated ${ICON_ICNS##*/} from source"
+    else
+        echo "warning: icon regeneration failed; using committed ${ICON_ICNS##*/}" >&2
+    fi
+fi
+if [[ -f "${ICON_ICNS}" ]]; then
+    cp "${ICON_ICNS}" "${ICON_DST}"
+    echo "    bundled app icon: Contents/Resources/AppIcon.icns"
+else
+    echo "warning: no app icon at ${ICON_ICNS}; the bundle will use the generic icon" >&2
 fi
 
 echo "==> Ad-hoc signing"

@@ -29,19 +29,34 @@ struct FlatVertex: Equatable {
     var color: SIMD4<Float>
 }
 
-/// Overlay colors + sizes (tuned for the dark canvas background).
+/// Overlay colors + sizes. These default to the DARK canvas palette but are
+/// `var`s so `CanvasTheme.apply(to:appearance:)` can swap them to the light
+/// palette (and back) when the system appearance changes.
+///
+/// They are `nonisolated(unsafe)` rather than `@MainActor`: the renderer, the
+/// overlay builders, and `CanvasTheme.apply` all run on the MAIN ACTOR, so every
+/// read and the single writer are already serialized there. Keeping them
+/// non-isolated avoids forcing the GPU-free, unit-tested `OverlayGeometry`
+/// builders (and their non-`@MainActor` test suites) onto the main actor just to
+/// read a color constant. Mutate ONLY via `CanvasTheme.apply` (main actor).
 enum OverlayStyle {
-    static let gridColor      = SIMD4<Float>(1, 1, 1, 0.06)
-    static let gridAxisColor  = SIMD4<Float>(0.55, 0.55, 0.62, 0.30)
-    static let selectionColor = SIMD4<Float>(1.0, 0.85, 0.20, 1.0)   // amber
-    static let snapColor      = SIMD4<Float>(0.30, 0.85, 1.0, 1.0)   // cyan
-    static let crosshairColor = SIMD4<Float>(1, 1, 1, 0.18)
+    nonisolated(unsafe) static var gridColor      = SIMD4<Float>(1, 1, 1, 0.06)
+    nonisolated(unsafe) static var gridAxisColor  = SIMD4<Float>(0.55, 0.55, 0.62, 0.30)
+    nonisolated(unsafe) static var selectionColor = SIMD4<Float>(1.0, 0.85, 0.20, 1.0)  // amber
+    nonisolated(unsafe) static var snapColor      = SIMD4<Float>(0.30, 0.85, 1.0, 1.0)  // cyan
+    nonisolated(unsafe) static var crosshairColor = SIMD4<Float>(1, 1, 1, 0.18)
     /// The in-progress tool rubber-band color (a distinct, brighter green than the
     /// committed geometry so the live preview reads as "not yet placed").
-    static let toolPreviewColor = SIMD4<Float>(0.45, 1.0, 0.55, 0.9)
+    nonisolated(unsafe) static var toolPreviewColor = SIMD4<Float>(0.45, 1.0, 0.55, 0.9)
 
     /// Snap marker radius in screen points (converted to world by the builder).
     static let snapMarkerPointRadius: Double = 6
+
+    /// When true (light mode), near-white "automatic"/color-7 entity pens are
+    /// flipped to near-black by the renderer so the default drawing color stays
+    /// legible on a light canvas (the standard AutoCAD/LibreCAD auto-invert). The
+    /// renderer reads this when packing line instances; it does not affect overlays.
+    nonisolated(unsafe) static var invertNearWhiteEntities = false
 }
 
 enum OverlayGeometry {

@@ -182,7 +182,10 @@ struct ContentView: View {
             .font(.caption.monospaced())
             .foregroundStyle(.secondary)
             .padding(6)
-            .background(.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 6))
+            // Adaptive chip: a system material instead of a fixed black wash, so the
+            // HUD reads correctly over BOTH the light and dark canvas (the material
+            // + semantic `.secondary` text invert with the appearance).
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
             .padding(8)
     }
 
@@ -207,8 +210,9 @@ struct ContentView: View {
             Text(String(format: "x %.3f   y %.3f%@", w.x, w.y, snapLabel))
                 .font(.caption.monospaced())
                 .foregroundStyle(.primary)
-                .padding(6)
-                .background(.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 6))
+                // Adaptive chip (see statusHUD): a system material so the coordinate
+                // readout stays legible over both the light and dark canvas.
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
                 .padding(8)
         }
     }
