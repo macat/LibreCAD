@@ -107,7 +107,21 @@ pass or by the relevant downstream owner. Each cites its source.
   SwiftUI's environment `UndoManager` (`CanvasModel.adoptUndoManager`) so edits mark the document dirty.
   Custom NSOpenPanel/NSSavePanel Open/Save removed (DocumentGroup owns them); Export (PDF/PNG/SVG) + Print
   stay custom. Headless launch verified: stays alive 10s, NO new crash report. (4 doc-payload round-trip tests.)
-- DXF/DWG **write** + Save (currently read-only viewer). *(DXF Save now native via DocumentGroup.)*
+- ~~DXF/DWG **write** + Save (currently read-only viewer). *(DXF Save now native via DocumentGroup.)*~~
+  **DWG read + write DONE** (feature DC.2): the vendored libdxfrw exposes `dwgRW` (read + write) in this
+  repo — read for R2000+ DWG, write for R2000 (AC1015) ONLY. Surfaced via new C ABI `lc_dwg_read` /
+  `lc_dwg_write` (`lcdxf.{cpp,h}`), reusing the SAME `FlatteningReader`/`WritingInterface` and POD entity
+  stream as DXF; the writer dispatches per-entity to `dxfRW` or `dwgRW` via `emit*` helpers. Engine entry
+  points: `CADEngine.readEntities(dwgPath:)` / `writeEntities(...toDWGPath:)` + `loadDrawing(dwgPath:)`.
+  App: `.dwg` registered in `LibreCADUTType` (`com.autodesk.dwg`, imported), `LibreCADDocument`
+  readable+writable, `DXFDocumentCodec` routes by content type, Info.plist DWG type promoted to Editor.
+  **Known DWG gaps** (libdxfrw writer phase, not our wiring): (a) DWG write is R2000-only; (b) block
+  **member geometry** does NOT round-trip to DWG — `dwgWriter15::defineBlock` makes EMPTY user blocks, so an
+  INSERT references an empty block on re-read (DXF writes full block contents). (c) NO real third-party
+  `.dwg` sample ships in the repo, so the read path is verified only against files our own writer produces
+  (self-generated round-trip in `DWGReadWriteTests`); reading AutoCAD-authored DWGs rides on libdxfrw's
+  shared reader (the same code LibreCAD-Qt uses) but is NOT directly tested here — add a real sample when one
+  is obtainable.
 
 ## Render gate — renderer/canvas (Wave 2)
 - **Extract a `CADRender` library target** in Package.swift so renderer logic is `@testable import`-able;

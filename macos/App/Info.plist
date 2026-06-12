@@ -45,11 +45,12 @@
 			<key>CFBundleTypeName</key>
 			<string>DWG Drawing</string>
 			<key>CFBundleTypeRole</key>
-			<string>Viewer</string>
+			<string>Editor</string>
 			<key>LSHandlerRank</key>
 			<string>Alternate</string>
 			<key>LSItemContentTypes</key>
 			<array>
+				<string>com.autodesk.dwg</string>
 				<string>org.librecad.dwg</string>
 			</array>
 		</dict>

@@ -98,10 +98,61 @@ extension CADEngine {
         toPath path: String,
         version: DXFVersion = .r2000
     ) throws -> DXFWriteResult {
+        try writeEntities(entities, layers: layers, blocks: blocks,
+                          blockMembers: blockMembers, toPath: path,
+                          version: version, writer: lc_dxf_write)
+    }
+
+    /// Writes `entities` + `layers` to a DWG file at `path` (overwriting it). The
+    /// DWG counterpart of `writeEntities(...toPath:)`: SAME inputs and POD-build
+    /// path, but the bytes are encoded as a binary R2000 (AC1015) DWG via the
+    /// bridge's `lc_dwg_write` (libdxfrw `dwgRW`). DWG write is R2000-only, so the
+    /// `version` parameter is omitted here.
+    ///
+    /// Round-trip scope (the honest state of libdxfrw's DWG writer): top-level
+    /// entities of every supported kind, layer "0" + the standard tables, and
+    /// EMPTY block definitions + INSERT references are written. A block's MEMBER
+    /// geometry is NOT written to DWG (the library's `defineBlock` makes empty
+    /// blocks); for full block-content round-trip use DXF.
+    ///
+    /// - Throws: `CADWriteError.invalidPath` for a null/empty path;
+    ///   `CADWriteError.writeFailed` if libdxfrw cannot write the file.
+    public func writeEntities(
+        _ entities: [EntityRecord],
+        layers: LayerTable,
+        blocks: BlockTable = BlockTable(),
+        blockMembers: [String: [EntityRecord]] = [:],
+        toDWGPath path: String
+    ) throws -> DXFWriteResult {
+        try writeEntities(entities, layers: layers, blocks: blocks,
+                          blockMembers: blockMembers, toPath: path,
+                          version: .r2000, writer: lc_dwg_write)
+    }
+
+    /// Shared write core for the DXF and DWG entry points. Builds the flat POD
+    /// model once and hands it to whichever bridge writer (`lc_dxf_write` /
+    /// `lc_dwg_write`) the caller passed — both take the identical POD signature.
+    private func writeEntities(
+        _ entities: [EntityRecord],
+        layers: LayerTable,
+        blocks: BlockTable,
+        blockMembers: [String: [EntityRecord]],
+        toPath path: String,
+        version: DXFVersion,
+        writer: (
+            UnsafePointer<CChar>?,
+            UnsafePointer<LCEntity>?, Int32,
+            UnsafePointer<LCLayer>?, Int32,
+            UnsafePointer<LCBlock>?, Int32,
+            UnsafePointer<LCEntity>?, Int32,
+            Int32,
+            UnsafeMutablePointer<Int32>?
+        ) -> LCStatus
+    ) throws -> DXFWriteResult {
         guard !path.isEmpty else { throw CADWriteError.invalidPath }
 
         // Build the flat POD model. `Builder` owns every C string / vertex array
-        // the PODs borrow; it must outlive the `lc_dxf_write` call below.
+        // the PODs borrow; it must outlive the write call below.
         let builder = PODBuilder()
         let entityPODs = entities.map { builder.makeEntity($0) }
         let layerPODs = layers.layers.map { builder.makeLayer($0) }
@@ -126,7 +177,7 @@ extension CADEngine {
                 layerPODs.withUnsafeBufferPointer { lays -> LCStatus in
                     blockPODs.withUnsafeBufferPointer { blks -> LCStatus in
                         blockEntityPODs.withUnsafeBufferPointer { blkEnts -> LCStatus in
-                            lc_dxf_write(
+                            writer(
                                 cpath,
                                 ents.baseAddress, Int32(ents.count),
                                 lays.baseAddress, Int32(lays.count),

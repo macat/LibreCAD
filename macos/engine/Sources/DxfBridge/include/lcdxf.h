@@ -317,6 +317,31 @@ typedef struct LCEntityList LCEntityList;
  */
 LCStatus lc_dxf_read(const char *path, LCEntityList **out);
 
+/**
+ * Read a DWG file (AutoCAD binary drawing) and flatten it into the SAME owned
+ * `LCEntityList` handle the DXF reader produces — every supported entity kind,
+ * the layer table, and the block definitions flow through the identical
+ * `FlatteningReader` (a `DRW_Interface` subclass), so Swift consumes one model
+ * regardless of source format. DWG is binary (not text), so it gets its own
+ * entry point rather than auto-detection inside `lc_dxf_read`; libdxfrw routes
+ * DXF through `dxfRW` and DWG through `dwgRW`, two different parsers.
+ *
+ * libdxfrw supports reading DWG versions R2000 (AC1015) and newer; an older or
+ * corrupt file fails the read (LC_ERR_READ_FAILED). The result handle is freed
+ * with `lc_entity_list_free`, exactly like the DXF reader's.
+ *
+ * libdxfrw is non-reentrant; callers MUST serialize through the single shared
+ * engine actor (see CADEngine), exactly as for `lc_dxf_read`.
+ *
+ * @param path  UTF-8 filesystem path to a DWG file.
+ * @param out   On LC_OK, receives a newly-allocated handle the caller owns and
+ *              must free with `lc_entity_list_free`. Untouched on error.
+ * @return LC_OK on success; LC_ERR_INVALID_PATH for a null/empty path or null
+ *         out; LC_ERR_READ_FAILED if libdxfrw fails to read (also covers any
+ *         exception escaping the parse, and unsupported/old DWG versions).
+ */
+LCStatus lc_dwg_read(const char *path, LCEntityList **out);
+
 /** Number of flattened entities in the list (>= 0). NULL-safe (returns 0). */
 int lc_entity_list_count(const LCEntityList *list);
 
@@ -426,6 +451,60 @@ LCStatus lc_dxf_count_entities(const char *path, int *out_count);
  *         fails to write (also covers any exception escaping the export).
  */
 LCStatus lc_dxf_write(const char *path,
+                      const LCEntity *entities, int entityCount,
+                      const LCLayer *layers, int layerCount,
+                      const LCBlock *blocks, int blockCount,
+                      const LCEntity *blockEntities, int blockEntityCount,
+                      int version,
+                      int *out_skipped);
+
+/**
+ * Write a DWG file from flat POD entity + layer arrays. The DWG counterpart of
+ * `lc_dxf_write`, with the SAME POD inputs so the Swift writer reuses its entire
+ * POD-build path. Internally drives libdxfrw's `dwgRW` (its `dwgWriter15`)
+ * through the same `WritingInterface` (a `DRW_Interface` subclass); each
+ * supported entity is encoded into the DWG object stream.
+ *
+ * Format scope (the honest state of libdxfrw's DWG writer in THIS repo):
+ *  - DWG WRITE supports ONLY version R2000 (AC1015). The `version` argument is
+ *    ACCEPTED for ABI symmetry with `lc_dxf_write` but is forced to R2000 (any
+ *    other value is overridden); libdxfrw's `dwgRW::write` rejects non-AC1015.
+ *  - Top-level entities of every kind `lc_dxf_write` supports are emitted
+ *    (LINE/POINT/CIRCLE/ARC/ELLIPSE/LWPOLYLINE/POLYLINE/SPLINE/TEXT/MTEXT/
+ *    SOLID/HATCH/DIMENSION/INSERT). Unsupported kinds are skipped + counted in
+ *    `*out_skipped`, exactly as for DXF.
+ *  - BLOCK definitions are emitted as EMPTY user blocks (libdxfrw's
+ *    `dwgWriter15::defineBlock` allocates an empty block_record — it has no path
+ *    to write a user block's MEMBER geometry yet). An INSERT that references a
+ *    block by name therefore resolves to an empty block on re-read. The block
+ *    MEMBER entities passed in `blockEntities` are NOT written to DWG (they ARE
+ *    written for DXF). This is the one round-trip gap vs DXF; surface it.
+ *
+ * The whole body is wrapped in try/catch — no exception crosses the C boundary.
+ * libdxfrw is non-reentrant; callers MUST serialize through the single shared
+ * engine actor (see CADEngine), exactly as for `lc_dxf_write`.
+ *
+ * @param path          UTF-8 filesystem path to write. Overwritten if it exists.
+ * @param entities      Pointer to `entityCount` LCEntity PODs (may be NULL iff 0).
+ * @param entityCount   Number of entities (>= 0).
+ * @param layers        Pointer to `layerCount` LCLayer PODs (may be NULL iff 0).
+ * @param layerCount    Number of layers (>= 0).
+ * @param blocks        Pointer to `blockCount` LCBlock definitions (may be NULL
+ *                      iff 0). Emitted as empty user blocks (see above) so an
+ *                      INSERT's block name resolves on re-read.
+ * @param blockCount    Number of block definitions (>= 0).
+ * @param blockEntities Pointer to `blockEntityCount` LCEntity block-member PODs
+ *                      (may be NULL iff 0). Accepted for ABI symmetry but NOT
+ *                      written for DWG (the writer makes empty blocks).
+ * @param blockEntityCount Number of block-member entities (>= 0).
+ * @param version       An LCDxfVersion. IGNORED — DWG write is R2000-only.
+ * @param out_skipped   If non-NULL, receives the count of entities whose kind is
+ *                      not supported by the writer (skipped). 0 on error.
+ * @return LC_OK on success; LC_ERR_INVALID_PATH for a null/empty path or a
+ *         negative count with a NULL array; LC_ERR_WRITE_FAILED if libdxfrw
+ *         fails to write (also covers any exception escaping the export).
+ */
+LCStatus lc_dwg_write(const char *path,
                       const LCEntity *entities, int entityCount,
                       const LCLayer *layers, int layerCount,
                       const LCBlock *blocks, int blockCount,
