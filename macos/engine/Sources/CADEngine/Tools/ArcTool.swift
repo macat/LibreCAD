@@ -46,16 +46,28 @@
 
 import Foundation
 
-/// The interactive Arc tool (center → start → end, counter-clockwise). Click the
-/// center, then the start point (fixing the radius and start angle), then drag and
-/// click the end angle to commit a CCW arc. After committing it resets to await a
-/// new center.
+/// How the Arc tool collects its three picks — surfaced by the tool-options bar
+/// (UX-plan U2). Mirrors LibreCAD's two common arc-construction actions.
+public enum ArcCreationMode: Sendable, Hashable, CaseIterable {
+    /// Center → start → end (CCW). The first click is the center, the second fixes
+    /// the radius + start angle, the third the end angle (the original behavior).
+    case centerStartEnd
+    /// Three points ON the arc: start → a point the arc passes through → end. The
+    /// arc is the unique circular arc through the three clicked points.
+    case threePoint
+}
+
+/// The interactive Arc tool. Two construction modes (see `ArcCreationMode`):
+/// center→start→end (CCW, the default) or three points on the arc. After
+/// committing it resets to await the next arc's first pick.
 public struct ArcTool: Tool {
 
     // MARK: - Private state machine (no magic Int — engine-architecture note)
 
     /// The tool's lifecycle, ported from `RS_ActionDrawArc`'s status integers to
-    /// an exhaustive `enum`. Each case carries the picks made so far.
+    /// an exhaustive `enum`. Each case carries the picks made so far. The
+    /// center→start→end cases drive the default mode; the `.three*` cases drive the
+    /// three-point mode.
     private enum State: Equatable {
         /// Waiting for the center (no pick yet).
         case settingCenter
@@ -65,16 +77,35 @@ public struct ArcTool: Tool {
         /// Center, radius and start angle fixed; waiting for the end angle. The arc
         /// sweeps CCW from `startAngle` to the angle of (center → end click).
         case settingEnd(center: Vector, radius: Double, startAngle: Double)
+
+        /// Three-point mode: waiting for the first (start) point.
+        case threeStart
+        /// Three-point mode: the start point is fixed; waiting for a point the arc
+        /// passes through.
+        case threeMid(start: Vector)
+        /// Three-point mode: start + mid fixed; waiting for the end point. The
+        /// committed arc is the unique circle through the three picks.
+        case threeEnd(start: Vector, mid: Vector)
     }
 
-    /// The current state. Starts waiting for the center.
-    private var state: State = .settingCenter
+    /// The current state. Set in `init` from the `mode`.
+    private var state: State
 
     /// The last cursor point seen via `.move`, used to draw the rubber-band even
     /// between clicks. Invalid until the first move.
     private var cursor: Vector = .invalid
 
-    public init() {}
+    /// The arc construction mode. Surfaced by the tool-options bar (UX-plan U2).
+    /// Back-compatible: the default `.centerStartEnd` keeps the original flow.
+    public let mode: ArcCreationMode
+
+    /// Creates an Arc tool in the given construction mode (default the original
+    /// center→start→end). The app's `applyToolConfig` mints the tool in the mode
+    /// the options bar selected.
+    public init(mode: ArcCreationMode = .centerStartEnd) {
+        self.mode = mode
+        self.state = (mode == .threePoint) ? .threeStart : .settingCenter
+    }
 
     // MARK: - Tool
 
@@ -85,6 +116,9 @@ public struct ArcTool: Tool {
         case .settingCenter: return "Specify center point"
         case .settingStart:  return "Specify start point"
         case .settingEnd:    return "Specify end angle"
+        case .threeStart:    return "Specify start point"
+        case .threeMid:      return "Specify point on arc"
+        case .threeEnd:      return "Specify end point"
         }
     }
 
@@ -92,17 +126,30 @@ public struct ArcTool: Tool {
     /// the current cursor's angle at `radius`. Empty until the start point is fixed
     /// and the cursor has moved.
     public var preview: [ResolvedPolyline] {
-        guard case .settingEnd(let center, let radius, let startAngle) = state,
-              cursor.valid, center.valid else {
+        switch state {
+        case .settingEnd(let center, let radius, let startAngle):
+            guard cursor.valid, center.valid else { return [] }
+            let endAngle = (cursor - center).angle
+            let pts = Tessellation.arcPoints(
+                center: center, radius: radius,
+                startAngle: startAngle, endAngle: endAngle, reversed: false,
+                tolerance: ResolveContext.default.tessellationTolerance
+            )
+            return [ResolvedPolyline(points: pts, closed: false, pen: .toolPreview)]
+
+        case .threeEnd(let start, let mid):
+            // Rubber-band the arc through start → mid → cursor.
+            guard cursor.valid, let arc = Self.arcThrough(start, mid, cursor) else { return [] }
+            let pts = Tessellation.arcPoints(
+                center: arc.center, radius: arc.radius,
+                startAngle: arc.startAngle, endAngle: arc.endAngle, reversed: arc.reversed,
+                tolerance: ResolveContext.default.tessellationTolerance
+            )
+            return [ResolvedPolyline(points: pts, closed: false, pen: .toolPreview)]
+
+        default:
             return []
         }
-        let endAngle = (cursor - center).angle
-        let pts = Tessellation.arcPoints(
-            center: center, radius: radius,
-            startAngle: startAngle, endAngle: endAngle, reversed: false,
-            tolerance: ResolveContext.default.tessellationTolerance
-        )
-        return [ResolvedPolyline(points: pts, closed: false, pen: .toolPreview)]
     }
 
     /// A draw tool: it IGNORES `context` (it needs only the snapped world points)
@@ -168,6 +215,29 @@ public struct ArcTool: Tool {
             )
             reset()
             return .commit([.add(record)])
+
+        // MARK: Three-point mode
+
+        case .threeStart:
+            guard p.valid else { return .none }
+            state = .threeMid(start: p)
+            cursor = p
+            return .none
+
+        case .threeMid(let start):
+            // Need a mid point distinct from the start; a coincident pick is ignored.
+            guard p.valid, (p - start).magnitude > Tolerance.distance else { return .none }
+            state = .threeEnd(start: start, mid: p)
+            cursor = p
+            return .none
+
+        case .threeEnd(let start, let mid):
+            // Third pick closes the arc through the three points. Collinear / coincident
+            // picks have no finite circle — ignore them and keep waiting for a valid end.
+            guard let arc = Self.arcThrough(start, mid, p) else { return .none }
+            let record = EntityRecord(id: .placeholder, kind: .arc(arc))
+            reset()
+            return .commit([.add(record)])
         }
     }
 
@@ -188,12 +258,59 @@ public struct ArcTool: Tool {
             state = .settingStart(center: center)
             cursor = center
             return .preview
+
+        case .threeStart:
+            // Nothing to step back.
+            return .none
+
+        case .threeMid:
+            // Undo the start pick → back to the initial three-point state.
+            reset()
+            return .preview
+
+        case .threeEnd(let start, _):
+            // Undo the mid pick → back to waiting for the mid point, keeping start.
+            state = .threeMid(start: start)
+            cursor = start
+            return .preview
         }
     }
 
-    /// Returns to the initial waiting-for-center state.
+    /// Returns to the initial waiting-for-first-pick state for the active `mode`.
     private mutating func reset() {
-        state = .settingCenter
+        state = (mode == .threePoint) ? .threeStart : .settingCenter
         cursor = .invalid
+    }
+
+    // MARK: - Three-point arc geometry (circumcircle through 3 points)
+
+    /// The unique circular arc that passes through `a` → `b` → `c` in that order,
+    /// or `nil` when the three points are collinear / coincident (no finite circle).
+    /// The arc is oriented so the SWEEP from `a` to `c` passes through `b`: the
+    /// returned `ArcData` carries `reversed` accordingly (CCW when `b` is on the CCW
+    /// side, CW otherwise), matching how `Tessellation.arcPoints` walks the sweep.
+    static func arcThrough(_ a: Vector, _ b: Vector, _ c: Vector) -> ArcData? {
+        guard a.valid, b.valid, c.valid else { return nil }
+        // Circumcenter via the perpendicular-bisector determinant. `d` is twice the
+        // signed area of triangle abc; it is zero exactly when the points are
+        // collinear (or two coincide), which has no finite circle.
+        let d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y))
+        guard abs(d) > Tolerance.distance else { return nil }
+        let a2 = a.x * a.x + a.y * a.y
+        let b2 = b.x * b.x + b.y * b.y
+        let c2 = c.x * c.x + c.y * c.y
+        let ux = (a2 * (b.y - c.y) + b2 * (c.y - a.y) + c2 * (a.y - b.y)) / d
+        let uy = (a2 * (c.x - b.x) + b2 * (a.x - c.x) + c2 * (b.x - a.x)) / d
+        let center = Vector(ux, uy)
+        let radius = (a - center).magnitude
+        guard radius > Tolerance.distance else { return nil }
+        let startAngle = (a - center).angle
+        let endAngle = (c - center).angle
+        // Orient the sweep so it passes through `b`. `d > 0` ⇔ a→b→c turns CCW, so a
+        // CCW (reversed == false) sweep from start to end passes through the mid; a
+        // CW turn needs reversed == true.
+        let reversed = d < 0
+        return ArcData(center: center, radius: radius,
+                       startAngle: startAngle, endAngle: endAngle, reversed: reversed)
     }
 }

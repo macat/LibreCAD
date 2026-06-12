@@ -167,6 +167,34 @@ final class CanvasModel {
     /// Divide tool: number of equal pieces (drops `count − 1` division points).
     var divideCount: Int = 2
 
+    // MARK: Draw-tool options (NEW — UX-plan U2, surfaced by the Tool Options bar)
+
+    /// Polygon tool: number of sides (clamped ≥ 3 by the tool) and whether the
+    /// polygon is inscribed in (default) or circumscribed about the reference circle.
+    var polygonSides: Int = 6
+    var polygonFit: PolygonFit = .inscribed
+
+    /// Rectangle tool: an optional EXACT width/height. When BOTH are set (> 0) a
+    /// single click drops a rectangle of that size; `nil`/0 keeps the two-corner
+    /// drag. Stored as `Double` (0 ⇒ "unset") so the bar binds a plain numeric field;
+    /// `applyToolConfig` maps 0 → `nil` on the tool.
+    var rectWidth: Double = 0
+    var rectHeight: Double = 0
+
+    /// Circle tool: whether numeric size entry is a radius (default) or diameter, and
+    /// an optional EXACT size (0 ⇒ unset → two-click center+radius).
+    var circleSizeMode: CircleSizeMode = .radius
+    var circleFixedSize: Double = 0
+
+    /// Arc tool: the construction mode (center→start→end default, or 3-point).
+    var arcMode: ArcCreationMode = .centerStartEnd
+
+    /// Point tool: the on-screen marker style for placed points.
+    var pointStyle: PointStyle = .dot
+
+    /// Text tool: the default cap height (world units) new text is authored at.
+    var textHeight: Double = TextTool.defaultHeight
+
     // MARK: Layer defaults (Document Settings — app policy for new layers)
 
     /// The default color a NEW layer is born with (Document Settings ▸ Layers).
@@ -408,6 +436,32 @@ final class CanvasModel {
             // configured count (its public `var divisions` is settable too, but the
             // init carries the clamp/validation, so prefer the init).
             tool = DivideTool(divisions: Swift.max(2, divideCount))
+
+        // MARK: NEW draw-tool options (UX-plan U2)
+
+        case var t as PolygonTool:
+            t.sides = polygonSides          // the tool clamps to ≥ 3
+            t.fit = polygonFit
+            tool = t
+        case var t as RectangleTool:
+            // 0 ⇒ "unset" so the optional exact-size flow is opt-in (both must be > 0).
+            t.fixedWidth = rectWidth > 0 ? rectWidth : nil
+            t.fixedHeight = rectHeight > 0 ? rectHeight : nil
+            tool = t
+        case var t as CircleTool:
+            t.sizeMode = circleSizeMode
+            t.fixedSize = circleFixedSize > 0 ? circleFixedSize : nil
+            tool = t
+        case is ArcTool:
+            // ArcTool's `mode` is fixed at construction (it seeds the start state),
+            // so re-mint with the configured mode (mirrors the DivideTool pattern).
+            tool = ArcTool(mode: arcMode)
+        case var t as PointTool:
+            t.style = pointStyle
+            tool = t
+        case var t as TextTool:
+            t.height = Swift.max(InspectorEdits.minTextHeight, textHeight)
+            tool = t
         default:
             break
         }
@@ -421,11 +475,12 @@ final class CanvasModel {
         guard tool != nil else { return }
         let savedStatus = toolStatus
         applyToolConfig()
-        // DivideTool re-mint resets status to its initial prompt; restore the
-        // prior prompt text only if the tool kept its identity (non-Divide tools
-        // keep their state, so their status is unchanged anyway).
-        if !(tool is DivideTool) { toolStatus = savedStatus }
-        else { toolStatus = tool?.status ?? "" }
+        // Some tools are RE-MINTED by `applyToolConfig` (DivideTool's count, ArcTool's
+        // mode are fixed at construction), which resets their state/status to the
+        // initial prompt. For those, take the fresh tool's status; for the in-place
+        // tools (which keep their state) restore the prior prompt text.
+        if tool is DivideTool || tool is ArcTool { toolStatus = tool?.status ?? "" }
+        else { toolStatus = savedStatus }
     }
 
     /// Forwards a snapped world point as a tool input, applying any committed
