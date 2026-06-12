@@ -275,9 +275,9 @@ public enum Snapping {
             }
             return [f, l]
 
-        case .text:
-            // Stroked text has no single canonical endpoint to snap (the .lff
-            // strokes are an implementation detail); left to other snap kinds.
+        case .text, .mtext:
+            // (M)TEXT has no single canonical endpoint to snap (the glyph
+            // strokes/fills are an implementation detail); left to other snap kinds.
             return []
 
         case .hatch(let d):
@@ -361,8 +361,8 @@ public enum Snapping {
             // No cheap canonical midpoint; left to onEntity/endpoint snaps.
             return []
 
-        case .text:
-            // No canonical midpoint for stroked text.
+        case .text, .mtext:
+            // No canonical midpoint for (m)text.
             return []
 
         case .hatch(let d):

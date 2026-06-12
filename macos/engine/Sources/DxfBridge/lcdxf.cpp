@@ -103,6 +103,10 @@ public:
         e.hAlign = 0;
         e.vAlign = 0;
         e.solidFill = 0;
+        e.mtextRectWidth = 0.0;
+        e.mtextAttachment = 1;            // TopLeft default
+        e.mtextLineSpacingStyle = 1;      // at-least
+        e.mtextLineSpacingFactor = 1.0;
         e.vertices = nullptr;
         e.vertexCount = 0;
         e.knots = nullptr;
@@ -315,20 +319,26 @@ public:
         m_out->entities.push_back(e);
     }
 
-    // Multi-line MTEXT. DRW_MText derives from DRW_Text, so the same fields
-    // apply; MTEXT always uses basePoint as its insertion (group 10), and its
-    // alignment is an attachment code (textgen) — not the 72/73 codes used by
-    // TEXT. We carry the raw string and insertion point + height/angle; the
-    // attachment-point -> halign/valign mapping (rs_filterdxfrw mtextEntityFromDRW)
-    // and the MTEXT inline-format-code stripping are layout backlog, so we leave
-    // alignment at the left/baseline default.
+    // Multi-line MTEXT. DRW_MText derives from DRW_Text, so it inherits height
+    // (40), angle (50), widthscale (41 = reference/wrap width), style (7), and the
+    // attachment point (71 -> textgen). DRW_MText adds interlin (44 = line-spacing
+    // factor); the line-spacing style (73) is parsed into alignV. We emit the RAW
+    // inline-coded string (data.text, the concatenation of group 1/3) verbatim so
+    // the Swift side can both PARSE it into the run tree AND keep it for lossless
+    // round-trip. Mapped to LC_ENT_MTEXT so the reader builds `.mtext`, not `.text`.
     void addMText(const DRW_MText &data) override {
         ++m_out->geometryCount;
-        LCEntity e = makeEntity(LC_ENT_TEXT);
+        LCEntity e = makeEntity(LC_ENT_MTEXT);
         fillCommon(e, data);
         e.p1x = data.basePoint.x; e.p1y = data.basePoint.y; e.p1z = data.basePoint.z;
         e.height = data.height;
         e.startAngle = data.angle * M_PI / 180.0;  // DXF degrees -> radians
+        e.mtextRectWidth = data.widthscale;        // code 41: reference/wrap width
+        // Attachment point (code 71) is parsed into textgen by DRW_Text::parseCode.
+        e.mtextAttachment = data.textgen >= 1 && data.textgen <= 9 ? data.textgen : 1;
+        e.mtextLineSpacingFactor = data.interlin;  // code 44
+        // Line-spacing style (code 73) lands in alignV for MTEXT (1 at-least, 2 exact).
+        e.mtextLineSpacingStyle = (data.alignV == 2) ? 2 : 1;
         e.textValue = intern(data.text);
         e.styleName = intern(data.style);
         m_out->entities.push_back(e);

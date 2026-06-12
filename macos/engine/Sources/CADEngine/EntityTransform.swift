@@ -234,6 +234,7 @@ public enum EntityTransform {
         case .spline(let s):          return .spline(transformSpline(s, t))
         case .splinePoints(let sp):   return .splinePoints(transformSplinePoints(sp, t))
         case .text(let tx):           return .text(transformText(tx, t))
+        case .mtext(let mt):          return .mtext(transformMText(mt, t))
         case .hatch(let h):           return .hatch(transformHatch(h, t))
         case .solid(let s):           return .solid(transformSolid(s, t))
         case .dimension(let dm):      return .dimension(transformDimension(dm, t))
@@ -402,6 +403,28 @@ public enum EntityTransform {
             vAlign: tx.vAlign,
             letterSpacingFactor: tx.letterSpacingFactor
         )
+    }
+
+    // MARK: mtext — insertion point transforms; height/rectWidth *= uniformScale;
+    //       rotation gains the transform's rotation (or reflects under a mirror),
+    //       matching RS_MText::move/rotate/scale/mirror. The run tree (paragraphs)
+    //       + rawCode are unchanged — they are size-independent formatting.
+
+    static func transformMText(_ mt: MTextData, _ t: Affine2D) -> MTextData {
+        let rotation: Double = t.isMirror
+            ? Vector.correctAngle(t.mirrorAxisAngle * 2 - mt.rotation)
+            : Vector.correctAngle(mt.rotation + t.rotationDelta)
+        return MTextData(
+            position: t.apply(mt.position),
+            height: abs(mt.height * t.uniformScale),
+            rectWidth: abs(mt.rectWidth * t.uniformScale),
+            rotation: rotation,
+            styleName: mt.styleName,
+            attachment: mt.attachment,
+            lineSpacingStyle: mt.lineSpacingStyle,
+            lineSpacingFactor: mt.lineSpacingFactor,
+            paragraphs: mt.paragraphs,
+            rawCode: mt.rawCode)
     }
 
     // MARK: hatch — transform every boundary-loop vertex point; bulge sign flips

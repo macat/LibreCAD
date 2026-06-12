@@ -192,6 +192,9 @@ extension CADEngine {
         case Int32(LC_ENT_TEXT.rawValue):
             return mapText(e)
 
+        case Int32(LC_ENT_MTEXT.rawValue):
+            return mapMText(e)
+
         case Int32(LC_ENT_HATCH.rawValue):
             return .hatch(HatchData(
                 loops: hatchLoops(e),
@@ -233,6 +236,30 @@ extension CADEngine {
             hAlign: TextHAlign(rawValue: Int(e.hAlign)) ?? .left,
             vAlign: TextVAlign(rawValue: Int(e.vAlign)) ?? .baseline
         ))
+    }
+
+    /// Maps an MTEXT POD to `MTextData`. The bridge hands back the RAW inline-coded
+    /// string (`textValue`), the reference/wrap width (`mtextRectWidth`), the
+    /// attachment point (`mtextAttachment`, 1..9), and the line-spacing style/factor.
+    /// We PARSE the coded string into the run tree (`MTextParser`) AND keep it
+    /// verbatim in `rawCode` so format codes we don't model still round-trip. An
+    /// empty string or non-positive height is dropped (returns `nil` → warning).
+    private static func mapMText(_ e: LCEntity) -> EntityKind? {
+        let coded = string(e.textValue) ?? ""
+        guard !coded.isEmpty, e.height > 0 else { return nil }
+        let attachment = MTextAttachment(rawValue: Int(e.mtextAttachment)) ?? .topLeft
+        let spacingStyle = MTextLineSpacingStyle(rawValue: Int(e.mtextLineSpacingStyle)) ?? .atLeast
+        let factor = e.mtextLineSpacingFactor > 0 ? e.mtextLineSpacingFactor : 1
+        return .mtext(MTextParser.makeData(
+            coded: coded,
+            position: Vector(e.p1x, e.p1y, e.p1z),
+            height: e.height,
+            rectWidth: max(0, e.mtextRectWidth),
+            rotation: e.startAngle,
+            styleName: string(e.styleName),
+            attachment: attachment,
+            lineSpacingStyle: spacingStyle,
+            lineSpacingFactor: factor))
     }
 
     /// Copies a HATCH's flat vertex array, sliced by its per-loop (offset,count)
