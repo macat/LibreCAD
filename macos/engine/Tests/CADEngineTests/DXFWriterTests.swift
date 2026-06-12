@@ -61,7 +61,7 @@ struct DXFWriterTests {
 
     private struct KindTally: Equatable {
         var line = 0, point = 0, circle = 0, arc = 0, ellipse = 0, polyline = 0
-        var text = 0, mtext = 0, solid = 0, hatch = 0, dimension = 0
+        var text = 0, mtext = 0, solid = 0, hatch = 0, dimension = 0, insert = 0
         var spline = 0
         /// The supported set the writer emits. SPLINE/SPLINEPOINTS are now written
         /// (both as a DXF SPLINE), so they count toward the round-trippable total.
@@ -69,7 +69,7 @@ struct DXFWriterTests {
         /// re-read both collapse into the `spline` bucket.
         var supportedTotal: Int {
             line + point + circle + arc + ellipse + polyline
-                + text + mtext + solid + hatch + dimension + spline
+                + text + mtext + solid + hatch + dimension + spline + insert
         }
     }
 
@@ -88,6 +88,7 @@ struct DXFWriterTests {
             case .solid:        t.solid += 1     // now written (DRW_Solid)
             case .hatch:        t.hatch += 1     // now written (DRW_Hatch)
             case .dimension:    t.dimension += 1 // now written (DRW_Dim*)
+            case .insert:       t.insert += 1    // now written (DRW_Insert)
             case .spline,
                  .splinePoints: t.spline += 1    // now written (DRW_Spline)
             }
@@ -837,7 +838,7 @@ struct DXFWriterTests {
     private func isSupported(_ r: EntityRecord) -> Bool {
         switch r.kind {
         case .line, .point, .circle, .arc, .ellipse, .polyline,
-             .text, .mtext, .solid, .hatch, .dimension,
+             .text, .mtext, .solid, .hatch, .dimension, .insert,
              .spline, .splinePoints: return true
         }
     }

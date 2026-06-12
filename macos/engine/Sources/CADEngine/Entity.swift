@@ -511,6 +511,93 @@ public enum DimKind: Sendable, Hashable, Codable {
                  line2Start: Vector, line2End: Vector)
 }
 
+// MARK: - Block reference (Insert) defining data (RS_InsertData / DRW_Insert)
+
+/// `RS_InsertData` — a **block reference**: a placement of a named block. Mirrors
+/// LibreCAD's `RS_InsertData` / DXF `INSERT`. Per ADR-001 a value type holding
+/// only the defining data; the placed copies of the block's member entities are
+/// produced on demand by `resolve()` via `ResolveContext.blockProvider` (the same
+/// provider pattern as `fontProvider`/`dimStyleProvider`), never stored.
+///
+/// ## Field grounding (DXF `INSERT` / libdxfrw `DRW_Insert`)
+/// - `blockName`      — DXF code 2: the referenced block's name (`RS_InsertData::name`).
+/// - `insertionPoint` — DXF code 10: where the block's base point lands in world
+///                      coords (`RS_InsertData::insertionPoint`).
+/// - `scale`          — DXF codes 41/42(/43): per-axis scale factors
+///                      (`RS_InsertData::scaleFactor`). `(1,1)` is no scaling; a
+///                      negative factor mirrors that axis.
+/// - `rotation`       — DXF code 50: rotation in **radians**, CCW about the
+///                      insertion point (`RS_InsertData::angle`).
+///
+/// ## MINSERT (rectangular array) — DXF codes 70/71/44/45
+/// An INSERT can repeat the block over a `rows × cols` grid (LibreCAD's
+/// `RS_InsertData::rows`/`cols`/`spacing`). The defaults (1×1, zero spacing) make
+/// a plain single insert. `resolve()` stamps the block at each grid cell
+/// `(r, c)` offset by `(c·colSpacing, r·rowSpacing)` in the insert's LOCAL frame
+/// (before rotation), matching AutoCAD MINSERT semantics.
+public struct InsertData: Sendable, Hashable, Codable {
+    /// DXF code 2 — the referenced block's name.
+    public var blockName: String
+    /// DXF code 10 — the placement point (where the block base point lands).
+    public var insertionPoint: Vector
+    /// DXF codes 41/42/43 — per-axis scale (`z` carried for round-trip; the
+    /// engine is 2D so the resolve uses `x`/`y`). `(1,1)` == no scaling.
+    public var scale: Vector
+    /// DXF code 50 — rotation in radians (CCW about the insertion point).
+    public var rotation: Double
+    /// DXF code 71 — MINSERT row count (>= 1; 1 == no array in this axis).
+    public var rows: Int
+    /// DXF code 70 — MINSERT column count (>= 1; 1 == no array in this axis).
+    public var cols: Int
+    /// DXF code 44 — MINSERT column spacing (local-frame X step between columns).
+    public var colSpacing: Double
+    /// DXF code 45 — MINSERT row spacing (local-frame Y step between rows).
+    public var rowSpacing: Double
+
+    public init(
+        blockName: String,
+        insertionPoint: Vector,
+        scale: Vector = Vector(1, 1),
+        rotation: Double = 0,
+        rows: Int = 1,
+        cols: Int = 1,
+        rowSpacing: Double = 0,
+        colSpacing: Double = 0
+    ) {
+        self.blockName = blockName
+        self.insertionPoint = insertionPoint
+        self.scale = scale
+        self.rotation = rotation
+        self.rows = Swift.max(1, rows)
+        self.cols = Swift.max(1, cols)
+        self.rowSpacing = rowSpacing
+        self.colSpacing = colSpacing
+    }
+
+    /// Whether this insert repeats over a grid (more than one cell).
+    public var isArray: Bool { rows > 1 || cols > 1 }
+}
+
+// MARK: - Decodable (back-compat: tolerate missing MINSERT fields)
+
+extension InsertData {
+    private enum CodingKeys: String, CodingKey {
+        case blockName, insertionPoint, scale, rotation, rows, cols, colSpacing, rowSpacing
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        blockName = try c.decode(String.self, forKey: .blockName)
+        insertionPoint = try c.decode(Vector.self, forKey: .insertionPoint)
+        scale = try c.decodeIfPresent(Vector.self, forKey: .scale) ?? Vector(1, 1)
+        rotation = try c.decodeIfPresent(Double.self, forKey: .rotation) ?? 0
+        rows = Swift.max(1, try c.decodeIfPresent(Int.self, forKey: .rows) ?? 1)
+        cols = Swift.max(1, try c.decodeIfPresent(Int.self, forKey: .cols) ?? 1)
+        colSpacing = try c.decodeIfPresent(Double.self, forKey: .colSpacing) ?? 0
+        rowSpacing = try c.decodeIfPresent(Double.self, forKey: .rowSpacing) ?? 0
+    }
+}
+
 // MARK: - The entity-kind sum type
 
 /// The discriminated union of entity geometry. This is the **seed set** for the
@@ -547,6 +634,12 @@ public enum EntityKind: Sendable, Hashable, Codable {
     /// lines, dimension line, arrowheads, measurement text) is computed in
     /// `resolve()`, never stored (ADR-001).
     case dimension(DimData)
+    /// A **block reference** — a placement of a named block (`RS_Insert`, DXF
+    /// `INSERT`/`MINSERT`). Its placed geometry (the block's member entities,
+    /// transformed by the insert's placement and optionally repeated over a grid)
+    /// is computed in `resolve()` via `ResolveContext.blockProvider`, never stored
+    /// (ADR-001).
+    case insert(InsertData)
 }
 
 // MARK: - Per-entity flags

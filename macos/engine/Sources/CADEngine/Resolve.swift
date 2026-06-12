@@ -192,6 +192,28 @@ public struct ResolveContext: Sendable {
     /// aware annotative is a later wave; this wires the mechanism + field now.
     public var annotationScale: Double = 1.0
 
+    /// Resolves a block NAME (DXF code 2, an `.insert`'s `blockName`) to that
+    /// block's ordered member `EntityRecord`s — the geometry placed by the insert.
+    /// The same provider pattern as `fontProvider`/`dimStyleProvider`: wired by
+    /// `CADDrawing.makeResolveContext` from the drawing's `BlockTable` (the block's
+    /// `entityIDs` looked up against `entities`). A `nil` provider — or a `nil`
+    /// return (the block doesn't exist) — makes an `.insert` resolve to EMPTY
+    /// geometry rather than crash (the brief's "missing block resolves to empty").
+    public var blockProvider: (@Sendable (String) -> [EntityRecord]?)? = nil
+
+    /// The remaining recursion budget when expanding nested `.insert`s. Each block
+    /// expansion decrements it; at `0` a further `.insert` resolves to empty. This
+    /// is the **cyclic-block depth guard** (a block that references itself, or a
+    /// cycle A→B→A, terminates instead of recursing forever). Starts at
+    /// `maxBlockRecursionDepth` for a top-level resolve; the block-resolve arm
+    /// threads a decremented copy into each member's resolve.
+    public var blockRecursionDepth: Int = ResolveContext.maxBlockRecursionDepth
+
+    /// The default maximum nesting depth for block (`.insert`) expansion. AutoCAD
+    /// allows deep nesting but a real drawing is rarely more than a handful deep;
+    /// this is the safety bound that makes a cyclic reference terminate.
+    public static let maxBlockRecursionDepth = 32
+
     public init(
         tessellationTolerance: Double = 0.05,
         layerAttributes: @escaping @Sendable (LayerID) -> ResolvedPen = { _ in
@@ -204,7 +226,9 @@ public struct ResolveContext: Sendable {
         fontProvider: (any FontProvider)? = nil,
         textStyleProvider: (@Sendable (String) -> TextStyle?)? = nil,
         annotationScale: Double = 1.0,
-        dimStyleProvider: (@Sendable () -> ResolvedDimStyle)? = nil
+        dimStyleProvider: (@Sendable () -> ResolvedDimStyle)? = nil,
+        blockProvider: (@Sendable (String) -> [EntityRecord]?)? = nil,
+        blockRecursionDepth: Int = ResolveContext.maxBlockRecursionDepth
     ) {
         self.tessellationTolerance = tessellationTolerance
         self.layerAttributes = layerAttributes
@@ -214,6 +238,8 @@ public struct ResolveContext: Sendable {
         self.textStyleProvider = textStyleProvider
         self.annotationScale = annotationScale
         self.dimStyleProvider = dimStyleProvider
+        self.blockProvider = blockProvider
+        self.blockRecursionDepth = blockRecursionDepth
     }
 
     /// A sensible default context for tests/previews.
@@ -777,7 +803,74 @@ extension EntityKind {
             // from the geometry unless overridden. The renderer draws all of this
             // for free (it consumes ResolvedGeometry only).
             return Self.resolveDimension(d, pen: pen, ctx: ctx)
+
+        case .insert(let d):
+            // Block reference → the block's member entities, each transformed by
+            // the insert's placement (translate∘rotate∘scale about the insertion
+            // point) and resolved (recursively, depth-guarded against cyclic
+            // blocks). A MINSERT repeats the block over its grid. A missing block
+            // (no provider / unknown name) resolves to EMPTY (no crash). The
+            // insert's own pen is threaded as the `currentBlockPen` so nested
+            // `.byBlock` member pens inherit from the placing insert (ADR-001).
+            return Self.resolveInsert(d, pen: pen, ctx: ctx)
         }
+    }
+
+    // MARK: - Insert (block reference) resolve — RS_Insert::update as a PURE function
+
+    /// The placement transform of an insert about its insertion point:
+    /// `translate(insertionPoint) ∘ rotate(rotation) ∘ scale(scale)`. Applied to
+    /// the block's LOCAL geometry (which is authored about the block base point —
+    /// conventionally (0,0), with the base point already folded into the member
+    /// coords by the block table). A degenerate (zero) scale axis is clamped away
+    /// from 0 so the linear part stays invertible enough for downstream kernels.
+    static func insertTransform(_ d: InsertData, cellOffset: Vector = Vector(0, 0)) -> Affine2D {
+        let sx = abs(d.scale.x) < Tolerance.distance ? Tolerance.distance * (d.scale.x < 0 ? -1 : 1)
+            : d.scale.x
+        let sy = abs(d.scale.y) < Tolerance.distance ? Tolerance.distance * (d.scale.y < 0 ? -1 : 1)
+            : d.scale.y
+        // Local frame: scale about origin, then offset by the (un-rotated) grid cell
+        // offset, then rotate, then translate to the insertion point. Matches AutoCAD
+        // MINSERT (the array spacing is in the insert's local, pre-rotation frame).
+        let scale = Affine2D(a: sx, b: 0, c: 0, d: sy, tx: 0, ty: 0)
+        let cell = Affine2D.translation(cellOffset)
+        let rotate = Affine2D.rotation(angle: d.rotation)
+        let translate = Affine2D.translation(d.insertionPoint)
+        return translate * rotate * cell * scale
+    }
+
+    /// Resolves an `.insert` to its placed block geometry (PURE; ADR-001 — no
+    /// mutation, unlike `RS_Insert::update`). Looks the block up via
+    /// `ctx.blockProvider`, transforms each member by the insert placement (per
+    /// MINSERT grid cell), resolves each member RECURSIVELY with a decremented
+    /// depth budget (the cyclic-block guard), and unions the results. Missing
+    /// block / exhausted depth ⇒ empty geometry (no crash).
+    static func resolveInsert(_ d: InsertData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        guard ctx.blockRecursionDepth > 0,
+              let provider = ctx.blockProvider,
+              let members = provider(d.blockName), !members.isEmpty
+        else { return ResolvedGeometry() }
+
+        // Thread the insert's pen as the current block pen so member `.byBlock`
+        // sentinels inherit from the placing insert, and decrement the depth budget
+        // so a cyclic block reference terminates.
+        var childCtx = ctx
+        childCtx.currentBlockPen = pen
+        childCtx.blockRecursionDepth = ctx.blockRecursionDepth - 1
+
+        var geo = ResolvedGeometry()
+        for r in 0..<Swift.max(1, d.rows) {
+            for c in 0..<Swift.max(1, d.cols) {
+                let cellOffset = Vector(Double(c) * d.colSpacing, Double(r) * d.rowSpacing)
+                let t = insertTransform(d, cellOffset: cellOffset)
+                for member in members {
+                    var placed = member
+                    placed.kind = member.kind.transformed(by: t)
+                    geo = geo.merged(with: placed.resolve(childCtx))
+                }
+            }
+        }
+        return geo
     }
 
     // MARK: - Dimension resolve (RS_Dimension::update ported as a PURE function)
@@ -1389,6 +1482,13 @@ extension EntityKind {
             if let tight = MTextShaper.boundingBox(d, ctx: ctx) { return tight }
             return Self.mtextBoundingBox(d)
         }
+        if case .insert(let d) = self {
+            // The real insert box needs the block provider (only here on the
+            // ctx-carrying path): union of every transformed-and-resolved member,
+            // per MINSERT cell. Missing block / no provider ⇒ collapse to the
+            // insertion point (the no-arg path returns the same).
+            return Self.insertBoundingBox(d, ctx: ctx)
+        }
         return boundingBox()
     }
 
@@ -1450,7 +1550,41 @@ extension EntityKind {
 
         case .dimension(let d):
             return Self.dimensionBoundingBox(d)
+
+        case .insert(let d):
+            // The no-arg path has no block provider, so the member geometry is
+            // unavailable — collapse to the insertion point (a valid, if degenerate,
+            // box). The ctx-carrying `boundingBox(ctx:)` returns the real union.
+            return Self.insertBoundingBox(d, ctx: nil)
         }
+    }
+
+    /// World-space bounding box of an `.insert`: the union of every member's
+    /// transformed-and-resolved geometry (per MINSERT cell), computed via the
+    /// provided context's `blockProvider`. With no context / no provider / a
+    /// missing block, collapses to the insertion point (a valid degenerate box).
+    static func insertBoundingBox(_ d: InsertData, ctx: ResolveContext?) -> AABB {
+        let fallback = AABB(point: d.insertionPoint.valid ? d.insertionPoint : Vector(0, 0))
+        guard let ctx,
+              ctx.blockRecursionDepth > 0,
+              let provider = ctx.blockProvider,
+              let members = provider(d.blockName), !members.isEmpty
+        else { return fallback }
+
+        var childCtx = ctx
+        childCtx.blockRecursionDepth = ctx.blockRecursionDepth - 1
+
+        var box = AABB.empty
+        for r in 0..<Swift.max(1, d.rows) {
+            for c in 0..<Swift.max(1, d.cols) {
+                let cellOffset = Vector(Double(c) * d.colSpacing, Double(r) * d.rowSpacing)
+                let t = insertTransform(d, cellOffset: cellOffset)
+                for member in members {
+                    box = box.union(member.kind.transformed(by: t).boundingBox(ctx: childCtx))
+                }
+            }
+        }
+        return box.isEmpty ? fallback : box
     }
 
     /// Bounding box for a dimension, derived from its RESOLVED geometry (ADR-001:

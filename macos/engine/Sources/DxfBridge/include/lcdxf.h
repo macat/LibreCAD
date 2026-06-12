@@ -104,8 +104,15 @@ typedef enum LCEntityKind {
      *  explicit text rotation (code 53). Distinct from LC_ENT_UNSUPPORTED so the
      *  reader maps it to `.dimension`. */
     LC_ENT_DIMENSION = 12,
+    /** A block reference (DXF INSERT / MINSERT). The referenced block name is in
+     *  `textValue`; the insertion point in p1; per-axis scale in
+     *  `insScaleX/Y/Z`; the rotation (radians) in `startAngle`; and the MINSERT
+     *  rectangular array in `insRows`/`insCols`/`insRowSpacing`/`insColSpacing`
+     *  (default 1×1, zero spacing == a plain single insert). Distinct from
+     *  LC_ENT_UNSUPPORTED so the reader maps it to `.insert`. */
+    LC_ENT_INSERT = 13,
     /** An entity libdxfrw delivered but the reader does not flatten
-     *  (INSERT/IMAGE/ordinate-DIMENSION/...). Carries only its `typeName` so Swift
+     *  (IMAGE/ordinate-DIMENSION/...). Carries only its `typeName` so Swift
      *  can collect a warning; geometry fields are unset. */
     LC_ENT_UNSUPPORTED = 100
 } LCEntityKind;
@@ -231,6 +238,17 @@ typedef struct LCEntity {
     int32_t dimLineStyle;        /**< text line-spacing style (code 72): 1 at-least, 2 exact. */
     double dimLineFactor;        /**< text line-spacing factor (code 41); default 1. */
 
+    /* INSERT-only fields (meaningful when kind == LC_ENT_INSERT). The block name
+     * is in `textValue`; the insertion point in p1; the rotation (radians) in
+     * `startAngle`. Per-axis scale + the MINSERT rectangular array live here. */
+    double insScaleX;            /**< x scale factor (code 41); default 1. */
+    double insScaleY;            /**< y scale factor (code 42); default 1. */
+    double insScaleZ;            /**< z scale factor (code 43); default 1. */
+    int32_t insRows;             /**< MINSERT row count (code 71); default 1. */
+    int32_t insCols;             /**< MINSERT column count (code 70); default 1. */
+    double insRowSpacing;        /**< MINSERT row spacing (code 45); default 0. */
+    double insColSpacing;        /**< MINSERT column spacing (code 44); default 0. */
+
     /* Variable-length data — borrowed pointers into the owning list's pools. */
     const LCVertex *vertices;   /**< polyline vertices, spline control points, hatch
                                      boundary vertices, or solid corners (x/y). */
@@ -260,6 +278,21 @@ typedef struct LCLayer {
     int32_t flags;          /**< code 70: bit0 frozen, bit2 locked. */
     int32_t plot;           /**< code 290: 1 printable, 0 not. */
 } LCLayer;
+
+/**
+ * A flattened block DEFINITION (from DRW_Block + its member entities). The member
+ * entities live in a SEPARATE flat array on the owning list (`lc_block_entities`);
+ * `memberOffset`/`memberCount` window into it. The name + base point come from the
+ * BLOCK record; anonymous/layout blocks (`*Model_Space`, `*Paper_Space`, names
+ * starting with `*`) are NOT emitted (they are not user-referenceable blocks).
+ */
+typedef struct LCBlock {
+    const char *name;       /**< block name, code 2 (borrows the list's string pool). */
+    double bx, by, bz;      /**< block base point, code 10/20/30. */
+    int32_t flags;          /**< block type bit flags, code 70. */
+    int32_t memberOffset;   /**< index of the first member in `lc_block_entities`. */
+    int32_t memberCount;    /**< number of member entities. */
+} LCBlock;
 
 /** Opaque owned result handle. Free with `lc_entity_list_free`. */
 typedef struct LCEntityList LCEntityList;
@@ -303,6 +336,24 @@ int lc_layer_count(const LCEntityList *list);
 
 /** Pointer to the contiguous flat array of `lc_layer_count` layers, or NULL. */
 const LCLayer *lc_layers(const LCEntityList *list);
+
+/** Number of block DEFINITIONS the reader collected (>= 0). NULL-safe. Anonymous
+ *  / layout blocks (`*`-prefixed names) are excluded. */
+int lc_block_count(const LCEntityList *list);
+
+/** Pointer to the contiguous flat array of `lc_block_count` blocks, or NULL. The
+ *  pointer (and the member window each block references) stays valid until
+ *  `lc_entity_list_free`. */
+const LCBlock *lc_blocks(const LCEntityList *list);
+
+/** Number of block-MEMBER entities across all blocks (>= 0). NULL-safe. Each
+ *  block's members are the window `[memberOffset, memberOffset+memberCount)` into
+ *  this array. */
+int lc_block_entity_count(const LCEntityList *list);
+
+/** Pointer to the contiguous flat array of `lc_block_entity_count` block-member
+ *  entities, or NULL. Same lifetime as the top-level entity array. */
+const LCEntity *lc_block_entities(const LCEntityList *list);
 
 /** Frees a handle returned by `lc_dxf_read`. NULL-safe. */
 void lc_entity_list_free(LCEntityList *list);
@@ -360,6 +411,14 @@ LCStatus lc_dxf_count_entities(const char *path, int *out_count);
  *                      absent from this array a default one is synthesized.
  * @param layerCount    Number of layers (>= 0).
  * @param version       An LCDxfVersion. Out-of-range falls back to R2000.
+ * @param blocks        Pointer to `blockCount` LCBlock block definitions, each
+ *                      windowing into `blockEntities` (may be NULL iff
+ *                      blockCount == 0). Emitted in the BLOCKS section so an
+ *                      INSERT entity resolves to real geometry on re-read.
+ * @param blockCount    Number of block definitions (>= 0).
+ * @param blockEntities Pointer to `blockEntityCount` LCEntity block-member PODs
+ *                      (may be NULL iff blockEntityCount == 0).
+ * @param blockEntityCount Number of block-member entities (>= 0).
  * @param out_skipped   If non-NULL, receives the count of entities whose kind is
  *                      not yet supported by the writer (skipped). 0 on error.
  * @return LC_OK on success; LC_ERR_INVALID_PATH for a null/empty path or a
@@ -369,6 +428,8 @@ LCStatus lc_dxf_count_entities(const char *path, int *out_count);
 LCStatus lc_dxf_write(const char *path,
                       const LCEntity *entities, int entityCount,
                       const LCLayer *layers, int layerCount,
+                      const LCBlock *blocks, int blockCount,
+                      const LCEntity *blockEntities, int blockEntityCount,
                       int version,
                       int *out_skipped);
 

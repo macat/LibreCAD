@@ -300,6 +300,12 @@ public enum Snapping {
             case let .angular(l1s, l1e, l2s, l2e):      pts += [l1s, l1e, l2s, l2e]
             }
             return pts.filter(\.valid)
+
+        case .insert(let d):
+            // The insertion point is the canonical snap target for a block
+            // reference (block-interior geometry snapping is backlog — the members
+            // aren't expanded here without a block provider).
+            return d.insertionPoint.valid ? [d.insertionPoint] : []
         }
     }
 
@@ -390,6 +396,11 @@ public enum Snapping {
         case .dimension:
             // A dimension has no canonical "middle" snap (its defining points are
             // exposed as endpoints); leave middles to other snap kinds.
+            return []
+
+        case .insert:
+            // A block reference has no canonical middle (its insertion point is the
+            // endpoint snap); block-interior middles are backlog.
             return []
         }
     }

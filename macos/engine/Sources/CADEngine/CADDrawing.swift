@@ -754,6 +754,11 @@ public final class CADDrawing {
         // the resolve hook fills document defaults for dims without per-entity
         // overrides (decision D4). These are the Document Settings sheet's `$DIM*`.
         let docDimStyle = dimensionStyle
+        // Snapshot the block table → member records map (value copies) so an
+        // `.insert` can resolve a referenced block's geometry. Building the
+        // name→[EntityRecord] map once here keeps the per-insert lookup O(1) and
+        // the closure `@Sendable` (it captures only value types, no `self`).
+        let blockMembers = blockMembersSnapshot()
         return ResolveContext(
             tessellationTolerance: tessellationTolerance,
             layerAttributes: { layerID in
@@ -763,8 +768,23 @@ public final class CADDrawing {
             fontProvider: CADFonts.provider,
             textStyleProvider: { name in styleTable.style(named: name) },
             annotationScale: annotationScale,
-            dimStyleProvider: { docDimStyle }
+            dimStyleProvider: { docDimStyle },
+            blockProvider: { name in blockMembers[name] }
         )
+    }
+
+    /// Builds a `blockName → [member EntityRecord]` snapshot (value copies) from the
+    /// block table: each block's `entityIDs` resolved against `entities`. Backs the
+    /// resolve context's `blockProvider` so an `.insert` can expand its block. A
+    /// referenced id no longer in the drawing is skipped (the block keeps its other
+    /// members). Returns an empty map for a drawing with no blocks.
+    func blockMembersSnapshot() -> [String: [EntityRecord]] {
+        var map: [String: [EntityRecord]] = [:]
+        for block in blocks.blocks where !block.isFrozen {
+            let members = block.entityIDs.compactMap { entity($0) }
+            map[block.name] = members
+        }
+        return map
     }
 
     /// The document-default dimension style assembled from the `$DIM*` header vars

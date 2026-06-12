@@ -42,7 +42,20 @@ extension CADEngine {
     public struct DXFReadResult: Sendable {
         public var records: [EntityRecord]
         public var layers: LayerTable
+        /// The parsed block table. Block member entities are also present in
+        /// `records` (ADR-001: a block's contents are id-refs into the drawing's
+        /// entity store), so loading is: `drawing.load(entities: records, …,
+        /// blocks: blocks)`. Empty when the file has no (non-anonymous) blocks.
+        public var blocks: BlockTable
         public var warnings: [String]
+
+        public init(records: [EntityRecord], layers: LayerTable,
+                    blocks: BlockTable = BlockTable(), warnings: [String]) {
+            self.records = records
+            self.layers = layers
+            self.blocks = blocks
+            self.warnings = warnings
+        }
     }
 
     /// Reads `dxfPath`, flattening every supported entity into `EntityRecord`s
@@ -89,11 +102,44 @@ extension CADEngine {
             }
         }
 
+        // Block definitions: each block's member entities are mapped + minted ids
+        // and APPENDED to `records` (ADR-001 — block contents are id-refs into the
+        // drawing's entity store), and the block table records those ids. A member
+        // whose kind is unsupported is skipped (the block keeps its other members).
+        var blocks = BlockTable()
+        let blockCount = Int(lc_block_count(list))
+        if blockCount > 0, let blockBase = lc_blocks(list),
+           let memberBase = lc_block_entities(list) {
+            let memberTotal = Int(lc_block_entity_count(list))
+            for bi in 0..<blockCount {
+                let b = blockBase[bi]
+                guard let blockName = Self.string(b.name), !blockName.isEmpty else { continue }
+                var memberIDs: [EntityID] = []
+                let start = Int(b.memberOffset)
+                let mcount = Int(b.memberCount)
+                if start >= 0, mcount >= 0, start + mcount <= memberTotal {
+                    for mi in start..<(start + mcount) {
+                        let me = memberBase[mi]
+                        guard let mapped = Self.mapEntity(
+                            me, idSource: { defer { nextID += 1 }; return EntityID(nextID) })
+                        else { continue }
+                        records.append(mapped)
+                        memberIDs.append(mapped.id)
+                    }
+                }
+                blocks.add(Block(
+                    name: blockName,
+                    basePoint: Vector(b.bx, b.by, b.bz),
+                    entityIDs: memberIDs,
+                    isFrozen: (b.flags & 0x1) != 0))
+            }
+        }
+
         for (name, n) in unsupportedCounts.sorted(by: { $0.key < $1.key }) {
             warnings.append("Skipped \(n) unsupported \(name) entit\(n == 1 ? "y" : "ies") (not yet imported)")
         }
 
-        return DXFReadResult(records: records, layers: layers, warnings: warnings)
+        return DXFReadResult(records: records, layers: layers, blocks: blocks, warnings: warnings)
     }
 
     // MARK: - Layer-table mapping
@@ -217,9 +263,31 @@ extension CADEngine {
             // frozen DimKind) still arrive as LC_ENT_UNSUPPORTED -> warning.
             return mapDimension(e)
 
+        case Int32(LC_ENT_INSERT.rawValue):
+            // A block reference (DXF INSERT/MINSERT) → `.insert`.
+            return mapInsert(e)
+
         default: // LC_ENT_UNSUPPORTED (incl. ordinate/3p DIMENSION) and anything else
             return nil
         }
+    }
+
+    /// Maps a flattened INSERT POD to `InsertData`: block name (`textValue`),
+    /// insertion point (p1), per-axis scale (ins*), rotation (startAngle, radians),
+    /// and the MINSERT array. An insert with no block name is dropped (returns
+    /// `nil` -> warning) — the resolve would have nothing to place.
+    private static func mapInsert(_ e: LCEntity) -> EntityKind? {
+        guard let name = string(e.textValue), !name.isEmpty else { return nil }
+        return .insert(InsertData(
+            blockName: name,
+            insertionPoint: Vector(e.p1x, e.p1y, e.p1z),
+            scale: Vector(e.insScaleX, e.insScaleY, e.insScaleZ),
+            rotation: e.startAngle,
+            rows: Int(e.insRows),
+            cols: Int(e.insCols),
+            rowSpacing: e.insRowSpacing,
+            colSpacing: e.insColSpacing
+        ))
     }
 
     /// Maps a flattened DIMENSION POD to `DimData`. The `dimType` discriminator
@@ -503,6 +571,8 @@ extension CADEngine {
 public func loadDrawing(dxfPath: String) async throws -> CADDrawing {
     let result = try await CADEngine.shared.readEntities(dxfPath: dxfPath)
     let drawing = CADDrawing()
-    drawing.load(entities: result.records, layers: result.layers)
+    // Load the block table too so any INSERT resolves to its block's geometry
+    // (the block's member records are part of `result.records`).
+    drawing.load(entities: result.records, layers: result.layers, blocks: result.blocks)
     return drawing
 }

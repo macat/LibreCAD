@@ -361,10 +361,11 @@ public struct StretchTool: Tool {
             guard inside(d.position) else { return nil }
             return EntityKind.mtext(d).transformed(by: t)
 
-        case .hatch, .dimension:
+        case .hatch, .dimension, .insert:
             // Best-effort whole-translate if ANY defining point is in-window; the
             // per-point stretch of these composite kinds is backlog. We translate
-            // the whole entity (its boundary moves with the geometry it bounds).
+            // the whole entity (its boundary moves with the geometry it bounds). For
+            // an `.insert` the defining point is its insertion point.
             guard anyDefiningPointInside(kind, window: window) else { return nil }
             return kind.transformed(by: t)
         }
@@ -412,6 +413,9 @@ public struct StretchTool: Tool {
             case let .diameter(p1, p2):    return inside(p1) || inside(p2)
             case let .angular(a, b, c, e): return inside(a) || inside(b) || inside(c) || inside(e)
             }
+        case .insert(let ins):
+            // A block reference's only stretch reference point is its insertion point.
+            return inside(ins.insertionPoint)
         default:
             return false
         }
