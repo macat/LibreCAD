@@ -145,6 +145,10 @@ public struct FilletTool: Tool {
     /// lines) + one `.add` (the arc) as a single undoable commit.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
         switch input {
+        case .value:
+            // A typed coordinate doesn't apply to this entity-pick EDITING tool — ignore.
+            return .none
+
         case .move(let p):
             cursor = p
             // Recompute the would-fillet preview from the live context so the

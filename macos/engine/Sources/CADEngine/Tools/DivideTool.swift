@@ -97,6 +97,10 @@ public struct DivideTool: Tool {
         case .move:
             return .none
 
+        case .value:
+            // A typed coordinate doesn't apply to this selection-based tool — ignore.
+            return .none
+
         case .click, .commit:
             return fire()
 

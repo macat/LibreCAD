@@ -69,6 +69,16 @@ struct ContentView: View {
     /// View ▸ Command Palette… menu item (⌘K) via a focused scene value.
     @State private var showPalette = false
 
+    /// The live text of the bottom command / coordinate input line (UX-plan U1).
+    /// Cleared after each successful submit; the field echoes parse errors via the
+    /// model's `lastCommandError`.
+    @State private var commandText: String = ""
+
+    /// Whether the bottom command field has keyboard focus. Bound to a `@FocusState`
+    /// so the canvas can hand focus to it on Space (D1) and Esc/submit can return
+    /// focus to the canvas (so tool letters work again).
+    @FocusState private var commandFieldFocused: Bool
+
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             // Leading pane: the modern Layers (+ Blocks stub) sidebar, bound to
@@ -110,6 +120,11 @@ struct ContentView: View {
             .overlay(alignment: .topLeading) { statusHUD }
             .overlay(alignment: .top) { toolPromptHUD }
             .overlay(alignment: .bottomLeading) { coordinateHUD }
+            // U1: a persistent command / coordinate input line pinned to the bottom
+            // of the window, below the canvas. Always present (D1); focusing it routes
+            // typed keystrokes to it (not tool activation); Return parses + feeds the
+            // active tool a `.value(point)`; Esc returns focus to the canvas.
+            .safeAreaInset(edge: .bottom, spacing: 0) { commandBar }
             // Trailing Inspector: the selected entity's editable properties, plus
             // snap/grid controls and the active tool's options. Bound to the SAME
             // live model the canvas + layers sidebar use, so edits reflect live and
@@ -149,6 +164,14 @@ struct ContentView: View {
             // (which runs BEFORE the canvas `keyDown`), so ⌫ falls through to the
             // canvas, where the tool consumes it as `.backspace`. See MUST-FIX 1.
             .focusedSceneValue(\.isToolActive, model.isToolActive)
+            // Let the canvas hand focus to the command line on Space (D1). The
+            // controller calls this closure from `handleKey` when Space is pressed
+            // and a tool is active, so a typed length goes to the field, not a tool.
+            .onAppear {
+                controllerBox.controller?.requestCommandFocus = { commandFieldFocused = true }
+            }
+            // View ▸ Show Command Line (⇧⌘L) focuses the field from the menu.
+            .focusedSceneValue(\.focusCommandLine) { commandFieldFocused = true }
     }
 
     // MARK: - Document ⇄ live model bridge (MAIN ACTOR)
@@ -384,6 +407,75 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Command / coordinate input line (U1)
+
+    /// The persistent command/coordinate field pinned to the bottom of the window.
+    /// Typing here (focused via Space, click, or ⇧⌘L) and pressing Return parses the
+    /// text and feeds the active tool a `.value(point)` — the precision-input path
+    /// (e.g. `0,0`, `@10,0`, `5<90`). Esc returns focus to the canvas so tool
+    /// shortcut letters work again. The prompt label echoes the active tool's step.
+    private var commandBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "chevron.right")
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+
+            TextField(commandPlaceholder, text: $commandText)
+                .textFieldStyle(.plain)
+                .font(.body.monospaced())
+                .focused($commandFieldFocused)
+                .onSubmit { submitCommand() }
+                // Esc clears + returns focus to the canvas (so tool letters work).
+                .onExitCommand { returnFocusToCanvas() }
+
+            if let error = model.lastCommandError, !error.isEmpty {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(1)
+            } else if model.isToolActive {
+                Text(commandPlaceholder)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(.bar)
+        .overlay(alignment: .top) { Divider() }
+    }
+
+    /// The active tool's step prompt + the accepted coordinate syntax, shown as the
+    /// field's placeholder/hint. A neutral hint in select mode.
+    private var commandPlaceholder: String {
+        let hint = model.commandHint
+        return hint.isEmpty
+            ? "Command line — start a tool, then type a coordinate (x,y · @dx,dy · dist<angle)"
+            : hint
+    }
+
+    /// Parses + submits the current command text via the model, clears the field on
+    /// success, and keeps focus for the next coordinate (a chained run types many).
+    private func submitCommand() {
+        let didChange = model.submitCommandText(commandText)
+        if model.lastCommandError == nil {
+            commandText = ""
+            // A successful submit may have committed geometry / moved the preview.
+            if didChange { controllerBox.controller?.requestRedraw() }
+        }
+        // Keep focus in the field so the user can type the next point immediately.
+    }
+
+    /// Returns keyboard focus to the canvas (Esc): clears the field text and the
+    /// error, drops the field focus so the MTKView reclaims first-responder and tool
+    /// shortcut letters route to it again.
+    private func returnFocusToCanvas() {
+        commandText = ""
+        commandFieldFocused = false
+        controllerBox.controller?.returnFocusToCanvas()
+    }
+
     // MARK: - Export (PDF / PNG / SVG) and Print (⌘P)
     //
     // These STAY custom (not the document type). DocumentGroup owns only DXF
@@ -453,6 +545,13 @@ extension FocusedValues {
         set { self[CommandPaletteKey.self] = newValue }
     }
 
+    /// Focus the bottom command/coordinate line on the focused window
+    /// (View ▸ Show Command Line, ⇧⌘L) — U1.
+    var focusCommandLine: (() -> Void)? {
+        get { self[FocusCommandLineKey.self] }
+        set { self[FocusCommandLineKey.self] = newValue }
+    }
+
     var zoomToFit: (() -> Void)? {
         get { self[ZoomToFitKey.self] }
         set { self[ZoomToFitKey.self] = newValue }
@@ -503,6 +602,10 @@ extension FocusedValues {
 }
 
 private struct CommandPaletteKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct FocusCommandLineKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 

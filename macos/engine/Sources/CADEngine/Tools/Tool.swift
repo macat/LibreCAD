@@ -46,6 +46,16 @@ public enum ToolInput: Sendable, Equatable {
     /// A primary click landed at a (snapped) world point — the tool's "pick a
     /// point" event.
     case click(Vector)
+    /// A world point the user TYPED on the command/coordinate line (U1) — already
+    /// resolved by `CommandParser` from `x,y` / `@dx,dy` / `dist<angle` / a bare
+    /// distance, against the relative-zero + cursor. It is a "pick a point" event
+    /// just like `.click`, but it lands at the *exact* typed coordinate (no snap
+    /// drift): a DRAW or DIMENSION tool treats it like a `.click` at that point,
+    /// placing the next point. MODIFY / SELECT tools ignore it (safe default —
+    /// their pick semantics are entity-based, not coordinate-typed). Append-only
+    /// extension of the frozen contract (decision D7); every tool's `handle`
+    /// switch handles it (the build flags any that don't).
+    case value(Vector)
     /// Finish the current operation (Return / double-click / Enter): commit any
     /// pending geometry and end the tool's current run.
     case commit

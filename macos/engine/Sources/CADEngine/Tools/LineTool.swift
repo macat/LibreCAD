@@ -89,7 +89,8 @@ public struct LineTool: Tool {
             // A move only matters for the preview once there is a fixed point.
             return preview.isEmpty ? .none : .preview
 
-        case .click(let p):
+        case .click(let p), .value(let p):
+            // A typed coordinate (U1) places the next point exactly like a click.
             return handleClick(p)
 
         case .backspace:

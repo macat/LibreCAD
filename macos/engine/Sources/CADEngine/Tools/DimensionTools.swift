@@ -197,7 +197,8 @@ public struct LinearDimTool: Tool {
         case .move(let p):
             cursor = p
             return preview.isEmpty ? .none : .preview
-        case .click(let p):
+        case .click(let p), .value(let p):
+            // A typed coordinate (U1) places the next origin/leader point like a click.
             return handleClick(p)
         case .backspace:
             return handleBackspace()
@@ -307,7 +308,8 @@ public struct AlignedDimTool: Tool {
         case .move(let p):
             cursor = p
             return preview.isEmpty ? .none : .preview
-        case .click(let p):
+        case .click(let p), .value(let p):
+            // A typed coordinate (U1) places the next origin/leader point like a click.
             return handleClick(p)
         case .backspace:
             return handleBackspace()
@@ -454,7 +456,8 @@ public struct RadialDimTool: Tool {
         case .move(let p):
             cursor = p
             return preview.isEmpty ? .none : .preview
-        case .click(let p):
+        case .click(let p), .value(let p):
+            // A typed coordinate (U1) places the next pick point like a click.
             return handleClick(p, context: context)
         case .backspace:
             return handleBackspace()
@@ -582,7 +585,8 @@ public struct AngularDimTool: Tool {
         case .move(let p):
             cursor = p
             return preview.isEmpty ? .none : .preview
-        case .click(let p):
+        case .click(let p), .value(let p):
+            // A typed coordinate (U1) places the next pick point like a click.
             return handleClick(p, context: context)
         case .backspace:
             return handleBackspace()

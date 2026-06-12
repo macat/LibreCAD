@@ -169,6 +169,10 @@ public struct ArrayTool: Tool {
         }
 
         switch input {
+        case .value:
+            // A typed coordinate doesn't apply to this selection-based MODIFY tool — ignore.
+            return .none
+
         case .move(let p):
             cursor = p
             // The cursor only matters for the polar center preview before the pick.

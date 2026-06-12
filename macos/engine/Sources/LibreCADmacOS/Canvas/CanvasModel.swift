@@ -123,6 +123,21 @@ final class CanvasModel {
     /// empty in select mode. Republished on every tool input so SwiftUI updates.
     private(set) var toolStatus: String = ""
 
+    /// The "relative-zero" — the last point the active tool actually PLACED
+    /// (clicked or typed), the origin that the command line's `@dx,dy`, polar
+    /// `dist<angle`, and bare-distance input are measured from (UX-plan U1 / G7).
+    /// Updated by `handleToolInput` on every valid `.click`/`.value` so a typed
+    /// `@10,0` is relative to wherever the previous point landed. Reset to `nil`
+    /// when the run ends (commit/cancel → `.finished`) or the tool changes, so the
+    /// first point of a fresh run has no stale reference. Observed so the command
+    /// field / status bar can show/draw it.
+    private(set) var relativeZero: Vector?
+
+    /// The most recent error from a command-line submission (`submitCommandText`),
+    /// or `nil` after a successful submit. The command field echoes it so a typo
+    /// like `1,,2` shows "Expected x,y" instead of silently doing nothing.
+    private(set) var lastCommandError: String?
+
     // MARK: Tool config (the parameterized tools' "options", surfaced by the Inspector)
 
     /// Editable defaults for the parameterized tools. These tools (`FilletTool`,
@@ -315,6 +330,10 @@ final class CanvasModel {
         tool = kind.makeTool()
         applyToolConfig()
         toolStatus = tool?.status ?? ""
+        // A fresh tool has placed no point yet — clear any stale relative-zero so the
+        // command line's `@`/polar/distance input has no leftover reference.
+        relativeZero = nil
+        lastCommandError = nil
     }
 
     /// Pushes the Inspector's stored tool options onto the live tool value. The
@@ -378,6 +397,18 @@ final class CanvasModel {
         let outcome = tool!.handle(input, context: makeToolContext())
         toolStatus = tool!.status
 
+        // Track the relative-zero (UX-plan U1 / G7): a `.click`/`.value` is a point
+        // placement, so the point the tool just consumed becomes the origin the
+        // command line's `@dx,dy` / polar / bare-distance input measures from next.
+        // (Done regardless of the outcome — even the first click of a Line returns
+        // `.none` but still fixes the start point a typed `@10,0` should follow.)
+        switch input {
+        case .click(let p), .value(let p):
+            if p.valid { relativeZero = p }
+        default:
+            break
+        }
+
         switch outcome {
         case .none:
             return false
@@ -395,7 +426,48 @@ final class CanvasModel {
             tool = activeToolKind.makeTool()
             applyToolConfig()
             toolStatus = tool?.status ?? ""
+            // The run is over — drop the relative-zero so the next run starts fresh.
+            relativeZero = nil
             return true
+        }
+    }
+
+    // MARK: - Command / coordinate line (UX-plan U1)
+
+    /// A short hint of the input the active tool's current step expects, for the
+    /// command field's placeholder/echo. Empty in select mode. Mirrors the tool's
+    /// own `status` prompt plus the coordinate syntax so the field is
+    /// self-documenting ("Specify next point — x,y / @dx,dy / dist<angle").
+    var commandHint: String {
+        guard isToolActive, !toolStatus.isEmpty else { return "" }
+        return "\(activeToolKind.title): \(toolStatus) — x,y · @dx,dy · dist<angle"
+    }
+
+    /// Parses a command/coordinate string the user typed on the bottom field and,
+    /// on success, feeds the resolved world point to the active tool as
+    /// `ToolInput.value(point)` — exactly as a click at that exact coordinate would,
+    /// with NO snap drift (the typed value is the truth). Uses the current
+    /// `relativeZero` as the `@`/polar/distance origin and `cursorWorld` for the
+    /// bare-distance bearing. Returns whether the canvas should redraw.
+    ///
+    /// On a parse error it stores `lastCommandError` (the field echoes it) and does
+    /// NOT touch the tool. A no-op (false) in select mode (no tool to receive the
+    /// point) or for empty input.
+    @discardableResult
+    func submitCommandText(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return false }
+        guard isToolActive else {
+            lastCommandError = "Start a tool first (e.g. press L for Line)"
+            return false
+        }
+        switch CommandParser.parse(trimmed, reference: relativeZero, cursor: cursorWorld) {
+        case .point(let p):
+            lastCommandError = nil
+            return handleToolInput(.value(p))
+        case .error(let message):
+            lastCommandError = message
+            return false
         }
     }
 

@@ -102,6 +102,10 @@ public struct TrimTool: Tool {
     /// shorten the clicked target up to the nearest cutting intersection.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
         switch input {
+        case .value:
+            // A typed coordinate doesn't apply to this entity-pick EDITING tool — ignore.
+            return .none
+
         case .move(let p):
             cursor = p
             // Recompute the would-trim preview from the live context so the

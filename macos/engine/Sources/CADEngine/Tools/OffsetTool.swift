@@ -115,6 +115,10 @@ public struct OffsetTool: Tool {
         }
 
         switch input {
+        case .value:
+            // A typed coordinate doesn't apply to this selection-based MODIFY tool — ignore.
+            return .none
+
         case .move(let p):
             cursor = p
             // A move only matters for the preview once a selection is captured.
