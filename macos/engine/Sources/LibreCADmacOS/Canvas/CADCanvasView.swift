@@ -85,6 +85,16 @@ final class FlippedMTKView: MTKView {
 
     override func mouseDown(with event: NSEvent) {
         let loc = locationInView(event)
+        // ===== CURSOR-OFFSET INSTRUMENTATION (remove once the bug is closed) =====
+        // Enable by launching with `LC_DEBUG_COORDS=1` and watch Console.app (or the
+        // terminal if running the bare binary). One line per click dumps every
+        // coordinate space involved so a residual cursor↔point offset can be pinned
+        // to the exact mismatching rect. The KEY check is `worldToScreen(world)` vs
+        // `viewLocal`: if they diverge, the event-view space and the
+        // Viewport/drawable space disagree (the ~200px structural offset). To remove:
+        // delete this block and the `debugDumpCoords` method below.
+        debugDumpCoords(event: event, viewLocal: loc)
+        // ========================================================================
         mouseDownLocation = loc
         lastDragLocation = loc
     }
@@ -115,6 +125,43 @@ final class FlippedMTKView: MTKView {
     /// Max pointer travel (points) between down and up that still counts as a click
     /// rather than a pan (so a grab-drag doesn't toggle selection on release).
     private static let clickThreshold: CGFloat = 3
+
+    // ===== CURSOR-OFFSET INSTRUMENTATION (remove once the bug is closed) =========
+    /// Dumps every coordinate space involved in a click to `NSLog` when the process
+    /// is launched with the env var `LC_DEBUG_COORDS` set (to anything). This is the
+    /// USER-runnable probe for the residual ~200px cursor↔point offset: run once,
+    /// click anywhere, and paste the Console line.
+    ///
+    /// The diagnostic invariant is the LAST field: `w2s` (== `viewport.worldToScreen`
+    /// of the world point the click maps to) MUST equal `viewLocal` for a click that
+    /// lands under the cursor. If `w2s` ≠ `viewLocal`, the event-view space and the
+    /// Viewport space disagree — and the printed rects say WHY (compare
+    /// `viewport.size` to `bounds.size`/`drawablePts`, and `bounds.origin`/`frame`).
+    ///
+    /// To remove: delete this method and the call in `mouseDown`.
+    private func debugDumpCoords(event: NSEvent, viewLocal: CGPoint) {
+        guard ProcessInfo.processInfo.environment["LC_DEBUG_COORDS"] != nil else { return }
+        guard let controller else { NSLog("LC_DEBUG_COORDS: no controller"); return }
+        let vp = controller.model.viewport
+        let world = vp.screenToWorld(viewLocal)
+        let w2s = vp.worldToScreen(world)
+        let backing = window?.backingScaleFactor ?? layer?.contentsScale ?? 1
+        let drawablePts = CGSize(width: drawableSize.width / max(backing, 1),
+                                 height: drawableSize.height / max(backing, 1))
+        NSLog("""
+        LC_DEBUG_COORDS click:
+          event.locationInWindow = \(event.locationInWindow)
+          viewLocal (convert)    = \(viewLocal)
+          self.bounds            = \(bounds)
+          self.frame             = \(frame)
+          window.frame.size      = \(window?.frame.size.debugDescription ?? "nil")  backing=\(backing)
+          viewport.size          = \(vp.size)   center=(\(vp.center.x), \(vp.center.y)) scale=\(vp.scale)
+          drawableSize (px)      = \(drawableSize)   drawable (pts) = \(drawablePts)
+          world point            = (\(world.x), \(world.y))
+          worldToScreen(world)   = \(w2s)   <-- MUST equal viewLocal; delta = (\(w2s.x - viewLocal.x), \(w2s.y - viewLocal.y))
+        """)
+    }
+    // ============================================================================
 
     override func scrollWheel(with event: NSEvent) {
         let loc = locationInView(event)
@@ -215,6 +262,9 @@ final class CADCanvasController {
 
     func zoom(byWheelDelta delta: CGFloat, at point: CGPoint) {
         beginGesture()
+        // The zoom anchor `point` is in the view's local space, so the viewport must
+        // match that view's size for the cursor to stay put (same invariant as click).
+        syncViewSizeFromView()
         // Map wheel delta to a multiplicative zoom factor (clamped per tick).
         let step = 1.0 + Double(delta) * 0.01
         let factor = Swift.min(Swift.max(step, 0.5), 2.0)
@@ -225,6 +275,7 @@ final class CADCanvasController {
 
     func magnify(by magnification: CGFloat, at point: CGPoint, phase: NSEvent.Phase) {
         beginGesture()
+        syncViewSizeFromView()
         // `magnification` is a delta (e.g. +0.02 per event); 1 + delta is the factor.
         model.zoom(by: 1.0 + Double(magnification), about: point)
         endGestureSoon()
@@ -238,7 +289,22 @@ final class CADCanvasController {
 
     // MARK: Cursor interaction (snap + select)
 
+    /// Pulls the live view bounds INTO the viewport so `screenToWorld`/`worldToScreen`
+    /// use exactly the rect the incoming event point was measured in. Events arrive in
+    /// the `FlippedMTKView`'s own local space (`convert(_:from: nil)`); the Viewport's
+    /// `size` MUST be that same view's point-size or the center term in
+    /// `screenToWorld` is off, producing a CONSTANT cursor↔committed-point offset of
+    /// half the size mismatch on each axis. `setViewSize` is otherwise driven by
+    /// SwiftUI's `updateNSView` and the MTKView resize callback, both of which can lag
+    /// the actual bounds by a layout pass; re-syncing here makes the click/move math
+    /// provably keyed off the SAME view the point came from, no matter the ordering.
+    /// (Matrix-only: keeps center/scale; only `size` may change — cheap, idempotent.)
+    private func syncViewSizeFromView() {
+        if let b = view?.bounds.size { model.setViewSize(b) }
+    }
+
     func mouseMoved(to point: CGPoint) {
+        syncViewSizeFromView()
         let spacing = renderer?.lastGridSpacing
         model.updateSnap(atScreenPoint: point, gridSpacing: spacing)
         // When a draw tool is active, feed it the SNAPPED world point so its
@@ -262,6 +328,7 @@ final class CADCanvasController {
     /// active it feeds the tool a snapped `.click`; otherwise it toggles selection.
     /// (A larger-travel down→up is a pan and is handled by `panDrag`, NOT here.)
     func mouseClick(at point: CGPoint) {
+        syncViewSizeFromView()
         if model.isToolActive {
             let spacing = renderer?.lastGridSpacing
             let p = model.snappedWorldPoint(atScreenPoint: point, gridSpacing: spacing)
