@@ -96,7 +96,8 @@ let package = Package(
             dependencies: ["CADEngine"],
             path: "Tests/CADEngineTests",
             resources: [
-                .copy("Resources/dim_sample.dxf")
+                .copy("Resources/dim_sample.dxf"),
+                .copy("Resources/hatch_sample.dxf")
             ],
             swiftSettings: swift6
         ),

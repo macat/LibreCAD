@@ -4,9 +4,12 @@
 //
 //  Tests for the DXF writer (DXFWriter.swift + the DxfBridge write C ABI). The
 //  key test is a full round-trip: read dim_sample.dxf, write it back out, re-read
-//  the result, and assert the supported-kind entity counts are preserved. A
-//  second test builds a CADDrawing from scratch (line + circle + arc + a custom
-//  layer), writes, re-reads, and asserts the geometry round-trips.
+//  the result, and assert the supported-kind entity counts are preserved
+//  (including the TEXT and SOLID kinds the writer now emits). A second test
+//  builds a CADDrawing from scratch (line + circle + arc + a custom layer),
+//  writes, re-reads, and asserts the geometry round-trips. Dedicated tests assert
+//  TEXT, SOLID, and HATCH (the previously-dropped display kinds) now survive the
+//  round-trip with their key fields.
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //
@@ -28,6 +31,16 @@ struct DXFWriterTests {
         return url.path
     }
 
+    /// Path to the bundled hatch_sample.dxf (a crafted minimal fixture: one LINE
+    /// plus one solid-fill HATCH with a 10x10 square edge boundary).
+    private func hatchSamplePath() throws -> String {
+        let url = try #require(
+            Bundle.module.url(forResource: "hatch_sample", withExtension: "dxf"),
+            "hatch_sample.dxf resource missing from the test bundle"
+        )
+        return url.path
+    }
+
     /// A fresh temp .dxf path in the system temp dir; the caller cleans it up.
     private func tempDXFPath() -> String {
         let dir = FileManager.default.temporaryDirectory
@@ -43,8 +56,11 @@ struct DXFWriterTests {
 
     private struct KindTally: Equatable {
         var line = 0, point = 0, circle = 0, arc = 0, ellipse = 0, polyline = 0
+        var text = 0, solid = 0, hatch = 0
         /// The supported set the writer emits (spline/splinePoints excluded).
-        var supportedTotal: Int { line + point + circle + arc + ellipse + polyline }
+        var supportedTotal: Int {
+            line + point + circle + arc + ellipse + polyline + text + solid + hatch
+        }
     }
 
     private func tally(_ records: [EntityRecord]) -> KindTally {
@@ -57,8 +73,10 @@ struct DXFWriterTests {
             case .arc:          t.arc += 1
             case .ellipse:      t.ellipse += 1
             case .polyline:     t.polyline += 1
-            case .spline, .splinePoints: break   // skipped by the writer
-            case .text, .hatch, .solid: break    // display kinds, skipped by the writer
+            case .text:         t.text += 1      // now written (DRW_Text)
+            case .solid:        t.solid += 1     // now written (DRW_Solid)
+            case .hatch:        t.hatch += 1     // now written (DRW_Hatch)
+            case .spline, .splinePoints: break   // still skipped by the writer
             }
         }
         return t
@@ -78,23 +96,23 @@ struct DXFWriterTests {
         #expect(firstTally.arc >= 1)
         #expect(firstTally.polyline >= 1)
 
+        // dim_sample carries MTEXT (-> .text) and SOLID (-> .solid), which the
+        // writer now emits, so they should round-trip rather than be dropped.
+        #expect(firstTally.text >= 1)
+        #expect(firstTally.solid >= 1)
+
         let outPath = tempDXFPath()
         defer { removeFile(outPath) }
 
-        // Write everything the reader produced. The reader-import wave now also
-        // imports dim_sample's MTEXT/SOLID as .text/.solid records, which the
-        // writer does not yet emit, so it skips exactly those display kinds.
+        // Write everything the reader produced. dim_sample has no splines, so
+        // every record is in the writer's supported set -> nothing is skipped.
         let writeResult = try await CADEngine.shared.writeEntities(
             first.records, layers: first.layers, toPath: outPath
         )
-        // The writer skips only the display kinds it can't emit yet (text/hatch/
-        // solid) plus any spline/splinePoints; dim_sample has no splines, so the
-        // skipped count equals its imported text+solid count and the
-        // writer-supported geometry is fully written.
-        let displayKinds = first.records.filter {
-            switch $0.kind { case .text, .hatch, .solid: return true; default: return false }
+        let unsupported = first.records.filter {
+            switch $0.kind { case .spline, .splinePoints: return true; default: return false }
         }.count
-        #expect(writeResult.skipped == displayKinds)
+        #expect(writeResult.skipped == unsupported)   // 0 for dim_sample
         #expect(FileManager.default.fileExists(atPath: outPath))
 
         // Re-read and compare the supported-kind tallies exactly.
@@ -106,6 +124,9 @@ struct DXFWriterTests {
         #expect(secondTally.arc == firstTally.arc)
         #expect(secondTally.polyline == firstTally.polyline)
         #expect(secondTally.ellipse == firstTally.ellipse)
+        // The previously-dropped display kinds now survive the round-trip.
+        #expect(secondTally.text == firstTally.text)
+        #expect(secondTally.solid == firstTally.solid)
         #expect(secondTally.supportedTotal == firstTally.supportedTotal)
     }
 
@@ -226,6 +247,147 @@ struct DXFWriterTests {
         }
     }
 
+    // MARK: - Display-kind round-trips (TEXT / SOLID / HATCH).
+
+    @Test("a hand-built text entity round-trips its key fields")
+    func roundTripsText() async throws {
+        let textRec = EntityRecord(
+            id: EntityID(1),
+            layer: LayerID("annot"),
+            kind: .text(TextData(
+                position: Vector(3, 4),
+                height: 2.5,
+                rotation: .pi / 6,
+                text: "HELLO DXF",
+                styleName: "STANDARD",
+                hAlign: .center,
+                vAlign: .middle
+            ))
+        )
+        let outPath = tempDXFPath()
+        defer { removeFile(outPath) }
+
+        let result = try await CADEngine.shared.writeEntities(
+            [textRec], layers: LayerTable(layers: [Layer(name: "0"), Layer(name: "annot")],
+                                          activeLayerName: "0"),
+            toPath: outPath
+        )
+        #expect(result.written == 1)
+        #expect(result.skipped == 0)
+
+        let back = try await CADEngine.shared.readEntities(dxfPath: outPath)
+        let texts = back.records.compactMap { r -> TextData? in
+            if case .text(let d) = r.kind { return d } else { return nil }
+        }
+        let d = try #require(texts.first, "text missing after round-trip")
+        let tol = 1e-6
+        #expect(d.text == "HELLO DXF")
+        #expect(abs(d.position.x - 3) < tol)
+        #expect(abs(d.position.y - 4) < tol)
+        #expect(abs(d.height - 2.5) < tol)
+        #expect(abs(d.rotation - .pi / 6) < 1e-9)
+        #expect(d.hAlign == .center)
+        #expect(d.vAlign == .middle)
+    }
+
+    @Test("a hand-built solid (triangle + quad) round-trips its corners")
+    func roundTripsSolid() async throws {
+        let tri = EntityRecord(
+            id: EntityID(1),
+            kind: .solid(SolidData(corners: [Vector(0, 0), Vector(10, 0), Vector(5, 8)]))
+        )
+        let quad = EntityRecord(
+            id: EntityID(2),
+            kind: .solid(SolidData(corners: [Vector(0, 0), Vector(10, 0),
+                                             Vector(10, 10), Vector(0, 10)]))
+        )
+        let outPath = tempDXFPath()
+        defer { removeFile(outPath) }
+
+        let result = try await CADEngine.shared.writeEntities(
+            [tri, quad], layers: LayerTable(), toPath: outPath
+        )
+        #expect(result.written == 2)
+        #expect(result.skipped == 0)
+
+        let back = try await CADEngine.shared.readEntities(dxfPath: outPath)
+        let solids = back.records.compactMap { r -> [Vector]? in
+            if case .solid(let d) = r.kind { return d.corners } else { return nil }
+        }
+        #expect(solids.count == 2)
+
+        // Compare corner SETS (the bow-tie swap is applied symmetrically on
+        // write and un-applied on read, so the ring order round-trips exactly).
+        let tol = 1e-6
+        func sameRing(_ a: [Vector], _ b: [Vector]) -> Bool {
+            guard a.count == b.count else { return false }
+            return zip(a, b).allSatisfy { abs($0.x - $1.x) < tol && abs($0.y - $1.y) < tol }
+        }
+        #expect(solids.contains { sameRing($0, [Vector(0, 0), Vector(10, 0), Vector(5, 8)]) })
+        #expect(solids.contains {
+            sameRing($0, [Vector(0, 0), Vector(10, 0), Vector(10, 10), Vector(0, 10)])
+        })
+    }
+
+    @Test("a hand-built solid-fill hatch round-trips its boundary loop")
+    func roundTripsHatch() async throws {
+        let ring = [
+            PolylineVertex(point: Vector(0, 0)),
+            PolylineVertex(point: Vector(10, 0)),
+            PolylineVertex(point: Vector(10, 10)),
+            PolylineVertex(point: Vector(0, 10)),
+        ]
+        let hatchRec = EntityRecord(
+            id: EntityID(1),
+            kind: .hatch(HatchData(loops: [ring], solidFill: true, patternName: "SOLID"))
+        )
+        let outPath = tempDXFPath()
+        defer { removeFile(outPath) }
+
+        let result = try await CADEngine.shared.writeEntities(
+            [hatchRec], layers: LayerTable(), toPath: outPath
+        )
+        #expect(result.written == 1)
+        #expect(result.skipped == 0)
+
+        let back = try await CADEngine.shared.readEntities(dxfPath: outPath)
+        let hatches = back.records.compactMap { r -> HatchData? in
+            if case .hatch(let d) = r.kind { return d } else { return nil }
+        }
+        let d = try #require(hatches.first, "hatch missing after round-trip")
+        #expect(d.solidFill)
+        #expect(d.loops.count == 1)
+        // The 4 ring vertices survive (edge-line boundary: each edge's start
+        // point is read back, recovering the original ring).
+        let pts = d.loops[0].map(\.point)
+        #expect(pts.count == 4)
+        let tol = 1e-6
+        for (a, b) in zip(pts, ring.map(\.point)) {
+            #expect(abs(a.x - b.x) < tol)
+            #expect(abs(a.y - b.y) < tol)
+        }
+    }
+
+    @Test("the crafted hatch_sample fixture round-trips through write")
+    func roundTripsHatchFixture() async throws {
+        let first = try await CADEngine.shared.readEntities(dxfPath: try hatchSamplePath())
+        let firstTally = tally(first.records)
+        // The fixture carries at least one HATCH (plus a LINE).
+        #expect(firstTally.hatch >= 1)
+
+        let outPath = tempDXFPath()
+        defer { removeFile(outPath) }
+        let result = try await CADEngine.shared.writeEntities(
+            first.records, layers: first.layers, toPath: outPath
+        )
+        #expect(result.skipped == 0)
+
+        let second = try await CADEngine.shared.readEntities(dxfPath: outPath)
+        let secondTally = tally(second.records)
+        #expect(secondTally.hatch == firstTally.hatch)
+        #expect(secondTally.line == firstTally.line)
+    }
+
     // MARK: - Skipped kinds are counted, not fatal.
 
     @Test("unsupported kinds are skipped and counted")
@@ -287,8 +449,9 @@ struct DXFWriterTests {
     // Whether a record's kind is in the writer's supported set.
     private func isSupported(_ r: EntityRecord) -> Bool {
         switch r.kind {
-        case .line, .point, .circle, .arc, .ellipse, .polyline: return true
-        case .spline, .splinePoints, .text, .hatch, .solid: return false
+        case .line, .point, .circle, .arc, .ellipse, .polyline,
+             .text, .solid, .hatch: return true
+        case .spline, .splinePoints: return false
         }
     }
 }

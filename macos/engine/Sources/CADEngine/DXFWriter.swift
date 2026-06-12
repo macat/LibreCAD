@@ -13,9 +13,11 @@
 //  Like the reader, all bridge access goes through `CADEngine.shared` (libdxfrw
 //  is non-reentrant, so there is exactly one serialization point per process).
 //
-//  Supported kinds round-trip: line / point / circle / arc / ellipse / polyline.
-//  Spline / text / hatch / and any other kind are skipped for now (counted, not
-//  fatal) — they land with the matching reader-side wave.
+//  Supported kinds round-trip: line / point / circle / arc / ellipse / polyline /
+//  text / solid / hatch. Spline / splinePoints (and any other kind) are skipped
+//  for now (counted, not fatal). HATCH writes its boundary loops as edge (line)
+//  boundaries (libdxfrw's polyline-boundary writer is an unimplemented stub), so
+//  boundary-arc bulges are not preserved across the round-trip — see backlog.md.
 //
 //  The per-attribute mapping (ACI color, linetype name, lineweight) is the
 //  inverse of DXFReader.swift's, which is itself ported from LibreCAD's
@@ -158,10 +160,13 @@ private final class PODBuilder {
     private var strings: [UnsafeMutablePointer<CChar>] = []
     /// Each interned vertex array is a heap `LCVertex` buffer, same lifetime.
     private var vertexBuffers: [UnsafeMutableBufferPointer<LCVertex>] = []
+    /// Each interned hatch-loop array is a heap `LCLoop` buffer, same lifetime.
+    private var loopBuffers: [UnsafeMutableBufferPointer<LCLoop>] = []
 
     deinit {
         for s in strings { s.deallocate() }
         for v in vertexBuffers { v.deallocate() }
+        for l in loopBuffers { l.deallocate() }
     }
 
     /// Interns a Swift string as a stable, null-terminated C string.
@@ -184,6 +189,39 @@ private final class PODBuilder {
         }
         vertexBuffers.append(buf)
         return (UnsafePointer(buf.baseAddress!), Int32(verts.count))
+    }
+
+    /// Interns a hatch's boundary loops as a single flat `LCVertex` array plus a
+    /// parallel `LCLoop` window array (offset,count into the vertices) — the
+    /// exact layout the reader hands back. Loops with fewer than 2 vertices are
+    /// dropped (they can't form an edge boundary). Returns `(nil,0,nil,0)` if no
+    /// loop survives.
+    private func internHatchLoops(
+        _ loops: [[PolylineVertex]]
+    ) -> (verts: UnsafePointer<LCVertex>?, vertCount: Int32,
+          loops: UnsafePointer<LCLoop>?, loopCount: Int32) {
+        var flatVerts: [LCVertex] = []
+        var windows: [LCLoop] = []
+        for ring in loops {
+            guard ring.count >= 2 else { continue }
+            let start = Int32(flatVerts.count)
+            for v in ring {
+                flatVerts.append(LCVertex(x: v.point.x, y: v.point.y, bulge: v.bulge))
+            }
+            windows.append(LCLoop(offset: start, count: Int32(ring.count)))
+        }
+        guard !flatVerts.isEmpty, !windows.isEmpty else { return (nil, 0, nil, 0) }
+
+        let vbuf = UnsafeMutableBufferPointer<LCVertex>.allocate(capacity: flatVerts.count)
+        _ = vbuf.initialize(from: flatVerts)
+        vertexBuffers.append(vbuf)
+
+        let lbuf = UnsafeMutableBufferPointer<LCLoop>.allocate(capacity: windows.count)
+        _ = lbuf.initialize(from: windows)
+        loopBuffers.append(lbuf)
+
+        return (UnsafePointer(vbuf.baseAddress!), Int32(flatVerts.count),
+                UnsafePointer(lbuf.baseAddress!), Int32(windows.count))
     }
 
     // MARK: Entity mapping (inverse of DXFReader.mapKind)
@@ -255,12 +293,41 @@ private final class PODBuilder {
             e.kind = Int32(LC_ENT_UNSUPPORTED.rawValue)
             e.typeName = intern("SPLINE")
 
-        case .text, .hatch, .solid:
-            // Display kinds not yet round-tripped through the writer; skipped
-            // (counted UNSUPPORTED on the C side). TODO(backlog): DXF write for
-            // TEXT/MTEXT/HATCH/SOLID once these are imported by the reader.
-            e.kind = Int32(LC_ENT_UNSUPPORTED.rawValue)
-            e.typeName = intern("DISPLAY")
+        case .text(let d):
+            // Emitted as a single-line DXF TEXT (the C side writes DRW_Text). The
+            // POD carries one insertion point + the 72/73 alignment codes, which
+            // round-trip cleanly; MTEXT-on-read is written back as TEXT.
+            e.kind = Int32(LC_ENT_TEXT.rawValue)
+            e.p1x = d.position.x; e.p1y = d.position.y; e.p1z = d.position.z
+            e.height = d.height
+            e.startAngle = d.rotation   // radians; the C side converts to DXF degrees
+            e.hAlign = Int32(d.hAlign.rawValue)
+            e.vAlign = Int32(d.vAlign.rawValue)
+            e.textValue = intern(d.text)
+            if let style = d.styleName, !style.isEmpty { e.styleName = intern(style) }
+
+        case .solid(let d):
+            // Emitted as a DXF SOLID. Corners are stored in ring order; the C side
+            // re-applies DXF's bow-tie 3rd/4th swap. A degenerate (<3 corner)
+            // solid is emitted with its corners and skipped on the C side.
+            e.kind = Int32(LC_ENT_SOLID.rawValue)
+            let solidVerts = d.corners.map { PolylineVertex(point: $0) }
+            let (ptr, count) = internVertices(solidVerts)
+            e.vertices = ptr
+            e.vertexCount = count
+
+        case .hatch(let d):
+            // Emitted as a DXF HATCH with edge (line) boundary loops. All loops'
+            // vertices are flattened into one contiguous array; per-loop windows
+            // go into `loops` (the same layout the reader hands back).
+            e.kind = Int32(LC_ENT_HATCH.rawValue)
+            e.solidFill = d.solidFill ? 1 : 0
+            e.textValue = intern(d.patternName ?? (d.solidFill ? "SOLID" : "ANSI31"))
+            let (vptr, vcount, lptr, lcount) = internHatchLoops(d.loops)
+            e.vertices = vptr
+            e.vertexCount = vcount
+            e.loops = lptr
+            e.loopCount = lcount
         }
         return e
     }
