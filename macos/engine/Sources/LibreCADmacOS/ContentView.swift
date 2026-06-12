@@ -285,7 +285,7 @@ struct ContentView: View {
             toolButton(.offset, symbol: "plus.rectangle.on.rectangle",
                        help: "Offset selection (⇧O)")
             toolButton(.rotate, symbol: "rotate.right", help: "Rotate selection (⇧R)")
-            toolButton(.scale, symbol: "arrow.up.left.and.arrow.down.right",
+            toolButton(.scale, symbol: "square.resize",
                        help: "Scale selection (⇧S)")
             toolButton(.mirror, symbol: "flip.horizontal", help: "Mirror selection (⇧M)")
             toolButton(.array, symbol: "square.grid.3x3", help: "Array selection (⇧A)")
@@ -305,7 +305,7 @@ struct ContentView: View {
                        help: "Extend to boundary (X)")
             toolButton(.fillet, symbol: "circle.bottomrighthalf.checkered",
                        help: "Fillet (round) corner (F)")
-            toolButton(.chamfer, symbol: "angle", help: "Chamfer (bevel) corner (⇧F)")
+            toolButton(.chamfer, symbol: "skew", help: "Chamfer (bevel) corner (⇧F)")
 
             Divider()
             // Dimension tools (annotate measurements). Linear/Aligned place two
@@ -381,7 +381,8 @@ struct ContentView: View {
             undo: { model.undo() },
             redo: { model.redo() },
             toggleInspector: { showInspector.toggle() },
-            toggleGrid: { model.gridVisible.toggle(); controllerBox.controller?.requestRedraw() }
+            toggleGrid: { model.gridVisible.toggle(); controllerBox.controller?.requestRedraw() },
+            documentSettings: { showSettings = true }
         ))
     }
 

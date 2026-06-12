@@ -398,6 +398,10 @@ private struct SnapSettingOption {
         SnapSettingOption(label: "Center", mode: .center),
         SnapSettingOption(label: "Intersection", mode: .intersection),
         SnapSettingOption(label: "On entity", mode: .onEntity),
+        SnapSettingOption(label: "Nearest point", mode: .nearest),
+        SnapSettingOption(label: "Perpendicular", mode: .perpendicular),
+        SnapSettingOption(label: "Tangent", mode: .tangent),
+        SnapSettingOption(label: "Parallel", mode: .parallel),
         SnapSettingOption(label: "Grid", mode: .grid),
         SnapSettingOption(label: "Free (no snap)", mode: .free),
     ]
