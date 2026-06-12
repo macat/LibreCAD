@@ -14,9 +14,11 @@
 //  is non-reentrant, so there is exactly one serialization point per process).
 //
 //  Supported kinds round-trip: line / point / circle / arc / ellipse / polyline /
-//  text / mtext / solid / hatch. Spline / splinePoints / dimension (and any other
-//  kind) are skipped for now (counted, not fatal) — dimension WRITE is a later
-//  wave (S3 `ws/dim-write`). MTEXT writes the preserved raw inline-coded string
+//  text / mtext / solid / hatch / dimension. Spline / splinePoints (and any other
+//  kind) are skipped for now (counted, not fatal). Dimension writes the DIMENSION
+//  entity definition (linear/aligned/radial/diameter/angular); the associated
+//  anonymous block is NOT authored — a real CAD app regenerates it, and our own
+//  resolve() regenerates the visual on read. MTEXT writes the preserved raw inline-coded string
 //  (or, when the run tree was edited and no raw is stored, a reconstruction of
 //  the MTEXT codes from the run tree). MTEXT only exists for R2000+; at R12 it is
 //  dropped (counted as skipped) by the C bridge. HATCH writes its boundary loops as edge (line)
@@ -297,12 +299,18 @@ private final class PODBuilder {
             e.kind = Int32(LC_ENT_UNSUPPORTED.rawValue)
             e.typeName = intern("SPLINE")
 
-        case .dimension:
-            // Dimension WRITE is a later wave (S3 `ws/dim-write`); for now the
-            // writer skips it (the C side counts UNSUPPORTED). The `.dimension`
-            // EntityKind + its resolve()/round-trip graphic land in S1.
-            e.kind = Int32(LC_ENT_UNSUPPORTED.rawValue)
-            e.typeName = intern("DIMENSION")
+        case .dimension(let d):
+            // Emitted as a DXF DIMENSION (the C side builds the matching DRW_Dim*).
+            // The `dimType` discriminator + the per-variant defining points map onto
+            // the POD's `dim*` fields; the shared base (text override, style,
+            // attachment, line-spacing, text rotation) round-trips. The DIMENSION's
+            // rendered geometry lives in an anonymous block in DXF; we do NOT author
+            // it (the C side writes the entity definition with an empty block name —
+            // a real CAD app regenerates the block, and our resolve() regenerates
+            // the visual). The measured value (code 42) is NOT written — it is
+            // recomputed on read. DIMENSION needs R2000+; at R12 the C side drops it
+            // (counted as skipped), matching MTEXT/HATCH.
+            applyDimension(d, to: &e)
 
         case .text(let d):
             // Emitted as a single-line DXF TEXT (the C side writes DRW_Text). The
@@ -392,6 +400,95 @@ private final class PODBuilder {
         e.color24 = color24
         e.lineType = intern(lineTypeName(pen.lineType))
         e.lineWeightMM100 = lineWeightDXF(pen.lineWidth)
+    }
+
+    // MARK: Dimension mapping (inverse of DXFReader.mapDimension)
+
+    /// Fills the DIMENSION fields of `e` from a `DimData`. The `DimKind` variant
+    /// selects the `dimType` (an `LCDimType`) and which `dim*` defining points the
+    /// C side reads back; the shared base fields (text override, style, attachment,
+    /// line-spacing, text rotation) map straight onto the POD. The measured value
+    /// (code 42) is intentionally not written — it is recomputed on read. This is
+    /// the exact inverse of `DXFReader.mapDimension`.
+    private func applyDimension(_ d: DimData, to e: inout LCEntity) {
+        e.kind = Int32(LC_ENT_DIMENSION.rawValue)
+
+        switch d.kind {
+        case let .linear(e1, e2, angle):
+            e.dimType = Int32(LC_DIM_LINEAR.rawValue)
+            // code 10 == dim-line location (definitionPoint).
+            setP1(&e, d.definitionPoint)
+            setDef1(&e, e1)
+            setDef2(&e, e2)
+            e.dimAngle = angle
+            e.dimOblique = d.obliqueAngle
+
+        case let .aligned(e1, e2):
+            e.dimType = Int32(LC_DIM_ALIGNED.rawValue)
+            setP1(&e, d.definitionPoint)
+            setDef1(&e, e1)
+            setDef2(&e, e2)
+
+        case let .radial(center, pointOnCircle):
+            e.dimType = Int32(LC_DIM_RADIAL.rawValue)
+            // center == code 10 (defPoint); pointOnCircle == code 15.
+            setP1(&e, center)
+            setDef5(&e, pointOnCircle)
+
+        case let .diameter(p1, p2):
+            e.dimType = Int32(LC_DIM_DIAMETRIC.rawValue)
+            // p1 == code 15; p2 == code 10 (defPoint).
+            setP1(&e, p2)
+            setDef5(&e, p1)
+
+        case let .angular(l1s, l1e, l2s, l2e):
+            e.dimType = Int32(LC_DIM_ANGULAR.rawValue)
+            // line1 = (def1 code13, def2 code14); line2 = (def5 code15,
+            // defPoint code10 == l2e); the dimension arc passes through
+            // DimData.definitionPoint, written as the arc point (code 16).
+            setP1(&e, l2e)              // code 10: second line's endpoint
+            setDef1(&e, l1s)
+            setDef2(&e, l1e)
+            setDef5(&e, l2s)
+            e.dimArcx = d.definitionPoint.x
+            e.dimArcy = d.definitionPoint.y
+            e.dimArcz = d.definitionPoint.z
+        }
+
+        if let mid = d.textMiddle {
+            e.dimTextx = mid.x; e.dimTexty = mid.y; e.dimTextz = mid.z
+            e.dimHasText = 1
+        } else {
+            e.dimHasText = 0
+        }
+        if let override = d.textOverride, !override.isEmpty {
+            e.textValue = intern(override)
+        }
+        if let style = d.styleName, !style.isEmpty {
+            e.styleName = intern(style)
+        }
+        e.dimAlign = Int32(d.attachmentPoint.rawValue)
+        e.dimLineStyle = Int32(d.lineSpacingStyle.rawValue)
+        e.dimLineFactor = d.lineSpacingFactor
+        if let rot = d.textRotation {
+            e.dimTextRotation = rot
+            e.dimHasTextRotation = 1
+        } else {
+            e.dimHasTextRotation = 0
+        }
+    }
+
+    private func setP1(_ e: inout LCEntity, _ v: Vector) {
+        e.p1x = v.x; e.p1y = v.y; e.p1z = v.z
+    }
+    private func setDef1(_ e: inout LCEntity, _ v: Vector) {
+        e.dimDef1x = v.x; e.dimDef1y = v.y; e.dimDef1z = v.z
+    }
+    private func setDef2(_ e: inout LCEntity, _ v: Vector) {
+        e.dimDef2x = v.x; e.dimDef2y = v.y; e.dimDef2z = v.z
+    }
+    private func setDef5(_ e: inout LCEntity, _ v: Vector) {
+        e.dimDef5x = v.x; e.dimDef5y = v.y; e.dimDef5z = v.z
     }
 
     /// Maps a `PenColor` to the (code-62 ACI, code-420 true color) POD pair.

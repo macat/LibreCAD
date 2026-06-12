@@ -107,6 +107,20 @@ public:
         e.mtextAttachment = 1;            // TopLeft default
         e.mtextLineSpacingStyle = 1;      // at-least
         e.mtextLineSpacingFactor = 1.0;
+        e.dimType = LC_DIM_LINEAR;
+        e.dimDef1x = e.dimDef1y = e.dimDef1z = 0.0;
+        e.dimDef2x = e.dimDef2y = e.dimDef2z = 0.0;
+        e.dimDef5x = e.dimDef5y = e.dimDef5z = 0.0;
+        e.dimArcx  = e.dimArcy  = e.dimArcz  = 0.0;
+        e.dimTextx = e.dimTexty = e.dimTextz = 0.0;
+        e.dimHasText = 0;
+        e.dimAngle = 0.0;
+        e.dimOblique = 0.0;
+        e.dimTextRotation = 0.0;
+        e.dimHasTextRotation = 0;
+        e.dimAlign = 5;                   // middle-center default (DRW_Dimension)
+        e.dimLineStyle = 1;              // at-least
+        e.dimLineFactor = 1.0;
         e.vertices = nullptr;
         e.vertexCount = 0;
         e.knots = nullptr;
@@ -349,11 +363,13 @@ public:
     void addTrace(const DRW_Trace &data) override { emitSolid(data); }
     void add3dFace(const DRW_3Dface &data) override { addUnsupportedEntity(data, "3DFACE"); }
     void addSolid(const DRW_Solid &data) override { emitSolid(data); }
-    void addDimAlign(const DRW_DimAligned *data) override { addUnsupportedDim(data, "DIMENSION"); }
-    void addDimLinear(const DRW_DimLinear *data) override { addUnsupportedDim(data, "DIMENSION"); }
-    void addDimRadial(const DRW_DimRadial *data) override { addUnsupportedDim(data, "DIMENSION"); }
-    void addDimDiametric(const DRW_DimDiametric *data) override { addUnsupportedDim(data, "DIMENSION"); }
-    void addDimAngular(const DRW_DimAngular *data) override { addUnsupportedDim(data, "DIMENSION"); }
+    void addDimAlign(const DRW_DimAligned *data) override { emitDimAligned(data); }
+    void addDimLinear(const DRW_DimLinear *data) override { emitDimLinear(data); }
+    void addDimRadial(const DRW_DimRadial *data) override { emitDimRadial(data); }
+    void addDimDiametric(const DRW_DimDiametric *data) override { emitDimDiametric(data); }
+    void addDimAngular(const DRW_DimAngular *data) override { emitDimAngular(data); }
+    // Angular-3p and ordinate dimensions are not in the frozen DimKind model;
+    // surface them as warnings rather than dropping them silently.
     void addDimAngular3P(const DRW_DimAngular3p *data) override { addUnsupportedDim(data, "DIMENSION"); }
     void addDimOrdinate(const DRW_DimOrdinate *data) override { addUnsupportedDim(data, "DIMENSION"); }
     void addLeader(const DRW_Leader *data) override { addUnsupportedDim(data, "LEADER"); }
@@ -562,6 +578,97 @@ private:
         }
     }
 
+    // ----- DIMENSION -----------------------------------------------------
+    // Flatten the shared DRW_Dimension data (def point, text point, text
+    // override, style, attachment, line-spacing, text rotation). Mirrors the
+    // RS_Dimension common-field mapping in rs_filterdxfrw.cpp; per-variant points
+    // are filled by the emitDim* callers. `text` is the user text override (code
+    // 1): empty == use the measured value. `rot` (code 53) is the explicit text
+    // rotation; libdxfrw defaults it to 0, so we mark it "set" only when nonzero.
+    LCEntity makeDimensionBase(const DRW_Dimension &d, int dimType) {
+        LCEntity e = makeEntity(LC_ENT_DIMENSION);
+        fillCommon(e, d);
+        e.dimType = dimType;
+        const DRW_Coord def = d.getDefPoint();
+        e.p1x = def.x; e.p1y = def.y; e.p1z = def.z;
+        const DRW_Coord tp = d.getTextPoint();
+        e.dimTextx = tp.x; e.dimTexty = tp.y; e.dimTextz = tp.z;
+        // A zeroed text point means "no override" (resolve centers the label).
+        e.dimHasText = (tp.x != 0.0 || tp.y != 0.0 || tp.z != 0.0) ? 1 : 0;
+        const std::string text = d.getText();
+        if (!text.empty()) e.textValue = intern(text);
+        e.styleName = intern(d.getStyle());
+        e.dimAlign = d.getAlign();
+        e.dimLineStyle = d.getTextLineStyle();
+        e.dimLineFactor = d.getTextLineFactor();
+        e.dimTextRotation = d.getDir();
+        e.dimHasTextRotation = (d.getDir() != 0.0) ? 1 : 0;
+        return e;
+    }
+
+    void emitDimLinear(const DRW_DimLinear *data) {
+        ++m_out->geometryCount;
+        if (!data) { addUnsupportedDim(data, "DIMENSION"); return; }
+        LCEntity e = makeDimensionBase(*data, LC_DIM_LINEAR);
+        const DRW_Coord d1 = data->getDef1Point();
+        const DRW_Coord d2 = data->getDef2Point();
+        e.dimDef1x = d1.x; e.dimDef1y = d1.y; e.dimDef1z = d1.z;
+        e.dimDef2x = d2.x; e.dimDef2y = d2.y; e.dimDef2z = d2.z;
+        e.dimAngle = data->getAngle() * M_PI / 180.0;     // DXF degrees -> radians
+        e.dimOblique = data->getOblique() * M_PI / 180.0;
+        m_out->entities.push_back(e);
+    }
+
+    void emitDimAligned(const DRW_DimAligned *data) {
+        ++m_out->geometryCount;
+        if (!data) { addUnsupportedDim(data, "DIMENSION"); return; }
+        LCEntity e = makeDimensionBase(*data, LC_DIM_ALIGNED);
+        const DRW_Coord d1 = data->getDef1Point();
+        const DRW_Coord d2 = data->getDef2Point();
+        e.dimDef1x = d1.x; e.dimDef1y = d1.y; e.dimDef1z = d1.z;
+        e.dimDef2x = d2.x; e.dimDef2y = d2.y; e.dimDef2z = d2.z;
+        m_out->entities.push_back(e);
+    }
+
+    void emitDimRadial(const DRW_DimRadial *data) {
+        ++m_out->geometryCount;
+        if (!data) { addUnsupportedDim(data, "DIMENSION"); return; }
+        // center == defPoint (code 10), already in p1; radius point == code 15.
+        LCEntity e = makeDimensionBase(*data, LC_DIM_RADIAL);
+        const DRW_Coord rp = data->getDiameterPoint();
+        e.dimDef5x = rp.x; e.dimDef5y = rp.y; e.dimDef5z = rp.z;
+        m_out->entities.push_back(e);
+    }
+
+    void emitDimDiametric(const DRW_DimDiametric *data) {
+        ++m_out->geometryCount;
+        if (!data) { addUnsupportedDim(data, "DIMENSION"); return; }
+        // p2 == code 10 (getDiameter2Point, already in p1 as defPoint);
+        // p1 == code 15 (getDiameter1Point).
+        LCEntity e = makeDimensionBase(*data, LC_DIM_DIAMETRIC);
+        const DRW_Coord p1 = data->getDiameter1Point();
+        e.dimDef5x = p1.x; e.dimDef5y = p1.y; e.dimDef5z = p1.z;
+        m_out->entities.push_back(e);
+    }
+
+    void emitDimAngular(const DRW_DimAngular *data) {
+        ++m_out->geometryCount;
+        if (!data) { addUnsupportedDim(data, "DIMENSION"); return; }
+        // 2-line angular: line1 = (firstLine1 code13, firstLine2 code14),
+        // line2 = (secondLine1 code15, secondLine2 code10 == defPoint == p1);
+        // the dimension arc passes through dimPoint (code 16).
+        LCEntity e = makeDimensionBase(*data, LC_DIM_ANGULAR);
+        const DRW_Coord l1a = data->getFirstLine1();
+        const DRW_Coord l1b = data->getFirstLine2();
+        const DRW_Coord l2a = data->getSecondLine1();
+        const DRW_Coord arc = data->getDimPoint();   // code 16: arc-through point
+        e.dimDef1x = l1a.x; e.dimDef1y = l1a.y; e.dimDef1z = l1a.z;
+        e.dimDef2x = l1b.x; e.dimDef2y = l1b.y; e.dimDef2z = l1b.z;
+        e.dimDef5x = l2a.x; e.dimDef5y = l2a.y; e.dimDef5z = l2a.z;
+        e.dimArcx  = arc.x; e.dimArcy  = arc.y; e.dimArcz  = arc.z;
+        m_out->entities.push_back(e);
+    }
+
     // Common path for an entity passed by const-ref that we don't flatten.
     template <typename T>
     void addUnsupportedEntity(const T &data, const char *name) {
@@ -754,6 +861,7 @@ private:
         case LC_ENT_MTEXT:      writeMText(e);      break;
         case LC_ENT_SOLID:      writeSolid(e);      break;
         case LC_ENT_HATCH:      writeHatch(e);      break;
+        case LC_ENT_DIMENSION:  writeDimension(e);  break;
         default:                ++m_skipped;        break; // SPLINE / UNSUPPORTED / ...
         }
     }
@@ -953,6 +1061,93 @@ private:
         }
         h.loopsnum = static_cast<int>(h.looplist.size());
         m_dxf->writeHatch(&h);
+    }
+
+    // ----- DIMENSION -----------------------------------------------------
+    // Emit a DXF DIMENSION (the inverse of FlatteningReader's emitDim*). We build
+    // the matching DRW_Dim* subclass (dxfRW::writeDimension dispatches on eType)
+    // and set the shared base fields + the per-variant defining points. The
+    // DIMENSION's rendered geometry normally lives in an associated anonymous
+    // *block* (code 2); we do NOT author that block — we leave the block name
+    // empty, so libdxfrw writes the DIMENSION with no `2` reference (its
+    // writeDimension only emits code 2 when the name is non-empty) and forces the
+    // type-70 "named block" bit (|32) itself. A real CAD app regenerates the block
+    // on open; our own reader + resolve() regenerate the visual, so the entity's
+    // definition alone is a faithful, lossless round-trip. DIMENSION (like MTEXT)
+    // only exists for R2000+; at R12 dxfRW::writeDimension is a no-op, so the
+    // entity is dropped — count it as skipped so the tally stays honest.
+    void writeDimension(const LCEntity &e) {
+        if (m_dxf->getVersion() <= DRW::AC1009) {
+            ++m_skipped;
+            return;
+        }
+        const DRW_Coord def{e.p1x, e.p1y, e.p1z};
+        const DRW_Coord def1{e.dimDef1x, e.dimDef1y, e.dimDef1z};
+        const DRW_Coord def2{e.dimDef2x, e.dimDef2y, e.dimDef2z};
+        const DRW_Coord def5{e.dimDef5x, e.dimDef5y, e.dimDef5z};
+        const DRW_Coord arc{e.dimArcx, e.dimArcy, e.dimArcz};
+
+        // Build the shared base into a DRW_Dimension, then copy-construct the
+        // concrete subtype from it (the DRW_Dim* copy ctors take a DRW_Dimension).
+        DRW_Dimension base;
+        fillCommon(base, e);
+        base.setDefPoint(def);
+        if (e.dimHasText) {
+            base.setTextPoint(DRW_Coord{e.dimTextx, e.dimTexty, e.dimTextz});
+        }
+        if (e.textValue && e.textValue[0]) base.setText(std::string(e.textValue));
+        base.setStyle((e.styleName && e.styleName[0])
+                          ? std::string(e.styleName) : std::string("STANDARD"));
+        base.setAlign(e.dimAlign);
+        base.setTextLineStyle(e.dimLineStyle);
+        base.setTextLineFactor(e.dimLineFactor);
+        if (e.dimHasTextRotation) base.setDir(e.dimTextRotation);
+
+        switch (e.dimType) {
+        case LC_DIM_LINEAR: {
+            base.type = 0;                       // type-70 low nibble: linear
+            DRW_DimLinear d(base);
+            d.setDef1Point(def1);
+            d.setDef2Point(def2);
+            d.setAngle(e.dimAngle * 180.0 / M_PI);     // radians -> DXF degrees
+            d.setOblique(e.dimOblique * 180.0 / M_PI);
+            m_dxf->writeDimension(&d);
+            break; }
+        case LC_DIM_ALIGNED: {
+            base.type = 1;                       // aligned
+            DRW_DimAligned d(base);
+            d.setDef1Point(def1);
+            d.setDef2Point(def2);
+            m_dxf->writeDimension(&d);
+            break; }
+        case LC_DIM_ANGULAR: {
+            base.type = 2;                       // 2-line angular
+            DRW_DimAngular d(base);
+            d.setFirstLine1(def1);
+            d.setFirstLine2(def2);
+            d.setSecondLine1(def5);
+            // secondLine2 == defPoint (code 10), already set on base.
+            d.setDimPoint(arc);                  // code 16: arc-through point
+            m_dxf->writeDimension(&d);
+            break; }
+        case LC_DIM_DIAMETRIC: {
+            base.type = 3;                       // diametric
+            DRW_DimDiametric d(base);
+            d.setDiameter1Point(def5);           // code 15
+            // diameter2Point == defPoint (code 10), already set on base.
+            m_dxf->writeDimension(&d);
+            break; }
+        case LC_DIM_RADIAL: {
+            base.type = 4;                       // radial
+            DRW_DimRadial d(base);
+            // centerPoint == defPoint (code 10), already set on base.
+            d.setDiameterPoint(def5);            // code 15: radius point
+            m_dxf->writeDimension(&d);
+            break; }
+        default:
+            ++m_skipped;
+            break;
+        }
     }
 };
 

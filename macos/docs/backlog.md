@@ -65,6 +65,17 @@ pass or by the relevant downstream owner. Each cites its source.
   reconstructed (the reader already strips them). *(ws-dxf-write-fidelity)*
 - **SPLINE / splinePoints write still skipped** (counted, not fatal) — no `writeSpline` mapping yet.
   *(ws-dxf-write-fidelity)*
+- **DIMENSION read+write covers linear/aligned/radial/diametric/angular only** — the five
+  `DimKind`-modelled variants round-trip (read: `addDim*` → `LC_ENT_DIMENSION` → `.dimension`; write:
+  `.dimension` → `DRW_Dim*`). DXF **ordinate** and **angular-3p** dimensions are NOT in the frozen
+  `DimKind`, so they still surface as a "DIMENSION" reader warning and are never written (dim_sample.dxf
+  has 6 ordinate dims that stay warnings). Add `DimKind.ordinate`/`.angular3p` + resolve arms first.
+  Also: the DIMENSION entity's **text height / arrow size live in DIMSTYLE, not on the entity**, so
+  `DimData.textHeight`/`arrowSize` do NOT survive a DXF round-trip (they reset to the resolve defaults);
+  carrying them needs a DIMSTYLE table writer. The rendered geometry's **anonymous block (code 2) is not
+  authored** — we write the entity definition with an empty block name (libdxfrw forces the type-70 |32
+  bit); a real CAD app regenerates the block and our own `resolve()` regenerates the visual on read.
+  *(ws-dim-dxf)*
 
 ## Render gate — DXF reader (F)
 - Add a DXF fixture covering SPLINE + ELLIPSE + true-color (color24) to lock the mapping (dim_sample.dxf has none). *(review-dxfread #3)*
