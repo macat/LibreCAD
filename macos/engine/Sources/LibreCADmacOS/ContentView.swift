@@ -44,6 +44,11 @@ struct ContentView: View {
     /// The sidebar's visibility column state (lets the toolbar toggle drive it).
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
+    /// Whether the trailing Inspector pane (entity properties + snap/grid + tool
+    /// options) is shown. Toggled from the toolbar; defaults visible so the modern
+    /// editing surface is discoverable on launch.
+    @State private var showInspector = true
+
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             // Leading pane: the modern Layers (+ Blocks stub) sidebar, bound to
@@ -68,7 +73,16 @@ struct ContentView: View {
             .overlay(alignment: .topLeading) { statusHUD }
             .overlay(alignment: .top) { toolPromptHUD }
             .overlay(alignment: .bottomLeading) { coordinateHUD }
+            // Trailing Inspector: the selected entity's editable properties, plus
+            // snap/grid controls and the active tool's options. Bound to the SAME
+            // live model the canvas + layers sidebar use, so edits reflect live and
+            // undo via ⌘Z (see InspectorView).
+            .inspector(isPresented: $showInspector) {
+                InspectorView(model: model, controllerBox: controllerBox)
+                    .inspectorColumnWidth(min: 260, ideal: 300, max: 420)
+            }
             .toolbar { toolbarContent }
+            .toolbar { inspectorToolbarContent }
             .focusedSceneValue(\.zoomToFit) { controllerBox.controller?.zoomToFit() }
             .focusedSceneValue(\.openDocument) { showOpen = true }
             // Save (⌘S): write in place if we have a current file, else Save As…
@@ -162,6 +176,21 @@ struct ContentView: View {
             toolButton(.fillet, symbol: "circle.bottomrighthalf.checkered",
                        help: "Fillet (round) corner (F)")
             toolButton(.chamfer, symbol: "angle", help: "Chamfer (bevel) corner (⇧F)")
+        }
+    }
+
+    /// The trailing toolbar item: a toggle for the Inspector pane (the standard Mac
+    /// inspector affordance). Placed in the trailing group so it sits at the far
+    /// right, next to where the inspector opens.
+    @ToolbarContentBuilder
+    private var inspectorToolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                showInspector.toggle()
+            } label: {
+                Label("Inspector", systemImage: "sidebar.trailing")
+            }
+            .help("Show or hide the Inspector")
         }
     }
 
