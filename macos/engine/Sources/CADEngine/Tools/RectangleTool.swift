@@ -58,6 +58,27 @@ public struct RectangleTool: Tool {
     /// between clicks. Invalid until the first move.
     private var cursor: Vector = .invalid
 
+    /// An optional EXACT width (world units) for the rectangle, surfaced by the
+    /// tool-options bar (UX-plan U2). When BOTH `fixedWidth` and `fixedHeight` are
+    /// set (> 0), a SINGLE click fixes the lower-left corner and immediately commits
+    /// a rectangle of that exact size (extending +x / +y from the click) — the
+    /// "draw a 100×50 box here" flow. `nil` (the default) keeps the original
+    /// two-corner drag behavior, so this is fully back-compatible.
+    public var fixedWidth: Double?
+
+    /// An optional EXACT height (world units). See `fixedWidth` — both must be set
+    /// (> 0) for the single-click exact-size commit; otherwise the tool draws by two
+    /// dragged corners as before.
+    public var fixedHeight: Double?
+
+    /// Whether an exact size is configured (both dimensions set and positive), so a
+    /// single click commits a rectangle of that size instead of waiting for the
+    /// opposite corner.
+    private var hasFixedSize: Bool {
+        guard let w = fixedWidth, let h = fixedHeight else { return false }
+        return w > Tolerance.distance && h > Tolerance.distance
+    }
+
     public init() {}
 
     // MARK: - Tool
@@ -66,9 +87,23 @@ public struct RectangleTool: Tool {
 
     public var status: String {
         switch state {
-        case .settingFirst:  return "Specify first corner"
+        case .settingFirst:
+            return hasFixedSize
+                ? "Specify corner (size \(sizePrompt))"
+                : "Specify first corner"
         case .settingSecond: return "Specify opposite corner"
         }
+    }
+
+    /// A compact "W×H" readout of the configured exact size for the status prompt.
+    private var sizePrompt: String {
+        let w = fixedWidth ?? 0, h = fixedHeight ?? 0
+        return "\(Self.trim(w))×\(Self.trim(h))"
+    }
+
+    /// Formats a dimension with no trailing ".0" for whole values (status text only).
+    private static func trim(_ v: Double) -> String {
+        v == v.rounded() ? String(Int(v)) : String(v)
     }
 
     /// The live rubber-band: a closed 4-corner rectangle spanned by the fixed
@@ -115,6 +150,13 @@ public struct RectangleTool: Tool {
     private mutating func handleClick(_ p: Vector) -> ToolOutcome {
         switch state {
         case .settingFirst:
+            // Exact-size mode (UX-plan U2): a single click fixes the lower-left
+            // corner and immediately commits a rectangle of the configured size,
+            // then re-arms — the "drop a 100×50 box here" flow.
+            if hasFixedSize, p.valid {
+                let opposite = Vector(p.x + (fixedWidth ?? 0), p.y + (fixedHeight ?? 0))
+                return commitRect(from: p, to: opposite)
+            }
             // First corner fixed; now rubber-band toward the opposite corner.
             state = .settingSecond(first: p)
             cursor = p
@@ -123,23 +165,25 @@ public struct RectangleTool: Tool {
         case .settingSecond(let first):
             // Commit one closed rectangle spanned by first↔p, then RESET to draw
             // the next rectangle.
-            guard first.valid, p.valid, !Self.isDegenerate(first, p) else {
-                // Degenerate (zero-area / coincident corners) pick — ignore it,
-                // keep waiting for a valid opposite corner.
-                return .none
-            }
-            let corners = Self.corners(first, p)
-            let data = PolylineData(
-                vertices: corners.map { PolylineVertex(point: $0, bulge: 0) },
-                closed: true
-            )
-            let record = EntityRecord(
-                id: .placeholder,
-                kind: .polyline(data)
-            )
-            reset()
-            return .commit([.add(record)])
+            return commitRect(from: first, to: p)
         }
+    }
+
+    /// Builds + commits one closed-polyline rectangle spanned by two opposite
+    /// corners, then resets to draw the next. A degenerate (zero-area / coincident
+    /// corners) pick is ignored (returns `.none`, keeps the current state) so a
+    /// stray click never creates a collapsed rectangle. Shared by the two-corner
+    /// drag commit and the exact-size single-click commit.
+    private mutating func commitRect(from a: Vector, to b: Vector) -> ToolOutcome {
+        guard a.valid, b.valid, !Self.isDegenerate(a, b) else { return .none }
+        let corners = Self.corners(a, b)
+        let data = PolylineData(
+            vertices: corners.map { PolylineVertex(point: $0, bulge: 0) },
+            closed: true
+        )
+        let record = EntityRecord(id: .placeholder, kind: .polyline(data))
+        reset()
+        return .commit([.add(record)])
     }
 
     private mutating func handleBackspace() -> ToolOutcome {

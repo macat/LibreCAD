@@ -40,11 +40,26 @@
 
 import Foundation
 
+/// Whether the regular polygon is built INSCRIBED in (vertex on) the reference
+/// circle through the clicked point, or CIRCUMSCRIBED about it (the edge midpoints
+/// touch the circle, so the polygon is larger). Mirrors LibreCAD's two N-gon
+/// variants (`RS_ActionDrawPolygonCenCor` inscribed vs the circumscribed corner
+/// build). The tool-options bar (UX-plan U2) exposes this as a segmented control.
+public enum PolygonFit: Sendable, Hashable, CaseIterable {
+    /// The clicked vertex lies ON the reference circle (default; LibreCAD's
+    /// centre→corner inscribed polygon).
+    case inscribed
+    /// The reference circle is INSCRIBED in the polygon — the clicked point is the
+    /// midpoint of an edge (the polygon's corners sit OUTSIDE the circle), so the
+    /// circumradius is `r / cos(π/sides)`.
+    case circumscribed
+}
+
 /// The interactive regular-polygon (N-gon) tool, center + vertex. Click the
 /// center, then click (or move to preview) a vertex; the polygon is the regular
-/// `sides`-gon inscribed in the circle through that vertex, with the first vertex
-/// at the clicked point. It commits one closed polyline and re-arms for the next
-/// (LibreCAD behavior).
+/// `sides`-gon built around the circle through that vertex (inscribed by default,
+/// or circumscribed per `fit`), with the first vertex at the clicked point. It
+/// commits one closed polyline and re-arms for the next (LibreCAD behavior).
 public struct PolygonTool: Tool {
 
     // MARK: - Private state machine (no magic Int — engine-architecture note)
@@ -67,16 +82,20 @@ public struct PolygonTool: Tool {
     private var cursor: Vector = .invalid
 
     /// The number of sides of the regular polygon. Defaults to 6 and is clamped to
-    /// a minimum of 3 on set (a polygon needs at least 3 sides).
-    ///
-    // TODO(backlog): side-count UI — expose `sides` through a tool-options panel /
-    // status-line input so the user can pick N. For now it is settable in code and
-    // defaults to a hexagon.
+    /// a minimum of 3 on set (a polygon needs at least 3 sides). Surfaced by the
+    /// tool-options bar (UX-plan U2) so the user can pick N (hexagon, pentagon, …)
+    /// before drawing.
     public var sides: Int {
         get { _sides }
         set { _sides = Swift.max(3, newValue) }
     }
     private var _sides: Int = 6
+
+    /// Whether the polygon is inscribed in (default) or circumscribed about the
+    /// reference circle through the clicked vertex. Surfaced by the tool-options bar
+    /// (UX-plan U2). Back-compatible: the default `.inscribed` keeps the original
+    /// vertex-on-circle behavior.
+    public var fit: PolygonFit = .inscribed
 
     public init() {}
 
@@ -99,7 +118,7 @@ public struct PolygonTool: Tool {
         guard case .settingVertex(let center) = state, cursor.valid, center.valid else {
             return []
         }
-        guard let corners = Self.corners(center: center, vertex: cursor, sides: _sides) else {
+        guard let corners = Self.corners(center: center, vertex: cursor, sides: _sides, fit: fit) else {
             return []
         }
         return [ResolvedPolyline(points: corners, closed: true, pen: .toolPreview)]
@@ -147,7 +166,7 @@ public struct PolygonTool: Tool {
 
         case .settingVertex(let center):
             // Commit one closed regular polygon (center, vertex = p), then re-arm.
-            guard let corners = Self.corners(center: center, vertex: p, sides: _sides) else {
+            guard let corners = Self.corners(center: center, vertex: p, sides: _sides, fit: fit) else {
                 // Degenerate (zero-radius) pick — ignore it, keep waiting.
                 return .none
             }
@@ -185,19 +204,37 @@ public struct PolygonTool: Tool {
 
     // MARK: - Geometry
 
-    /// The `sides` corners of the regular polygon inscribed in the circle through
-    /// `vertex`, centered on `center`. The first corner is exactly `vertex`; the
-    /// rest are spaced by 2π/sides CCW around the center. Returns `nil` for a
-    /// degenerate pick (radius below the distance tolerance) so callers can ignore
-    /// it. The ring does NOT duplicate the first vertex — the `closed` flag carries
-    /// the closing edge (same convention as `Tessellation.circlePoints`).
-    static func corners(center: Vector, vertex: Vector, sides: Int) -> [Vector]? {
+    /// The `sides` corners of the regular polygon built around the circle through
+    /// `vertex`, centered on `center`. For `.inscribed` (default) the first corner
+    /// is exactly `vertex` and every corner lies ON the reference circle; for
+    /// `.circumscribed` the clicked point is an EDGE MIDPOINT (the corners sit
+    /// outside the reference circle at circumradius `r / cos(π/sides)`, with the
+    /// first edge midpoint at `vertex`). The rest are spaced by 2π/sides CCW around
+    /// the center. Returns `nil` for a degenerate pick (radius below the distance
+    /// tolerance) so callers can ignore it. The ring does NOT duplicate the first
+    /// vertex — the `closed` flag carries the closing edge (same convention as
+    /// `Tessellation.circlePoints`).
+    static func corners(center: Vector, vertex: Vector, sides: Int,
+                        fit: PolygonFit = .inscribed) -> [Vector]? {
         guard center.valid, vertex.valid, sides >= 3 else { return nil }
         let delta = vertex - center
-        let radius = delta.magnitude
-        guard radius > Tolerance.distance else { return nil }
-        let baseAngle = delta.angle
+        let refRadius = delta.magnitude
+        guard refRadius > Tolerance.distance else { return nil }
         let step = 2 * Double.pi / Double(sides)
+        // Inscribed: corners on the reference circle, first at the clicked vertex.
+        // Circumscribed: the clicked point is an edge midpoint, so push the corners
+        // out to the circumradius and rotate the first corner back by half a step so
+        // the FIRST EDGE'S MIDPOINT lands on the clicked point.
+        let baseAngle: Double
+        let radius: Double
+        switch fit {
+        case .inscribed:
+            baseAngle = delta.angle
+            radius = refRadius
+        case .circumscribed:
+            baseAngle = delta.angle - step / 2
+            radius = refRadius / cos(step / 2)
+        }
         var pts: [Vector] = []
         pts.reserveCapacity(sides)
         for i in 0..<sides {

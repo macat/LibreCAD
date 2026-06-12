@@ -32,10 +32,52 @@
 
 import Foundation
 
+/// The on-screen display style for placed points — a subset of AutoCAD's `$PDMODE`
+/// point-marker glyphs, surfaced by the tool-options bar (UX-plan U2). It selects
+/// HOW a point is drawn (a dot, a plus/cross, an X, …).
+///
+/// NOTE: rendering each style is gated on a `style` field being added to the
+/// engine's `PointData` (Entity.swift) + the point resolve arm honoring it — both
+/// owned by the engine agent. Until then this enum lets the options bar expose the
+/// choice; the committed `PointData` carries only its position, so every point
+/// currently renders with the default marker regardless of this selection. The
+/// `rawValue` matches the DXF `$PDMODE` code so it round-trips once wired.
+public enum PointStyle: Int, Sendable, Hashable, CaseIterable {
+    /// A single dot (DXF `$PDMODE` 0 — the default).
+    case dot = 0
+    /// A plus sign / cross (`$PDMODE` 2).
+    case plus = 2
+    /// An X (`$PDMODE` 3).
+    case cross = 3
+    /// A vertical tick (`$PDMODE` 4).
+    case tick = 4
+    /// A dot inside a circle (`$PDMODE` 33).
+    case circle = 33
+    /// A dot inside a square (`$PDMODE` 65).
+    case square = 65
+
+    /// A short human label for the options-bar picker.
+    public var label: String {
+        switch self {
+        case .dot:    return "Dot"
+        case .plus:   return "Plus"
+        case .cross:  return "Cross (X)"
+        case .tick:   return "Tick"
+        case .circle: return "Circle"
+        case .square: return "Square"
+        }
+    }
+}
+
 /// The interactive Point tool. Each click places a point entity; the tool stays
 /// active so the user can keep placing points until `.commit`/`.cancel`
 /// (LibreCAD behavior). A point has no rubber-band, so there is no preview.
 public struct PointTool: Tool {
+
+    /// The display style new points are placed with (UX-plan U2). Defaulted +
+    /// back-compatible; honored at render time once `PointData.style` lands (see
+    /// `PointStyle`).
+    public var style: PointStyle = .dot
 
     public init() {}
 

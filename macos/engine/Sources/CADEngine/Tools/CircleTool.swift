@@ -33,6 +33,19 @@
 
 import Foundation
 
+/// Whether the Circle tool's numeric SIZE input is interpreted as a radius or a
+/// diameter — surfaced by the tool-options bar (UX-plan U2). It governs how a typed
+/// command-line value and the `fixedSize` option are read: in `.diameter` mode the
+/// value is the full diameter (halved to the stored radius). It does NOT change the
+/// interactive two-click geometry (the second click is always a point ON the
+/// circle); it only labels and scales the NUMERIC entry.
+public enum CircleSizeMode: Sendable, Hashable, CaseIterable {
+    /// The numeric value is the circle's radius (default).
+    case radius
+    /// The numeric value is the circle's diameter (stored radius = value / 2).
+    case diameter
+}
+
 /// The interactive center+radius Circle tool. Click the center, then click (or
 /// move to preview) a point on the circle to set the radius; it commits one
 /// circle and re-arms for the next (LibreCAD behavior).
@@ -55,6 +68,24 @@ public struct CircleTool: Tool {
     /// The last cursor point seen via `.move`, used to draw the rubber-band even
     /// between clicks. Invalid until the first move.
     private var cursor: Vector = .invalid
+
+    /// Whether a numeric size entry means a radius (default) or a diameter. Surfaced
+    /// by the tool-options bar (UX-plan U2). Used to interpret `fixedSize`.
+    public var sizeMode: CircleSizeMode = .radius
+
+    /// An optional EXACT size (radius or diameter per `sizeMode`, world units),
+    /// surfaced by the tool-options bar (UX-plan U2). When set (> 0), a SINGLE click
+    /// fixes the center and immediately commits a circle of that size, then re-arms
+    /// — the "drop a Ø50 hole here" flow. `nil` (the default) keeps the original
+    /// two-click center+radius behavior, so this is fully back-compatible.
+    public var fixedSize: Double?
+
+    /// The configured fixed RADIUS (resolving `sizeMode`), or `nil` when no usable
+    /// exact size is set. Diameter mode halves the entry.
+    private var fixedRadius: Double? {
+        guard let s = fixedSize, s > Tolerance.distance else { return nil }
+        return sizeMode == .diameter ? s / 2 : s
+    }
 
     public init() {}
 
@@ -120,6 +151,11 @@ public struct CircleTool: Tool {
     private mutating func handleClick(_ p: Vector) -> ToolOutcome {
         switch state {
         case .settingCenter:
+            // Exact-size mode (UX-plan U2): a single click fixes the center and
+            // immediately commits a circle of the configured radius, then re-arms.
+            if let r = fixedRadius, p.valid {
+                return commitCircle(center: p, radius: r)
+            }
             // Center fixed; now rubber-band the radius toward the next click.
             state = .settingRadius(center: p)
             cursor = p
@@ -128,19 +164,22 @@ public struct CircleTool: Tool {
         case .settingRadius(let center):
             // Commit one circle (center, radius = |p − center|), then re-arm.
             guard center.valid, p.valid else { return .none }
-            let radius = (p - center).magnitude
-            guard radius > Tolerance.distance else {
-                // Degenerate (zero-radius) pick — ignore it, keep waiting.
-                return .none
-            }
-            let record = EntityRecord(
-                id: .placeholder,
-                kind: .circle(CircleData(center: center, radius: radius))
-            )
-            // Re-arm for the next circle (stay active).
-            reset()
-            return .commit([.add(record)])
+            return commitCircle(center: center, radius: (p - center).magnitude)
         }
+    }
+
+    /// Builds + commits one circle, then resets to draw the next. A degenerate
+    /// (zero-radius) circle is ignored (returns `.none`, keeps the current state).
+    /// Shared by the two-click center+radius commit and the exact-size single-click
+    /// commit.
+    private mutating func commitCircle(center: Vector, radius: Double) -> ToolOutcome {
+        guard center.valid, radius > Tolerance.distance else { return .none }
+        let record = EntityRecord(
+            id: .placeholder,
+            kind: .circle(CircleData(center: center, radius: radius))
+        )
+        reset()
+        return .commit([.add(record)])
     }
 
     private mutating func handleBackspace() -> ToolOutcome {

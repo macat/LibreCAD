@@ -124,6 +124,14 @@ struct ContentView: View {
             .overlay(alignment: .topLeading) { statusHUD }
             .overlay(alignment: .top) { toolPromptHUD }
             .overlay(alignment: .bottomLeading) { coordinateHUD }
+            // U2: the contextual tool-options bar, pinned directly under the toolbar
+            // and above the canvas. It shows ONLY the active tool's parameters (and
+            // collapses to nothing for tools without options), two-way bound to the
+            // SAME CanvasModel config the Inspector uses; changes re-apply onto the
+            // live tool via `reapplyActiveToolConfig` (one source of truth).
+            .safeAreaInset(edge: .top, spacing: 0) {
+                ToolOptionsBar(model: model, controllerBox: controllerBox)
+            }
             // U1: a persistent command / coordinate input line pinned to the bottom
             // of the window, below the canvas. Always present (D1); focusing it routes
             // typed keystrokes to it (not tool activation); Return parses + feeds the
