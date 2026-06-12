@@ -141,4 +141,58 @@ struct FillTriangulationTests {
         RendererGeometry.appendFillVertices(for: fill, renderOrigin: .init(0, 0), into: &verts)
         #expect(verts.isEmpty)
     }
+
+    // MARK: - Holes (earcut bridge) — glyph counters render as cut-outs
+
+    @Test("a square with a square hole triangulates to (outer − hole) area")
+    func squareWithHole() {
+        // Outer 10×10 CCW, hole 4×4 centered, wound CW.
+        let outer = [Vector(0, 0), Vector(10, 0), Vector(10, 10), Vector(0, 10)]
+        let hole  = [Vector(3, 3), Vector(3, 7), Vector(7, 7), Vector(7, 3)]   // CW
+        let tris = FillTriangulation.triangulateLoops([outer, hole])
+        #expect(!tris.isEmpty)
+        // The filled area must be the annulus area (100 − 16 = 84), NOT 100
+        // (over-filled). The bridge stitches a zero-area channel, so the total
+        // triangulated area equals outer − hole.
+        let area = triangleListArea(tris)
+        #expect(abs(area - 84.0) < 1e-6)
+    }
+
+    @Test("the bridge handles a CCW-wound hole input too (winding normalized)")
+    func holeWindingNormalized() {
+        let outer = [Vector(0, 0), Vector(10, 0), Vector(10, 10), Vector(0, 10)]
+        let holeCCW = [Vector(3, 3), Vector(7, 3), Vector(7, 7), Vector(3, 7)]   // CCW
+        let tris = FillTriangulation.triangulateLoops([outer, holeCCW])
+        #expect(abs(triangleListArea(tris) - 84.0) < 1e-6)
+    }
+
+    @Test("two holes both get subtracted")
+    func twoHoles() {
+        let outer = [Vector(0, 0), Vector(20, 0), Vector(20, 10), Vector(0, 10)]   // area 200
+        let h1 = [Vector(2, 2), Vector(2, 8), Vector(6, 8), Vector(6, 2)]          // 24, CW
+        let h2 = [Vector(12, 2), Vector(12, 8), Vector(16, 8), Vector(16, 2)]      // 24, CW
+        let tris = FillTriangulation.triangulateLoops([outer, h1, h2])
+        #expect(abs(triangleListArea(tris) - (200.0 - 48.0)) < 1e-6)
+    }
+
+    @Test("a single loop (no holes) forwards to the simple triangulator")
+    func singleLoopForwarded() {
+        let square = [Vector(0, 0), Vector(2, 0), Vector(2, 2), Vector(0, 2)]
+        let tris = FillTriangulation.triangulateLoops([square])
+        #expect(tris.count == 2 * 3)
+        #expect(abs(triangleListArea(tris) - 4.0) < 1e-9)
+    }
+
+    @Test("appendFillVertices subtracts a hole (counter renders as a cut-out)")
+    func fillVertexWithHole() {
+        let outer = [Vector(0, 0), Vector(10, 0), Vector(10, 10), Vector(0, 10)]
+        let hole  = [Vector(3, 3), Vector(3, 7), Vector(7, 7), Vector(7, 3)]
+        let fill = ResolvedFill(loops: [outer, hole], color: .white)
+        var verts: [FlatVertex] = []
+        RendererGeometry.appendFillVertices(for: fill, renderOrigin: .init(0, 0), into: &verts)
+        #expect(verts.count % 3 == 0)
+        let area = triangleListArea(verts.map { Vector(Double($0.position.x), Double($0.position.y)) })
+        // Cut-out (84), not over-filled (100).
+        #expect(abs(area - 84.0) < 1e-3)
+    }
 }
