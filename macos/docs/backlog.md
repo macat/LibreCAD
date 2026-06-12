@@ -57,6 +57,10 @@ pass or by the relevant downstream owner. Each cites its source.
 - Comment that `lc_dxf_count_entities` now parses+flattens the whole file (no longer alloc-free). *(review-dxfread #4)*
 - Layer with ACI 256 silently → green instead of inheriting (rare/invalid edge). *(review-dxfread #1)*
 
+## Coordinate / canvas (offset resolved)
+- Add a `worldToScreen ↔ worldToClip` consistency regression test (same world point → same screen pixel across sizes/backing/pan/zoom) — locks in the offset fix. (offset-fix3's intended test; agent was stopped before landing it.)
+- Remove (or keep env-gated) the `LC_DEBUG_COORDS` instrumentation in CADCanvasView once we're confident the offset stays fixed.
+
 ## App shell
 - **Reintroduce DocumentGroup** (native open/save/recents/autosave/versions) with an OFF-MAIN-SAFE
   `ReferenceFileDocument`: store Sendable parsed data (entities/layers or raw bytes) in
