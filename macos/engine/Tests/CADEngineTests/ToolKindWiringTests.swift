@@ -74,6 +74,7 @@ struct ToolKindWiringTests {
             .linearDim, .alignedDim, .radialDim, .diameterDim, .angularDim, // wave B (dimensions)
             .stretch, .lengthen, .break,                           // wave C (modify)
             .insert,                                               // wave C (blocks)
+            .polylineEdit,                                         // wave D (modify)
         ]
         #expect(Set(ToolKind.allCases) == expected,
                 "ToolKind.allCases (\(ToolKind.allCases)) != expected roster")
@@ -182,6 +183,23 @@ struct ToolKindWiringTests {
         }
     }
 
+    /// The wave-D wiring addition: Edit Polyline. It mints a non-nil tool whose own
+    /// title matches the kind's UI title, so the toolbar/menu label and the HUD prompt
+    /// ("Edit Polyline: …") agree. `PolylineEditTool()` defaults to `.move` mode.
+    @Test func waveDKindIsWiredWithMatchingTitle() {
+        let waveD: [ToolKind: String] = [
+            .polylineEdit: "Edit Polyline",
+        ]
+        for (kind, title) in waveD {
+            #expect(kind.title == title,
+                    "ToolKind.\(kind).title (\(kind.title)) != \(title)")
+            let tool = kind.makeTool()
+            #expect(tool != nil, "ToolKind.\(kind) minted a nil Tool")
+            #expect(tool?.title == title,
+                    "ToolKind.\(kind) tool.title (\(tool?.title ?? "nil")) != \(title)")
+        }
+    }
+
     /// `.insert` mints an Insert tool that is SAFE with no block chosen — the
     /// block-picker UI is a later task, so a wired ⌥/menu activation with no blocks in
     /// the drawing must never crash. With no block name the tool is inert (a no-op),
@@ -238,6 +256,8 @@ struct ToolKindWiringTests {
             // wave C — Insert Block + Break take free shift chords; Stretch is ⌥S above.
             (.insert, "i", true, false),
             (.break, "b", true, false),
+            // wave D — Edit Polyline takes ⇧P (bare P is Polyline with no shift twin).
+            (.polylineEdit, "p", true, false),
         ]
         // No two entries share a (key, shift, option) chord.
         let chords = keymap.map { "\($0.1)\($0.2 ? "+shift" : "")\($0.3 ? "+option" : "")" }
@@ -259,5 +279,7 @@ struct ToolKindWiringTests {
         for k in [ToolKind.stretch, .lengthen, .break, .insert] {
             #expect(kinds.contains(k), "wave-C kind \(k) has no keyboard shortcut")
         }
+        // The wave-D kind (Edit Polyline) has a shortcut.
+        #expect(kinds.contains(.polylineEdit), "wave-D kind polylineEdit has no keyboard shortcut")
     }
 }

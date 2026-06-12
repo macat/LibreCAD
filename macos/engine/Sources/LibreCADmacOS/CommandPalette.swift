@@ -119,6 +119,7 @@ enum CommandRegistry {
         case .lengthen:    return ("ruler", "⇧L")
         case .break:       return ("scissors.badge.ellipsis", "⇧B")
         case .insert:      return ("square.on.square.dashed", "⇧I")
+        case .polylineEdit: return ("point.topleft.down.to.point.bottomright.curvepath.fill", "⇧P")
         }
     }
 
