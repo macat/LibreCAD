@@ -69,6 +69,25 @@ style names a stroke font; we honor it for fidelity + round-trip.
 
 **Why.** SDF-from-system-fonts renders the wrong typeface and breaks DXF geometry round-trip.
 
+### REVISION (2026-06-12) — add nice NATIVE fonts as the default (user directive)
+> User: "LibreCAD does not support nice fonts. I want the Mac app to support nice, native ones."
+
+In-drawing text now supports **two glyph sources behind ONE `FontProvider`/glyph abstraction** in `ResolveContext` — chosen per text by the style's font name:
+
+1. **Stroke fonts (`.lff`)** — RETAINED for DXF fidelity, round-trip of stroke-font styles, and the classic single-stroke CAD look. Resolve → polyline strokes (unchanged).
+2. **Native outline fonts — the DEFAULT for newly created text.** Any installed macOS font via **Core Text glyph PATHS** (`CTFontCreatePathForGlyph` → `CGPath`) → flattened → **tessellated to FILLS** through the existing fill pipeline (earcut / `ResolvedFill`).
+
+**Why this is correct (and not a contradiction of the original "no system fonts"):**
+- It is **vector outline tessellation, NOT an SDF atlas** — so text stays **crisp at any zoom** and **exports to PDF/SVG perfectly** (vector). The original ADR only rejected the *SDF atlas* approach; that rejection stands.
+- It renders the **actual chosen typeface** (the "wrong typeface" concern was specific to SDF-from-system; outlines render the true font).
+- **Round-trip is preserved**: the chosen font family name is stored on the text style; DXF TEXT/MTEXT already carries an arbitrary style/font name, so we remember it and re-render native on reopen. Stroke (`.lff`/SHX) styles still resolve via the stroke provider.
+
+**Implications (build for this NOW):**
+- `ResolvedGeometry` for text MAY contain **fills** (outline glyphs) in addition to / instead of strokes. The renderer already draws fills → **no renderer change needed**.
+- `.text` AND `.dimension` measurement text both go through the same provider abstraction (do not fork a second text path).
+- New TEXT / DIMENSION text defaults to a clean native font (e.g. a system sans); `.lff` "standard" remains selectable (font picker lands with the Inspector / text tool).
+- The SDF path stays OUT — outline tessellation supersedes the need for it for CAD text.
+
 ---
 
 ## Sequencing contract (supersedes PLAN phase order where they differ)
