@@ -286,6 +286,20 @@ public enum Snapping {
 
         case .solid(let d):
             return d.corners
+
+        case .dimension(let d):
+            // The dimension's defining points (the measured points / extension
+            // origins / circle points) plus the dim-line location are the
+            // meaningful snap targets.
+            var pts: [Vector] = [d.definitionPoint]
+            switch d.kind {
+            case let .linear(e1, e2, _):                pts += [e1, e2]
+            case let .aligned(e1, e2):                  pts += [e1, e2]
+            case let .radial(center, pointOnCircle):    pts += [center, pointOnCircle]
+            case let .diameter(p1, p2):                 pts += [p1, p2]
+            case let .angular(l1s, l1e, l2s, l2e):      pts += [l1s, l1e, l2s, l2e]
+            }
+            return pts.filter(\.valid)
         }
     }
 
@@ -372,6 +386,11 @@ public enum Snapping {
                 mids.append((d.corners[i] + d.corners[(i + 1) % d.corners.count]) * 0.5)
             }
             return mids
+
+        case .dimension:
+            // A dimension has no canonical "middle" snap (its defining points are
+            // exposed as endpoints); leave middles to other snap kinds.
+            return []
         }
     }
 

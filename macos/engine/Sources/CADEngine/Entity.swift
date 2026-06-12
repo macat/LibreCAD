@@ -339,6 +339,112 @@ public struct SplinePointsData: Sendable, Hashable, Codable {
     }
 }
 
+// MARK: - Dimension defining data (RS_Dimension* / DRW_Dimension family)
+
+/// An associative CAD dimension (`RS_Dimension` family / DXF `DIMENSION`).
+///
+/// Per ADR-001 a dimension is a **value struct holding only its defining data**;
+/// the drawn graphic (extension lines, the dimension line, arrowheads, and the
+/// measurement text) is NOT stored — it is produced on demand by `resolve()` and
+/// the measurement value is recomputed from the geometry, so a dimension
+/// **re-measures on edit** and **round-trips to DXF faithfully** (a DIMENSION
+/// stays a DIMENSION). The renderer needs ZERO changes: `resolve()` emits
+/// `ResolvedPolyline`s (lines + measurement-text strokes) and `ResolvedFill`s
+/// (arrowhead triangles), exactly the contract the renderer already consumes.
+///
+/// ## Field grounding (DXF `DIMENSION` / libdxfrw `DRW_Dimension` family)
+/// The fields below mirror the DXF dimension model so import/export map cleanly
+/// (the DXF *read* import + *write* of dimensions are later waves):
+/// - `definitionPoint`  — DXF code 10 (the **dimension-line location**; for a
+///   radial/diametric dim, the point the leader passes through; for angular, the
+///   point the dimension arc passes through). `DRW_Dimension::getDefPoint`.
+/// - `textOverride`     — DXF code 1: the user-entered text that **replaces** the
+///   computed measurement. `nil`/empty ⇒ use the measured value; `" "` (a single
+///   space, DXF convention) ⇒ suppress the text. `DRW_Dimension::getText`.
+/// - `textMiddle`       — DXF code 11: optional override for the text's middle
+///   point. `.invalid` ⇒ the resolve computes a default text position centered on
+///   the dimension line. `DRW_Dimension::getTextPoint`.
+/// - `styleName`        — DXF code 3: the dimension style name (carried for
+///   round-trip; not yet resolved against a style table — that is the reserved
+///   `dimStyleProvider` hook on `ResolveContext`). `DRW_Dimension::getStyle`.
+/// - `textHeight`       — measurement-text cap height in world units (from the
+///   dim style's text height; defaulted here until a style table lands).
+/// - `arrowSize`        — arrowhead length in world units (dim style arrow size).
+///
+/// The per-variant defining points live in `DimKind`.
+public struct DimData: Sendable, Hashable, Codable {
+    /// The variant + its defining points (linear / aligned / radial / diameter /
+    /// angular).
+    public var kind: DimKind
+    /// DXF code 10 — the dimension-line location (its meaning is per-variant; see
+    /// `DimKind`). Drives where the dimension line / leader / arc is drawn.
+    public var definitionPoint: Vector
+    /// DXF code 1 — explicit text that REPLACES the computed measurement. `nil`
+    /// or empty ⇒ show the measured value; a single space suppresses the text.
+    public var textOverride: String?
+    /// DXF code 11 — optional override for the text middle point. `.invalid`
+    /// (the default) ⇒ resolve centers the text on the dimension line.
+    public var textMiddle: Vector
+    /// DXF code 3 — the dimension style name (round-trip; style resolution TBD).
+    public var styleName: String?
+    /// Measurement-text cap height in world units.
+    public var textHeight: Double
+    /// Arrowhead length in world units.
+    public var arrowSize: Double
+
+    public init(
+        kind: DimKind,
+        definitionPoint: Vector,
+        textOverride: String? = nil,
+        textMiddle: Vector = .invalid,
+        styleName: String? = nil,
+        textHeight: Double = 2.5,
+        arrowSize: Double = 2.5
+    ) {
+        self.kind = kind
+        self.definitionPoint = definitionPoint
+        self.textOverride = textOverride
+        self.textMiddle = textMiddle
+        self.styleName = styleName
+        self.textHeight = textHeight
+        self.arrowSize = arrowSize
+    }
+}
+
+/// The four dimension variants the user wants, each carrying its defining points.
+/// Points use the DXF DIMENSION sub-type conventions so import/export are direct.
+public enum DimKind: Sendable, Hashable, Codable {
+    /// A **linear** dimension: the distance between two extension-line origin
+    /// points measured along a fixed direction `angle` (radians; 0 = horizontal,
+    /// π/2 = vertical — DXF code 50 of `DRW_DimLinear`). The two points are
+    /// `RS_DimLinearData::extensionPoint1/2` (DXF def1/def2, codes 13/14).
+    case linear(extension1: Vector, extension2: Vector, angle: Double)
+
+    /// An **aligned** dimension: the distance between two extension-line origin
+    /// points measured **parallel to the line** through them (`RS_DimAligned`,
+    /// DXF `DIMALIGNED`). The dimension line is offset to pass through
+    /// `DimData.definitionPoint`.
+    case aligned(extension1: Vector, extension2: Vector)
+
+    /// A **radial** dimension: the radius from `center` to `pointOnCircle`
+    /// (`RS_DimRadial`, DXF `DIMRADIUS`). The measured value is the radius; the
+    /// drawn leader runs from the circle toward the center.
+    case radial(center: Vector, pointOnCircle: Vector)
+
+    /// A **diameter** dimension: the diameter across a circle through the two
+    /// opposite points `point1`/`point2` (`RS_DimDiametric`, DXF `DIMDIAMETER`).
+    /// The measured value is the diameter (the distance between the two points).
+    case diameter(point1: Vector, point2: Vector)
+
+    /// An **angular** dimension: the angle between the two lines
+    /// (`line1Start`→`line1End`) and (`line2Start`→`line2End`), with the
+    /// dimension arc passing through `DimData.definitionPoint`
+    /// (`RS_DimAngular`, DXF `DIMANGULAR`). The measured value is the angle (in
+    /// degrees) subtended at the lines' intersection.
+    case angular(line1Start: Vector, line1End: Vector,
+                 line2Start: Vector, line2End: Vector)
+}
+
 // MARK: - The entity-kind sum type
 
 /// The discriminated union of entity geometry. This is the **seed set** for the
@@ -364,6 +470,11 @@ public enum EntityKind: Sendable, Hashable, Codable {
     case hatch(HatchData)
     /// A filled triangle/quadrilateral (`RS_Solid`, DXF `SOLID`/`TRACE`).
     case solid(SolidData)
+    /// An associative CAD dimension — linear / aligned / radial / diameter /
+    /// angular (`RS_Dimension` family, DXF `DIMENSION`). Its graphic (extension
+    /// lines, dimension line, arrowheads, measurement text) is computed in
+    /// `resolve()`, never stored (ADR-001).
+    case dimension(DimData)
 }
 
 // MARK: - Per-entity flags

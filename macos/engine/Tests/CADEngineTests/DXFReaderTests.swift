@@ -36,10 +36,10 @@ struct DXFReaderTests {
     private struct KindTally {
         var line = 0, point = 0, circle = 0, arc = 0
         var ellipse = 0, polyline = 0, spline = 0, splinePoints = 0
-        var text = 0, hatch = 0, solid = 0
+        var text = 0, hatch = 0, solid = 0, dimension = 0
         var total: Int {
             line + point + circle + arc + ellipse + polyline + spline + splinePoints
-                + text + hatch + solid
+                + text + hatch + solid + dimension
         }
     }
 
@@ -59,6 +59,10 @@ struct DXFReaderTests {
             case .text:         t.text += 1
             case .hatch:        t.hatch += 1
             case .solid:        t.solid += 1
+            // Dimensions are not yet IMPORTED by the reader (skip arm only — they
+            // surface as warnings); tallied here only to keep the switch
+            // exhaustive. Stays 0 until the dimension-import follow-up wave.
+            case .dimension:    t.dimension += 1
             }
         }
         return t

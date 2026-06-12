@@ -77,6 +77,7 @@ struct DXFWriterTests {
             case .solid:        t.solid += 1     // now written (DRW_Solid)
             case .hatch:        t.hatch += 1     // now written (DRW_Hatch)
             case .spline, .splinePoints: break   // still skipped by the writer
+            case .dimension:    break            // skipped by the writer (S3 wave)
             }
         }
         return t
@@ -451,7 +452,7 @@ struct DXFWriterTests {
         switch r.kind {
         case .line, .point, .circle, .arc, .ellipse, .polyline,
              .text, .solid, .hatch: return true
-        case .spline, .splinePoints: return false
+        case .spline, .splinePoints, .dimension: return false
         }
     }
 }
