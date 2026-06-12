@@ -2,23 +2,26 @@
 //  LibreCADApp.swift
 //  LibreCADmacOS
 //
-//  SwiftUI entry point. A single-window `WindowGroup` shell owns the live canvas
-//  directly (ContentView holds the `@MainActor @Observable CanvasModel`). The
-//  View menu adds "Zoom to Fit" (⌘0) and "Open…" (⌘O), both routed to the
-//  focused window via focused scene values.
+//  SwiftUI entry point. The app is now DOCUMENT-BASED: a `DocumentGroup` over the
+//  off-main-safe `LibreCADDocument` (a `ReferenceFileDocument` for `.dxf`). That
+//  gives native New / Open / Open Recent / Save / Save As / Revert / autosave /
+//  versions / the dirty dot / multi-window for free. Each document window hosts
+//  `ContentView`, which builds the live `@MainActor CADDrawing`/`CanvasModel` from
+//  the document's Sendable payload — on the MAIN ACTOR — and runs the canvas +
+//  inspector + toolbar + palette + gizmos.
 //
-//  NOTE: We intentionally do NOT use `DocumentGroup`/`ReferenceFileDocument`.
-//  SwiftUI's NSDocument machinery constructs the document off the main thread
-//  (a background NSOperationQueue), which traps any `MainActor.assumeIsolated`
-//  in the document's `init` and crashes before the first window appears. The
-//  model (`CADDrawing`) is `@MainActor`-isolated, so the document path is
-//  fundamentally unsafe here. See CADDocument deletion in this commit and the
-//  backlog note below.
+//  ⚠️ LAUNCH-SAFETY — why DocumentGroup is safe HERE (it crashed once).
+//  An earlier document build SIGTRAP-crashed because `CADDocument.init` called
+//  `MainActor.assumeIsolated` while NSDocument constructed the document OFF the
+//  main actor (a background NSOperationQueue). The current `LibreCADDocument`
+//  init/snapshot/fileWrapper touch ONLY Sendable value data (never a `@MainActor`
+//  type, never `assumeIsolated`); the `@MainActor` model is built later in the
+//  view. See LibreCADDocument.swift / ContentView.swift and DEVLOG.md ("SIGTRAP").
 //
-//  TODO(backlog): reintroduce DocumentGroup with an off-main-safe
-//  ReferenceFileDocument (store only Sendable parsed data in init/snapshot/
-//  fileWrapper; build the @MainActor CADDrawing later in the view, never in
-//  the document init).
+//  File ▸ New / Open / Open Recent / Save / Save As / Revert are now NATIVE
+//  DocumentGroup commands (no custom panels). Export (PDF/PNG/SVG) and Print STAY
+//  custom (they are not the document type) and are added to the File menu via
+//  focused scene values, as are the tool/undo/delete/palette commands.
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //
@@ -32,11 +35,6 @@ struct LibreCADApp: App {
     @FocusedValue(\.commandPalette) private var commandPalette
     /// The Zoom-to-Fit action published by the focused window.
     @FocusedValue(\.zoomToFit) private var zoomToFit
-    /// The Open action published by the focused window (drives its .fileImporter).
-    @FocusedValue(\.openDocument) private var openDocument
-    /// Save / Save As… actions published by the focused window (⌘S / ⇧⌘S).
-    @FocusedValue(\.saveDocument) private var saveDocument
-    @FocusedValue(\.saveDocumentAs) private var saveDocumentAs
     /// Export (PDF/PNG/SVG) and Print actions published by the focused window.
     @FocusedValue(\.exportDocument) private var exportDocument
     @FocusedValue(\.printDocument) private var printDocument
@@ -53,35 +51,20 @@ struct LibreCADApp: App {
     @FocusedValue(\.isToolActive) private var isToolActive
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        // The document scene: a brand-new document is the empty `LibreCADDocument()`;
+        // opening a file constructs `LibreCADDocument(configuration:)` OFF-main from
+        // Sendable bytes (the launch-safe path). The editor closure hands us the
+        // document reference, which ContentView turns into the live model on-main.
+        DocumentGroup(newDocument: { LibreCADDocument() }) { configuration in
+            ContentView(document: configuration.document)
         }
         .commands {
-            CommandGroup(replacing: .newItem) {
-                Button("Open…") { openDocument?() }
-                    .keyboardShortcut("o", modifiers: .command)
-                    .disabled(openDocument == nil)
-            }
-            // File ▸ Save (⌘S) / Save As… (⇧⌘S). Both route to the focused window
-            // via focused scene values (same pattern as Open/Zoom-to-Fit). Save
-            // writes the current `model.drawing` to the document's file (or falls
-            // through to Save As… when there isn't one yet) through the merged
-            // DXFWriter; Save As… always presents an NSSavePanel for a `.dxf`.
-            // Disabled when no canvas is focused.
-            CommandGroup(replacing: .saveItem) {
-                Button("Save") { saveDocument?() }
-                    .keyboardShortcut("s", modifiers: .command)
-                    .disabled(saveDocument == nil)
-                Button("Save As…") { saveDocumentAs?() }
-                    .keyboardShortcut("s", modifiers: [.command, .shift])
-                    .disabled(saveDocumentAs == nil)
-
+            // File ▸ Export… / Print… — added AFTER the native Save items (Save /
+            // Save As / Revert come from DocumentGroup). Export renders the drawing
+            // to PDF / PNG / SVG (not the document type); Print drives the system
+            // print dialog. Both route to the focused window via focused values.
+            CommandGroup(after: .saveItem) {
                 Divider()
-                // File ▸ Export… — render the drawing to PDF / PNG / SVG via the
-                // shared resolve→CGContext (PDF/PNG) / pure-Swift (SVG) export path.
-                // Each routes to the focused window via the `exportDocument` value;
-                // an NSSavePanel in the window picks the destination. ⇧⌘E exports
-                // to PDF as the common default.
                 Menu("Export…") {
                     Button("PDF…") { exportDocument?(.pdf) }
                         .keyboardShortcut("e", modifiers: [.command, .shift])
@@ -96,7 +79,13 @@ struct LibreCADApp: App {
                     .keyboardShortcut("p", modifiers: .command)
                     .disabled(printDocument == nil)
             }
-            // Undo / redo (replaces the empty default since there's no DocumentGroup).
+            // Undo / redo. DocumentGroup provides system Undo/Redo bound to the
+            // document's environment UndoManager — which our model now ADOPTS, so
+            // edits register against it. We still REPLACE the items to route ⌘Z/⇧⌘Z
+            // through `model.undo()`/`redo()`, which run the post-undo bookkeeping the
+            // raw UndoManager can't (rebuild the spatial index, clear selection,
+            // request a redraw). Because the model's manager IS the environment
+            // manager, the native dirty/clean tracking still works.
             CommandGroup(replacing: .undoRedo) {
                 Button("Undo") { undoAction?() }
                     .keyboardShortcut("z", modifiers: .command)

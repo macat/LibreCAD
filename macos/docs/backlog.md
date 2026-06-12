@@ -92,11 +92,21 @@ pass or by the relevant downstream owner. Each cites its source.
 - Add a `CADDrawing.setLayerColor(_:_:)` convenience wrapper (sidebar used `mutateLayers{ setColor }`). (ws-sidebar)
 
 ## App shell
-- **Reintroduce DocumentGroup** (native open/save/recents/autosave/versions) with an OFF-MAIN-SAFE
+- ~~**Reintroduce DocumentGroup** (native open/save/recents/autosave/versions) with an OFF-MAIN-SAFE
   `ReferenceFileDocument`: store Sendable parsed data (entities/layers or raw bytes) in
   `init/snapshot/fileWrapper` (these run off-main), and build the `@MainActor CADDrawing` in the view.
-  NO `MainActor.assumeIsolated` in document entry points. (Replaced by WindowGroup after the launch crash.)
-- DXF/DWG **write** + Save (currently read-only viewer).
+  NO `MainActor.assumeIsolated` in document entry points. (Replaced by WindowGroup after the launch crash.)~~
+  **DONE** — `LibreCADDocument: ReferenceFileDocument` over `.dxf`. The document holds ONLY a Sendable
+  `DXFPayload` (entity records + layer/block tables + header vars); `init(configuration:)`/`snapshot`/
+  `fileWrapper` parse/serialize off-main via `CADEngine.shared.readEntities`/`writeEntities` (the
+  `DXFDocumentCodec` bridges the async engine actor to the sync document requirements with a semaphore —
+  SAFE because those entry points run on a background queue, never main). The `@MainActor CADDrawing` +
+  `CanvasModel` are built in `ContentView.task` (main actor) from the payload, NEVER in the document init —
+  no `MainActor.assumeIsolated` anywhere. `WindowGroup`→`DocumentGroup(newDocument:)`. The model adopts
+  SwiftUI's environment `UndoManager` (`CanvasModel.adoptUndoManager`) so edits mark the document dirty.
+  Custom NSOpenPanel/NSSavePanel Open/Save removed (DocumentGroup owns them); Export (PDF/PNG/SVG) + Print
+  stay custom. Headless launch verified: stays alive 10s, NO new crash report. (4 doc-payload round-trip tests.)
+- DXF/DWG **write** + Save (currently read-only viewer). *(DXF Save now native via DocumentGroup.)*
 
 ## Render gate — renderer/canvas (Wave 2)
 - **Extract a `CADRender` library target** in Package.swift so renderer logic is `@testable import`-able;
