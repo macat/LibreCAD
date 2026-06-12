@@ -254,6 +254,13 @@ private final class PODBuilder {
             // Not yet supported by the writer; the C side skips UNSUPPORTED.
             e.kind = Int32(LC_ENT_UNSUPPORTED.rawValue)
             e.typeName = intern("SPLINE")
+
+        case .text, .hatch, .solid:
+            // Display kinds not yet round-tripped through the writer; skipped
+            // (counted UNSUPPORTED on the C side). TODO(backlog): DXF write for
+            // TEXT/MTEXT/HATCH/SOLID once these are imported by the reader.
+            e.kind = Int32(LC_ENT_UNSUPPORTED.rawValue)
+            e.typeName = intern("DISPLAY")
         }
         return e
     }
