@@ -27,6 +27,9 @@ let package = Package(
     products: [
         .library(name: "CADEngine", targets: ["CADEngine"]),
         .executable(name: "LibreCADmacOS", targets: ["LibreCADmacOS"]),
+        // Additive: the scale benchmark harness (perf profiling). Not part of the
+        // app or the test suite — run explicitly via `swift run ... CADBench`.
+        .executable(name: "CADBench", targets: ["CADBench"]),
     ],
     targets: [
         // MARK: - C++ bridge over libdxfrw, exposed as a plain C module.
@@ -87,6 +90,23 @@ let package = Package(
             name: "LibreCADmacOS",
             dependencies: ["CADEngine"],
             path: "Sources/LibreCADmacOS",
+            swiftSettings: swift6
+        ),
+
+        // MARK: - Scale benchmark harness (additive; perf profiling).
+        //
+        // A standalone executable that measures the engine/render hot paths at
+        // 100k / 500k / 1M synthetic entities (macos/docs/perf-report.md). It
+        // depends on the CADEngine library and compiles the GPU-FREE renderer
+        // geometry directly via symlinks (`_Shared*.swift`) — the same
+        // zero-drift pattern the test target uses — so it can time the EXACT
+        // shipping `RendererGeometry`/`RendererCull` CPU buffer-build path
+        // (the GPU `MTLBuffer` blit is the only step it omits). It is NOT a test
+        // target, so `swift test` never runs it.
+        .executableTarget(
+            name: "CADBench",
+            dependencies: ["CADEngine"],
+            path: "Sources/CADBench",
             swiftSettings: swift6
         ),
 
