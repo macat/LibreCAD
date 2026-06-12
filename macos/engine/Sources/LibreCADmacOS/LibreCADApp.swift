@@ -84,15 +84,57 @@ struct LibreCADApp: App {
                     .keyboardShortcut("0", modifiers: .command)
                     .disabled(zoomToFit == nil)
             }
-            // The Tools menu — minimal but real tool selection (also bound to the
-            // bare L/V keys on the canvas; these add discoverable menu items +
-            // standalone shortcuts).
+            // The Tools menu — the discoverable source of truth for EVERY tool and
+            // its shortcut. Each item activates the tool on the focused canvas via
+            // the `activateTool` focused value; the same shortcuts are also handled
+            // directly by the canvas `keyDown` (CADCanvasView.handleKey) so they work
+            // whether the menu or the canvas has focus. Grouped Select → Draw →
+            // Modify. Modify tools act on the current selection (select in V mode,
+            // then activate); with nothing selected the tool's HUD prompts "Select
+            // objects…". Shift picks the modify variant where a letter is shared
+            // (⇧C Copy vs C Circle, ⇧R Rotate vs R Rectangle, ⇧M Mirror vs M Move).
             CommandMenu("Tools") {
                 Button("Select") { activateTool?(.select) }
                     .keyboardShortcut("v", modifiers: [])
                     .disabled(activateTool == nil)
+
+                Divider()
+                // Draw tools.
                 Button("Line") { activateTool?(.line) }
                     .keyboardShortcut("l", modifiers: [])
+                    .disabled(activateTool == nil)
+                Button("Circle") { activateTool?(.circle) }
+                    .keyboardShortcut("c", modifiers: [])
+                    .disabled(activateTool == nil)
+                Button("Arc") { activateTool?(.arc) }
+                    .keyboardShortcut("a", modifiers: [])
+                    .disabled(activateTool == nil)
+                Button("Rectangle") { activateTool?(.rectangle) }
+                    .keyboardShortcut("r", modifiers: [])
+                    .disabled(activateTool == nil)
+                Button("Polyline") { activateTool?(.polyline) }
+                    .keyboardShortcut("p", modifiers: [])
+                    .disabled(activateTool == nil)
+                Button("Point") { activateTool?(.point) }
+                    .keyboardShortcut("o", modifiers: [])
+                    .disabled(activateTool == nil)
+
+                Divider()
+                // Modify tools (act on the current selection).
+                Button("Move") { activateTool?(.move) }
+                    .keyboardShortcut("m", modifiers: [])
+                    .disabled(activateTool == nil)
+                Button("Copy") { activateTool?(.copy) }
+                    .keyboardShortcut("c", modifiers: .shift)
+                    .disabled(activateTool == nil)
+                Button("Rotate") { activateTool?(.rotate) }
+                    .keyboardShortcut("r", modifiers: .shift)
+                    .disabled(activateTool == nil)
+                Button("Scale") { activateTool?(.scale) }
+                    .keyboardShortcut("s", modifiers: .shift)
+                    .disabled(activateTool == nil)
+                Button("Mirror") { activateTool?(.mirror) }
+                    .keyboardShortcut("m", modifiers: .shift)
                     .disabled(activateTool == nil)
             }
         }

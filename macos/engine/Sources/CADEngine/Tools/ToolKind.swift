@@ -34,13 +34,45 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     case select
     /// The Line draw tool (`LineTool`).
     case line
+    // --- Draw tools (geometry-creating; ignore the selection) ---
+    /// The Circle draw tool (`CircleTool`).
+    case circle
+    /// The Arc draw tool (`ArcTool`).
+    case arc
+    /// The Rectangle draw tool (`RectangleTool`).
+    case rectangle
+    /// The Polyline draw tool (`PolylineTool`).
+    case polyline
+    /// The Point draw tool (`PointTool`).
+    case point
+    // --- Modify tools (act on `ToolContext.selected`; need a selection) ---
+    /// The Move modify tool (`MoveTool`).
+    case move
+    /// The Copy modify tool (`CopyTool`).
+    case copy
+    /// The Rotate modify tool (`RotateTool`).
+    case rotate
+    /// The Scale modify tool (`ScaleTool`).
+    case scale
+    /// The Mirror modify tool (`MirrorTool`).
+    case mirror
     // Append new draw tools here (one `case` per tool) — see the collision note.
 
     /// A short title for the UI (toolbar button / menu).
     public var title: String {
         switch self {
-        case .select: return "Select"
-        case .line:   return "Line"
+        case .select:    return "Select"
+        case .line:      return "Line"
+        case .circle:    return "Circle"
+        case .arc:       return "Arc"
+        case .rectangle: return "Rectangle"
+        case .polyline:  return "Polyline"
+        case .point:     return "Point"
+        case .move:      return "Move"
+        case .copy:      return "Copy"
+        case .rotate:    return "Rotate"
+        case .scale:     return "Scale"
+        case .mirror:    return "Mirror"
         // Append a title arm per new case.
         }
     }
@@ -50,8 +82,18 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     /// this when the active kind changes.
     public func makeTool() -> (any Tool)? {
         switch self {
-        case .select: return nil
-        case .line:   return LineTool()
+        case .select:    return nil
+        case .line:      return LineTool()
+        case .circle:    return CircleTool()
+        case .arc:       return ArcTool()
+        case .rectangle: return RectangleTool()
+        case .polyline:  return PolylineTool()
+        case .point:     return PointTool()
+        case .move:      return MoveTool()
+        case .copy:      return CopyTool()
+        case .rotate:    return RotateTool()
+        case .scale:     return ScaleTool()
+        case .mirror:    return MirrorTool()
         // Append a `case <kind>: return <Name>Tool()` arm per new tool.
         }
     }
