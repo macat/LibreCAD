@@ -37,7 +37,27 @@ struct ContentView: View {
     /// Set once so the launch sample is loaded exactly one time.
     @State private var didLoadSample = false
 
+    /// The sidebar's visibility column state (lets the toolbar toggle drive it).
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
     var body: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            // Leading pane: the modern Layers (+ Blocks stub) sidebar, bound to
+            // the SAME live model the canvas renders so edits reflect immediately.
+            LayersSidebar(model: model, controllerBox: controllerBox)
+                .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
+                .navigationTitle("Document")
+        } detail: {
+            // Detail pane: the existing interactive canvas + HUD + toolbar,
+            // unchanged from the pre-sidebar layout.
+            canvasDetail
+        }
+    }
+
+    /// The canvas detail pane — the prior single-window body, verbatim. Kept
+    /// separate so the `NavigationSplitView` above stays readable and the canvas /
+    /// HUD / toolbar wiring is untouched.
+    private var canvasDetail: some View {
         CADCanvasView(model: model, controllerBox: controllerBox)
             .ignoresSafeArea()
             .frame(minWidth: 480, minHeight: 320)
