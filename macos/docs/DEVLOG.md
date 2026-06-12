@@ -110,7 +110,11 @@ Engine modules on native-macos: CADEngine core (Vector/Geometry/Pen/Entity/Resol
 - [2026-06-12 ~01:20] 📋 coordinator — **Task #2 DONE** (all 5 modify tools built). Dispatched review-modify-tools (batch + hygiene check). **Task #3.**
 - [2026-06-12 ~01:35] 🔍 review-modify-tools — APPROVE all 5, no must-fix. Hygiene: every branch = exactly its 2 files (Scale dirty-index was worktree-only, commit clean); collision-safe; all use EntityTransform; real assertions. Should-fix: CopyTool copies inherit original `.selected` flag → confirm/strip at applyCommit.
 - [2026-06-12 ~01:40] 📋 coordinator — MERGED all 5 modify tools → native-macos (each clean = 2 files; overlap none). Combined build+test: **466 tests in 50 suites green**. Cleaned worktrees. **Task #3 DONE.** All 11 tool files now present; NOT yet wired in ToolKind/toolbar.
-- [2026-06-12 ~01:45] 🔨 tool-wiring (worktree) — **Task #4**: register all 10 tools in ToolKind (case+title+makeTool) + toolbar (Draw/Modify groups) + keyboard shortcuts + Tools menu; confirm modify tools get context.selected; fix CopyTool `.selected` carryover at applyCommit. Outcome: running.
+- [2026-06-12 ~01:45] 🔨 tool-wiring (worktree) — **Task #4**: register all 10 tools in ToolKind + toolbar (Select|Draw|Modify) + keymap (V/L/C/A/R/P/O + M/⇧C/⇧R/⇧S/⇧M; shift-flag read directly to split C/R/M twins) + Tools menu; modify tools read context.selected; strip .selected on .add. Outcome: DONE/GREEN — 471 tests; .app assembles; no new crash. @ be074579a. Coordinator-verified applyCommit + handleKey.
+- [2026-06-12 ~01:55] 📋 coordinator — MERGED ws/tool-wiring → native-macos (clean). 471 tests in 51 suites; .app reassembled. **Task #4 DONE.**
+
+## BROAD-PARITY P0 TOOLSET COMPLETE (2026-06-12) — usable native CAD editor
+All P0 tools wired + usable: DRAW line/circle/arc/rectangle/polyline/point; MODIFY move/copy/rotate/scale/mirror; select (single/window/crossing) + ⌫ delete + ⌘Z/⇧⌘Z undo/redo; snap (endpoint/center/mid/intersection/on-entity) + coord HUD; pan/zoom/fit/grid; open .dxf. 471 tests, 113 commits on native-macos, app launches (user-confirmed earlier). Cursor-offset fixed. AWAITING user GUI verification of the full toolset (task #5). All local — push blocked all session.
 
 #### Wave A results (all 7 DONE/GREEN; reviews in flight)
 - 🔨 tool-rect (RectangleTool, 2 corners→closed polyline) — 295 tests — ws/tool-rect @ b90de6a2a
