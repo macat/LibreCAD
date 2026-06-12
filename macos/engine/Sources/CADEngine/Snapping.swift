@@ -48,9 +48,26 @@ public struct SnapMode: OptionSet, Sendable, Hashable {
     public static let onEntity     = SnapMode(rawValue: 1 << 5)
     /// Snap to intersections between nearby entities.
     public static let intersection = SnapMode(rawValue: 1 << 6)
+    /// Snap to the closest point ON a nearby entity to the cursor (true
+    /// nearest-point-on-curve). Distinct named mode from `.onEntity` so it can be
+    /// toggled independently and carries its own status-bar label; the two share
+    /// the same analytic nearest-point kernel.
+    public static let nearest      = SnapMode(rawValue: 1 << 7)
+    /// Snap to the foot of the perpendicular from the reference ("from") point
+    /// onto the target entity (line / arc / circle). Inert without a reference
+    /// point (`referencePoint == nil` → no candidates).
+    public static let perpendicular = SnapMode(rawValue: 1 << 8)
+    /// Snap to a tangent point on a circle / arc / ellipse, as seen from the
+    /// reference ("from") point. Inert without a reference point.
+    public static let tangent      = SnapMode(rawValue: 1 << 9)
+    /// Snap the current segment (reference → cursor) to be parallel to a hovered
+    /// reference entity's direction. Inert without a reference point.
+    public static let parallel     = SnapMode(rawValue: 1 << 10)
 
     /// The common default set (endpoint + center + middle + intersection +
-    /// onEntity + grid), with `.free` always available as the fallback.
+    /// onEntity + grid), with `.free` always available as the fallback. The new
+    /// constructive modes (nearest / perpendicular / tangent / parallel) are
+    /// OFF by default — opt-in like LibreCAD's RS2::SnapMode.
     public static let standard: SnapMode = [
         .endpoint, .center, .middle, .intersection, .onEntity, .grid, .free,
     ]
@@ -66,6 +83,14 @@ public enum SnapKind: Sendable, Hashable {
     case middle
     case onEntity
     case intersection
+    /// Closest point on a nearby entity to the cursor (true nearest-point).
+    case nearest
+    /// Foot of the perpendicular from the reference point onto an entity.
+    case perpendicular
+    /// Tangent point on a circle / arc / ellipse from the reference point.
+    case tangent
+    /// Point keeping the reference→cursor segment parallel to a hovered entity.
+    case parallel
 }
 
 /// The chosen snap: the snapped world point, what kind of snap it is, and the
@@ -103,9 +128,17 @@ public enum Snapping {
     /// expectation that an endpoint "beats" a mere on-entity snap. Ties within a
     /// kind are broken by distance.
     ///
-    /// endpoint > center > middle > intersection > onEntity > grid > free.
+    /// endpoint > center > middle > intersection > perpendicular > tangent >
+    /// parallel > onEntity > nearest > grid > free.
+    ///
+    /// The constructive snaps (perpendicular / tangent / parallel) require an
+    /// explicit reference point and an intentional toggle, so they rank above the
+    /// passive `onEntity` / `nearest` "anywhere on the curve" snaps but below the
+    /// discrete defining-geometry snaps (endpoint / center / middle / intersection).
     static let priority: [SnapKind] = [
-        .endpoint, .center, .middle, .intersection, .onEntity, .grid, .free,
+        .endpoint, .center, .middle, .intersection,
+        .perpendicular, .tangent, .parallel,
+        .onEntity, .nearest, .grid, .free,
     ]
 
     /// An internal candidate before priority resolution.
@@ -141,6 +174,10 @@ public enum Snapping {
     ///   - drawing: the document.
     ///   - quadtree: the shared spatial index.
     ///   - ctx: resolve context for curve tessellation (onEntity for curve kinds).
+    ///   - referencePoint: the tool's "from" point (last placed point /
+    ///     relative-zero). Required by the constructive modes (`.perpendicular`,
+    ///     `.tangent`, `.parallel`); when `nil` those modes contribute no
+    ///     candidates, so existing callers that omit it are unaffected.
     @MainActor
     public static func snap(worldPoint: Vector,
                             modes: SnapMode,
@@ -148,7 +185,8 @@ public enum Snapping {
                             gridSpacing: Double?,
                             in drawing: CADDrawing,
                             using quadtree: Quadtree,
-                            ctx: ResolveContext? = nil) -> SnapResult {
+                            ctx: ResolveContext? = nil,
+                            referencePoint: Vector? = nil) -> SnapResult {
         let freeResult = SnapResult(point: worldPoint, kind: .free, entity: nil)
         guard worldPoint.valid else { return freeResult }
         let tol = Swift.max(worldTolerance, 0)
@@ -187,6 +225,34 @@ public enum Snapping {
                 let np = nearestOnEntity(worldPoint, entity: e, ctx: context)
                 appendIfNear(&candidates, point: np, kind: .onEntity, entity: e.id,
                              cursor: worldPoint, tol: tol)
+            }
+            if modes.contains(.nearest) {
+                // True nearest-point-on-curve to the cursor (shares the analytic
+                // kernel with onEntity; distinct mode/label).
+                let np = nearestOnEntity(worldPoint, entity: e, ctx: context)
+                appendIfNear(&candidates, point: np, kind: .nearest, entity: e.id,
+                             cursor: worldPoint, tol: tol)
+            }
+            // Constructive modes need the tool's reference ("from") point.
+            if let ref = referencePoint, ref.valid {
+                if modes.contains(.perpendicular) {
+                    for p in perpendicularFeet(from: ref, entity: e) {
+                        appendIfNear(&candidates, point: p, kind: .perpendicular, entity: e.id,
+                                     cursor: worldPoint, tol: tol)
+                    }
+                }
+                if modes.contains(.tangent) {
+                    for p in tangentPoints(from: ref, entity: e) {
+                        appendIfNear(&candidates, point: p, kind: .tangent, entity: e.id,
+                                     cursor: worldPoint, tol: tol)
+                    }
+                }
+                if modes.contains(.parallel) {
+                    if let p = parallelSnap(from: ref, cursor: worldPoint, entity: e) {
+                        appendIfNear(&candidates, point: p, kind: .parallel, entity: e.id,
+                                     cursor: worldPoint, tol: tol)
+                    }
+                }
             }
         }
 
@@ -434,6 +500,77 @@ public enum Snapping {
                 }
             }
             return best
+        }
+    }
+
+    // MARK: - Constructive snap helpers (need a reference point)
+
+    /// The perpendicular foot/feet from `from` onto `entity`. Analytic for
+    /// line / circle / arc; for a line the foot is kept only if it lands on the
+    /// finite segment (matching the CAD "perpendicular to this segment" intent).
+    /// Other kinds have no cheap analytic perpendicular and return `[]` (the
+    /// passive on-entity/nearest snaps still cover them).
+    static func perpendicularFeet(from: Vector, entity: EntityRecord) -> [Vector] {
+        switch entity.kind {
+        case .line(let d):
+            // Foot on the infinite carrier line, kept only if it lies on the
+            // finite segment (else there's no valid perpendicular to the drawn line).
+            let foot = SnapGeometry.perpendicularFootOnLine(from: from, a: d.start, b: d.end)
+            guard foot.valid else { return [] }
+            let onSeg = SnapGeometry.perpendicularFootOnSegment(from: from, a: d.start, b: d.end)
+            return (foot - onSeg).squared <= Tolerance.distanceSquared ? [foot] : []
+
+        case .circle(let d):
+            return SnapGeometry.perpendicularFeetOnCircle(from: from, center: d.center, radius: d.radius)
+
+        case .arc(let d):
+            return SnapGeometry.perpendicularFeetOnArc(from: from, center: d.center, radius: d.radius,
+                                                       startAngle: d.startAngle, endAngle: d.endAngle,
+                                                       reversed: d.reversed)
+        default:
+            return []
+        }
+    }
+
+    /// The tangent point(s) on `entity` from the external reference `from`.
+    /// Defined for circle / arc / ellipse (a line has no tangent point). Other
+    /// kinds return `[]`.
+    static func tangentPoints(from: Vector, entity: EntityRecord) -> [Vector] {
+        switch entity.kind {
+        case .circle(let d):
+            return SnapGeometry.tangentPointsOnCircle(from: from, center: d.center, radius: d.radius)
+
+        case .arc(let d):
+            return SnapGeometry.tangentPointsOnArc(from: from, center: d.center, radius: d.radius,
+                                                   startAngle: d.startAngle, endAngle: d.endAngle,
+                                                   reversed: d.reversed)
+
+        case .ellipse(let d):
+            let pts = SnapGeometry.tangentPointsOnEllipse(from: from, center: d.center,
+                                                          majorRadius: d.majorRadius,
+                                                          minorRadius: d.minorRadius,
+                                                          rotation: d.rotationAngle)
+            // For an elliptic ARC, keep only tangent points within the sweep.
+            guard d.isArc else { return pts }
+            return pts.filter { ellipseAngleSwept($0, ellipse: d) }
+
+        default:
+            return []
+        }
+    }
+
+    /// The parallel snap point for `entity`: the cursor projected onto the line
+    /// through `from` parallel to the entity's direction. Defined where the
+    /// entity has a well-defined direction (a line / a polyline's straight
+    /// segment use the segment direction; we use the line direction here). Other
+    /// kinds return `nil`.
+    static func parallelSnap(from: Vector, cursor: Vector, entity: EntityRecord) -> Vector? {
+        switch entity.kind {
+        case .line(let d):
+            let p = SnapGeometry.parallelProjection(from: from, cursor: cursor, refDir: d.end - d.start)
+            return p.valid ? p : nil
+        default:
+            return nil
         }
     }
 

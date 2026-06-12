@@ -163,7 +163,8 @@ enum OverlayGeometry {
     /// Builds the snap marker for a `SnapResult` as a line list, sized in world
     /// units from the screen-point radius so it's a constant on-screen size.
     /// Glyph by kind: square=endpoint, circle=center, diamond=middle,
-    /// triangle=onEntity, X=intersection, +=grid/free.
+    /// triangle=onEntity, X=intersection, +=grid/free, hourglass=nearest,
+    /// right-angle bracket=perpendicular, ring=tangent, parallel slashes=parallel.
     static func snapMarker(
         for snap: SnapResult,
         viewport: Viewport,
@@ -208,6 +209,34 @@ enum OverlayGeometry {
         case .grid, .free:
             seg(Vector(p.x - r, p.y), Vector(p.x + r, p.y))
             seg(Vector(p.x, p.y - r), Vector(p.x, p.y + r))
+        case .nearest:
+            // Hourglass (two opposed triangles meeting at the point), the usual
+            // CAD "nearest" glyph.
+            seg(Vector(p.x - r, p.y - r), Vector(p.x + r, p.y - r))
+            seg(Vector(p.x - r, p.y + r), Vector(p.x + r, p.y + r))
+            seg(Vector(p.x - r, p.y - r), Vector(p.x + r, p.y + r))
+            seg(Vector(p.x + r, p.y - r), Vector(p.x - r, p.y + r))
+        case .perpendicular:
+            // Right-angle bracket (⌐-like): a vertical and a horizontal arm with a
+            // base, the conventional perpendicular glyph.
+            seg(Vector(p.x - r, p.y + r), Vector(p.x - r, p.y - r))
+            seg(Vector(p.x - r, p.y - r), Vector(p.x + r, p.y - r))
+            seg(Vector(p.x - r, p.y), Vector(p.x, p.y))
+            seg(Vector(p.x, p.y), Vector(p.x, p.y - r))
+        case .tangent:
+            // A ring with a baseline beneath it (tangent line touching a circle).
+            let n = 12
+            var corners: [Vector] = []
+            for i in 0..<n {
+                let a = Double(i) / Double(n) * 2 * Double.pi
+                corners.append(Vector(p.x + r * 0.8 * cos(a), p.y + r * 0.4 + r * 0.8 * sin(a)))
+            }
+            ring(corners)
+            seg(Vector(p.x - r, p.y - r), Vector(p.x + r, p.y - r))
+        case .parallel:
+            // Two parallel slashes.
+            seg(Vector(p.x - r, p.y - r), Vector(p.x, p.y + r))
+            seg(Vector(p.x, p.y - r), Vector(p.x + r, p.y + r))
         }
         return v
     }

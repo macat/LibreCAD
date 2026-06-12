@@ -585,6 +585,10 @@ final class CanvasModel {
         case .middle:       return "Midpoint"
         case .onEntity:     return "On entity"
         case .intersection: return "Intersection"
+        case .nearest:      return "Nearest"
+        case .perpendicular: return "Perpendicular"
+        case .tangent:      return "Tangent"
+        case .parallel:     return "Parallel"
         case .grid:         return "Grid"
         case .free:         return "Free"
         }
