@@ -243,33 +243,97 @@ public enum TextShaper {
                          primaryFont: .native(family: TextStyle.defaultNativeFamily))
     }
 
-    /// Resolves the shaper for a style, with the substitution chain
-    /// (text-system-design §4.3): exact match → default native → `.lff` "standard".
-    /// Returns the shaper and whether it is a native (fill) source.
+    /// Resolves the shaper for a style, walking the deterministic SUBSTITUTION
+    /// CHAIN (text-system-design §4.3) so a referenced-but-missing font degrades
+    /// gracefully and NEVER crashes. The order is:
+    ///
+    ///   1. **requested** — the style's primary font, exactly (native/`.lff`/`.shx`),
+    ///      honoring its bold/italic traits.
+    ///   2. **mapped alias** — a deterministic per-source alias (`fontAlias`): a
+    ///      classic AutoCAD `.shx`/`.lff` name maps to the nearest native family
+    ///      (e.g. "txt"/"simplex"/"romans" → the default sans), and a stroke name
+    ///      maps to its native look-alike. This is where a missing `.shx` becomes a
+    ///      legible substitute instead of nothing.
+    ///   3. **default native** — the universal `TextStyle.defaultNativeFamily`.
+    ///   4. **`.lff` "standard"** — the always-bundled ISO stroke font.
+    ///   5. **empty-key stroke default** — legacy provider wiring.
+    ///
+    /// Returns the resolved shaper and whether it is a native (fill) source.
     static func resolveShaper(style: TextStyle, ctx: ResolveContext,
                               provider: any FontProvider) -> (ShapedFont, Bool)? {
-        // The style's bold/italic select a native face (stroke providers ignore them).
+        // The style's bold/italic select a native face (stroke/SHX ignore them).
         let bold = style.bold, italic = style.italic
+
         // 1. Exact match for the style's primary font (with its bold/italic traits).
         if let s = provider.resolveFont(style.primaryFont, bold: bold, italic: italic) {
             let isNative: Bool
             if case .native = style.primaryFont { isNative = true } else { isNative = false }
             return (s, isNative)
         }
-        // 2. Fall back to the default native family (still honoring bold/italic).
+        // 2. Mapped alias for the requested font (deterministic look-alike).
+        if let alias = fontAlias(for: style.primaryFont),
+           let s = provider.resolveFont(alias, bold: bold, italic: italic) {
+            let isNative: Bool
+            if case .native = alias { isNative = true } else { isNative = false }
+            return (s, isNative)
+        }
+        // 3. Fall back to the default native family (still honoring bold/italic).
         if let s = provider.resolveFont(.native(family: TextStyle.defaultNativeFamily),
                                         bold: bold, italic: italic) {
             return (s, true)
         }
-        // 3. Last resort: the `.lff` "standard" stroke font.
+        // 4. The `.lff` "standard" stroke font.
         if let s = provider.resolveFont(.stroke(lff: "standard")) {
             return (s, false)
         }
-        // 4. Empty-key stroke default (legacy provider wiring).
+        // 5. Empty-key stroke default (legacy provider wiring).
         if let s = provider.resolveFont(.stroke(lff: "")) {
             return (s, false)
         }
         return nil
+    }
+
+    /// A deterministic alias for a requested font that could not be resolved
+    /// directly (substitution step 2). Maps the classic AutoCAD compiled-font
+    /// names (`.shx`) and `.lff` stroke names to their nearest NATIVE family so a
+    /// drawing referencing a font we don't have still renders legibly. Returns
+    /// `nil` when no better-than-default alias is known (the caller then uses the
+    /// universal default native family).
+    ///
+    /// The table is intentionally small and conservative — the common CAD text
+    /// fonts. Anything not listed falls through to the default native family.
+    static func fontAlias(for source: FontSource) -> FontSource? {
+        // Extract the bare font name (no extension) for either `.shx` or `.stroke`.
+        let raw: String
+        switch source {
+        case .shx(let file):    raw = file
+        case .stroke(let lff):  raw = lff
+        case .native:           return nil   // a missing native family → default native
+        }
+        // Normalize: strip an extension + path, lowercase.
+        var name = raw
+        for ext in [".shx", ".lff"] where name.lowercased().hasSuffix(ext) {
+            name = String(name.dropLast(ext.count))
+        }
+        if let slash = name.lastIndex(of: "/") { name = String(name[name.index(after: slash)...]) }
+        name = name.lowercased()
+
+        // Classic CAD sans/serif fonts → nearest native family. The defaults bias
+        // to the universal default sans so the alias is always installed.
+        let sansFamily = TextStyle.defaultNativeFamily
+        let monoFamily = "Courier New"
+        switch name {
+        case "txt", "txt.shx", "simplex", "romans", "romand", "isocp", "isocpeur",
+             "iso", "standard", "gothicg", "gothice", "gothici", "scriptc", "scripts":
+            return .native(family: sansFamily)
+        case "monotxt", "romanc", "romant", "romant.shx":
+            return .native(family: monoFamily)
+        default:
+            // Unknown name: try the `.lff` "standard" stroke as a same-class alias
+            // (a stroke font substituting for a missing stroke/shape font keeps the
+            // CAD stroke look). Native default is handled by chain step 3.
+            return .stroke(lff: "standard")
+        }
     }
 
     // MARK: - Line shaping (em space)

@@ -683,17 +683,25 @@ public final class CADDrawing {
 // MARK: - Composite font provider (native Core Text + .lff stroke, ADR-004)
 
 /// The unified `FontProvider` feeding `ResolveContext.fontProvider`: native
-/// outline fonts (Core Text, the default) AND `.lff` stroke fonts behind ONE
-/// abstraction. `resolveFont(.native(...))` goes to Core Text; `.stroke(...)`
-/// goes to the `.lff` registry; `.shx(...)` is unsupported (Phase 3) and returns
-/// `nil` so the resolve arm walks the substitution chain.
+/// outline fonts (Core Text, the default), `.lff` stroke fonts, AND AutoCAD
+/// `.shx` shape fonts, all behind ONE abstraction. `resolveFont(.native(...))`
+/// goes to Core Text; `.stroke(...)` goes to the `.lff` registry; `.shx(...)`
+/// goes to the SHX registry (when one is wired). A source that no provider can
+/// satisfy returns `nil` so the resolve arm (`TextShaper.resolveShaper`) walks
+/// the substitution chain.
 public final class CompositeFontProvider: FontProvider, @unchecked Sendable {
     public let native: CoreTextFontProvider
     public let stroke: StrokeFontProvider
+    /// AutoCAD `.shx` shape-font registry. Optional so callers that never touch
+    /// SHX (most) pay nothing; when `nil`, `.shx` sources fall to substitution.
+    public let shx: SHXFontProvider?
 
-    public init(native: CoreTextFontProvider, stroke: StrokeFontProvider) {
+    public init(native: CoreTextFontProvider,
+                stroke: StrokeFontProvider,
+                shx: SHXFontProvider? = nil) {
         self.native = native
         self.stroke = stroke
+        self.shx = shx
     }
 
     public func resolveFont(_ source: FontSource) -> ShapedFont? {
@@ -703,15 +711,17 @@ public final class CompositeFontProvider: FontProvider, @unchecked Sendable {
         case .stroke:
             return stroke.resolveFont(source)
         case .shx:
-            // Phase 3: SHX is read via the substitution chain until a parser lands.
-            return nil
+            // True-font path: serve the compiled `.shx` shapes when available;
+            // otherwise `nil` ⇒ the resolve arm walks the substitution chain.
+            return shx?.resolveFont(source)
         }
     }
 
     /// Traits-aware resolution: forward the style's bold/italic to the native
     /// provider so a `TextStyle(bold:true)` selects a heavier face (stroke/SHX
-    /// ignore traits). Without this forwarding the protocol default would drop the
-    /// traits and bold/italic native styles would render Regular.
+    /// ignore traits — the formats have no faces). Without this forwarding the
+    /// protocol default would drop the traits and bold/italic native styles would
+    /// render Regular.
     public func resolveFont(_ source: FontSource, bold: Bool, italic: Bool) -> ShapedFont? {
         switch source {
         case .native:
@@ -719,7 +729,7 @@ public final class CompositeFontProvider: FontProvider, @unchecked Sendable {
         case .stroke:
             return stroke.resolveFont(source)
         case .shx:
-            return nil
+            return shx?.resolveFont(source)
         }
     }
 }
@@ -760,9 +770,23 @@ public enum CADFonts {
         return p
     }()
 
+    /// The shared AutoCAD `.shx` shape-font provider. Searches the SAME font
+    /// directories as `.lff` (a drawing's `.shx` fonts sit alongside `.lff` ones in
+    /// the user's font path). We do NOT ship any `.shx` (they are licensed), so this
+    /// is empty until the user adds `.shx` fonts to a search directory; a referenced
+    /// `.shx` that isn't found falls through to the substitution chain.
+    public static let shxProvider: SHXFontProvider = {
+        let p = SHXFontProvider()
+        for dir in fontSearchDirectories() {
+            p.registerSearchDirectory(dir)
+        }
+        return p
+    }()
+
     /// The unified provider handed to `ResolveContext.fontProvider`.
     public static let provider: CompositeFontProvider =
-        CompositeFontProvider(native: nativeProvider, stroke: strokeProvider)
+        CompositeFontProvider(native: nativeProvider, stroke: strokeProvider,
+                              shx: shxProvider)
 
     /// Directories searched for `<name>.lff`, in priority order: the app bundle's
     /// `Resources/fonts`, then the in-repo `librecad/support/fonts`.
