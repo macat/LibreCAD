@@ -51,6 +51,21 @@ pass or by the relevant downstream owner. Each cites its source.
 - Cache resolved geometry on entity/quadtree (hitTest/snap re-tessellate curves per call). *(review-selectsnap #3)*
 - Test gaps: arc/ellipse window-vs-crossing, closed-loop-encloses-rect crossing, degenerate-entity snap NaN-safety. *(review-selectsnap nice-to-have)*
 
+## DXF writer (text/solid/hatch fidelity)
+- **HATCH write uses edge (line) boundary loops, not polyline boundaries** — libdxfrw's `writeHatch`
+  has a `//RLZ: polyline boundary writeme` stub, so a polyline boundary path (type & 2) would emit no
+  geometry. We therefore write each loop as a chain of `DRW_Line` edges. Consequence: **boundary-arc
+  bulges are NOT preserved** across a write (each ring vertex's `bulge` is dropped; the boundary is
+  straight-segment only). A curved hatch boundary round-trips as its vertex polygon. Fix when
+  libdxfrw's polyline-boundary writer is implemented, or by emitting `DRW_Arc` edges for bulged
+  segments. *(ws-dxf-write-fidelity)*
+- **TEXT write emits single-line DXF TEXT, never MTEXT** — the POD model carries one insertion point +
+  the 72/73 alignment codes (which `DRW_Text` round-trips); an MTEXT read back as `.text` is written
+  as TEXT. Multi-line layout, MTEXT attachment-point alignment, and inline format codes are not
+  reconstructed (the reader already strips them). *(ws-dxf-write-fidelity)*
+- **SPLINE / splinePoints write still skipped** (counted, not fatal) — no `writeSpline` mapping yet.
+  *(ws-dxf-write-fidelity)*
+
 ## Render gate — DXF reader (F)
 - Add a DXF fixture covering SPLINE + ELLIPSE + true-color (color24) to lock the mapping (dim_sample.dxf has none). *(review-dxfread #3)*
 - Strengthen `pensMapped` test (currently `allSatisfy { _ in true }` no-op) with a real pen assertion. *(review-dxfread #2)*

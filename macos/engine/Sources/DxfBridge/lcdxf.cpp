@@ -740,6 +740,9 @@ private:
         case LC_ENT_ELLIPSE:    writeEllipse(e);    break;
         case LC_ENT_LWPOLYLINE: writeLWPolyline(e); break;
         case LC_ENT_POLYLINE:   writeLWPolyline(e); break; // emit as LWPOLYLINE
+        case LC_ENT_TEXT:       writeText(e);       break;
+        case LC_ENT_SOLID:      writeSolid(e);      break;
+        case LC_ENT_HATCH:      writeHatch(e);      break;
         default:                ++m_skipped;        break; // SPLINE / UNSUPPORTED / ...
         }
     }
@@ -800,6 +803,107 @@ private:
         }
         pol.vertexnum = static_cast<int>(pol.vertlist.size());
         m_dxf->writeLWPolyline(&pol);
+    }
+
+    // ----- TEXT ----------------------------------------------------------
+    // Emit a single-line DXF TEXT (the inverse of FlatteningReader::addText).
+    // The POD carries a single insertion point plus the 72/73 alignment codes,
+    // which DRW_Text round-trips exactly; MTEXT (which uses attachment codes
+    // rather than 72/73) would lose that alignment, so a POD TEXT — whether it
+    // came from a DXF TEXT or MTEXT on read — is written back as TEXT. We mirror
+    // the insertion point into BOTH basePoint and secPoint: libdxfrw's writeText
+    // only emits group 11/21 (which the reader prefers for aligned text) when the
+    // alignment is non-default, so writing both keeps the insertion correct for
+    // every alignment without branching here.
+    void writeText(const LCEntity &e) {
+        DRW_Text t;
+        fillCommon(t, e);
+        t.basePoint.x = e.p1x; t.basePoint.y = e.p1y; t.basePoint.z = e.p1z;
+        t.secPoint.x  = e.p1x; t.secPoint.y  = e.p1y; t.secPoint.z  = e.p1z;
+        t.height = e.height;
+        t.text   = (e.textValue && e.textValue[0]) ? std::string(e.textValue) : std::string();
+        t.angle  = e.startAngle * 180.0 / M_PI;   // radians -> DXF degrees
+        t.style  = (e.styleName && e.styleName[0]) ? std::string(e.styleName) : std::string("STANDARD");
+        t.alignH = static_cast<DRW_Text::HAlign>(e.hAlign);
+        t.alignV = static_cast<DRW_Text::VAlign>(e.vAlign);
+        m_dxf->writeText(&t);
+    }
+
+    // ----- SOLID ---------------------------------------------------------
+    // Emit a DXF SOLID (the inverse of FlatteningReader::emitSolid). The POD
+    // stores its 3-4 corners in RING order; DXF orders a quad's 3rd/4th corner
+    // "bow-tie" (3 and 4 swapped relative to a ring), so re-apply that swap when
+    // mapping ring -> DXF: base=ring0, sec=ring1, third=ring3, four=ring2. A
+    // triangle (3 corners) stores third==four. A degenerate (<3 corner) solid is
+    // skipped (counted), matching the reader dropping it on read.
+    void writeSolid(const LCEntity &e) {
+        if (e.vertexCount < 3 || e.vertices == nullptr) {
+            ++m_skipped;
+            return;
+        }
+        DRW_Solid s;
+        fillCommon(s, e);
+        const LCVertex &r0 = e.vertices[0];
+        const LCVertex &r1 = e.vertices[1];
+        const LCVertex &r2 = e.vertices[2];
+        s.basePoint.x  = r0.x; s.basePoint.y  = r0.y; s.basePoint.z  = 0.0;
+        s.secPoint.x   = r1.x; s.secPoint.y   = r1.y; s.secPoint.z   = 0.0;
+        if (e.vertexCount >= 4) {
+            const LCVertex &r3 = e.vertices[3];
+            // ring [r0,r1,r2,r3] -> DXF base/sec/third/four = r0,r1,r3,r2
+            s.thirdPoint.x = r3.x; s.thirdPoint.y = r3.y; s.thirdPoint.z = 0.0;
+            s.fourPoint.x  = r2.x; s.fourPoint.y  = r2.y; s.fourPoint.z  = 0.0;
+        } else {
+            // triangle: DXF stores third == four (the reader collapses it back).
+            s.thirdPoint.x = r2.x; s.thirdPoint.y = r2.y; s.thirdPoint.z = 0.0;
+            s.fourPoint.x  = r2.x; s.fourPoint.y  = r2.y; s.fourPoint.z  = 0.0;
+        }
+        m_dxf->writeSolid(&s);
+    }
+
+    // ----- HATCH ---------------------------------------------------------
+    // Emit a DXF HATCH (the inverse of FlatteningReader::emitHatch). Each POD
+    // loop is a ring of vertices; we emit it as an EDGE boundary of DRW_Line
+    // segments (libdxfrw's writeHatch only supports edge boundaries — its
+    // polyline-boundary branch is an unimplemented stub). Each ring of N vertices
+    // becomes N closing line edges (vertex[i] -> vertex[(i+1)%N]); on read,
+    // readHatchLoop picks up each edge's basePoint, recovering exactly the N ring
+    // vertices. solidFill and the pattern name round-trip. Boundary-arc fidelity
+    // (bulges) is not preserved across this edge-line tessellation — noted in the
+    // backlog. HATCH only exists for R2000+; for R12 writeHatch is a no-op in
+    // libdxfrw, so the entity is silently dropped at that version (rare export).
+    void writeHatch(const LCEntity &e) {
+        DRW_Hatch h;
+        fillCommon(h, e);
+        h.solid = (e.solidFill != 0) ? 1 : 0;
+        h.hpattern = h.solid;   // pattern-fill flag follows solid (1 solid, 0 pattern)
+        h.name = (e.textValue && e.textValue[0]) ? std::string(e.textValue)
+                                                 : std::string(h.solid ? "SOLID" : "ANSI31");
+
+        if (e.loopCount > 0 && e.loops != nullptr &&
+            e.vertexCount > 0 && e.vertices != nullptr) {
+            for (int li = 0; li < e.loopCount; ++li) {
+                const LCLoop &loop = e.loops[li];
+                const int start = loop.offset;
+                const int count = loop.count;
+                if (start < 0 || count < 2 || start + count > e.vertexCount) continue;
+                // Edge boundary (type 0, not the polyline bit 2): a chain of LINE
+                // edges closing back to the first vertex.
+                auto hl = std::make_shared<DRW_HatchLoop>(0);
+                for (int j = 0; j < count; ++j) {
+                    const LCVertex &a = e.vertices[start + j];
+                    const LCVertex &b = e.vertices[start + ((j + 1) % count)];
+                    auto edge = std::make_shared<DRW_Line>();
+                    edge->basePoint.x = a.x; edge->basePoint.y = a.y; edge->basePoint.z = 0.0;
+                    edge->secPoint.x  = b.x; edge->secPoint.y  = b.y; edge->secPoint.z  = 0.0;
+                    hl->objlist.push_back(edge);
+                }
+                hl->update();
+                h.appendLoop(hl);
+            }
+        }
+        h.loopsnum = static_cast<int>(h.looplist.size());
+        m_dxf->writeHatch(&h);
     }
 };
 
