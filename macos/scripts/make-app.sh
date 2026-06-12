@@ -106,5 +106,17 @@ codesign --force --sign - "${APP_DIR}"
 echo "==> Verifying signature"
 codesign -dv "${APP_DIR}" 2>&1 | sed 's/^/    /'
 
+# --- Optional Developer ID signing + notarization ----------------------------
+# DEFAULT BEHAVIOR IS UNCHANGED: the .app above is ad-hoc signed. Setting
+# SIGN_RELEASE=1 additionally hands the bundle to sign-and-notarize.sh, which
+# re-signs with a Developer ID identity + hardened runtime and (if credentials
+# are present) notarizes + staples. That script itself gracefully falls back to
+# ad-hoc signing when no Developer ID credentials are set, so this hook never
+# breaks a credential-less build. See macos/docs/ci-and-release.md.
+if [[ "${SIGN_RELEASE:-0}" == "1" ]]; then
+    echo "==> SIGN_RELEASE=1: invoking sign-and-notarize.sh"
+    bash "${SCRIPT_DIR}/sign-and-notarize.sh" "${APP_DIR}"
+fi
+
 echo "==> Done: ${APP_DIR}"
 echo "    executable: ${APP_DIR}/Contents/MacOS/${EXE_NAME}"

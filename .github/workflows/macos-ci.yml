@@ -1,0 +1,102 @@
+# CI for the native-macOS Swift port (macos/).
+#
+# Scoped DELIBERATELY to the SwiftPM project under macos/ — this repo also
+# contains the upstream C++/Qt LibreCAD, which is built by other workflows
+# (build-all.yml, run_pixi.yml). This job does NOT build the Qt app.
+#
+# On every push / PR that touches the macos/ project (or this workflow), it:
+#   1. builds the engine + app in debug AND release,
+#   2. runs the unit tests (swift test) in debug AND release — a test failure
+#      fails the job,
+#   3. assembles the .app via make-app.sh (default ad-hoc signing path).
+name: macOS CI
+
+on:
+  push:
+    paths:
+      - 'macos/**'
+      - '.github/workflows/macos-ci.yml'
+  pull_request:
+    paths:
+      - 'macos/**'
+      - '.github/workflows/macos-ci.yml'
+  # Allow manual runs from the Actions tab.
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: macos-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: build + test (${{ matrix.config }})
+    # macos-15 ships Xcode/Swift new enough for the toolchain; the project pins
+    # Swift 6.2 / macOS 26 SDK in Package.swift. Use the latest macOS image so
+    # the required SDK is available.
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [debug, release]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Swift toolchain
+        run: |
+          swift --version
+          xcodebuild -version || true
+
+      # Cache the SwiftPM build + resolved-dependency state per config. Keyed on
+      # the manifest so a Package.swift change busts the cache.
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            macos/engine/.build
+            ~/Library/Caches/org.swift.swiftpm
+          key: swiftpm-${{ runner.os }}-${{ matrix.config }}-${{ hashFiles('macos/engine/Package.swift') }}
+          restore-keys: |
+            swiftpm-${{ runner.os }}-${{ matrix.config }}-
+
+      - name: Build (${{ matrix.config }})
+        run: swift build --package-path macos/engine --disable-sandbox -c ${{ matrix.config }}
+
+      - name: Test (${{ matrix.config }})
+        run: swift test --package-path macos/engine --disable-sandbox -c ${{ matrix.config }}
+
+  assemble-app:
+    name: assemble .app (release, ad-hoc signed)
+    runs-on: macos-latest
+    # Only assemble after build+test are green, so a broken build never produces
+    # an artifact.
+    needs: build-and-test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            macos/engine/.build
+            ~/Library/Caches/org.swift.swiftpm
+          key: swiftpm-${{ runner.os }}-release-${{ hashFiles('macos/engine/Package.swift') }}
+          restore-keys: |
+            swiftpm-${{ runner.os }}-release-
+
+      # make-app.sh builds release by default? No — it defaults to debug. Pin a
+      # release build for the assembled artifact. Default (ad-hoc) signing path:
+      # SIGN_RELEASE is left unset, so no Developer ID signing is attempted in CI.
+      - name: Assemble .app (make-app.sh)
+        run: CONFIG=release bash macos/scripts/make-app.sh
+
+      - name: Upload .app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LibreCADmacOS-app
+          path: macos/build/LibreCADmacOS.app
+          if-no-files-found: error
