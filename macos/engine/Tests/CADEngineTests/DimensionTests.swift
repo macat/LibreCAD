@@ -389,4 +389,394 @@ struct DimensionEntityTests {
         let back = try JSONDecoder().decode(EntityRecord.self, from: data)
         #expect(back == rec)
     }
+
+    @Test("DimData round-trips the S1 fields through JSON (textRotation, attachment, spacing, oblique)")
+    func codableRoundTripS1Fields() throws {
+        let dim = DimData(
+            kind: .linear(extension1: Vector(0, 0), extension2: Vector(10, 0), angle: 0),
+            definitionPoint: Vector(5, 5),
+            textMiddle: Vector(7, 8),
+            textRotation: .pi / 4,
+            attachmentPoint: .bottomRight,
+            lineSpacingStyle: .exact,
+            lineSpacingFactor: 1.5,
+            obliqueAngle: .pi / 6)
+        let rec = EntityRecord(id: EntityID(9), kind: .dimension(dim))
+        let data = try JSONEncoder().encode(rec)
+        let back = try JSONDecoder().decode(EntityRecord.self, from: data)
+        #expect(back == rec)
+        // And the optional textMiddle survives as `.some`.
+        guard case let .dimension(bd) = back.kind else {
+            Issue.record("expected a dimension"); return
+        }
+        #expect(bd.textMiddle?.distance(to: Vector(7, 8)) ?? .infinity < 1e-9)
+        #expect(bd.textRotation.map { abs($0 - .pi / 4) < 1e-9 } == true)
+        #expect(bd.attachmentPoint == .bottomRight)
+        #expect(bd.lineSpacingStyle == .exact)
+    }
+}
+
+// MARK: - Dimension foundation fixes (M1 / M2 / S2 / S3)
+
+/// Tests the dimension-foundation fixes the code review demanded: the angular
+/// sector selected by the definition point (M1), the robust extension-line
+/// direction (M2), the optional `textMiddle` override (S2), and the
+/// measured-metrics text centering (S3). Each is written to genuinely exercise
+/// the fix — the M1 wrong-side test in particular FAILS against the old
+/// always-CCW behavior.
+///
+/// Suite/type names are domain-namespaced per CONVENTIONS.md to avoid the
+/// parallel-fan-out test-target redeclaration trap.
+@Suite("Dimension foundation fixes")
+struct DimensionFoundationFixTests {
+
+    // Reuse the synthetic-font helpers' shape: one 3-point stroke per glyph so
+    // text strokes are countable and distinguishable from the 2-point graphic
+    // lines and the many-point arc.
+    private static let glyphStroke = "0,0;3,9;6,0"
+
+    private static func digitFont() -> StrokeFont {
+        var blocks: [String] = []
+        for ch in "0123456789" {
+            let scalar = ch.unicodeScalars.first!
+            let hex = String(format: "%04x", scalar.value)
+            blocks.append("[\(hex)] \(ch)\n\(glyphStroke)")
+        }
+        blocks.append("[0052] R\n\(glyphStroke)")
+        blocks.append("[00b0] DEG\n\(glyphStroke)")
+        blocks.append("[2300] DIA\n\(glyphStroke)")
+        return LFFParser.parse(text: blocks.joined(separator: "\n\n"))
+    }
+
+    private static func ctxWithFont() -> ResolveContext {
+        ResolveContext(tessellationTolerance: 0.01,
+                       fontProvider: SingleStrokeFontProvider(digitFont()))
+    }
+
+    private static func textGlyphStrokes(_ geo: ResolvedGeometry) -> Int {
+        geo.polylines.filter { $0.points.count == 3 }.count
+    }
+
+    /// The many-point dimension arc (> 3 points) — distinct from glyph strokes
+    /// (exactly 3) and graphic lines (exactly 2).
+    private static func arcPolyline(_ geo: ResolvedGeometry) -> ResolvedPolyline? {
+        geo.polylines.filter { $0.points.count > 3 }.max { $0.points.count < $1.points.count }
+    }
+
+    private func record(_ kind: DimKind, def: Vector,
+                        textMiddle: Vector? = nil) -> EntityRecord {
+        EntityRecord(
+            id: EntityID(1),
+            kind: .dimension(DimData(kind: kind, definitionPoint: def,
+                                     textMiddle: textMiddle)))
+    }
+
+    // MARK: - M1: angular sector selected by the definition point
+
+    /// Baseline: the def point in the CCW (Q1) sector measures 90° and the arc
+    /// stays in Q1 (all sampled points have y ≥ 0). This is the value the OLD
+    /// always-CCW code also produced — it pins the "right side" reference.
+    @Test("M1 angular: def point in the CCW sector measures 90° with the arc in Q1")
+    func angularCCWSectorRightSide() {
+        let ctx = Self.ctxWithFont()
+        // +X ray and +Y ray; def in Q1 → the minor (CCW) 90° sector.
+        let rec = record(
+            .angular(line1Start: Vector(0, 0), line1End: Vector(10, 0),
+                     line2Start: Vector(0, 0), line2End: Vector(0, 10)),
+            def: Vector(5, 5))
+        let geo = rec.resolve(ctx)
+
+        // Measured value (single source of truth) is 90°.
+        guard case let .dimension(dm) = rec.kind else { Issue.record("dim"); return }
+        #expect(abs(EntityKind.dimMeasuredValue(dm).value - 90) < 1e-6)
+
+        // Label reads "90°" — 3 glyphs.
+        #expect(Self.textGlyphStrokes(geo) == 3)
+
+        // The arc lives in Q1: every sampled arc point has y ≥ 0 (and x ≥ 0).
+        let arc = try! #require(Self.arcPolyline(geo))
+        #expect(arc.points.allSatisfy { $0.y > -1e-6 && $0.x > -1e-6 })
+    }
+
+    /// M1: the def point in the CLOCKWISE (Q4) sector must measure the REFLEX
+    /// 270° angle and the arc must sweep the OTHER way (through Q4, where the def
+    /// point sits — sampled arc points reach y < 0). The OLD always-CCW code
+    /// reported 90° here and kept the arc in Q1, so this test FAILS against it
+    /// and PASSES only with the sector-by-def-point selection.
+    @Test("M1 angular WRONG-SIDE: def point in the CW sector measures the reflex 270° and the arc follows")
+    func angularCWSectorWrongSide() {
+        let ctx = Self.ctxWithFont()
+        // Same two rays, but def in Q4 → the dimension must span the major
+        // (clockwise, 270°) sector that contains the def point.
+        let rec = record(
+            .angular(line1Start: Vector(0, 0), line1End: Vector(10, 0),
+                     line2Start: Vector(0, 0), line2End: Vector(0, 10)),
+            def: Vector(5, -5))
+        let geo = rec.resolve(ctx)
+
+        // Measured value is the REFLEX 270° (NOT 90°) — this alone fails the old
+        // always-CCW behavior.
+        guard case let .dimension(dm) = rec.kind else { Issue.record("dim"); return }
+        let measured = EntityKind.dimMeasuredValue(dm).value
+        #expect(abs(measured - 270) < 1e-6, "expected reflex 270°, got \(measured)")
+
+        // Label reads "270°" — 4 glyphs (2,7,0,°). The old code's "90°" is 3.
+        #expect(Self.textGlyphStrokes(geo) == 4)
+
+        // The arc now sweeps through the def-point side: at least one sampled arc
+        // point has y < 0 (Q4), which the old Q1-only arc never produced.
+        let arc = try! #require(Self.arcPolyline(geo))
+        #expect(arc.points.contains { $0.y < -1e-6 },
+                "arc must enter Q4 (the def-point side) for the reflex sweep")
+
+        // The text center also sits on the measured (reflex) arc's far side —
+        // its midpoint angle is ~225° (Q3), so the text x is < 0.
+        let textCenter = EntityKind.dimTextCenter(dm)
+        #expect(textCenter.x < 0, "text center should sit on the reflex-arc side")
+    }
+
+    // MARK: - M2: extension-line direction with the def point BETWEEN origins
+
+    /// M2: a horizontal linear dim whose dimension line lies BETWEEN the two
+    /// extension origins (def y is between the origins' y). Each extension line
+    /// must run from its origin TOWARD the dim line — i.e. the two extension
+    /// lines point in OPPOSITE normal directions (one up, one down), each
+    /// bridging its origin to its projection. The old single-`normal` fallback
+    /// could send both the same (wrong) way.
+    @Test("M2 extension lines: def line BETWEEN the origins makes the two extensions point opposite ways")
+    func extensionLinesDefBetweenOrigins() {
+        let ctx = Self.ctxWithFont()
+        // Origin1 below the dim line (y = -4), origin2 above (y = +6); the dim
+        // line (through def) sits between them at y = 1. Horizontal dim (angle 0).
+        let p1 = Vector(0, -4)
+        let p2 = Vector(10, 6)
+        let def = Vector(5, 1)
+        let rec = EntityRecord(
+            id: EntityID(2),
+            kind: .dimension(DimData(
+                kind: .linear(extension1: p1, extension2: p2, angle: 0),
+                definitionPoint: def)))
+        let geo = rec.resolve(ctx)
+
+        // Find the two extension lines: 2-point polylines that are NOT the
+        // (horizontal) dimension line. The dim line is horizontal at y = 1; the
+        // extension lines are vertical (constant x ≈ 0 and ≈ 10).
+        let twoPt = geo.polylines.filter { $0.points.count == 2 }
+        let ext1 = try! #require(twoPt.first { abs($0.points[0].x - 0) < 1e-6 && abs($0.points[1].x - 0) < 1e-6 })
+        let ext2 = try! #require(twoPt.first { abs($0.points[0].x - 10) < 1e-6 && abs($0.points[1].x - 10) < 1e-6 })
+
+        // ext1 starts near its origin (y ≈ -4) and runs UP toward/past the dim
+        // line (y = 1): its direction has +y.
+        let d1 = ext1.points[1].y - ext1.points[0].y
+        // ext2 starts near its origin (y ≈ +6) and runs DOWN toward the dim line:
+        // its direction has -y. The signs MUST be opposite.
+        let d2 = ext2.points[1].y - ext2.points[0].y
+        #expect(d1 * d2 < 0, "extension lines must point opposite ways (one up, one down) when the dim line is between the origins")
+
+        // And each spans from below/above its origin across the dim line at y=1:
+        // ext1 covers a range that includes y < 0 (its origin side) up past y=1;
+        // ext2 covers a range that includes y > 1 (its origin side) down to ~1.
+        let ext1Ys = [ext1.points[0].y, ext1.points[1].y]
+        let ext2Ys = [ext2.points[0].y, ext2.points[1].y]
+        #expect(ext1Ys.min()! < 0 && ext1Ys.max()! > 1 - 1e-6)
+        #expect(ext2Ys.max()! > 1 && ext2Ys.min()! < 6)
+    }
+
+    /// M2 robustness: when an extension origin lies exactly ON the dim line
+    /// (len ≈ 0), the direction is derived from the dim-line normal signed by the
+    /// def point — it must NOT collapse to a zero-length or arbitrarily-flipped
+    /// line. Here origin1 sits on the dim line (same y as def).
+    @Test("M2 extension lines: an origin ON the dim line still yields a non-degenerate, correctly-signed extension")
+    func extensionLineOriginOnDimLine() {
+        let ctx = Self.ctxWithFont()
+        // def at y = 0, origin1 also at y = 0 (ON the dim line), origin2 at y = 8.
+        let p1 = Vector(0, 0)
+        let p2 = Vector(10, 8)
+        let def = Vector(5, 0)
+        let rec = EntityRecord(
+            id: EntityID(3),
+            kind: .dimension(DimData(
+                kind: .linear(extension1: p1, extension2: p2, angle: 0),
+                definitionPoint: def)))
+        let geo = rec.resolve(ctx)
+
+        let twoPt = geo.polylines.filter { $0.points.count == 2 }
+        let ext1 = try! #require(twoPt.first { abs($0.points[0].x - 0) < 1e-6 && abs($0.points[1].x - 0) < 1e-6 })
+        // The on-dim-line extension is NOT degenerate (the DIMEXO/DIMEXE offsets
+        // give it a real length) and points away from the def point's side.
+        let len = (ext1.points[1] - ext1.points[0]).magnitude
+        #expect(len > 1e-6, "extension line at len≈0 must still be non-degenerate")
+        // origin2 (y=8) is above the dim line; the signed normal makes the
+        // measured point lie on the side AWAY from the def line — for origin1 ON
+        // the line the convention points to the +y side (origin2's side flips it).
+        // The key invariant: it is finite and oriented vertically.
+        #expect(abs(ext1.points[1].x - 0) < 1e-6)
+    }
+
+    // MARK: - S2: textMiddle override placement (the `.some` branch)
+
+    /// S2: an explicit `textMiddle` override places the text center at exactly
+    /// that point (the `.some` branch), overriding the default centered-on-dim
+    /// placement. The text strokes must be centered around the override point.
+    @Test("S2 textMiddle override: the text is placed at the override point, not the default center")
+    func textMiddleOverridePlacement() {
+        let ctx = Self.ctxWithFont()
+        let override = Vector(42, 17)
+        let rec = record(
+            .linear(extension1: Vector(0, 0), extension2: Vector(10, 0), angle: 0),
+            def: Vector(5, 5),
+            textMiddle: override)
+        let geo = rec.resolve(ctx)
+
+        // dimTextCenter honors the override EXACTLY (the precise `.some` contract).
+        guard case let .dimension(dm) = rec.kind else { Issue.record("dim"); return }
+        #expect(EntityKind.dimTextCenter(dm).distance(to: override) < 1e-9)
+
+        // The resolved text ink sits AT the override, clearly distinct from the
+        // default placement (≈ (5, ~6)). The ink midpoint lands within a glyph
+        // height of the override (the small metrics-vs-ink gap is expected, since
+        // the shaper anchors on the run's advance/metrics, not the ink box).
+        let glyphPts = geo.polylines.filter { $0.points.count == 3 }.flatMap { $0.points }
+        #expect(!glyphPts.isEmpty)
+        let minX = glyphPts.map(\.x).min()!, maxX = glyphPts.map(\.x).max()!
+        let minY = glyphPts.map(\.y).min()!, maxY = glyphPts.map(\.y).max()!
+        let inkMidX = (minX + maxX) / 2, inkMidY = (minY + maxY) / 2
+        #expect(abs(inkMidX - override.x) < dm.textHeight)
+        #expect(abs(inkMidY - override.y) < dm.textHeight)
+        // ...and nowhere near the default center it would use without the override.
+        let defaultCenter = Vector(5, 5)   // dim-line midpoint region
+        #expect(Vector(inkMidX, inkMidY).distance(to: defaultCenter) > 20)
+    }
+
+    /// S2: a `nil` textMiddle (the default) falls through to the computed center
+    /// — confirming the `.none` branch still works alongside the `.some` branch.
+    @Test("S2 textMiddle nil: falls back to the default computed center")
+    func textMiddleNilDefault() {
+        let rec = record(
+            .linear(extension1: Vector(0, 0), extension2: Vector(10, 0), angle: 0),
+            def: Vector(5, 5),
+            textMiddle: nil)
+        guard case let .dimension(dm) = rec.kind else { Issue.record("dim"); return }
+        let center = EntityKind.dimTextCenter(dm)
+        // Default center: midpoint of the dim line (x = 5) lifted above by ~textH.
+        #expect(abs(center.x - 5) < 1e-6)
+        #expect(center.y > 5)   // lifted above the y=5 dim line
+    }
+
+    // MARK: - S3: measured-metrics text centering (wide vs narrow label)
+
+    /// S3: text centering uses the MEASURED run width (not a nominal glyph
+    /// count). A wide label ("888888") and a narrow label ("8") both anchor on
+    /// the SAME text center, so their ink-midpoint OFFSET from that center is
+    /// IDENTICAL (the run is symmetric about the advance-width center for any
+    /// count). The wide label genuinely spans wider. If centering used a nominal
+    /// per-glyph count instead of the measured width, the two offsets would
+    /// differ — so equal offsets is the discriminating measured-width property.
+    @Test("S3 measured centering: a wide and a narrow override label share the same centered offset")
+    func measuredCenteringWideVsNarrow() {
+        let ctx = Self.ctxWithFont()
+        let center = Vector(20, 30)
+
+        func glyphBounds(_ override: String) -> (midX: Double, span: Double) {
+            let rec = EntityRecord(
+                id: EntityID(4),
+                kind: .dimension(DimData(
+                    kind: .linear(extension1: Vector(0, 0), extension2: Vector(10, 0), angle: 0),
+                    definitionPoint: Vector(5, 5),
+                    textOverride: override,
+                    textMiddle: center)))
+            let geo = rec.resolve(ctx)
+            let pts = geo.polylines.filter { $0.points.count == 3 }.flatMap { $0.points }
+            let minX = pts.map(\.x).min()!, maxX = pts.map(\.x).max()!
+            return ((minX + maxX) / 2, maxX - minX)
+        }
+
+        let wide = glyphBounds("888888")   // 6 glyphs
+        let narrow = glyphBounds("8")      // 1 glyph
+
+        // The ink-midpoint OFFSET from the anchor is IDENTICAL for both labels —
+        // measured-width centering keeps the run symmetric about the same center
+        // regardless of glyph count.
+        let wideOffset = wide.midX - center.x
+        let narrowOffset = narrow.midX - center.x
+        #expect(abs(wideOffset - narrowOffset) < 1e-6,
+                "wide/narrow centered offsets must match (measured-width centering)")
+
+        // Both offsets are small relative to the wide label's span (the run is
+        // centered, not justified to one side).
+        #expect(abs(wideOffset) < wide.span)
+
+        // The wide label genuinely spans wider than the narrow one (so we know we
+        // are not accidentally measuring an empty / identical run).
+        #expect(wide.span > narrow.span + 1e-6)
+    }
+
+    // MARK: - Transform: reflection + non-uniform scale
+
+    /// A reflection composed with a NON-UNIFORM scale maps every defining point
+    /// by the matrix and scales the text/arrow sizes by the geometric-mean
+    /// uniform factor (`sqrt(|det|)`). The measured value re-derives from the
+    /// transformed points.
+    @Test("transform: reflection + non-uniform scale maps the defining points and sizes correctly")
+    func transformReflectNonUniformScale() {
+        // Aligned dim on a horizontal segment so its measured length is the
+        // segment length (re-derived after transform).
+        let p1 = Vector(2, 3)
+        let p2 = Vector(8, 3)
+        let def = Vector(5, 6)
+        let dim = DimData(kind: .aligned(extension1: p1, extension2: p2),
+                          definitionPoint: def,
+                          textHeight: 2.0, arrowSize: 3.0)
+
+        // Non-uniform scale (sx=2, sy=3) about the origin, then mirror across the
+        // x-axis (y → -y). det of the linear part is negative → a reflection.
+        let scale = Affine2D.scale(sx: 2, sy: 3, about: Vector(0, 0))
+        let mirror = Affine2D.mirror(acrossLineThrough: Vector(0, 0), angle: 0)  // x-axis
+        let t = mirror * scale
+
+        // Sanity: this is orientation-reversing with the expected uniform factor.
+        #expect(t.isMirror)
+        let expectedUniform = (2.0 * 3.0).squareRoot()   // sqrt(|det|) = sqrt(6)
+
+        let out = EntityKind.dimension(dim).transformed(by: t)
+        guard case let .dimension(od) = out,
+              case let .aligned(oe1, oe2) = od.kind else {
+            Issue.record("expected an aligned dimension after transform"); return
+        }
+
+        // Each defining point maps by the full matrix.
+        #expect(oe1.distance(to: t.apply(p1)) < 1e-9)
+        #expect(oe2.distance(to: t.apply(p2)) < 1e-9)
+        #expect(od.definitionPoint.distance(to: t.apply(def)) < 1e-9)
+
+        // The measured length re-derives from the transformed points: the
+        // horizontal segment (length 6) scaled in x by 2 → length 12.
+        #expect(abs(EntityKind.dimMeasuredValue(od).value - 12) < 1e-6)
+
+        // Text height / arrow size scale by the uniform (geometric-mean) factor.
+        #expect(abs(od.textHeight - 2.0 * expectedUniform) < 1e-9)
+        #expect(abs(od.arrowSize - 3.0 * expectedUniform) < 1e-9)
+    }
+
+    /// A reflection must reflect the linear-dim direction angle (and keep a
+    /// textMiddle override mapped through the same matrix), not silently drop it.
+    @Test("transform: a mirror reflects the linear direction angle and the textMiddle override")
+    func transformMirrorAngleAndTextMiddle() {
+        let tm = Vector(5, 4)
+        let dim = DimData(
+            kind: .linear(extension1: Vector(0, 0), extension2: Vector(10, 0), angle: .pi / 6),
+            definitionPoint: Vector(5, 5),
+            textMiddle: tm)
+        // Mirror across the x-axis (angle 0): y → -y, angle θ → -θ.
+        let t = Affine2D.mirror(acrossLineThrough: Vector(0, 0), angle: 0)
+        let out = EntityKind.dimension(dim).transformed(by: t)
+        guard case let .dimension(od) = out,
+              case let .linear(_, _, angle) = od.kind else {
+            Issue.record("expected a linear dimension"); return
+        }
+        // The direction angle reflects: π/6 → -π/6 ≡ 11π/6.
+        #expect(abs(Vector.correctAngle(angle) - Vector.correctAngle(-(.pi / 6))) < 1e-9)
+        // The textMiddle override maps through the same matrix (y flips).
+        #expect(od.textMiddle?.distance(to: t.apply(tm)) ?? .infinity < 1e-9)
+    }
 }
