@@ -14,9 +14,12 @@
 //  is non-reentrant, so there is exactly one serialization point per process).
 //
 //  Supported kinds round-trip: line / point / circle / arc / ellipse / polyline /
-//  text / solid / hatch. Spline / splinePoints / dimension (and any other kind)
-//  are skipped for now (counted, not fatal) — dimension WRITE is a later wave
-//  (S3 `ws/dim-write`). HATCH writes its boundary loops as edge (line)
+//  text / mtext / solid / hatch. Spline / splinePoints / dimension (and any other
+//  kind) are skipped for now (counted, not fatal) — dimension WRITE is a later
+//  wave (S3 `ws/dim-write`). MTEXT writes the preserved raw inline-coded string
+//  (or, when the run tree was edited and no raw is stored, a reconstruction of
+//  the MTEXT codes from the run tree). MTEXT only exists for R2000+; at R12 it is
+//  dropped (counted as skipped) by the C bridge. HATCH writes its boundary loops as edge (line)
 //  boundaries (libdxfrw's polyline-boundary writer is an unimplemented stub), so
 //  boundary-arc bulges are not preserved across the round-trip — see backlog.md.
 //
@@ -314,13 +317,27 @@ private final class PODBuilder {
             e.textValue = intern(d.text)
             if let style = d.styleName, !style.isEmpty { e.styleName = intern(style) }
 
-        case .mtext:
-            // MTEXT WRITE is a follow-up wave; for now the writer skips it (the C
-            // side counts UNSUPPORTED). MTEXT IMPORT (read DXF MTEXT → `.mtext`
-            // with the raw coded string) lands in this wave; re-emitting the run
-            // tree as a coded MTEXT string is the next step.
-            e.kind = Int32(LC_ENT_UNSUPPORTED.rawValue)
-            e.typeName = intern("MTEXT")
+        case .mtext(let d):
+            // Emitted as a DXF MTEXT (the C side writes DRW_MText). We prefer the
+            // PRESERVED raw inline-coded string (`rawCode`, kept verbatim by the
+            // reader) for a lossless round-trip of every format code; if it was
+            // never stored (a programmatically-built / edited entity) we
+            // reconstruct the MTEXT coded string from the run tree (the inverse of
+            // MTextParser). Insertion point, height, reference/wrap width,
+            // attachment, rotation (radians; C converts to DXF degrees), the
+            // line-spacing style/factor and the STYLE name map straight onto the
+            // POD's MTEXT fields.
+            e.kind = Int32(LC_ENT_MTEXT.rawValue)
+            e.p1x = d.position.x; e.p1y = d.position.y; e.p1z = d.position.z
+            e.height = d.height
+            e.startAngle = d.rotation   // radians; the C side converts to DXF degrees
+            e.mtextRectWidth = d.rectWidth
+            e.mtextAttachment = Int32(d.attachment.rawValue)
+            e.mtextLineSpacingStyle = Int32(d.lineSpacingStyle.rawValue)
+            e.mtextLineSpacingFactor = d.lineSpacingFactor
+            let coded = d.rawCode ?? MTextEncoder.encode(d.paragraphs)
+            e.textValue = intern(coded)
+            if let style = d.styleName, !style.isEmpty { e.styleName = intern(style) }
 
         case .solid(let d):
             // Emitted as a DXF SOLID. Corners are stored in ring order; the C side
@@ -428,5 +445,163 @@ private final class PODBuilder {
         case .default:           return -3
         case .millimeters(let m): return Int32((m * 100.0).rounded())
         }
+    }
+}
+
+// MARK: - MTEXT run-tree -> coded string (inverse of MTextParser)
+
+/// Serializes an `MTextData` run tree back into an AutoCAD/DXF MTEXT inline-coded
+/// string — the inverse of `MTextParser.parse`. Used ONLY as the fallback when an
+/// `.mtext` entity has no preserved `rawCode` (i.e. it was built or edited in the
+/// app): a freshly-read entity always re-emits its verbatim `rawCode` for lossless
+/// round-trip, so this path never has to reproduce codes the parser merely passes
+/// through. Each run's formatting is wrapped in a `{ … }` scope so per-run state
+/// never leaks into the next run (matching how the parser pushes/pops on braces).
+///
+/// Coverage mirrors the codes the parser models: `\f` (font + bold/italic), `\H`
+/// (relative `<f>x` / absolute), `\C`/`\c` (colour), `\L`/`\O`/`\K` (decorations),
+/// `\T` (tracking), `\Q` (oblique, degrees), `\S` (stacked), `\t` (tab), `\P`
+/// (paragraph break), and the `\\ \{ \}` literal escapes. Paragraph alignment
+/// (`\pq…`) is emitted at the start of a paragraph when set.
+enum MTextEncoder {
+
+    /// Encode a list of paragraphs into one MTEXT coded string (paragraphs joined
+    /// by `\P`).
+    static func encode(_ paragraphs: [MTextParagraph]) -> String {
+        paragraphs.map(encodeParagraph).joined(separator: "\\P")
+    }
+
+    private static func encodeParagraph(_ p: MTextParagraph) -> String {
+        var out = ""
+        if let align = p.alignment {
+            out += alignmentCode(align)
+        }
+        for inline in p.inlines {
+            switch inline {
+            case .run(let run):       out += encodeRun(run)
+            case .stacked(let s):     out += encodeStacked(s)
+            case .tab:                out += "\\t"
+            }
+        }
+        return out
+    }
+
+    /// Wrap a run's formatting in a `{ … }` scope so it does not bleed into the
+    /// following run. Codes are emitted in a stable order before the (escaped) text.
+    private static func encodeRun(_ run: TextRun) -> String {
+        var codes = ""
+
+        // Bold / italic are FONT attributes in MTEXT — they only exist as the
+        // `|b`/`|i` flags inside a `\f…;` code (the parser sets them only via
+        // `applyFont`). So emit a font code whenever a font override OR a
+        // bold/italic flag is present; if there is no explicit family, fall back to
+        // a standard one ("Arial") so the flags have a code to ride on.
+        if run.fontOverride != nil || run.bold == true || run.italic == true {
+            codes += fontCode(run.fontOverride, bold: run.bold, italic: run.italic)
+        }
+        if let hf = run.heightFactor {
+            // Parser sentinel: negative factor == absolute world height; positive
+            // == relative factor (`<f>x`).
+            if hf < 0 {
+                codes += "\\H\(trimDouble(-hf));"
+            } else {
+                codes += "\\H\(trimDouble(hf))x;"
+            }
+        }
+        if let color = run.color {
+            codes += "\\c\(bgrDecimal(color));"   // true-colour form the parser reads
+        }
+        if run.underline     { codes += "\\L" }
+        if run.overline      { codes += "\\O" }
+        if run.strikethrough { codes += "\\K" }
+        if let t = run.trackingFactor { codes += "\\T\(trimDouble(t));" }
+        if let q = run.obliqueOverride { codes += "\\Q\(trimDouble(q * 180.0 / .pi));" }
+
+        let body = escapeText(run.text)
+        // A plain run (no codes) needs no scope braces.
+        if codes.isEmpty { return body }
+        return "{" + codes + body + "}"
+    }
+
+    /// `\S<upper>(/|^|#)<lower>;`. The divider selects the kind (the inverse of
+    /// `MTextParser.parseStacked`); a literal `;` inside a side is escaped.
+    private static func encodeStacked(_ s: StackedRun) -> String {
+        let divider: String
+        switch s.kind {
+        case .fraction:  divider = "/"
+        case .tolerance: divider = "^"
+        case .diagonal:  divider = "#"
+        }
+        return "\\S" + escapeStackedSide(s.upper) + divider + escapeStackedSide(s.lower) + ";"
+    }
+
+    // MARK: helpers
+
+    /// `\f<family>|b<0/1>|i<0/1>;` (native/stroke families). `.shx` uses `\F`. With
+    /// no font override the family defaults to "Arial" so a standalone bold/italic
+    /// flag still has a parseable font code to ride on.
+    private static func fontCode(_ font: FontSource?, bold: Bool?, italic: Bool?) -> String {
+        let family: String
+        let lead: String
+        switch font {
+        case .native(let f): family = f; lead = "\\f"
+        case .stroke(let f): family = f; lead = "\\f"
+        case .shx(let f):    family = f; lead = "\\F"
+        case nil:            family = "Arial"; lead = "\\f"
+        }
+        var s = lead + family
+        s += "|b\(bold == true ? 1 : 0)"
+        s += "|i\(italic == true ? 1 : 0)"
+        s += ";"
+        return s
+    }
+
+    private static func alignmentCode(_ a: MTextParagraphAlign) -> String {
+        switch a {
+        case .left:        return "\\pql;"
+        case .center:      return "\\pqc;"
+        case .right:       return "\\pqr;"
+        case .justified:   return "\\pqj;"
+        case .distributed: return "\\pqd;"
+        }
+    }
+
+    /// Escape MTEXT control characters in literal run text: backslash and braces.
+    private static func escapeText(_ s: String) -> String {
+        var out = ""
+        out.reserveCapacity(s.count)
+        for ch in s {
+            switch ch {
+            case "\\": out += "\\\\"
+            case "{":  out += "\\{"
+            case "}":  out += "\\}"
+            default:   out.append(ch)
+            }
+        }
+        return out
+    }
+
+    /// A stacked side is `;`-terminated as a whole, so a literal `;` must be
+    /// escaped (the parser's `readStackedArg` stops at the first UNescaped `;`).
+    private static func escapeStackedSide(_ s: String) -> String {
+        escapeText(s).replacingOccurrences(of: ";", with: "\\;")
+    }
+
+    /// Pack an `RGBAColor` into the 24-bit BGR decimal AutoCAD stores after `\c`
+    /// (the inverse of `MTextParser.colorFromTrueColor`).
+    private static func bgrDecimal(_ c: RGBAColor) -> Int {
+        let r = Int((c.r * 255.0).rounded()) & 0xFF
+        let g = Int((c.g * 255.0).rounded()) & 0xFF
+        let b = Int((c.b * 255.0).rounded()) & 0xFF
+        return (b << 16) | (g << 8) | r
+    }
+
+    /// Format a double without a trailing `.0` (so `\H2x;` not `\H2.0x;`), keeping
+    /// fractional values intact.
+    private static func trimDouble(_ v: Double) -> String {
+        if v == v.rounded() && abs(v) < 1e15 {
+            return String(Int(v.rounded()))
+        }
+        return String(v)
     }
 }

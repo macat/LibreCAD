@@ -5,11 +5,13 @@
 //  Tests for the DXF writer (DXFWriter.swift + the DxfBridge write C ABI). The
 //  key test is a full round-trip: read dim_sample.dxf, write it back out, re-read
 //  the result, and assert the supported-kind entity counts are preserved
-//  (including the TEXT and SOLID kinds the writer now emits). A second test
+//  (including the TEXT, MTEXT and SOLID kinds the writer now emits). A second test
 //  builds a CADDrawing from scratch (line + circle + arc + a custom layer),
 //  writes, re-reads, and asserts the geometry round-trips. Dedicated tests assert
-//  TEXT, SOLID, and HATCH (the previously-dropped display kinds) now survive the
-//  round-trip with their key fields.
+//  TEXT, MTEXT, SOLID, and HATCH (the previously-dropped display kinds) now survive
+//  the round-trip with their key fields — the MTEXT test exercises BOTH the
+//  reconstruct-from-run-tree path (no stored rawCode) and the verbatim rawCode
+//  passthrough path.
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //
@@ -57,9 +59,10 @@ struct DXFWriterTests {
     private struct KindTally: Equatable {
         var line = 0, point = 0, circle = 0, arc = 0, ellipse = 0, polyline = 0
         var text = 0, mtext = 0, solid = 0, hatch = 0
-        /// The supported set the writer emits (spline/splinePoints/mtext excluded).
+        /// The supported set the writer emits (spline/splinePoints excluded; MTEXT
+        /// is now written, so it counts toward the round-trippable total).
         var supportedTotal: Int {
-            line + point + circle + arc + ellipse + polyline + text + solid + hatch
+            line + point + circle + arc + ellipse + polyline + text + mtext + solid + hatch
         }
     }
 
@@ -74,7 +77,7 @@ struct DXFWriterTests {
             case .ellipse:      t.ellipse += 1
             case .polyline:     t.polyline += 1
             case .text:         t.text += 1      // now written (DRW_Text)
-            case .mtext:        t.mtext += 1     // skipped by the writer (MTEXT-write follow-up)
+            case .mtext:        t.mtext += 1     // now written (DRW_MText)
             case .solid:        t.solid += 1     // now written (DRW_Solid)
             case .hatch:        t.hatch += 1     // now written (DRW_Hatch)
             case .spline, .splinePoints: break   // still skipped by the writer
@@ -98,27 +101,27 @@ struct DXFWriterTests {
         #expect(firstTally.arc >= 1)
         #expect(firstTally.polyline >= 1)
 
-        // dim_sample carries MTEXT (-> .mtext, skipped by the writer until the
-        // MTEXT-write follow-up) and SOLID (-> .solid, written), so SOLID should
-        // round-trip while MTEXT is counted as skipped.
+        // dim_sample carries MTEXT (-> .mtext, now WRITTEN as DRW_MText) and SOLID
+        // (-> .solid, written), so both should round-trip.
         #expect(firstTally.mtext >= 1)
         #expect(firstTally.solid >= 1)
 
         let outPath = tempDXFPath()
         defer { removeFile(outPath) }
 
-        // Write everything the reader produced. dim_sample has no splines, but its
-        // MTEXT records are skipped (MTEXT-write follow-up).
+        // Write everything the reader produced. dim_sample has no splines; MTEXT is
+        // now emitted (R2000 default), so only spline/dimension kinds (none here)
+        // are skipped.
         let writeResult = try await CADEngine.shared.writeEntities(
             first.records, layers: first.layers, toPath: outPath
         )
         let unsupported = first.records.filter {
             switch $0.kind {
-            case .spline, .splinePoints, .mtext: return true
+            case .spline, .splinePoints, .dimension: return true
             default: return false
             }
         }.count
-        #expect(writeResult.skipped == unsupported)   // == the MTEXT count for dim_sample
+        #expect(writeResult.skipped == unsupported)   // MTEXT no longer counts as skipped
         #expect(FileManager.default.fileExists(atPath: outPath))
 
         // Re-read and compare the supported-kind tallies exactly.
@@ -132,6 +135,7 @@ struct DXFWriterTests {
         #expect(secondTally.ellipse == firstTally.ellipse)
         // The previously-dropped display kinds now survive the round-trip.
         #expect(secondTally.text == firstTally.text)
+        #expect(secondTally.mtext == firstTally.mtext)
         #expect(secondTally.solid == firstTally.solid)
         #expect(secondTally.supportedTotal == firstTally.supportedTotal)
     }
@@ -296,6 +300,123 @@ struct DXFWriterTests {
         #expect(d.vAlign == .middle)
     }
 
+    // MARK: - MTEXT round-trip (reconstruct-from-run-tree + rawCode passthrough).
+
+    /// Concatenate the plain (decode-expanded) text of all `.run` inlines in a
+    /// paragraph — the "line" content, ignoring per-run formatting.
+    private func paragraphText(_ p: MTextParagraph) -> String {
+        p.inlines.reduce(into: "") { acc, inline in
+            if case .run(let r) = inline { acc += r.text }
+        }
+    }
+
+    @Test("MTEXTwrite: a hand-built multi-line formatted mtext round-trips as .mtext")
+    func mtextWriteRoundTripsRunTree() async throws {
+        // Build a MULTI-LINE mtext (two paragraphs via \P) with a FORMATTING code
+        // (a bold red middle run) and NO stored rawCode, so the writer must
+        // RECONSTRUCT the coded string from the run tree (MTextEncoder).
+        let para1 = MTextParagraph(inlines: [
+            .run(TextRun(text: "First ")),
+            .run(TextRun(text: "BOLD", bold: true, italic: false)),  // \f...|b1|i0; formatting
+            .run(TextRun(text: " line")),
+        ])
+        let para2 = MTextParagraph(inlines: [
+            .run(TextRun(text: "Second line")),
+        ])
+        let mtextRec = EntityRecord(
+            id: EntityID(1),
+            layer: LayerID("annot"),
+            kind: .mtext(MTextData(
+                position: Vector(7, 8),
+                height: 3.0,
+                rectWidth: 50,
+                rotation: .pi / 4,
+                styleName: "STANDARD",
+                attachment: .middleCenter,
+                lineSpacingStyle: .exact,
+                lineSpacingFactor: 1.5,
+                paragraphs: [para1, para2],
+                rawCode: nil))            // force the reconstruct-from-run-tree path
+        )
+        let outPath = tempDXFPath()
+        defer { removeFile(outPath) }
+
+        let result = try await CADEngine.shared.writeEntities(
+            [mtextRec],
+            layers: LayerTable(layers: [Layer(name: "0"), Layer(name: "annot")],
+                               activeLayerName: "0"),
+            toPath: outPath
+        )
+        #expect(result.written == 1)   // MTEXT is now written, not skipped
+        #expect(result.skipped == 0)
+
+        let back = try await CADEngine.shared.readEntities(dxfPath: outPath)
+        let mtexts = back.records.compactMap { r -> MTextData? in
+            if case .mtext(let d) = r.kind { return d } else { return nil }
+        }
+        let d = try #require(mtexts.first, "mtext missing after round-trip")
+
+        let tol = 1e-6
+        // Block-level layout survived.
+        #expect(abs(d.position.x - 7) < tol)
+        #expect(abs(d.position.y - 8) < tol)
+        #expect(abs(d.height - 3.0) < tol)
+        #expect(abs(d.rectWidth - 50) < tol)
+        #expect(abs(d.rotation - .pi / 4) < 1e-9)
+        #expect(d.attachment == .middleCenter)
+        #expect(d.lineSpacingStyle == .exact)
+        #expect(abs(d.lineSpacingFactor - 1.5) < tol)
+
+        // Two LINES (paragraphs) survived, with matching text content per line.
+        #expect(d.paragraphs.count == 2)
+        #expect(paragraphText(d.paragraphs[0]) == "First BOLD line")
+        #expect(paragraphText(d.paragraphs[1]) == "Second line")
+
+        // The formatting code survived: a run carries the bold flag.
+        let allRuns = d.paragraphs.flatMap { p in
+            p.inlines.compactMap { i -> TextRun? in
+                if case .run(let r) = i { return r } else { return nil }
+            }
+        }
+        #expect(allRuns.contains { $0.text == "BOLD" && $0.bold == true })
+    }
+
+    @Test("MTEXTwrite: a preserved rawCode mtext round-trips verbatim")
+    func mtextWriteRoundTripsRawCode() async throws {
+        // An entity carrying a verbatim rawCode (the lossless-passthrough path the
+        // reader uses): the writer emits THAT string, so the re-read coded string
+        // matches exactly and the parsed paragraphs reproduce the lines.
+        let raw = "Alpha\\PBeta {\\C1;red} gamma"
+        let data = MTextParser.makeData(
+            coded: raw,
+            position: Vector(1, 1),
+            height: 2.0,
+            attachment: .bottomRight)
+        #expect(data.rawCode == raw)   // makeData preserves it
+
+        let mtextRec = EntityRecord(id: EntityID(1), kind: .mtext(data))
+        let outPath = tempDXFPath()
+        defer { removeFile(outPath) }
+
+        let result = try await CADEngine.shared.writeEntities(
+            [mtextRec], layers: LayerTable(), toPath: outPath
+        )
+        #expect(result.written == 1)
+        #expect(result.skipped == 0)
+
+        let back = try await CADEngine.shared.readEntities(dxfPath: outPath)
+        let d = try #require(back.records.compactMap { r -> MTextData? in
+            if case .mtext(let m) = r.kind { return m } else { return nil }
+        }.first, "mtext missing after round-trip")
+
+        // The raw coded string survived verbatim (lossless passthrough).
+        #expect(d.rawCode == raw)
+        // …and it parses back into the two lines.
+        #expect(d.paragraphs.count == 2)
+        #expect(paragraphText(d.paragraphs[0]) == "Alpha")
+        #expect(d.attachment == .bottomRight)
+    }
+
     @Test("a hand-built solid (triangle + quad) round-trips its corners")
     func roundTripsSolid() async throws {
         let tri = EntityRecord(
@@ -456,8 +577,8 @@ struct DXFWriterTests {
     private func isSupported(_ r: EntityRecord) -> Bool {
         switch r.kind {
         case .line, .point, .circle, .arc, .ellipse, .polyline,
-             .text, .solid, .hatch: return true
-        case .spline, .splinePoints, .dimension, .mtext: return false
+             .text, .mtext, .solid, .hatch: return true
+        case .spline, .splinePoints, .dimension: return false
         }
     }
 }

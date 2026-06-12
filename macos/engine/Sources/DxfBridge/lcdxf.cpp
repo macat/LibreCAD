@@ -751,6 +751,7 @@ private:
         case LC_ENT_LWPOLYLINE: writeLWPolyline(e); break;
         case LC_ENT_POLYLINE:   writeLWPolyline(e); break; // emit as LWPOLYLINE
         case LC_ENT_TEXT:       writeText(e);       break;
+        case LC_ENT_MTEXT:      writeMText(e);      break;
         case LC_ENT_SOLID:      writeSolid(e);      break;
         case LC_ENT_HATCH:      writeHatch(e);      break;
         default:                ++m_skipped;        break; // SPLINE / UNSUPPORTED / ...
@@ -837,6 +838,44 @@ private:
         t.alignH = static_cast<DRW_Text::HAlign>(e.hAlign);
         t.alignV = static_cast<DRW_Text::VAlign>(e.vAlign);
         m_dxf->writeText(&t);
+    }
+
+    // ----- MTEXT ---------------------------------------------------------
+    // Emit a DXF MTEXT (the inverse of FlatteningReader::addMText). DRW_MText
+    // derives from DRW_Text and adds `interlin` (code 44). The POD carries the
+    // RAW inline-coded string in `textValue` (group 1/3 — Swift re-emits either
+    // the preserved raw code or a reconstruction of the run tree, so this side
+    // stays format-agnostic), the insertion point (10/20/30), height (40),
+    // reference/wrap width (41 -> widthscale), attachment point (71 -> textgen),
+    // rotation (radians -> code 50 degrees), line-spacing style (73 -> alignV,
+    // 1 at-least / 2 exact) and line-spacing factor (44 -> interlin), plus the
+    // style name (7). libdxfrw's writeMText is a no-op for AC1009 (R12 has no
+    // MTEXT), so at that version the entity is dropped; count it as skipped so
+    // the caller's written/skipped tally is honest (matches the HATCH/R12 note).
+    void writeMText(const LCEntity &e) {
+        if (m_dxf->getVersion() <= DRW::AC1009) {
+            ++m_skipped;
+            return;
+        }
+        DRW_MText t;
+        fillCommon(t, e);
+        t.basePoint.x = e.p1x; t.basePoint.y = e.p1y; t.basePoint.z = e.p1z;
+        t.height = e.height;
+        t.text   = (e.textValue && e.textValue[0]) ? std::string(e.textValue) : std::string();
+        t.widthscale = e.mtextRectWidth;            // code 41: reference/wrap width
+        t.angle  = e.startAngle * 180.0 / M_PI;     // radians -> DXF degrees
+        t.style  = (e.styleName && e.styleName[0]) ? std::string(e.styleName) : std::string("STANDARD");
+        // Attachment point (code 71): DRW_MText keeps it in `textgen`. Clamp to the
+        // valid 1..9 (TopLeft..BottomRight) range; default TopLeft.
+        t.textgen = (e.mtextAttachment >= 1 && e.mtextAttachment <= 9)
+                        ? e.mtextAttachment : DRW_MText::TopLeft;
+        // Line-spacing style (code 73) lives in alignV for MTEXT (1 at-least, 2 exact);
+        // the line-spacing factor (code 44) in interlin.
+        t.alignV = (e.mtextLineSpacingStyle == 2)
+                       ? static_cast<DRW_Text::VAlign>(2)
+                       : static_cast<DRW_Text::VAlign>(1);
+        t.interlin = (e.mtextLineSpacingFactor > 0) ? e.mtextLineSpacingFactor : 1.0;
+        m_dxf->writeMText(&t);
     }
 
     // ----- SOLID ---------------------------------------------------------
