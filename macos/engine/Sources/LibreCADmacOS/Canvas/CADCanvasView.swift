@@ -104,6 +104,15 @@ final class FlippedMTKView: MTKView {
 
     override func mouseDown(with event: NSEvent) {
         let loc = locationInView(event)
+        // A double-click opens the inline text editor on an existing text/mtext
+        // entity under the cursor (edit-in-place). The controller no-ops if there
+        // is no editable text there, so a double-click elsewhere falls through to
+        // the normal click classification below.
+        if event.clickCount == 2, controller?.handleDoubleClick(at: loc) == true {
+            mouseDownLocation = nil
+            lastDragLocation = nil
+            return
+        }
         mouseDownLocation = loc
         lastDragLocation = loc
     }
@@ -301,6 +310,20 @@ final class CADCanvasController {
     /// (A larger-travel down→up is a pan and is handled by `panDrag`, NOT here.)
     func mouseClick(at point: CGPoint) {
         syncViewSizeFromView()
+        // The Text tool authors text via the inline NSTextView editor, not the
+        // model's geometry-tool input path: a click sets the insertion point and
+        // raises the editor. (Detected by the active tool's identity so it works the
+        // moment the wire-wave adds `ToolKind.text` — see `isTextToolActive`.)
+        if isTextToolActive {
+            // If an editor is already open, commit it first (a new click starts a
+            // fresh run, like clicking away in a text app).
+            if textEditor != nil { commitTextEditing() }
+            let spacing = renderer?.lastGridSpacing
+            let p = model.snappedWorldPoint(atScreenPoint: point, gridSpacing: spacing)
+            beginTextEditing(atWorldPoint: p, editing: nil, initialText: "")
+            redraw()
+            return
+        }
         if model.isToolActive {
             let spacing = renderer?.lastGridSpacing
             let p = model.snappedWorldPoint(atScreenPoint: point, gridSpacing: spacing)
@@ -312,11 +335,156 @@ final class CADCanvasController {
         }
     }
 
+    // MARK: Inline text authoring (the NSTextView editor over the canvas)
+
+    /// The live inline text editor, or `nil` when none is open. The controller owns
+    /// at most one at a time; it is added as a subview of the `FlippedMTKView`.
+    private(set) var textEditor: TextEditorOverlay?
+
+    /// Whether the active tool is the Text authoring tool. Detected by the tool's
+    /// stable `title` ("Text") rather than a `ToolKind` case, so this works the
+    /// moment the wire-wave adds `ToolKind.text` + the toolbar/menu/key binding —
+    /// no edit to this file is then needed to make text authoring reachable.
+    var isTextToolActive: Bool { model.tool?.title == "Text" }
+
+    /// The default text height (world units) for newly authored text. Mirrors
+    /// `TextTool.defaultHeight` / the "Standard" style's last height.
+    private static let defaultTextHeight: Double = 2.5
+
+    /// Opens the inline editor at a WORLD insertion point. `editing` is the entity
+    /// being edited (→ commit replaces it) or `nil` for new text; `initialText`
+    /// seeds the editor (the existing string when editing, else empty).
+    func beginTextEditing(atWorldPoint world: Vector, editing: EntityID?, initialText: String) {
+        guard let view else { return }
+        // Tear down any prior editor first.
+        teardownEditor(commit: false)
+
+        let height = Self.defaultTextHeight
+        // Screen anchor: the insertion point, nudged UP by the cap height so the
+        // first line's baseline sits near the click (the precise baseline is set by
+        // the renderer once committed). worldToScreen is top-left/Y-down.
+        let screenPoint = model.viewport.worldToScreen(world)
+        let pointHeight = CGFloat(height * model.viewport.scale)
+        let origin = CGPoint(x: screenPoint.x, y: screenPoint.y - pointHeight)
+
+        let overlay = TextEditorOverlay(
+            worldPoint: world,
+            worldHeight: height,
+            styleName: TextTool.standardStyleName,
+            editingID: editing,
+            initialText: initialText,
+            screenOrigin: origin,
+            pointHeight: pointHeight,
+            accentColor: .controlAccentColor,
+            backgroundColor: .textBackgroundColor,
+            textColor: .textColor
+        )
+        overlay.textView.onCommit = { [weak self] in self?.commitTextEditing() }
+        overlay.textView.onCancel = { [weak self] in self?.cancelTextEditing() }
+
+        view.addSubview(overlay.container)
+        textEditor = overlay
+        // Give the editor focus so typing goes straight into it.
+        view.window?.makeFirstResponder(overlay.textView)
+    }
+
+    /// Double-click handler: if a text/mtext entity is under the cursor, open the
+    /// inline editor pre-filled with its string (edit-in-place). Returns whether a
+    /// text entity was found and the editor opened.
+    @discardableResult
+    func handleDoubleClick(at screenPoint: CGPoint) -> Bool {
+        syncViewSizeFromView()
+        let world = model.viewport.screenToWorld(screenPoint)
+        guard let id = model.selection.hitTest(
+            worldPoint: world,
+            worldTolerance: model.worldTolerance,
+            in: model.drawing,
+            using: model.quadtree
+        ), let record = model.drawing.entity(id) else { return false }
+
+        // Only text/mtext entities are editable by the inline editor.
+        switch record.kind {
+        case .text(let d):
+            beginTextEditing(atWorldPoint: d.position, editing: id, initialText: d.text)
+            redraw()
+            return true
+        case .mtext(let d):
+            beginTextEditing(atWorldPoint: d.position, editing: id,
+                             initialText: Self.plainText(of: d))
+            redraw()
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Commits the inline editor: builds + runs a `TextTool` value (single-line →
+    /// `.text`, multi-line → `.mtext`; editing → `.replace`) and applies the edits
+    /// through the shared `applyToolEdits` (the same undoable `applyCommit` path the
+    /// in-canvas tools use). Empty text creates nothing. Tears the editor down.
+    func commitTextEditing() {
+        guard let overlay = textEditor else { return }
+        let string = overlay.currentText
+        textEditor = nil
+        overlay.container.removeFromSuperview()
+
+        var tool: TextTool
+        if let id = overlay.editingID {
+            tool = TextTool(
+                editing: id, at: overlay.worldPoint, text: string,
+                height: overlay.worldHeight, styleName: overlay.styleName)
+        } else {
+            tool = TextTool(
+                text: string, height: overlay.worldHeight, styleName: overlay.styleName)
+            // Place the insertion point, then commit.
+            _ = tool.handle(.click(overlay.worldPoint), context: .empty)
+        }
+        let outcome = tool.handle(.commit, context: .empty)
+        if case .commit(let edits) = outcome {
+            model.applyToolEdits(edits)
+        }
+        redraw()
+    }
+
+    /// Cancels the inline editor (Esc): discards the typed text, no entity created
+    /// or replaced.
+    func cancelTextEditing() {
+        teardownEditor(commit: false)
+        redraw()
+    }
+
+    /// Removes the editor view + state. `commit` is reserved for callers that want
+    /// the editor's text committed first (currently only the explicit commit path
+    /// does that itself); this just tears down.
+    private func teardownEditor(commit: Bool) {
+        guard let overlay = textEditor else { return }
+        textEditor = nil
+        overlay.container.removeFromSuperview()
+    }
+
+    /// Reconstructs a plain multi-line string from an `MTextData`'s paragraph/run
+    /// tree (run texts concatenated per paragraph; paragraphs joined with `\n`), so
+    /// the inline editor can pre-fill when editing an existing MTEXT entity.
+    private static func plainText(of data: MTextData) -> String {
+        data.paragraphs.map { paragraph in
+            paragraph.inlines.map { inline -> String in
+                switch inline {
+                case .run(let run):       return run.text
+                case .stacked(let s):     return "\(s.upper)/\(s.lower)"
+                case .tab:                return "\t"
+                }
+            }.joined()
+        }.joined(separator: "\n")
+    }
+
     // MARK: Tool activation + keyboard
 
     /// Switches the active tool (toolbar/menu/keyboard). Redraws so the preview /
-    /// status clears or appears.
+    /// status clears or appears. Switching tools tears down any open inline text
+    /// editor (without committing) so a stale editor never lingers across a mode
+    /// change.
     func activateTool(_ kind: ToolKind) {
+        teardownEditor(commit: false)
         model.activateTool(kind)
         redraw()
     }
