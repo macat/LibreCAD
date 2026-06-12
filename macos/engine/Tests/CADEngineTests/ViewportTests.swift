@@ -414,4 +414,50 @@ struct ViewportTransformTests {
         #expect(abs(back.x - 100) < 1e-9)
         #expect(abs(back.y - 50) < 1e-9)
     }
+
+    /// Pins the structural invariant the canvas relies on: the Viewport's `size` MUST
+    /// equal the size of the view the event point was measured in, or a click lands a
+    /// CONSTANT offset away from the cursor — exactly the reported "object appears up
+    /// and to the left of the click". This proves WHY the canvas re-syncs
+    /// `viewport.size` from the live `FlippedMTKView.bounds` on every interaction
+    /// (`CADCanvasController.syncViewSizeFromView`): with the sizes matched the
+    /// round-trip is exact; with a stale (larger) size it is off by half the
+    /// per-axis mismatch, up and to the left — the observed symptom.
+    @Test("a size mismatch between Viewport and the event-view yields a constant up-left offset; matched sizes round-trip exactly")
+    func viewportSizeMustMatchEventView() {
+        // The view the events are actually measured in (the live FlippedMTKView).
+        let eventViewSize = CGSize(width: 1200, height: 800)
+        // A click at an arbitrary view-local point in THAT view.
+        let click = CGPoint(x: 300, y: 220)
+
+        // --- Correct: Viewport size == event-view size → exact round-trip. ---
+        let good = Viewport(scale: 2.5, center: Vector(10, -20), size: eventViewSize)
+        let goodWorld = good.screenToWorld(click)
+        let goodBack = good.worldToScreen(goodWorld)
+        #expect(abs(goodBack.x - Double(click.x)) < 1e-9)
+        #expect(abs(goodBack.y - Double(click.y)) < 1e-9)
+
+        // --- Bug: a STALE, larger Viewport size (e.g. left over from the initial
+        // 800×600 default, or a pre-layout drawable) while the SAME center/scale is
+        // used. screenToWorld now uses the wrong half-extents, so the world point the
+        // click maps to differs; when that point is drawn (worldToScreen with the
+        // stale size) it does round-trip against the stale size, BUT the cursor the
+        // user sees is positioned by the REAL view. Model that: the committed world
+        // point, re-projected through the TRUE event-view viewport, is where it
+        // visually lands relative to the cursor.
+        let staleSize = CGSize(width: 1600, height: 1100)   // bigger than the real view
+        let stale = Viewport(scale: 2.5, center: Vector(10, -20), size: staleSize)
+        let staleWorld = stale.screenToWorld(click)         // what the click computes
+        let trueVp = Viewport(scale: 2.5, center: Vector(10, -20), size: eventViewSize)
+        let landed = trueVp.worldToScreen(staleWorld)       // where it visually shows
+        // The offset is exactly half the per-axis size mismatch (the difference in
+        // the `size/2` center term between the two viewports), and it pushes the
+        // committed point UP and to the LEFT of the cursor (negative dx, dy).
+        let expectedDx = (Double(eventViewSize.width) - Double(staleSize.width)) * 0.5   // -200
+        let expectedDy = (Double(eventViewSize.height) - Double(staleSize.height)) * 0.5 // -150
+        #expect(abs((landed.x - Double(click.x)) - expectedDx) < 1e-9)
+        #expect(abs((landed.y - Double(click.y)) - expectedDy) < 1e-9)
+        #expect(landed.x < Double(click.x))   // appears to the LEFT of the cursor
+        #expect(landed.y < Double(click.y))   // appears ABOVE the cursor
+    }
 }
