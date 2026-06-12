@@ -6,8 +6,9 @@
 //  ABI (libdxfrw flattened to POD), maps each flat entity onto the frozen
 //  `EntityRecord` model (ADR-001), maps the layer table onto `LayerTable`, and
 //  collects a warning list for entity kinds we don't yet flatten
-//  (TEXT/MTEXT/INSERT/DIMENSION/HATCH/SOLID/IMAGE/...). Unsupported kinds are
-//  skipped, never fatal — the read still returns the supported geometry.
+//  (INSERT/DIMENSION/IMAGE/...). TEXT/MTEXT, HATCH, and SOLID/TRACE ARE imported.
+//  Unsupported kinds are skipped, never fatal — the read still returns the
+//  supported geometry.
 //
 //  All bridge access goes through `CADEngine.shared` (libdxfrw is non-reentrant,
 //  so there is exactly one serialization point per process). The C handle is
@@ -188,8 +189,60 @@ extension CADEngine {
         case Int32(LC_ENT_SPLINE.rawValue):
             return mapSpline(e)
 
+        case Int32(LC_ENT_TEXT.rawValue):
+            return mapText(e)
+
+        case Int32(LC_ENT_HATCH.rawValue):
+            return .hatch(HatchData(
+                loops: hatchLoops(e),
+                solidFill: e.solidFill != 0,
+                patternName: string(e.textValue)
+            ))
+
+        case Int32(LC_ENT_SOLID.rawValue):
+            // Corners are already in ring order (the bridge un-swaps DXF's
+            // bow-tie 3rd/4th vertex); a degenerate (<3 corner) solid is dropped.
+            let corners = vertices(e).map(\.point)
+            guard corners.count >= 3 else { return nil }
+            return .solid(SolidData(corners: corners))
+
         default: // LC_ENT_UNSUPPORTED and anything else
             return nil
+        }
+    }
+
+    /// Maps a TEXT/MTEXT POD to `TextData`. An empty string (or non-positive
+    /// height) is dropped (returns `nil` -> warning) since it would resolve to no
+    /// geometry. The DXF alignment codes (72/73) map onto `TextHAlign`/
+    /// `TextVAlign`; out-of-range codes fall back to the left/baseline default.
+    private static func mapText(_ e: LCEntity) -> EntityKind? {
+        let text = string(e.textValue) ?? ""
+        guard !text.isEmpty, e.height > 0 else { return nil }
+        return .text(TextData(
+            position: Vector(e.p1x, e.p1y, e.p1z),
+            height: e.height,
+            rotation: e.startAngle,
+            text: text,
+            styleName: string(e.styleName),
+            hAlign: TextHAlign(rawValue: Int(e.hAlign)) ?? .left,
+            vAlign: TextVAlign(rawValue: Int(e.vAlign)) ?? .baseline
+        ))
+    }
+
+    /// Copies a HATCH's flat vertex array, sliced by its per-loop (offset,count)
+    /// windows, into an array of `PolylineVertex` rings.
+    private static func hatchLoops(_ e: LCEntity) -> [[PolylineVertex]] {
+        guard e.loopCount > 0, let loopBase = e.loops,
+              e.vertexCount > 0, let vertBase = e.vertices else { return [] }
+        let verts = UnsafeBufferPointer(start: vertBase, count: Int(e.vertexCount))
+        let loops = UnsafeBufferPointer(start: loopBase, count: Int(e.loopCount))
+        return loops.map { loop in
+            let start = Int(loop.offset)
+            let end = start + Int(loop.count)
+            guard start >= 0, end <= verts.count, start < end else { return [] }
+            return verts[start..<end].map {
+                PolylineVertex(point: Vector($0.x, $0.y), bulge: $0.bulge)
+            }
         }
     }
 

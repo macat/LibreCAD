@@ -18,6 +18,7 @@
 
 #include "lcdxf.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <deque>
@@ -51,6 +52,7 @@ struct LCEntityList {
     std::deque<std::string>          strings;
     std::deque<std::vector<LCVertex>> vertexPool;
     std::deque<std::vector<double>>  doublePool;
+    std::deque<std::vector<LCLoop>>  loopPool;
 };
 
 namespace {
@@ -97,12 +99,20 @@ public:
         e.ratio = 1.0;
         e.degree = 0;
         e.closed = 0;
+        e.height = 0.0;
+        e.hAlign = 0;
+        e.vAlign = 0;
+        e.solidFill = 0;
         e.vertices = nullptr;
         e.vertexCount = 0;
         e.knots = nullptr;
         e.knotCount = 0;
         e.weights = nullptr;
         e.weightCount = 0;
+        e.loops = nullptr;
+        e.loopCount = 0;
+        e.textValue = nullptr;
+        e.styleName = nullptr;
         e.typeName = nullptr;
         return e;
     }
@@ -276,13 +286,59 @@ public:
 
     void addKnot(const DRW_Entity &data) override { (void)data; } // sub-record
 
+    // ----- TEXT / MTEXT --------------------------------------------------
+    // Single-line TEXT. Insertion point, height, rotation (DXF stores degrees;
+    // converted to radians here to match the POD/Swift contract), and the
+    // horizontal/vertical alignment codes (72/73). Mirrors addText in
+    // rs_filterdxfrw.cpp; the alignment-driven base/sec-point swap is irrelevant
+    // here because the POD carries a single insertion point.
+    void addText(const DRW_Text &data) override {
+        ++m_out->geometryCount;
+        LCEntity e = makeEntity(LC_ENT_TEXT);
+        fillCommon(e, data);
+        // For an aligned/fit/middle text DXF stores the insertion in secPoint;
+        // otherwise basePoint. Pick the meaningful one (rs_filterdxfrw.cpp logic).
+        bool useSec = (data.alignV != 0 || data.alignH != 0)
+                   && data.alignH != DRW_Text::HAligned
+                   && data.alignH != DRW_Text::HFit;
+        if (useSec) {
+            e.p1x = data.secPoint.x; e.p1y = data.secPoint.y; e.p1z = data.secPoint.z;
+        } else {
+            e.p1x = data.basePoint.x; e.p1y = data.basePoint.y; e.p1z = data.basePoint.z;
+        }
+        e.height = data.height;
+        e.startAngle = data.angle * M_PI / 180.0;  // DXF degrees -> radians
+        e.hAlign = static_cast<int32_t>(data.alignH);
+        e.vAlign = static_cast<int32_t>(data.alignV);
+        e.textValue = intern(data.text);
+        e.styleName = intern(data.style);
+        m_out->entities.push_back(e);
+    }
+
+    // Multi-line MTEXT. DRW_MText derives from DRW_Text, so the same fields
+    // apply; MTEXT always uses basePoint as its insertion (group 10), and its
+    // alignment is an attachment code (textgen) — not the 72/73 codes used by
+    // TEXT. We carry the raw string and insertion point + height/angle; the
+    // attachment-point -> halign/valign mapping (rs_filterdxfrw mtextEntityFromDRW)
+    // and the MTEXT inline-format-code stripping are layout backlog, so we leave
+    // alignment at the left/baseline default.
+    void addMText(const DRW_MText &data) override {
+        ++m_out->geometryCount;
+        LCEntity e = makeEntity(LC_ENT_TEXT);
+        fillCommon(e, data);
+        e.p1x = data.basePoint.x; e.p1y = data.basePoint.y; e.p1z = data.basePoint.z;
+        e.height = data.height;
+        e.startAngle = data.angle * M_PI / 180.0;  // DXF degrees -> radians
+        e.textValue = intern(data.text);
+        e.styleName = intern(data.style);
+        m_out->entities.push_back(e);
+    }
+
     // ----- entities not in the frozen geometry model: count + warn --------
     void addInsert(const DRW_Insert &data) override { addUnsupportedEntity(data, "INSERT"); }
-    void addTrace(const DRW_Trace &data) override { addUnsupportedEntity(data, "TRACE"); }
+    void addTrace(const DRW_Trace &data) override { emitSolid(data); }
     void add3dFace(const DRW_3Dface &data) override { addUnsupportedEntity(data, "3DFACE"); }
-    void addSolid(const DRW_Solid &data) override { addUnsupportedEntity(data, "SOLID"); }
-    void addMText(const DRW_MText &data) override { addUnsupportedEntity(data, "MTEXT"); }
-    void addText(const DRW_Text &data) override { addUnsupportedEntity(data, "TEXT"); }
+    void addSolid(const DRW_Solid &data) override { emitSolid(data); }
     void addDimAlign(const DRW_DimAligned *data) override { addUnsupportedDim(data, "DIMENSION"); }
     void addDimLinear(const DRW_DimLinear *data) override { addUnsupportedDim(data, "DIMENSION"); }
     void addDimRadial(const DRW_DimRadial *data) override { addUnsupportedDim(data, "DIMENSION"); }
@@ -291,7 +347,7 @@ public:
     void addDimAngular3P(const DRW_DimAngular3p *data) override { addUnsupportedDim(data, "DIMENSION"); }
     void addDimOrdinate(const DRW_DimOrdinate *data) override { addUnsupportedDim(data, "DIMENSION"); }
     void addLeader(const DRW_Leader *data) override { addUnsupportedDim(data, "LEADER"); }
-    void addHatch(const DRW_Hatch *data) override { addUnsupportedDim(data, "HATCH"); }
+    void addHatch(const DRW_Hatch *data) override { emitHatch(data); }
     void addViewport(const DRW_Viewport &data) override { addUnsupportedEntity(data, "VIEWPORT"); }
     void addImage(const DRW_Image *data) override { addUnsupportedDim(data, "IMAGE"); }
     void linkImage(const DRW_ImageDef *data) override { (void)data; } // definition, not entity
@@ -315,6 +371,186 @@ public:
 
 private:
     LCEntityList *m_out;
+
+    // ----- SOLID / TRACE -------------------------------------------------
+    // A filled triangle or quadrilateral. DXF orders the 4 corners as
+    // basePoint(10), secPoint(11), thirdPoint(12), fourPoint(13) where the 3rd
+    // and 4th are "bow-tie" swapped relative to a non-self-intersecting ring; we
+    // un-swap them to [c0, c1, c3, c2] so SolidData.corners is already a ring
+    // (matches RS_Painter::drawSolidWCS's std::swap of corner[2]/corner[3]). A
+    // degenerate solid (fourPoint == thirdPoint) is a triangle -> 3 corners.
+    void emitSolid(const DRW_Trace &data) {
+        ++m_out->geometryCount;
+        LCEntity e = makeEntity(LC_ENT_SOLID);
+        fillCommon(e, data);
+        const LCVertex c0{data.basePoint.x,  data.basePoint.y,  0.0};
+        const LCVertex c1{data.secPoint.x,   data.secPoint.y,   0.0};
+        const LCVertex c2{data.thirdPoint.x, data.thirdPoint.y, 0.0};
+        const LCVertex c3{data.fourPoint.x,  data.fourPoint.y,  0.0};
+        m_out->vertexPool.emplace_back();
+        std::vector<LCVertex> &verts = m_out->vertexPool.back();
+        const bool triangle = (c2.x == c3.x && c2.y == c3.y);
+        if (triangle) {
+            verts = {c0, c1, c2};
+        } else {
+            verts = {c0, c1, c3, c2};   // un-swap bow-tie 3rd/4th into ring order
+        }
+        e.vertices = verts.data();
+        e.vertexCount = static_cast<int32_t>(verts.size());
+        m_out->entities.push_back(e);
+    }
+
+    // ----- HATCH ---------------------------------------------------------
+    // A filled region described by one or more boundary loops. Each loop is read
+    // into a contiguous window of this entity's flat vertex array; the per-loop
+    // (offset,count) windows are stored in `loops`. Ported from addHatch in
+    // rs_filterdxfrw.cpp: a polyline boundary (type & 2) walks its vertlist with
+    // bulges; otherwise each edge entity (LINE/ARC/ELLIPSE/SPLINE) contributes
+    // its vertices. Arc/ellipse edges are tessellated into straight segments here
+    // (boundary-arc fidelity beyond the start point is layout backlog); bulges on
+    // polyline edges are carried through. solidFill and the pattern name round-trip.
+    void emitHatch(const DRW_Hatch *data) {
+        ++m_out->geometryCount;
+        LCEntity e = makeEntity(LC_ENT_HATCH);
+        if (data) {
+            fillCommon(e, *data);
+        } else {
+            e.layer = intern("0"); e.lineType = intern("BYLAYER");
+            m_out->entities.push_back(e);
+            return;
+        }
+        e.solidFill = data->solid ? 1 : 0;
+        e.textValue = intern(data->name);   // pattern name (e.g. "SOLID", "ANSI31")
+
+        // One flat vertex array for ALL loops; loops index into it via windows.
+        m_out->vertexPool.emplace_back();
+        std::vector<LCVertex> &verts = m_out->vertexPool.back();
+        m_out->loopPool.emplace_back();
+        std::vector<LCLoop> &loops = m_out->loopPool.back();
+
+        for (const auto &loop : data->looplist) {
+            if (!loop) continue;
+            // type bit 32 == an outermost/derived loop libdxfrw flags as skip
+            // (mirrors rs_filterdxfrw.cpp's `(loop->type & 32) == 32` continue).
+            if ((loop->type & 32) == 32) continue;
+            const int32_t start = static_cast<int32_t>(verts.size());
+            readHatchLoop(*loop, verts);
+            const int32_t count = static_cast<int32_t>(verts.size()) - start;
+            if (count > 0) loops.push_back(LCLoop{start, count});
+        }
+
+        e.vertices = verts.empty() ? nullptr : verts.data();
+        e.vertexCount = static_cast<int32_t>(verts.size());
+        e.loops = loops.empty() ? nullptr : loops.data();
+        e.loopCount = static_cast<int32_t>(loops.size());
+        m_out->entities.push_back(e);
+    }
+
+    // Append one hatch boundary loop's vertices to `verts`.
+    void readHatchLoop(const DRW_HatchLoop &loop, std::vector<LCVertex> &verts) {
+        if ((loop.type & 2) == 2) {
+            // Polyline boundary: a single DRW_LWPolyline holds all vertices+bulges.
+            if (loop.objlist.empty()) return;
+            const DRW_LWPolyline *pline =
+                dynamic_cast<DRW_LWPolyline *>(loop.objlist.front().get());
+            if (!pline) return;
+            for (const auto &v : pline->vertlist) {
+                if (v) verts.push_back(LCVertex{v->x, v->y, v->bulge});
+            }
+            return;
+        }
+        // Edge boundary: walk each edge entity, appending its start point (and,
+        // for arcs/ellipses, tessellated intermediate points) so the chained
+        // edges form one ring.
+        for (const auto &ent : loop.objlist) {
+            if (!ent) continue;
+            switch (ent->eType) {
+            case DRW::LINE: {
+                const auto *l = dynamic_cast<DRW_Line *>(ent.get());
+                if (l) verts.push_back(LCVertex{l->basePoint.x, l->basePoint.y, 0.0});
+                break;
+            }
+            case DRW::ARC: {
+                const auto *a = dynamic_cast<DRW_Arc *>(ent.get());
+                if (a) tessellateArc(a->basePoint.x, a->basePoint.y, a->radious,
+                                     a->staangle, a->endangle, a->isccw != 0, verts);
+                break;
+            }
+            case DRW::CIRCLE: {
+                const auto *c = dynamic_cast<DRW_Circle *>(ent.get());
+                if (c) tessellateArc(c->basePoint.x, c->basePoint.y, c->radious,
+                                     0.0, 2.0 * M_PI, true, verts);
+                break;
+            }
+            case DRW::ELLIPSE: {
+                // Tessellate via the ellipse parametric form. staparam/endparam
+                // are ellipse parameters (radians); ratio scales the minor axis.
+                const auto *el = dynamic_cast<DRW_Ellipse *>(ent.get());
+                if (el) tessellateEllipse(*el, verts);
+                break;
+            }
+            case DRW::SPLINE: {
+                // Approximate a spline boundary edge by its control polygon.
+                // (Proper NURBS boundary tessellation is backlog.)
+                const auto *s = dynamic_cast<DRW_Spline *>(ent.get());
+                if (s) for (const auto &cp : s->controllist) {
+                    if (cp) verts.push_back(LCVertex{cp->x, cp->y, 0.0});
+                }
+                break;
+            }
+            default:
+                break;
+            }
+        }
+    }
+
+    // Tessellate an arc (center cx,cy; radius r; staang..endang radians) into
+    // straight segments, appending each sample point. `ccw` is the sweep
+    // direction. ~16 segments per full turn keeps boundary fills smooth without
+    // exploding the vertex count.
+    static void tessellateArc(double cx, double cy, double r,
+                              double staang, double endang, bool ccw,
+                              std::vector<LCVertex> &verts) {
+        double sweep;
+        if (ccw) {
+            sweep = endang - staang;
+            while (sweep <= 0.0) sweep += 2.0 * M_PI;
+        } else {
+            sweep = staang - endang;
+            while (sweep <= 0.0) sweep += 2.0 * M_PI;
+            sweep = -sweep;   // negative for CW
+        }
+        const int segs = std::max(2, static_cast<int>(std::ceil(std::fabs(sweep) / (M_PI / 8.0))));
+        for (int i = 0; i <= segs; ++i) {
+            const double t = staang + sweep * (static_cast<double>(i) / segs);
+            verts.push_back(LCVertex{cx + r * std::cos(t), cy + r * std::sin(t), 0.0});
+        }
+    }
+
+    // Tessellate an ellipse / elliptic-arc boundary edge.
+    static void tessellateEllipse(const DRW_Ellipse &el, std::vector<LCVertex> &verts) {
+        const double cx = el.basePoint.x, cy = el.basePoint.y;
+        const double mx = el.secPoint.x,  my = el.secPoint.y;   // major-axis endpoint (relative)
+        const double rot = std::atan2(my, mx);
+        const double majR = std::sqrt(mx * mx + my * my);
+        const double minR = majR * el.ratio;
+        double a1 = el.staparam;
+        double a2 = el.endparam;
+        if (std::fabs(a2 - 2.0 * M_PI) < 1e-10 && std::fabs(a1) < 1e-10) {
+            a2 = 2.0 * M_PI;   // full ellipse
+        }
+        double sweep = a2 - a1;
+        while (sweep < 0.0) sweep += 2.0 * M_PI;
+        const int segs = std::max(2, static_cast<int>(std::ceil(sweep / (M_PI / 8.0))));
+        const double cosR = std::cos(rot), sinR = std::sin(rot);
+        for (int i = 0; i <= segs; ++i) {
+            const double t = a1 + sweep * (static_cast<double>(i) / segs);
+            const double ex = majR * std::cos(t);
+            const double ey = minR * std::sin(t);
+            verts.push_back(LCVertex{cx + ex * cosR - ey * sinR,
+                                     cy + ex * sinR + ey * cosR, 0.0});
+        }
+    }
 
     // Common path for an entity passed by const-ref that we don't flatten.
     template <typename T>

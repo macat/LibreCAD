@@ -74,9 +74,22 @@ typedef enum LCEntityKind {
     LC_ENT_LWPOLYLINE = 5,
     LC_ENT_POLYLINE = 6,
     LC_ENT_SPLINE = 7,
+    /** Single-line / multi-line CAD text (DXF TEXT or MTEXT). The text string is
+     *  in `textValue`; insertion point in p1; `height`/`startAngle` (radians) and
+     *  `hAlign`/`vAlign` carry the layout. */
+    LC_ENT_TEXT = 8,
+    /** A filled region (DXF HATCH). Its boundary loops are described by
+     *  `loops[loopCount]`, each loop a (offset,count) window into the entity's
+     *  flat `vertices` array; `solidFill` flags solid vs. pattern; `textValue`
+     *  carries the pattern name. */
+    LC_ENT_HATCH = 9,
+    /** A filled triangle/quad (DXF SOLID / TRACE). Its 3-4 corners are in the flat
+     *  `vertices` array, already un-swapped from DXF's bow-tie 3rd/4th order into
+     *  ring order. */
+    LC_ENT_SOLID = 10,
     /** An entity libdxfrw delivered but the reader does not flatten
-     *  (TEXT/MTEXT/INSERT/DIMENSION/HATCH/SOLID/IMAGE/...). Carries only its
-     *  `typeName` so Swift can collect a warning; geometry fields are unset. */
+     *  (INSERT/DIMENSION/IMAGE/...). Carries only its `typeName` so Swift can
+     *  collect a warning; geometry fields are unset. */
     LC_ENT_UNSUPPORTED = 100
 } LCEntityKind;
 
@@ -86,6 +99,14 @@ typedef struct LCVertex {
     double y;
     double bulge;   /**< tan(includedAngle/4) of the following segment; 0 == straight. */
 } LCVertex;
+
+/** One flattened hatch boundary loop: a (offset, count) window into the owning
+ *  LCEntity's flat `vertices` array. Lets a single hatch carry several loops
+ *  (outer boundary + holes) without nested pointers crossing the C boundary. */
+typedef struct LCLoop {
+    int32_t offset;   /**< index of this loop's first vertex in `vertices`. */
+    int32_t count;    /**< number of vertices in this loop. */
+} LCLoop;
 
 /**
  * A single flattened entity. Plain-old-data: trivially copyable, no owning
@@ -102,6 +123,11 @@ typedef struct LCVertex {
  *  - LWPOLYLINE / POLYLINE: vertices[vertexCount], closed
  *  - SPLINE:      degree, controlPoints (as vertices[].x/.y), knots/weights,
  *                 closed
+ *  - TEXT:        p1 (insertion point), height, startAngle (rotation, radians),
+ *                 hAlign/vAlign, textValue (string), styleName
+ *  - HATCH:       loops[loopCount] (each a window into vertices[]), solidFill,
+ *                 textValue (pattern name)
+ *  - SOLID:       vertices[vertexCount] (3-4 ring-ordered corners)
  *  - UNSUPPORTED: typeName only
  */
 typedef struct LCEntity {
@@ -126,15 +152,26 @@ typedef struct LCEntity {
     int32_t closed;        /**< polyline/spline closed flag (0/1). */
     int32_t degree;        /**< spline degree. */
 
+    /* Text (TEXT / MTEXT). */
+    double height;         /**< text cap height (code 40). */
+    int32_t hAlign;        /**< text horizontal align (code 72): 0 left, 1 center, 2 right. */
+    int32_t vAlign;        /**< text vertical align (code 73): 0 baseline, 1 bottom, 2 middle, 3 top. */
+    int32_t solidFill;     /**< HATCH solid-fill flag (0 pattern, 1 solid). */
+
     /* Variable-length data — borrowed pointers into the owning list's pools. */
-    const LCVertex *vertices;   /**< polyline vertices, or spline control points (x/y). */
+    const LCVertex *vertices;   /**< polyline vertices, spline control points, hatch
+                                     boundary vertices, or solid corners (x/y). */
     int32_t vertexCount;
     const double *knots;        /**< spline knot vector (may be NULL/0). */
     int32_t knotCount;
     const double *weights;      /**< spline rational weights (may be NULL/0). */
     int32_t weightCount;
+    const LCLoop *loops;        /**< HATCH boundary loops, windows into `vertices` (may be NULL/0). */
+    int32_t loopCount;
 
-    const char *typeName;       /**< DXF type name (e.g. "TEXT"); set for UNSUPPORTED. */
+    const char *textValue;      /**< TEXT/MTEXT string, or HATCH pattern name (may be NULL). */
+    const char *styleName;      /**< TEXT/MTEXT style name (code 7), may be NULL. */
+    const char *typeName;       /**< DXF type name (e.g. "INSERT"); set for UNSUPPORTED. */
 } LCEntity;
 
 /**

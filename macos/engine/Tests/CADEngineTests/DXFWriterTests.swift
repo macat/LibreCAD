@@ -81,13 +81,20 @@ struct DXFWriterTests {
         let outPath = tempDXFPath()
         defer { removeFile(outPath) }
 
-        // Write only the supported geometry (the reader already dropped the rest).
+        // Write everything the reader produced. The reader-import wave now also
+        // imports dim_sample's MTEXT/SOLID as .text/.solid records, which the
+        // writer does not yet emit, so it skips exactly those display kinds.
         let writeResult = try await CADEngine.shared.writeEntities(
             first.records, layers: first.layers, toPath: outPath
         )
-        // Everything the writer received was supported except spline/splinePoints,
-        // which dim_sample.dxf does not contain, so nothing should be skipped.
-        #expect(writeResult.skipped == 0)
+        // The writer skips only the display kinds it can't emit yet (text/hatch/
+        // solid) plus any spline/splinePoints; dim_sample has no splines, so the
+        // skipped count equals its imported text+solid count and the
+        // writer-supported geometry is fully written.
+        let displayKinds = first.records.filter {
+            switch $0.kind { case .text, .hatch, .solid: return true; default: return false }
+        }.count
+        #expect(writeResult.skipped == displayKinds)
         #expect(FileManager.default.fileExists(atPath: outPath))
 
         // Re-read and compare the supported-kind tallies exactly.
