@@ -149,6 +149,8 @@ Engine modules on native-macos: CADEngine core (Vector/Geometry/Pen/Entity/Resol
 
 - [2026-06-12 ~12:30] 📋 coordinator — review-reader-import APPROVE (loop pool memory-safe; writer untouched). MERGED ws/reader-import → native-macos. **618 tests, 157 commits. text/hatch/solid DISPLAY chain COMPLETE** (DXF import→resolve→render). 🔨 Fillet done (dc3bb83ee, 631t) + Chamfer done (f66ddda66, 634t) — both line-line, 2×replace+1×add, default-arm exhaustiveness-safe. Dispatched review-fillet-chamfer. NEXT: merge fillet/chamfer → WIRE trim/extend/fillet/chamfer into ToolKind+toolbar+keys → reassemble → consolidated user GUI verify (text/hatch/solid display, editing tools, save, sidebar eye).
 
+- [2026-06-12 ~12:50] 📋 coordinator — review-fillet-chamfer APPROVE both (geometry hand-verified). MERGED ws/tool-fillet + ws/tool-chamfer → native-macos. **653 tests, 162 commits.** 18 tool files. Dispatched wire-wave2 (Trim/Extend/Fillet/Chamfer → ToolKind+toolbar+keys T/X/F/⇧F+Tools menu) — last build step before the consolidated GUI verify.
+
 ## BROAD-PARITY P0 TOOLSET COMPLETE (2026-06-12) — usable native CAD editor
 All P0 tools wired + usable: DRAW line/circle/arc/rectangle/polyline/point; MODIFY move/copy/rotate/scale/mirror; select (single/window/crossing) + ⌫ delete + ⌘Z/⇧⌘Z undo/redo; snap (endpoint/center/mid/intersection/on-entity) + coord HUD; pan/zoom/fit/grid; open .dxf. 471 tests, 113 commits on native-macos, app launches (user-confirmed earlier). Cursor-offset fixed. AWAITING user GUI verification of the full toolset (task #5). All local — push blocked all session.
 
