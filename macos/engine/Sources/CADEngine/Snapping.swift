@@ -274,6 +274,18 @@ public enum Snapping {
                 return []
             }
             return [f, l]
+
+        case .text:
+            // Stroked text has no single canonical endpoint to snap (the .lff
+            // strokes are an implementation detail); left to other snap kinds.
+            return []
+
+        case .hatch(let d):
+            // The boundary-loop vertices are the snappable corners.
+            return d.loops.flatMap { $0.map(\.point) }
+
+        case .solid(let d):
+            return d.corners
         }
     }
 
@@ -334,6 +346,32 @@ public enum Snapping {
         case .spline, .splinePoints:
             // No cheap canonical midpoint; left to onEntity/endpoint snaps.
             return []
+
+        case .text:
+            // No canonical midpoint for stroked text.
+            return []
+
+        case .hatch(let d):
+            // Midpoint of each boundary-loop edge (chord midpoints; bulge-arc
+            // boundaries use the straight-chord midpoint — see resolve note).
+            var mids: [Vector] = []
+            for ring in d.loops where ring.count >= 2 {
+                for i in 0..<ring.count {
+                    let a = ring[i].point
+                    let b = ring[(i + 1) % ring.count].point
+                    mids.append((a + b) * 0.5)
+                }
+            }
+            return mids
+
+        case .solid(let d):
+            // Midpoint of each edge of the filled triangle/quad.
+            guard d.corners.count >= 2 else { return [] }
+            var mids: [Vector] = []
+            for i in 0..<d.corners.count {
+                mids.append((d.corners[i] + d.corners[(i + 1) % d.corners.count]) * 0.5)
+            }
+            return mids
         }
     }
 

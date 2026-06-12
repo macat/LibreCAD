@@ -202,7 +202,8 @@ public struct OffsetTool: Tool {
         // segment joins/trims, concentric ellipse/elliptic-arc, offset spline).
         // For now they are SKIPPED — no edit is emitted, matching the brief's
         // scope (line/circle/arc only).
-        case .polyline, .ellipse, .spline, .splinePoints, .point:
+        case .polyline, .ellipse, .spline, .splinePoints, .point,
+             .text, .hatch, .solid:
             return nil
         }
     }

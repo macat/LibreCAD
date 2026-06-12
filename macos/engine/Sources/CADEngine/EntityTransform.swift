@@ -233,6 +233,9 @@ public enum EntityTransform {
         case .ellipse(let e):         return .ellipse(transformEllipse(e, t))
         case .spline(let s):          return .spline(transformSpline(s, t))
         case .splinePoints(let sp):   return .splinePoints(transformSplinePoints(sp, t))
+        case .text(let tx):           return .text(transformText(tx, t))
+        case .hatch(let h):           return .hatch(transformHatch(h, t))
+        case .solid(let s):           return .solid(transformSolid(s, t))
         }
     }
 
@@ -375,5 +378,49 @@ public enum EntityTransform {
             controlPoints: sp.controlPoints.map { t.apply($0) },
             closed: sp.closed
         )
+    }
+
+    // MARK: text — insertion point transforms; height *= uniformScale; rotation
+    //       gains the transform's rotation (or reflects under a mirror), matching
+    //       RS_Text::move/rotate/scale/mirror. Alignment fields are unchanged.
+
+    static func transformText(_ tx: TextData, _ t: Affine2D) -> TextData {
+        // Under a mirror, the baseline direction reflects across the axis: a
+        // direction at angle φ maps to 2·axisAngle − φ (the same reflected-angle
+        // form RS_Arc/RS_Ellipse use). Otherwise the baseline simply rotates.
+        let rotation: Double = t.isMirror
+            ? Vector.correctAngle(t.mirrorAxisAngle * 2 - tx.rotation)
+            : Vector.correctAngle(tx.rotation + t.rotationDelta)
+        return TextData(
+            position: t.apply(tx.position),
+            height: abs(tx.height * t.uniformScale),
+            rotation: rotation,
+            text: tx.text,
+            styleName: tx.styleName,
+            hAlign: tx.hAlign,
+            vAlign: tx.vAlign,
+            letterSpacingFactor: tx.letterSpacingFactor
+        )
+    }
+
+    // MARK: hatch — transform every boundary-loop vertex point; bulge sign flips
+    //       under a mirror (each boundary arc reverses orientation), unchanged
+    //       under rotation/uniform-scale (RS_Hatch::move/rotate/scale/mirror via
+    //       its boundary entities).
+
+    static func transformHatch(_ h: HatchData, _ t: Affine2D) -> HatchData {
+        let flip = t.isMirror
+        let loops = h.loops.map { ring in
+            ring.map { v in
+                PolylineVertex(point: t.apply(v.point), bulge: flip ? -v.bulge : v.bulge)
+            }
+        }
+        return HatchData(loops: loops, solidFill: h.solidFill, patternName: h.patternName)
+    }
+
+    // MARK: solid — transform every corner (RS_Solid::move/rotate/scale/mirror).
+
+    static func transformSolid(_ s: SolidData, _ t: Affine2D) -> SolidData {
+        SolidData(corners: s.corners.map { t.apply($0) })
     }
 }
