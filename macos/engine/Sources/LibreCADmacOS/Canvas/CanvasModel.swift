@@ -79,8 +79,23 @@ final class CanvasModel {
     /// `.free` as the always-available fallback so an empty-area click lands EXACTLY
     /// under the cursor. The grid is still drawn as a visual guide. (Engine
     /// `SnapMode.standard` is unchanged; this is the app-level interactive policy.)
-    @ObservationIgnored
+    ///
+    /// Now OBSERVED (was `@ObservationIgnored`) so the Inspector's snap-mode toggles
+    /// both reflect and drive this live; `updateSnap` reads it on every cursor event.
     var snapModes: SnapMode = [.endpoint, .center, .middle, .intersection, .onEntity, .free]
+
+    /// Whether the grid is drawn / used as a visual guide. The live grid SPACING is
+    /// owned by the renderer (passed into `updateSnap` per event); this is the
+    /// user-facing on/off the Inspector toggles. (Render-side consumption of this
+    /// flag is owned by the canvas/renderer; wired here additively so the Inspector
+    /// has a single source of truth for the toggle.)
+    var gridVisible: Bool = true
+
+    /// The user's preferred grid spacing (world units), surfaced by the Inspector.
+    /// The renderer currently computes its own adaptive spacing and passes it into
+    /// `updateSnap`; this stored preference is the Inspector's editable value (full
+    /// renderer adoption is owned by the canvas agent — see the report).
+    var preferredGridSpacing: Double = 1.0
 
     /// The grid step (world units) last seen via `updateSnap`/`snappedWorldPoint`.
     /// The renderer owns the live grid spacing and the canvas view passes it down
@@ -107,6 +122,35 @@ final class CanvasModel {
     /// The tool's current prompt for the status HUD ("Specify first point" …), or
     /// empty in select mode. Republished on every tool input so SwiftUI updates.
     private(set) var toolStatus: String = ""
+
+    // MARK: Tool config (the parameterized tools' "options", surfaced by the Inspector)
+
+    /// Editable defaults for the parameterized tools. These tools (`FilletTool`,
+    /// `ChamferTool`, `ArrayTool`, `DivideTool`) carry their parameters as public
+    /// `var`s but `ToolKind.makeTool()` mints them with fixed defaults; the
+    /// Inspector edits the values here and `activateTool` / the run-restart in
+    /// `handleToolInput` apply them onto the freshly-minted tool (see
+    /// `applyToolConfig()`), so an option set in the Inspector flows into the tool
+    /// no matter how it is activated (toolbar, menu, or keyboard).
+    var filletRadius: Double = 10.0
+    var chamferDistance1: Double = 10.0
+    var chamferDistance2: Double = 10.0
+
+    /// Array tool options. `arrayPolar == false` is a rectangular grid
+    /// (`arrayRows` × `arrayCols` stepped by `(arraySpacingX, arraySpacingY)`);
+    /// `true` is a polar ring of `arrayPolarCount` over `arrayPolarTotalAngle`.
+    var arrayPolar: Bool = false
+    var arrayRows: Int = 2
+    var arrayCols: Int = 3
+    var arraySpacingX: Double = 10.0
+    var arraySpacingY: Double = 10.0
+    var arrayPolarCount: Int = 6
+    /// Total polar sweep in radians (default a full circle).
+    var arrayPolarTotalAngle: Double = 2 * .pi
+    var arrayPolarRotateItems: Bool = true
+
+    /// Divide tool: number of equal pieces (drops `count − 1` division points).
+    var divideCount: Int = 2
 
     // MARK: Derived (for the SwiftUI HUD)
 
@@ -248,11 +292,64 @@ final class CanvasModel {
     // MARK: - Tool activation + routing
 
     /// Activates `kind`, minting a fresh tool value (or clearing to select mode).
-    /// Returns to `.select` discards any in-progress preview.
+    /// Returns to `.select` discards any in-progress preview. The freshly-minted
+    /// tool is configured from the Inspector's stored options (`applyToolConfig`).
     func activateTool(_ kind: ToolKind) {
         activeToolKind = kind
         tool = kind.makeTool()
+        applyToolConfig()
         toolStatus = tool?.status ?? ""
+    }
+
+    /// Pushes the Inspector's stored tool options onto the live tool value. The
+    /// parameterized tools expose their parameters as public `var`s / a `config`
+    /// (`ToolKind.makeTool()` mints them with fixed defaults), so we downcast and
+    /// overwrite the parameters here. Called after EVERY mint of the active tool
+    /// (`activateTool` and the post-commit re-mint in `handleToolInput`) so a
+    /// chained run keeps the user's configured values. No-op for tools without
+    /// options. The `tool` is a value type owned by the model, so the mutated copy
+    /// is stored back.
+    func applyToolConfig() {
+        switch tool {
+        case var t as FilletTool:
+            t.radius = filletRadius
+            tool = t
+        case var t as ChamferTool:
+            t.distance1 = chamferDistance1
+            t.distance2 = chamferDistance2
+            tool = t
+        case var t as ArrayTool:
+            t.config = InspectorEdits.arrayConfig(
+                polar: arrayPolar,
+                rows: arrayRows, cols: arrayCols,
+                spacingX: arraySpacingX, spacingY: arraySpacingY,
+                count: arrayPolarCount, totalAngle: arrayPolarTotalAngle,
+                rotateItems: arrayPolarRotateItems
+            )
+            tool = t
+        case is DivideTool:
+            // DivideTool's `divisions` is set at construction, so re-mint with the
+            // configured count (its public `var divisions` is settable too, but the
+            // init carries the clamp/validation, so prefer the init).
+            tool = DivideTool(divisions: Swift.max(2, divideCount))
+        default:
+            break
+        }
+    }
+
+    /// Re-applies the Inspector's tool options to the CURRENTLY active tool (if it
+    /// is one of the parameterized tools). The Inspector calls this when the user
+    /// changes an option while the tool is already active, so the change takes
+    /// effect on the next click without re-activating.
+    func reapplyActiveToolConfig() {
+        guard tool != nil else { return }
+        let savedStatus = toolStatus
+        applyToolConfig()
+        // DivideTool re-mint resets status to its initial prompt; restore the
+        // prior prompt text only if the tool kept its identity (non-Divide tools
+        // keep their state, so their status is unchanged anyway).
+        if !(tool is DivideTool) { toolStatus = savedStatus }
+        else { toolStatus = tool?.status ?? "" }
     }
 
     /// Forwards a snapped world point as a tool input, applying any committed
@@ -277,8 +374,10 @@ final class CanvasModel {
             // The run ended (commit/cancel). Mint a fresh tool of the same kind so
             // the user can immediately start the next run (LibreCAD keeps the tool
             // active after each line). To leave the tool entirely, the app calls
-            // `activateTool(.select)`.
+            // `activateTool(.select)`. Re-apply the Inspector's options so a chained
+            // run keeps the configured values.
             tool = activeToolKind.makeTool()
+            applyToolConfig()
             toolStatus = tool?.status ?? ""
             return true
         }
@@ -401,6 +500,97 @@ final class CanvasModel {
     /// `applyCommit` (no behavior fork). No-op on an empty list.
     func applyToolEdits(_ edits: [ToolEdit]) {
         applyCommit(edits)
+    }
+
+    // MARK: - Inspector edits (full-record replace; undoable; index-synced)
+
+    /// Applies one or more FULL-RECORD replacements (the Inspector path), as ONE
+    /// undoable group. Unlike a tool's `.replace(id, kind)` (geometry only), an
+    /// inspector edit may change ANY common attribute — the layer, the pen
+    /// (color/line type/width), the flags — as well as the geometry, so it carries
+    /// the whole `EntityRecord`. Each replace goes through the undoable
+    /// `CADDrawing.replace` (ADR-002) and is mirrored into the quadtree so the
+    /// result stays snappable/selectable; the GPU buffer is marked dirty so the
+    /// renderer repacks. A single undo reverts the whole edit (e.g. setting the
+    /// layer of a multi-selection). Records whose id is not in the drawing are
+    /// skipped. No-op (no undo step) for an empty list.
+    func applyInspectorEdits(_ records: [EntityRecord]) {
+        guard !records.isEmpty else { return }
+
+        // One undo step for the whole inspector commit (same grouping rationale as
+        // `applyCommit`: groups-by-event in the live app, explicit group in tests).
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+
+        for record in records {
+            guard drawing.contains(record.id) else { continue }
+            drawing.replace(record)                 // undoable; preserves id
+            let box = record.boundingBox()
+            if box.isEmpty { quadtree.remove(record.id) }
+            else { quadtree.update(record.id, bounds: box) }
+        }
+        modelDirty = true
+        modelVersion &+= 1
+    }
+
+    /// Convenience: replace a single entity's GEOMETRY (its `kind`) while keeping
+    /// every other attribute — the common Inspector geometry-field path. Looks the
+    /// record up, swaps its `kind`, and applies via `applyInspectorEdits`.
+    func replaceEntityKind(_ id: EntityID, _ kind: EntityKind) {
+        guard var record = drawing.entity(id) else { return }
+        record.kind = kind
+        applyInspectorEdits([record])
+    }
+
+    /// Applies a TEXT/MTEXT font/style edit as ONE undoable group: upserts a
+    /// derived `TextStyle` into the document's STYLE table (so bold/italic/family
+    /// render via the resolve path) AND repoints the entity at it (`newKind` carries
+    /// the new `styleName`). The STYLE table is a plain `var` (no `CADDrawing`
+    /// mutator for it), so its undo is registered manually here, grouped with the
+    /// entity replace's own undo — a single undo reverts both the style insertion
+    /// and the entity's style pointer.
+    ///
+    /// When `style` is `nil` this is just a per-entity text edit (no style change)
+    /// and behaves like `replaceEntityKind`.
+    func applyTextStyleEdit(_ id: EntityID, kind: EntityKind, upserting style: TextStyle?) {
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+
+        if let style {
+            let prior = drawing.textStyles
+            drawing.textStyles.upsert(style)
+            registerTextStylesUndo(prior: prior)
+        }
+        replaceEntityKind(id, kind)
+    }
+
+    /// Registers a self-re-registering undo that restores the whole STYLE table to
+    /// `prior` (and, on redo, restores whatever it replaced) — the value-snapshot
+    /// pattern `CADDrawing` uses for its layer/block tables, but owned here because
+    /// `CADDrawing.textStyles` has no dedicated undoable mutator.
+    private func registerTextStylesUndo(prior: TextStyleTable) {
+        undoManager.registerUndo(withTarget: self) { model in
+            // UndoManager invokes on the main thread for document apps.
+            MainActor.assumeIsolated {
+                let current = model.drawing.textStyles
+                model.drawing.textStyles = prior
+                model.registerTextStylesUndo(prior: current)   // redo restores `current`
+                model.modelDirty = true
+                model.modelVersion &+= 1
+            }
+        }
+    }
+
+    // MARK: - Snap modes (Inspector toggles)
+
+    /// Whether a snap mode is currently enabled.
+    func isSnapModeOn(_ mode: SnapMode) -> Bool { snapModes.contains(mode) }
+
+    /// Enables/disables a single snap mode (the Inspector's per-mode toggles).
+    func setSnapMode(_ mode: SnapMode, _ on: Bool) {
+        if on { snapModes.insert(mode) } else { snapModes.remove(mode) }
     }
 
     // MARK: - Undo / redo (rebuild the index, which the undo closures don't touch)
