@@ -1153,7 +1153,9 @@ final class CADCanvasController {
             activateTool(shift ? .rotate : .rectangle)
             return true
         case "p":
-            activateTool(.polyline)
+            // Bare P = Polyline (draw); ⇧P = Edit Polyline (modify, wire-wave-D) —
+            // free shift chord (bare P has no other shift twin).
+            activateTool(shift ? .polylineEdit : .polyline)
             return true
         case "o":
             // Bare O = Point (draw); ⇧O = Offset (modify) — the shared-letter

@@ -281,6 +281,12 @@ struct LibreCADApp: App {
                 Button("Break") { activateTool?(.break) }
                     .keyboardShortcut("b", modifiers: .shift)
                     .disabled(activateTool == nil)
+                // Wire-wave-D: Edit Polyline (⇧P) — pick a polyline, then move / add /
+                // remove a vertex, or toggle a segment straight↔arc. ⇧P is free (bare P
+                // is Polyline with no shift twin).
+                Button("Edit Polyline") { activateTool?(.polylineEdit) }
+                    .keyboardShortcut("p", modifiers: .shift)
+                    .disabled(activateTool == nil)
 
                 Divider()
                 // Edit tools (pick entities under the cursor; no pre-selection).

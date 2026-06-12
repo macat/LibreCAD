@@ -109,6 +109,10 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     /// The Insert (block reference) draw tool (`InsertTool`) — place a reference to a
     /// named block by clicking an insertion point.
     case insert
+    // --- Wire-wave-D tool (wired into the UI in this wave) ---
+    /// The Polyline-Edit modify tool (`PolylineEditTool`) — pick a polyline, then
+    /// move / add / remove a vertex, or toggle a segment straight↔arc.
+    case polylineEdit
     // Append new draw tools here (one `case` per tool) — see the collision note.
 
     /// A short title for the UI (toolbar button / menu).
@@ -148,6 +152,7 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .lengthen:    return "Lengthen"
         case .break:       return "Break"
         case .insert:      return "Insert Block"
+        case .polylineEdit: return "Edit Polyline"
         // Append a title arm per new case.
         }
     }
@@ -193,6 +198,7 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         // InsertTool with no block name is inert (a safe no-op) — the block-picker UI
         // is a later task; activation never crashes even with no blocks in the drawing.
         case .insert:      return InsertTool()
+        case .polylineEdit: return PolylineEditTool()
         // Append a `case <kind>: return <Name>Tool()` arm per new tool.
         }
     }

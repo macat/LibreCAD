@@ -301,6 +301,10 @@ struct ContentView: View {
                        help: "Stretch selection (⌥S)")
             toolButton(.lengthen, symbol: "ruler", help: "Lengthen line/arc (⇧L)")
             toolButton(.break, symbol: "scissors.badge.ellipsis", help: "Break entity (⇧B)")
+            // Wire-wave-D: edit an existing polyline's vertices/segments.
+            toolButton(.polylineEdit,
+                       symbol: "point.topleft.down.to.point.bottomright.curvepath.fill",
+                       help: "Edit polyline vertices (⇧P)")
 
             Divider()
             // Edit tools (pick entities under the cursor; no pre-selection needed).
