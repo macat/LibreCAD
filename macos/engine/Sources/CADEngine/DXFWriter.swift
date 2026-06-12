@@ -93,6 +93,8 @@ extension CADEngine {
     public func writeEntities(
         _ entities: [EntityRecord],
         layers: LayerTable,
+        blocks: BlockTable = BlockTable(),
+        blockMembers: [String: [EntityRecord]] = [:],
         toPath path: String,
         version: DXFVersion = .r2000
     ) throws -> DXFWriteResult {
@@ -104,17 +106,37 @@ extension CADEngine {
         let entityPODs = entities.map { builder.makeEntity($0) }
         let layerPODs = layers.layers.map { builder.makeLayer($0) }
 
+        // Build the block definitions + a flat array of their member PODs. Each
+        // block windows into `blockEntityPODs`; only non-anonymous user blocks are
+        // emitted (anonymous `*`-blocks aren't authored — they regenerate). The
+        // member lookup is supplied by the caller (a `name → [EntityRecord]` map);
+        // missing members yield an empty (still valid) block.
+        var blockPODs: [LCBlock] = []
+        var blockEntityPODs: [LCEntity] = []
+        for block in blocks.blocks where !block.name.hasPrefix("*") {
+            let members = blockMembers[block.name] ?? []
+            let offset = blockEntityPODs.count
+            for m in members { blockEntityPODs.append(builder.makeEntity(m)) }
+            blockPODs.append(builder.makeBlock(block, memberOffset: offset, memberCount: members.count))
+        }
+
         var skipped: Int32 = 0
         let status = path.withCString { cpath -> LCStatus in
             entityPODs.withUnsafeBufferPointer { ents -> LCStatus in
                 layerPODs.withUnsafeBufferPointer { lays -> LCStatus in
-                    lc_dxf_write(
-                        cpath,
-                        ents.baseAddress, Int32(ents.count),
-                        lays.baseAddress, Int32(lays.count),
-                        version.rawValue,
-                        &skipped
-                    )
+                    blockPODs.withUnsafeBufferPointer { blks -> LCStatus in
+                        blockEntityPODs.withUnsafeBufferPointer { blkEnts -> LCStatus in
+                            lc_dxf_write(
+                                cpath,
+                                ents.baseAddress, Int32(ents.count),
+                                lays.baseAddress, Int32(lays.count),
+                                blks.baseAddress, Int32(blks.count),
+                                blkEnts.baseAddress, Int32(blkEnts.count),
+                                version.rawValue,
+                                &skipped
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -150,8 +172,13 @@ public func writeDrawing(
     // off-main through the single engine serialization point.
     let entities = drawing.entities
     let layers = drawing.layers
+    let blocks = drawing.blocks
+    // Resolve each block's member ids to records so the writer can author the block
+    // definitions (the same name → [EntityRecord] snapshot the resolve context uses).
+    let blockMembers = drawing.blockMembersSnapshot()
     return try await CADEngine.shared.writeEntities(
-        entities, layers: layers, toPath: path, version: version
+        entities, layers: layers, blocks: blocks, blockMembers: blockMembers,
+        toPath: path, version: version
     )
 }
 
@@ -453,8 +480,41 @@ private final class PODBuilder {
             e.vertexCount = vcount
             e.loops = lptr
             e.loopCount = lcount
+
+        case .insert(let d):
+            // Emitted as a DXF INSERT/MINSERT (the C side writes DRW_Insert). The
+            // block name (textValue), insertion point (p1), per-axis scale, rotation
+            // (radians; C converts to DXF degrees) and the MINSERT array map straight
+            // onto the POD. The referenced block's DEFINITION is written separately
+            // in the BLOCKS section (see writeEntities' block POD build) so the
+            // INSERT resolves to real geometry on re-read.
+            e.kind = Int32(LC_ENT_INSERT.rawValue)
+            e.p1x = d.insertionPoint.x; e.p1y = d.insertionPoint.y; e.p1z = d.insertionPoint.z
+            e.insScaleX = d.scale.x
+            e.insScaleY = d.scale.y
+            e.insScaleZ = d.scale.z == 0 ? 1 : d.scale.z
+            e.startAngle = d.rotation   // radians; the C side converts to DXF degrees
+            e.insRows = Int32(d.rows)
+            e.insCols = Int32(d.cols)
+            e.insRowSpacing = d.rowSpacing
+            e.insColSpacing = d.colSpacing
+            e.textValue = intern(d.blockName)
         }
         return e
+    }
+
+    /// Builds an `LCBlock` POD from a `Block` definition + the offset/count window
+    /// of its member entities in the flat block-member POD array. The block's name +
+    /// base point map straight onto the POD; the member PODs are built by the caller
+    /// (so their backing storage lives on this builder).
+    func makeBlock(_ block: Block, memberOffset: Int, memberCount: Int) -> LCBlock {
+        var b = LCBlock()
+        b.name = intern(block.name.isEmpty ? "block" : block.name)
+        b.bx = block.basePoint.x; b.by = block.basePoint.y; b.bz = block.basePoint.z
+        b.flags = block.isFrozen ? 0x1 : 0
+        b.memberOffset = Int32(memberOffset)
+        b.memberCount = Int32(memberCount)
+        return b
     }
 
     // MARK: Layer mapping (inverse of DXFReader.mapLayers)

@@ -229,9 +229,9 @@ public struct HatchTool: Tool {
 
             // Unsupported boundary kinds are skipped (no loop contributed). Ellipse
             // / spline boundaries are a backlog widening; text / hatch / solid /
-            // dimension / point can't bound a fill.
+            // dimension / insert / point can't bound a fill.
             case .ellipse, .spline, .splinePoints, .text, .mtext,
-                 .hatch, .solid, .dimension, .point:
+                 .hatch, .solid, .dimension, .point, .insert:
                 continue
             }
         }

@@ -238,6 +238,7 @@ public enum EntityTransform {
         case .hatch(let h):           return .hatch(transformHatch(h, t))
         case .solid(let s):           return .solid(transformSolid(s, t))
         case .dimension(let dm):      return .dimension(transformDimension(dm, t))
+        case .insert(let ins):        return .insert(transformInsert(ins, t))
         }
     }
 
@@ -504,6 +505,46 @@ public enum EntityTransform {
             lineSpacingStyle: dm.lineSpacingStyle,
             lineSpacingFactor: dm.lineSpacingFactor,
             obliqueAngle: newOblique
+        )
+    }
+
+    // MARK: insert — the insertion point transforms; the rotation gains the
+    //       transform's rotation (or reflects under a mirror); the per-axis scale
+    //       is multiplied by the transform's uniform factor. Mirrors
+    //       RS_Insert::move/rotate/scale/mirror, which transform the placement and
+    //       re-run update() — here update() is the PURE resolve(), so we only
+    //       transform the DEFINING placement (ADR-001). The block name + MINSERT
+    //       array (counts + spacing, in the block's local frame) are unchanged.
+    //
+    //       LIMITATION (documented, matching the circle/arc note in the header): a
+    //       NON-uniform scale (sx != sy) of an insert is approximated with the
+    //       uniform factor on both axes. The faithful behavior would fold the
+    //       transform's anisotropy into the insert's per-axis scale only when the
+    //       transform has no rotation; the general anisotropic+rotated case needs a
+    //       polar decomposition (out of scope). The common move/rotate/uniform-scale/
+    //       mirror paths are exact.
+
+    static func transformInsert(_ ins: InsertData, _ t: Affine2D) -> InsertData {
+        // New rotation: reflect across the mirror axis, else add the rotation delta.
+        let rotation: Double = t.isMirror
+            ? Vector.correctAngle(t.mirrorAxisAngle * 2 - ins.rotation)
+            : Vector.correctAngle(ins.rotation + t.rotationDelta)
+        // Per-axis scale times the uniform factor. A mirror flips the X scale sign
+        // (the reflected-angle rotation already accounts for orientation, so flipping
+        // one axis reproduces the reflection of the placed geometry — matching
+        // RS_Insert::mirror negating a scale factor).
+        let factor = t.uniformScale
+        let sx = ins.scale.x * factor * (t.isMirror ? -1 : 1)
+        let sy = ins.scale.y * factor
+        return InsertData(
+            blockName: ins.blockName,
+            insertionPoint: t.apply(ins.insertionPoint),
+            scale: Vector(sx, sy, ins.scale.z),
+            rotation: rotation,
+            rows: ins.rows,
+            cols: ins.cols,
+            rowSpacing: ins.rowSpacing * factor,
+            colSpacing: ins.colSpacing * factor
         )
     }
 }
