@@ -92,7 +92,8 @@ struct LibreCADApp: App {
             // Modify. Modify tools act on the current selection (select in V mode,
             // then activate); with nothing selected the tool's HUD prompts "Select
             // objects…". Shift picks the modify variant where a letter is shared
-            // (⇧C Copy vs C Circle, ⇧R Rotate vs R Rectangle, ⇧M Mirror vs M Move).
+            // (⇧C Copy vs C Circle, ⇧R Rotate vs R Rectangle, ⇧M Mirror vs M Move,
+            // ⇧O Offset vs O Point). New draw tools: E Ellipse, G Polygon.
             CommandMenu("Tools") {
                 Button("Select") { activateTool?(.select) }
                     .keyboardShortcut("v", modifiers: [])
@@ -118,6 +119,12 @@ struct LibreCADApp: App {
                 Button("Point") { activateTool?(.point) }
                     .keyboardShortcut("o", modifiers: [])
                     .disabled(activateTool == nil)
+                Button("Ellipse") { activateTool?(.ellipse) }
+                    .keyboardShortcut("e", modifiers: [])
+                    .disabled(activateTool == nil)
+                Button("Polygon") { activateTool?(.polygon) }
+                    .keyboardShortcut("g", modifiers: [])
+                    .disabled(activateTool == nil)
 
                 Divider()
                 // Modify tools (act on the current selection).
@@ -126,6 +133,9 @@ struct LibreCADApp: App {
                     .disabled(activateTool == nil)
                 Button("Copy") { activateTool?(.copy) }
                     .keyboardShortcut("c", modifiers: .shift)
+                    .disabled(activateTool == nil)
+                Button("Offset") { activateTool?(.offset) }
+                    .keyboardShortcut("o", modifiers: .shift)
                     .disabled(activateTool == nil)
                 Button("Rotate") { activateTool?(.rotate) }
                     .keyboardShortcut("r", modifiers: .shift)

@@ -56,6 +56,12 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     case scale
     /// The Mirror modify tool (`MirrorTool`).
     case mirror
+    /// The Ellipse draw tool (`EllipseTool`).
+    case ellipse
+    /// The Polygon draw tool (`PolygonTool`).
+    case polygon
+    /// The Offset modify tool (`OffsetTool`) — acts on `ToolContext.selected`.
+    case offset
     // Append new draw tools here (one `case` per tool) — see the collision note.
 
     /// A short title for the UI (toolbar button / menu).
@@ -73,6 +79,9 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .rotate:    return "Rotate"
         case .scale:     return "Scale"
         case .mirror:    return "Mirror"
+        case .ellipse:   return "Ellipse"
+        case .polygon:   return "Polygon"
+        case .offset:    return "Offset"
         // Append a title arm per new case.
         }
     }
@@ -94,6 +103,9 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .rotate:    return RotateTool()
         case .scale:     return ScaleTool()
         case .mirror:    return MirrorTool()
+        case .ellipse:   return EllipseTool()
+        case .polygon:   return PolygonTool()
+        case .offset:    return OffsetTool()
         // Append a `case <kind>: return <Name>Tool()` arm per new tool.
         }
     }

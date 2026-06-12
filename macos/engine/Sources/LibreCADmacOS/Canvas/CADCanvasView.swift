@@ -354,8 +354,9 @@ final class CADCanvasController {
     ///   Return/Enter → commit the current tool run.
     ///   Delete/⌫     → backspace the current tool run (tool active) OR delete the
     ///                  current selection (select mode, if non-empty).
-    ///   Draw (bare): L=Line, C=Circle, A=Arc, R=Rectangle, P=Polyline, O=Point.
-    ///   Modify (⇧):  M=Move, ⇧C=Copy, ⇧R=Rotate, ⇧S=Scale, ⇧M=Mirror.
+    ///   Draw (bare): L=Line, C=Circle, A=Arc, R=Rectangle, P=Polyline, O=Point,
+    ///                E=Ellipse, G=Polygon.
+    ///   Modify (⇧):  M=Move, ⇧C=Copy, ⇧R=Rotate, ⇧S=Scale, ⇧M=Mirror, ⇧O=Offset.
     /// These mirror the Tools-menu shortcuts in `LibreCADApp` (the discoverable
     /// source of truth) so the canvas and the menu stay in lockstep. Bare keys with
     /// a command modifier are NOT claimed here (⌘O Open / ⌘Z Undo / ⌘0 Zoom-to-Fit
@@ -404,7 +405,7 @@ final class CADCanvasController {
             return false
         }
         // Bare letter keys (no command modifier) activate tools. Shift selects the
-        // modify variant where a draw tool shares the letter (C/R/S/M).
+        // modify variant where a draw tool shares the letter (C/R/S/M/O).
         guard !command else { return false }
         switch chars {
         case "v":
@@ -426,7 +427,15 @@ final class CADCanvasController {
             activateTool(.polyline)
             return true
         case "o":
-            activateTool(.point)
+            // Bare O = Point (draw); ⇧O = Offset (modify) — the shared-letter
+            // shift convention (like ⇧C/⇧R/⇧M).
+            activateTool(shift ? .offset : .point)
+            return true
+        case "e":
+            activateTool(.ellipse)
+            return true
+        case "g":
+            activateTool(.polygon)
             return true
         case "m":
             activateTool(shift ? .mirror : .move)
