@@ -61,6 +61,10 @@ pass or by the relevant downstream owner. Each cites its source.
 - Add a `worldToScreen ↔ worldToClip` consistency regression test (same world point → same screen pixel across sizes/backing/pan/zoom) — locks in the offset fix. (offset-fix3's intended test; agent was stopped before landing it.)
 - Remove (or keep env-gated) the `LC_DEBUG_COORDS` instrumentation in CADCanvasView once we're confident the offset stays fixed.
 
+## Layers / rendering
+- **Layer visibility render filter** (sidebar gap): the render path (`LineRenderer.rebuildLineInstancesIfNeeded`) + `resolve()` don't skip entities on hidden/frozen layers — toggling the eye in the sidebar updates model state but doesn't hide pixels. Fix in the renderer (skip ids whose `layers.layer(e.layer)?.isVisible==false`) — fold into the renderer-fills wave. (ws-sidebar flag)
+- Add a `CADDrawing.setLayerColor(_:_:)` convenience wrapper (sidebar used `mutateLayers{ setColor }`). (ws-sidebar)
+
 ## App shell
 - **Reintroduce DocumentGroup** (native open/save/recents/autosave/versions) with an OFF-MAIN-SAFE
   `ReferenceFileDocument`: store Sendable parsed data (entities/layers or raw bytes) in

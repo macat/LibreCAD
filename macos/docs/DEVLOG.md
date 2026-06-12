@@ -131,6 +131,13 @@ Engine modules on native-macos: CADEngine core (Vector/Geometry/Pen/Entity/Resol
 ### Features v2 — user picked ALL FOUR directions (2026-06-12). See features-v2-plan.md.
 - [2026-06-12 ~10:00] 🔨 Wave 1 (4 parallel, disjoint files, controlled batch): ws-toolctx (widen ToolContext: nearbyEntities/allEntities for trim/extend boundaries — Tool.swift+CanvasModel; task #10 foundation), ws-dxfwrite (libdxfrw write side + DXFWriter; round-trip test — DxfBridge+new DXFWriter.swift; task #9), ws-displaykinds (text/hatch/solid EntityKind + resolve; activate fontProvider + bundle .lff — Entity/Resolve/CADDrawing/make-app.sh; task #8), ws-sidebar (NavigationSplitView Layers sidebar — ContentView+Sidebar/; task #11). Outcome: running. Wave 2 (trim/extend, fillet/chamfer, renderer fills, reader-import text/hatch/solid, save panels) after wave 1 merges.
 
+#### Wave 1 results + Wave 2 kickoff
+- 🔨 ws-toolctx — DONE (c59df92d3): ToolContext + nearbyEntities/allEntities (Sendable, defaults; existing tools unchanged). 545t. MERGED.
+- 🔨 ws-sidebar — DONE (21426dad9): NavigationSplitView Layers sidebar (visible/lock/active/color/rename/add/remove via CADDrawing undoable methods; Blocks stub). 536t. MERGED. FLAG: visibility toggle sets model state but render path doesn't skip hidden layers yet → follow-up (fold into renderer wave). Also no CADDrawing.setLayerColor wrapper (used mutateLayers).
+- [2026-06-12 ~10:30] 📋 coordinator — MERGED ws/toolctx + ws/sidebar → native-macos (disjoint, clean). 545 tests. 136 commits. Dispatched Wave 2a: tool-trim + tool-extend (use widened ToolContext + Intersections; line/arc scope).
+- 🔨 ws-displaykinds — DONE (94a26fbc1): text/hatch/solid kinds + resolve (.lff text layout, fills) + fontProvider activated + 46 fonts bundled. 558t. NECESSARILY edited exhaustive switches (EntityTransform/Snapping/OffsetTool/DXFReaderTests — additive arms, no existing-kind behavior change). In review (review-displaykinds).
+- 🔨 ws-dxfwrite — DONE (6072e6101): lc_dxf_write C-ABI + DXFWriter; round-trip test (dim_sample read→write→reread, counts in==out); reader untouched; R2000. 543t. In review (review-dxfwrite).
+
 ## BROAD-PARITY P0 TOOLSET COMPLETE (2026-06-12) — usable native CAD editor
 All P0 tools wired + usable: DRAW line/circle/arc/rectangle/polyline/point; MODIFY move/copy/rotate/scale/mirror; select (single/window/crossing) + ⌫ delete + ⌘Z/⇧⌘Z undo/redo; snap (endpoint/center/mid/intersection/on-entity) + coord HUD; pan/zoom/fit/grid; open .dxf. 471 tests, 113 commits on native-macos, app launches (user-confirmed earlier). Cursor-offset fixed. AWAITING user GUI verification of the full toolset (task #5). All local — push blocked all session.
 
