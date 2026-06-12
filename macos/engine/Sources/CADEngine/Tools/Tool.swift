@@ -127,10 +127,14 @@ public enum ToolOutcome: Sendable, Equatable {
 /// DRAW tools ignore the context entirely (they only need the snapped world
 /// points in `ToolInput`). MODIFY tools read `selected` (the entities to act on)
 /// and `entity(_:)` (to resolve any id they reference), and may read
-/// `gridSpacing` for grid-aware snapping/stepping.
+/// `gridSpacing` for grid-aware snapping/stepping. The EDITING tools this contract
+/// is widened for (Trim / Extend / Fillet) additionally need to see OTHER entities
+/// as *boundaries* — the thing you trim against, extend to, or fillet between — so
+/// they read `nearbyEntities(_:_:)` (boundaries near a picked point) and/or
+/// `allEntities()` (a full scan).
 ///
-/// Sendable: `selected` is a value array and `entity` is a `@Sendable` closure, so
-/// the whole context crosses isolation boundaries with the tool value.
+/// Sendable: `selected` is a value array and the closures are `@Sendable`, so the
+/// whole context crosses isolation boundaries with the tool value.
 public struct ToolContext: Sendable {
     /// The entities currently selected, resolved to full records (the app resolves
     /// `Selection.ids` against the drawing). Empty when nothing is selected — the
@@ -146,18 +150,50 @@ public struct ToolContext: Sendable {
     /// unavailable. Tools that step by the grid (e.g. a grid-aware move) read this.
     public let gridSpacing: Double?
 
+    /// The boundary-finding hook for the editing tools (Trim / Extend / Fillet):
+    /// every entity whose geometry lies within the given WORLD `tolerance` of the
+    /// given world `point`. The point is the user's pick (already snapped) and the
+    /// tolerance is the pick aperture in world units (GUI px × worldPerPixel).
+    ///
+    /// The app implements this by prefiltering candidates with the shared quadtree
+    /// (`query(point:tolerance:)`) and then keeping only those whose EXACT analytic
+    /// distance to the point is within tolerance — the same prefilter→exact path
+    /// `Selection.hitTest` uses, so a returned entity really is *under the pick*,
+    /// not merely AABB-near it. Hidden entities (cleared `.visible` flag) are
+    /// skipped — you can't pick a boundary you can't see. Order is unspecified; a
+    /// tool that wants "the nearest boundary" sorts by its own exact distance.
+    ///
+    /// A `@Sendable` closure over an immutable value snapshot of the drawing (and a
+    /// snapshot spatial query), so it carries across isolation boundaries with the
+    /// tool value (no `self`, no actor state). Default returns `[]` (the empty
+    /// context / draw-tool tests don't need boundaries).
+    public let nearbyEntities: @Sendable (Vector, Double) -> [EntityRecord]
+
+    /// A full snapshot of every entity in the drawing — for editing tools that scan
+    /// ALL boundaries rather than just the ones near a pick (e.g. a Fillet that
+    /// considers any pair, or an Extend whose target boundary is outside the pick
+    /// aperture). Prefer `nearbyEntities(_:_:)` when a pick point is available; this
+    /// is the brute-force fallback.
+    ///
+    /// A `@Sendable` closure returning the captured value snapshot. Default `[]`.
+    public let allEntities: @Sendable () -> [EntityRecord]
+
     public init(
         selected: [EntityRecord],
         entity: @escaping @Sendable (EntityID) -> EntityRecord?,
-        gridSpacing: Double?
+        gridSpacing: Double?,
+        nearbyEntities: @escaping @Sendable (Vector, Double) -> [EntityRecord] = { _, _ in [] },
+        allEntities: @escaping @Sendable () -> [EntityRecord] = { [] }
     ) {
         self.selected = selected
         self.entity = entity
         self.gridSpacing = gridSpacing
+        self.nearbyEntities = nearbyEntities
+        self.allEntities = allEntities
     }
 
-    /// An empty context (no selection, no lookup, no grid) — handy for unit tests
-    /// of draw tools that ignore the context.
+    /// An empty context (no selection, no lookup, no grid, no boundaries) — handy
+    /// for unit tests of draw tools that ignore the context.
     public static let empty = ToolContext(
         selected: [],
         entity: { _ in nil },

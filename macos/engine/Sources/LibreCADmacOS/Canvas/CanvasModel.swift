@@ -282,14 +282,31 @@ final class CanvasModel {
     }
 
     /// Builds the read-only `ToolContext` snapshot for one `handle` call: the
-    /// current selection resolved to records, a lookup into the drawing, and the
-    /// last-seen grid step. Rebuilt per call so the tool always sees current state
-    /// (cheap: the selection is usually small / empty while drawing).
+    /// current selection resolved to records, a lookup into the drawing, the
+    /// last-seen grid step, and the boundary hooks (`nearbyEntities` / `allEntities`)
+    /// the editing tools (Trim / Extend / Fillet) read. Rebuilt per call so the tool
+    /// always sees current state (cheap: the selection is usually small / empty
+    /// while drawing).
     ///
-    /// The `entity` closure captures an immutable value snapshot of the drawing's
-    /// `entities` (a copy-on-write array — cheap, no deep copy), keyed by id. That
-    /// makes the closure genuinely `@Sendable` (it touches only value types, no
-    /// `self`, no actor state), so no isolation assumption is needed.
+    /// ## Why the closures are genuinely `@Sendable` (no `MainActor.assumeIsolated`)
+    /// Every closure captures only an immutable VALUE snapshot of the drawing's
+    /// `entities` (`snapshot`, a copy-on-write array — cheap, no deep copy) and the
+    /// id-keyed `byID` map built from it. They touch no `self`, no actor state, and
+    /// — crucially — NOT the live `quadtree` (a non-`Sendable`, main-actor `final
+    /// class` that must never cross an isolation boundary). That makes the whole
+    /// `ToolContext` honestly `Sendable` with no isolation assumption (CONVENTIONS:
+    /// never `assumeIsolated` on a path the framework may invoke off-main).
+    ///
+    /// ## `nearbyEntities`: prefilter→exact, but over the value snapshot
+    /// `Selection.hitTest` prefilters with the shared `quadtree`, then runs the
+    /// exact analytic distance. Here the closure can't hold the quadtree
+    /// (non-Sendable) and the (point, tolerance) aren't known until the tool calls
+    /// it, so it runs the EXACT analytic distance test (`HitTesting.worldDistance`)
+    /// over the captured snapshot directly — correct (a returned entity really is
+    /// under the pick), skipping only the cheap AABB prefilter. Tool picks are
+    /// infrequent and drawings settle small enough that the linear scan is fine for
+    /// the editing-tool foundation; a future hot path can capture an immutable
+    /// snapshot index here WITHOUT changing the `ToolContext` contract.
     private func makeToolContext() -> ToolContext {
         let snapshot = drawing.entities          // CoW value snapshot (Sendable)
         let byID = Dictionary(uniqueKeysWithValues: snapshot.map { ($0.id, $0) })
@@ -297,7 +314,17 @@ final class CanvasModel {
         return ToolContext(
             selected: selected,
             entity: { id in byID[id] },
-            gridSpacing: lastGridSpacing
+            gridSpacing: lastGridSpacing,
+            nearbyEntities: { point, tolerance in
+                guard point.valid else { return [] }
+                let tol = Swift.max(tolerance, 0)
+                return snapshot.filter { record in
+                    // Skip what you can't see (mirrors hitTest's `.visible` gate).
+                    guard record.flags.contains(.visible) else { return false }
+                    return HitTesting.worldDistance(from: point, to: record) <= tol
+                }
+            },
+            allEntities: { snapshot }
         )
     }
 
