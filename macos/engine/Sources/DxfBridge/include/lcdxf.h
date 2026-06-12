@@ -283,8 +283,10 @@ LCStatus lc_dxf_count_entities(const char *path, int *out_count);
  * Write a DXF file from flat POD entity + layer arrays.
  *
  * Supported `LCEntity::kind` values are emitted: LINE, POINT, CIRCLE, ARC,
- * ELLIPSE, LWPOLYLINE, POLYLINE. Any other kind (SPLINE, UNSUPPORTED, ...) is
- * silently skipped and counted in `*out_skipped`. Common attributes
+ * ELLIPSE, LWPOLYLINE, POLYLINE, TEXT, MTEXT, SOLID, HATCH. Any other kind
+ * (SPLINE, UNSUPPORTED, ...) is silently skipped and counted in `*out_skipped`.
+ * (MTEXT only exists for R2000+; at R12 it is dropped and counted as skipped.)
+ * Common attributes
  * (layer/linetype/color/color24/lineweight) map onto the DRW_* fields, mirroring
  * the reader's POD mapping in reverse.
  *
