@@ -58,6 +58,7 @@ struct DXFWriterTests {
             case .ellipse:      t.ellipse += 1
             case .polyline:     t.polyline += 1
             case .spline, .splinePoints: break   // skipped by the writer
+            case .text, .hatch, .solid: break    // display kinds, skipped by the writer
             }
         }
         return t
@@ -280,7 +281,7 @@ struct DXFWriterTests {
     private func isSupported(_ r: EntityRecord) -> Bool {
         switch r.kind {
         case .line, .point, .circle, .arc, .ellipse, .polyline: return true
-        case .spline, .splinePoints: return false
+        case .spline, .splinePoints, .text, .hatch, .solid: return false
         }
     }
 }
