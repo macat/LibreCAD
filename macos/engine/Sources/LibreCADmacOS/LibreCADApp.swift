@@ -32,6 +32,9 @@ struct LibreCADApp: App {
     @FocusedValue(\.zoomToFit) private var zoomToFit
     /// The Open action published by the focused window (drives its .fileImporter).
     @FocusedValue(\.openDocument) private var openDocument
+    /// Save / Save As… actions published by the focused window (⌘S / ⇧⌘S).
+    @FocusedValue(\.saveDocument) private var saveDocument
+    @FocusedValue(\.saveDocumentAs) private var saveDocumentAs
     /// The tool-activation action published by the focused window.
     @FocusedValue(\.activateTool) private var activateTool
     /// Undo / redo actions published by the focused window.
@@ -53,6 +56,20 @@ struct LibreCADApp: App {
                 Button("Open…") { openDocument?() }
                     .keyboardShortcut("o", modifiers: .command)
                     .disabled(openDocument == nil)
+            }
+            // File ▸ Save (⌘S) / Save As… (⇧⌘S). Both route to the focused window
+            // via focused scene values (same pattern as Open/Zoom-to-Fit). Save
+            // writes the current `model.drawing` to the document's file (or falls
+            // through to Save As… when there isn't one yet) through the merged
+            // DXFWriter; Save As… always presents an NSSavePanel for a `.dxf`.
+            // Disabled when no canvas is focused.
+            CommandGroup(replacing: .saveItem) {
+                Button("Save") { saveDocument?() }
+                    .keyboardShortcut("s", modifiers: .command)
+                    .disabled(saveDocument == nil)
+                Button("Save As…") { saveDocumentAs?() }
+                    .keyboardShortcut("s", modifiers: [.command, .shift])
+                    .disabled(saveDocumentAs == nil)
             }
             // Undo / redo (replaces the empty default since there's no DocumentGroup).
             CommandGroup(replacing: .undoRedo) {
