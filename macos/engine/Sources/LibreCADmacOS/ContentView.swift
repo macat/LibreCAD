@@ -22,6 +22,7 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import AppKit
 import CADEngine
 
 struct ContentView: View {
@@ -29,6 +30,9 @@ struct ContentView: View {
     /// window; `@MainActor @Observable`, so it is only ever touched on the main
     /// actor — which is where this whole view runs.
     @State private var model = CanvasModel()
+    /// Tracks the window's current file URL (the doc opened or last saved to) and
+    /// its unsaved-changes flag. Drives Save (⌘S) vs Save As… (⇧⌘S) and the title.
+    @State private var doc = DocumentState()
     /// Bridge so the Zoom-to-Fit command can reach the live canvas controller.
     @State private var controllerBox = CADCanvasView.ControllerBox()
     @State private var status: String = "Loading…"
@@ -67,6 +71,10 @@ struct ContentView: View {
             .toolbar { toolbarContent }
             .focusedSceneValue(\.zoomToFit) { controllerBox.controller?.zoomToFit() }
             .focusedSceneValue(\.openDocument) { showOpen = true }
+            // Save (⌘S): write in place if we have a current file, else Save As…
+            .focusedSceneValue(\.saveDocument) { Task { await save() } }
+            // Save As… (⇧⌘S): always present the panel.
+            .focusedSceneValue(\.saveDocumentAs) { Task { await saveAs() } }
             .focusedSceneValue(\.activateTool) { kind in
                 controllerBox.controller?.activateTool(kind)
             }
@@ -93,6 +101,10 @@ struct ContentView: View {
                 didLoadSample = true
                 Task { await loadSample() }
             }
+            // Reflect the current file in the window title bar (and show the proxy
+            // icon when a real file backs the document). Untitled before first save.
+            .navigationTitle(doc.displayName)
+            .modifier(NavigationDocumentIfAny(url: doc.currentURL))
     }
 
     // MARK: - Toolbar (Select + Draw group + Modify group)
@@ -225,13 +237,15 @@ struct ContentView: View {
         }
     }
 
-    /// Loads a user-picked file, honoring the security-scoped URL lifecycle. On
-    /// error the message lands in the status HUD — never a crash.
+    /// Loads a user-picked file, honoring the security-scoped URL lifecycle, and
+    /// records it as the document's current file so a later ⌘S writes back to it.
+    /// On error the message lands in the status HUD — never a crash.
     @MainActor
     private func open(_ url: URL) async {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        await load(path: url.path, label: url.lastPathComponent)
+        let ok = await load(path: url.path, label: url.lastPathComponent)
+        if ok { doc.markOpened(url) }
     }
 
     // MARK: - Initial sample load
@@ -259,8 +273,10 @@ struct ContentView: View {
 
     /// Parses a DXF at `path` on the main actor, installs it in the model, frames
     /// it, and updates the HUD. Errors surface in the status HUD (no crash).
+    /// Returns whether the load succeeded (so callers can record the file URL).
     @MainActor
-    private func load(path: String, label: String) async {
+    @discardableResult
+    private func load(path: String, label: String) async -> Bool {
         let size = model.viewport.size
         do {
             let drawing = try await loadDrawing(dxfPath: path)
@@ -268,9 +284,89 @@ struct ContentView: View {
             status = "\(label) — \(model.entityCount) entities"
             NSLog("CADCanvas: loaded \(model.entityCount) entities from \(label)")
             controllerBox.controller?.zoomToFit()
+            return true
         } catch {
             status = "Load failed: \(error.localizedDescription)"
             NSLog("CADCanvas: load failed: \(error)")
+            return false
+        }
+    }
+
+    // MARK: - Save (⌘S) / Save As… (⇧⌘S)
+
+    /// Save (⌘S): if the document already has a file, write the current drawing to
+    /// it; otherwise fall through to Save As… The write runs through the
+    /// `@MainActor` `writeDrawing` (which hops to the engine actor for the
+    /// non-reentrant libdxfrw call). Status/errors land in the HUD — never a crash.
+    @MainActor
+    private func save() async {
+        if let url = doc.currentURL {
+            await write(to: url)
+        } else {
+            await saveAs()
+        }
+    }
+
+    /// Save As… (⇧⌘S): present an `NSSavePanel` for a `.dxf`, then write the
+    /// current drawing there and record it as the document's current file. The
+    /// chosen URL is security-scoped (start/stop around the write).
+    @MainActor
+    private func saveAs() async {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = Self.dxfTypes
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = "\(doc.displayName).dxf"
+        panel.title = "Save Drawing"
+        panel.prompt = "Save"
+
+        let response = panel.runModal()
+        guard response == .OK, let url = panel.url else {
+            status = "Save cancelled"
+            return
+        }
+        await write(to: url)
+    }
+
+    /// Writes `model.drawing` to `url` via the merged DXF writer, honoring the
+    /// security-scoped URL lifecycle (the Save As… panel hands back a scoped URL;
+    /// an in-place ⌘S URL is already accessible, so start/stop is a harmless no-op
+    /// there). On success records the file (clears dirty) and reports the
+    /// written/skipped tallies in the HUD; on failure shows the error (no crash).
+    @MainActor
+    private func write(to url: URL) async {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let result = try await writeDrawing(model.drawing, toPath: url.path)
+            doc.markSaved(to: url)
+            var msg = "Saved \(url.lastPathComponent) — \(result.written) entities"
+            if result.skipped > 0 {
+                // Some kinds (text/hatch/solid/spline) aren't yet emitted by the
+                // writer; make that visible rather than silently dropping them.
+                msg += " (\(result.skipped) unsupported skipped)"
+            }
+            status = msg
+            NSLog("CADCanvas: \(msg)")
+        } catch {
+            status = "Save failed: \(error.localizedDescription)"
+            NSLog("CADCanvas: save failed: \(error)")
+        }
+    }
+}
+
+// MARK: - Conditional window-document modifier
+
+/// Applies `.navigationDocument(url)` only when a real file backs the document so
+/// the title bar shows the proxy icon / path popover; before the first save there
+/// is no URL and the modifier is a no-op (the title alone reads "Untitled").
+private struct NavigationDocumentIfAny: ViewModifier {
+    let url: URL?
+    func body(content: Content) -> some View {
+        if let url {
+            content.navigationDocument(url)
+        } else {
+            content
         }
     }
 }
@@ -289,6 +385,16 @@ extension FocusedValues {
     var openDocument: (() -> Void)? {
         get { self[OpenDocumentKey.self] }
         set { self[OpenDocumentKey.self] = newValue }
+    }
+
+    /// Save / Save As… the focused window's drawing (File menu, ⌘S / ⇧⌘S).
+    var saveDocument: (() -> Void)? {
+        get { self[SaveDocumentKey.self] }
+        set { self[SaveDocumentKey.self] = newValue }
+    }
+    var saveDocumentAs: (() -> Void)? {
+        get { self[SaveDocumentAsKey.self] }
+        set { self[SaveDocumentAsKey.self] = newValue }
     }
 
     /// Activate a tool kind in the focused window (Tools menu / shortcuts).
@@ -329,6 +435,14 @@ private struct ZoomToFitKey: FocusedValueKey {
 }
 
 private struct OpenDocumentKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct SaveDocumentKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct SaveDocumentAsKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 
