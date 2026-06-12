@@ -389,8 +389,10 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     private func packEntity(_ e: EntityRecord, ctx: ResolveContext, origin: Vector, layers: LayerTable) {
         // Layer-visibility filter: a frozen/hidden layer contributes neither lines
         // nor fills. An entity referencing an unknown layer (no record) still draws
-        // (resolve() already falls back to the default pen for a missing layer).
-        if layers.layer(e.layer)?.isVisible == false { return }
+        // (resolve() already falls back to the default pen for a missing layer). The
+        // predicate lives in the GPU-free `RendererVisibility` (unit-tested without a
+        // GPU in `RendererVisibilityTests`).
+        guard RendererVisibility.isRendered(e.layer, in: layers) else { return }
         let geo = e.resolve(ctx)
         // In light mode (`OverlayStyle.invertNearWhiteEntities`), flip near-white
         // "automatic color" pens to near-black so the default drawing color stays

@@ -11,7 +11,10 @@
 //  TEXT, MTEXT, SOLID, and HATCH (the previously-dropped display kinds) now survive
 //  the round-trip with their key fields — the MTEXT test exercises BOTH the
 //  reconstruct-from-run-tree path (no stored rawCode) and the verbatim rawCode
-//  passthrough path.
+//  passthrough path. SPLINE round-trip tests cover both a control-point `.spline`
+//  (degree, control polygon, rational weights) and a fit-point `.splinePoints`
+//  (which writes as a degree-2 SPLINE and reads back as `.spline`); both confirm
+//  `writeResult.skipped` no longer counts splines.
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //
@@ -59,12 +62,14 @@ struct DXFWriterTests {
     private struct KindTally: Equatable {
         var line = 0, point = 0, circle = 0, arc = 0, ellipse = 0, polyline = 0
         var text = 0, mtext = 0, solid = 0, hatch = 0, dimension = 0
-        /// The supported set the writer emits (spline/splinePoints excluded; MTEXT
-        /// and DIMENSION are now written, so they count toward the round-trippable
-        /// total).
+        var spline = 0
+        /// The supported set the writer emits. SPLINE/SPLINEPOINTS are now written
+        /// (both as a DXF SPLINE), so they count toward the round-trippable total.
+        /// Note: a written `.splinePoints` reads back as a degree-2 `.spline`, so on
+        /// re-read both collapse into the `spline` bucket.
         var supportedTotal: Int {
             line + point + circle + arc + ellipse + polyline
-                + text + mtext + solid + hatch + dimension
+                + text + mtext + solid + hatch + dimension + spline
         }
     }
 
@@ -83,7 +88,8 @@ struct DXFWriterTests {
             case .solid:        t.solid += 1     // now written (DRW_Solid)
             case .hatch:        t.hatch += 1     // now written (DRW_Hatch)
             case .dimension:    t.dimension += 1 // now written (DRW_Dim*)
-            case .spline, .splinePoints: break   // still skipped by the writer
+            case .spline,
+                 .splinePoints: t.spline += 1    // now written (DRW_Spline)
             }
         }
         return t
@@ -114,20 +120,15 @@ struct DXFWriterTests {
         let outPath = tempDXFPath()
         defer { removeFile(outPath) }
 
-        // Write everything the reader produced. dim_sample has no splines; MTEXT
-        // and DIMENSION are now emitted (R2000 default), so only spline kinds
-        // (none here) are skipped.
+        // Write everything the reader produced. Every modeled kind — including
+        // SPLINE/SPLINEPOINTS — is now emitted at the R2000 default, so NOTHING
+        // should be skipped (splines are no longer counted as unsupported).
         let writeResult = try await CADEngine.shared.writeEntities(
             first.records, layers: first.layers, toPath: outPath
         )
-        let unsupported = first.records.filter {
-            switch $0.kind {
-            case .spline, .splinePoints: return true
-            default: return false
-            }
-        }.count
-        // MTEXT and DIMENSION no longer count as skipped.
-        #expect(writeResult.skipped == unsupported)
+        // No kind in dim_sample is unsupported anymore (MTEXT/DIMENSION/SPLINE all
+        // write at R2000).
+        #expect(writeResult.skipped == 0)
         #expect(FileManager.default.fileExists(atPath: outPath))
 
         // Re-read and compare the supported-kind tallies exactly.
@@ -691,16 +692,16 @@ struct DXFWriterTests {
         #expect(abs(measure(di.kind) - 8.0) < tol)   // diameter == 8
     }
 
-    // MARK: - Skipped kinds are counted, not fatal.
+    // MARK: - SPLINE round-trips (control-point .spline + fit-point .splinePoints).
 
-    @Test("unsupported kinds are skipped and counted")
-    func skipsUnsupportedKinds() async throws {
+    /// A control-point B-spline (`.spline`) survives write -> read with its degree
+    /// and control polygon preserved, and is NO LONGER counted as skipped.
+    @Test("a control-point spline round-trips and is not skipped")
+    func roundTripsControlPointSpline() async throws {
+        let cps = [Vector(0, 0), Vector(1, 2), Vector(3, 2), Vector(4, 0), Vector(5, 2)]
         let spline = EntityRecord(
             id: EntityID(1),
-            kind: .spline(SplineData(
-                degree: 3,
-                controlPoints: [Vector(0, 0), Vector(1, 1), Vector(2, 0), Vector(3, 1)]
-            ))
+            kind: .spline(SplineData(degree: 3, controlPoints: cps))
         )
         let line = EntityRecord(
             id: EntityID(2),
@@ -712,11 +713,93 @@ struct DXFWriterTests {
         let result = try await CADEngine.shared.writeEntities(
             [spline, line], layers: LayerTable(), toPath: outPath
         )
-        #expect(result.skipped == 1)   // the spline
-        #expect(result.written == 1)   // the line
+        // The spline is no longer skipped: both entities are written.
+        #expect(result.skipped == 0)
+        #expect(result.written == 2)
 
         let back = try await CADEngine.shared.readEntities(dxfPath: outPath)
-        #expect(tally(back.records).line == 1)
+        let t = tally(back.records)
+        #expect(t.line == 1)
+        #expect(t.spline == 1)
+
+        // Geometry preserved: degree + every control point round-trip (the reader
+        // re-maps a control-point SPLINE to `.spline`).
+        let s = try #require(back.records.compactMap { rec -> SplineData? in
+            if case let .spline(d) = rec.kind { return d }
+            return nil
+        }.first, "spline missing after round-trip")
+        #expect(s.degree == 3)
+        #expect(s.controlPoints.count == cps.count)
+        let tol = 1e-9
+        for (a, b) in zip(s.controlPoints, cps) {
+            #expect(abs(a.x - b.x) < tol)
+            #expect(abs(a.y - b.y) < tol)
+        }
+    }
+
+    /// A rational (weighted) spline round-trips its weights too.
+    @Test("a rational spline round-trips weights")
+    func roundTripsRationalSpline() async throws {
+        let cps = [Vector(0, 0), Vector(1, 3), Vector(3, 3), Vector(4, 0)]
+        let weights = [1.0, 2.0, 2.0, 1.0]
+        let spline = EntityRecord(
+            id: EntityID(1),
+            kind: .spline(SplineData(degree: 3, controlPoints: cps, weights: weights))
+        )
+        let outPath = tempDXFPath()
+        defer { removeFile(outPath) }
+
+        let result = try await CADEngine.shared.writeEntities(
+            [spline], layers: LayerTable(), toPath: outPath
+        )
+        #expect(result.skipped == 0)
+        #expect(result.written == 1)
+
+        let back = try await CADEngine.shared.readEntities(dxfPath: outPath)
+        let s = try #require(back.records.compactMap { rec -> SplineData? in
+            if case let .spline(d) = rec.kind { return d }
+            return nil
+        }.first, "rational spline missing after round-trip")
+        #expect(s.weights.count == weights.count)
+        let tol = 1e-9
+        for (a, b) in zip(s.weights, weights) { #expect(abs(a - b) < tol) }
+    }
+
+    /// A fit-point/interpolation spline (`.splinePoints`) survives write -> read
+    /// with its control polygon preserved. On write it becomes a degree-2 DXF
+    /// SPLINE; on read it maps back to `.spline` (degree 2) with the same control
+    /// points — so the rendered geometry is preserved. It is NO LONGER skipped.
+    @Test("a fit-point spline round-trips its geometry and is not skipped")
+    func roundTripsFitPointSpline() async throws {
+        let cps = [Vector(0, 0), Vector(2, 4), Vector(4, 0), Vector(6, 4), Vector(8, 0)]
+        let sp = EntityRecord(
+            id: EntityID(1),
+            kind: .splinePoints(SplinePointsData(controlPoints: cps))
+        )
+        let outPath = tempDXFPath()
+        defer { removeFile(outPath) }
+
+        let result = try await CADEngine.shared.writeEntities(
+            [sp], layers: LayerTable(), toPath: outPath
+        )
+        #expect(result.skipped == 0)
+        #expect(result.written == 1)
+
+        let back = try await CADEngine.shared.readEntities(dxfPath: outPath)
+        let t = tally(back.records)
+        #expect(t.spline == 1)
+
+        let s = try #require(back.records.compactMap { rec -> SplineData? in
+            if case let .spline(d) = rec.kind { return d }
+            return nil
+        }.first, "fit-point spline missing after round-trip")
+        #expect(s.degree == 2)
+        #expect(s.controlPoints.count == cps.count)
+        let tol = 1e-9
+        for (a, b) in zip(s.controlPoints, cps) {
+            #expect(abs(a.x - b.x) < tol)
+            #expect(abs(a.y - b.y) < tol)
+        }
     }
 
     // MARK: - High-level save helper + error path.
@@ -749,12 +832,13 @@ struct DXFWriterTests {
         }
     }
 
-    // Whether a record's kind is in the writer's supported set.
+    // Whether a record's kind is in the writer's supported set. Every modeled
+    // kind — including SPLINE/SPLINEPOINTS — is now emitted at R2000.
     private func isSupported(_ r: EntityRecord) -> Bool {
         switch r.kind {
         case .line, .point, .circle, .arc, .ellipse, .polyline,
-             .text, .mtext, .solid, .hatch, .dimension: return true
-        case .spline, .splinePoints: return false
+             .text, .mtext, .solid, .hatch, .dimension,
+             .spline, .splinePoints: return true
         }
     }
 }
