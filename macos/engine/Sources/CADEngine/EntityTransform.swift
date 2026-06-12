@@ -480,15 +480,30 @@ public enum EntityTransform {
                                line2Start: t.apply(l2s), line2End: t.apply(l2e))
         }
 
+        // An unset (nil/invalid) text-middle stays nil; a real one transforms.
+        let newTextMiddle: Vector? = dm.textMiddle.flatMap { $0.valid ? t.apply($0) : nil }
+
+        // The explicit measurement-text rotation (DXF 53) follows the same
+        // angle mapping as the dimension direction (rotate, or reflect under a
+        // mirror); a nil (auto) rotation stays nil.
+        let newTextRotation: Double? = dm.textRotation.map(mappedAngle)
+
+        // The extension-line oblique angle (DXF 52) also rotates / reflects.
+        let newOblique = mappedAngle(dm.obliqueAngle)
+
         return DimData(
             kind: newKind,
             definitionPoint: t.apply(dm.definitionPoint),
             textOverride: dm.textOverride,
-            // An invalid (unset) text-middle stays invalid; a real one transforms.
-            textMiddle: dm.textMiddle.valid ? t.apply(dm.textMiddle) : .invalid,
+            textMiddle: newTextMiddle,
             styleName: dm.styleName,
             textHeight: abs(dm.textHeight * t.uniformScale),
-            arrowSize: abs(dm.arrowSize * t.uniformScale)
+            arrowSize: abs(dm.arrowSize * t.uniformScale),
+            textRotation: newTextRotation,
+            attachmentPoint: dm.attachmentPoint,
+            lineSpacingStyle: dm.lineSpacingStyle,
+            lineSpacingFactor: dm.lineSpacingFactor,
+            obliqueAngle: newOblique
         )
     }
 }
