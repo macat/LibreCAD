@@ -74,6 +74,14 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     private var lineInstanceCount = 0
     private var lineBufferCapacity = 0
 
+    /// The fill triangle buffer (`FlatVertex`, render-space f32 offsets + color),
+    /// drawn with the flat pipeline as `.triangle` primitives BEFORE the lines so
+    /// stroked edges overlay the fill. Rebuilt on the SAME model/visible-set change
+    /// as the line buffer (never on a matrix-only pan/zoom).
+    private var fillVertexBuffer: MTLBuffer?
+    private var fillVertexCount = 0
+    private var fillBufferCapacity = 0
+
     /// The overlay vertex buffer (grid + selection + snap marker, flat-shaded).
     private var overlayBuffer: MTLBuffer?
     private var overlayVertexCount = 0
@@ -116,6 +124,10 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     /// `keepingCapacity` each rebuild so a steady drawing never re-allocates the
     /// backing storage (rendering-performance.md §2.3 — no per-frame heap churn).
     private var instanceScratch: [LineInstance] = []
+
+    /// Persistent scratch for the fill triangle vertices, packed in the SAME cull
+    /// rebuild as `instanceScratch` (cleared keepingCapacity → no per-frame churn).
+    private var fillScratch: [FlatVertex] = []
 
     /// Cached resolve context, rebuilt ONLY when the model changes (the layer
     /// table snapshot is stable between edits), not per cull.
@@ -264,6 +276,17 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: gridVertexCount)
         }
 
+        // ---- 1b. Fills (hatch/solid triangles) — UNDER the model lines so stroked
+        // edges overlay the fill (rendering-performance.md §1.3). Shares the flat
+        // pipeline with the overlay (alpha-blended, sRGB) so semi-transparent fills
+        // composite using the fill color's alpha.
+        if let flatPipeline, let fillVertexBuffer, fillVertexCount >= 3 {
+            encoder.setRenderPipelineState(flatPipeline)
+            encoder.setVertexBuffer(fillVertexBuffer, offset: 0, index: 0)
+            encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: fillVertexCount)
+        }
+
         // ---- 2. Model lines (instanced quads).
         if let linePipeline, let lineInstanceBuffer, lineInstanceCount > 0 {
             encoder.setRenderPipelineState(linePipeline)
@@ -330,8 +353,10 @@ final class LineRenderer: NSObject, MTKViewDelegate {
         // Reuse the persistent scratch (no per-frame heap allocation, §2.3) and the
         // cached resolve context (rebuilt only on model change, not per cull).
         instanceScratch.removeAll(keepingCapacity: true)
+        fillScratch.removeAll(keepingCapacity: true)
         let ctx = resolveContext(modelChanged: modelChanged)
         let origin = model.renderOrigin
+        let layers = model.drawing.layers
         let visibleIDs = model.quadtree.query(region: cullRect)
 
         if visibleIDs.isEmpty && model.quadtree.isEmpty {
@@ -339,26 +364,40 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             // back to resolving everything so a small/degenerate drawing still
             // shows. Cheap for tiny drawings; large ones populate the index.
             for e in model.drawing.entities {
-                let geo = e.resolve(ctx)
-                for poly in geo.polylines {
-                    RendererGeometry.appendInstances(for: poly, renderOrigin: origin, into: &instanceScratch)
-                }
+                packEntity(e, ctx: ctx, origin: origin, layers: layers)
             }
         } else {
             instanceScratch.reserveCapacity(visibleIDs.count * 2)
             for id in visibleIDs {
                 guard let e = model.drawing.entity(id) else { continue }
-                let geo = e.resolve(ctx)
-                for poly in geo.polylines {
-                    RendererGeometry.appendInstances(for: poly, renderOrigin: origin, into: &instanceScratch)
-                }
+                packEntity(e, ctx: ctx, origin: origin, layers: layers)
             }
         }
 
         uploadLineInstances(instanceScratch)
+        uploadFillVertices(fillScratch)
         builtModelVersion = model.modelVersion
         builtVisibleRect = cullRect   // cache the PADDED rect we culled
         model.modelDirty = false
+    }
+
+    /// Resolves one entity and packs its lines + fills into the scratch buffers,
+    /// SKIPPING entities on a hidden/frozen layer (so the sidebar's eye-toggle
+    /// actually hides them — a layer's `isVisible == false` ⇔ `isFrozen`). A
+    /// model-version bump (which the sidebar performs on a visibility change)
+    /// re-triggers this rebuild, so toggling re-packs the visible set.
+    private func packEntity(_ e: EntityRecord, ctx: ResolveContext, origin: Vector, layers: LayerTable) {
+        // Layer-visibility filter: a frozen/hidden layer contributes neither lines
+        // nor fills. An entity referencing an unknown layer (no record) still draws
+        // (resolve() already falls back to the default pen for a missing layer).
+        if layers.layer(e.layer)?.isVisible == false { return }
+        let geo = e.resolve(ctx)
+        for poly in geo.polylines {
+            RendererGeometry.appendInstances(for: poly, renderOrigin: origin, into: &instanceScratch)
+        }
+        for fill in geo.fills {
+            RendererGeometry.appendFillVertices(for: fill, renderOrigin: origin, into: &fillScratch)
+        }
     }
 
     /// Returns the resolve context, rebuilding it only when the model changed (the
@@ -392,6 +431,28 @@ final class LineRenderer: NSObject, MTKViewDelegate {
         }
         if let buf = lineInstanceBuffer {
             instances.withUnsafeBytes { raw in
+                buf.contents().copyMemory(from: raw.baseAddress!, byteCount: raw.count)
+            }
+        }
+    }
+
+    /// Uploads `verts` (triangle vertices, 3 per triangle) into the persistent fill
+    /// buffer, growing it only when the count exceeds capacity (no realloc on the
+    /// steady-state path) — same growth policy as the line buffer.
+    private func uploadFillVertices(_ verts: [FlatVertex]) {
+        fillVertexCount = verts.count
+        guard !verts.isEmpty else { return }
+        let needed = verts.count
+        if fillVertexBuffer == nil || needed > fillBufferCapacity {
+            let cap = Swift.max(needed, Int(Double(needed) * 1.5))
+            fillVertexBuffer = device.makeBuffer(
+                length: MemoryLayout<FlatVertex>.stride * cap,
+                options: .storageModeShared
+            )
+            fillBufferCapacity = cap
+        }
+        if let buf = fillVertexBuffer {
+            verts.withUnsafeBytes { raw in
                 buf.contents().copyMemory(from: raw.baseAddress!, byteCount: raw.count)
             }
         }
