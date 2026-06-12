@@ -174,6 +174,11 @@ struct LibreCADApp: App {
                 Button("Hatch") { activateTool?(.hatch) }
                     .keyboardShortcut("h", modifiers: [])
                     .disabled(activateTool == nil)
+                // Text authoring (⇧T): a click sets the insertion point and raises the
+                // inline editor; type, then Return commits a text/mtext entity.
+                Button("Text") { activateTool?(.text) }
+                    .keyboardShortcut("t", modifiers: .shift)
+                    .disabled(activateTool == nil)
 
                 Divider()
                 // Modify tools (act on the current selection).
@@ -226,6 +231,30 @@ struct LibreCADApp: App {
                 Button("Chamfer") { activateTool?(.chamfer) }
                     .keyboardShortcut("f", modifiers: .shift)
                     .disabled(activateTool == nil)
+
+                Divider()
+                // Dimension tools (annotate measurements). Each takes a bare,
+                // collision-free letter (no draw/modify twin): D Linear, I Aligned,
+                // U Radius, B Diameter, N Angular. Linear/Aligned place two extension
+                // origins + a dimension-line point; Radius/Diameter pick a circle/arc
+                // + a leader; Angular defines two rays + an arc location.
+                Menu("Dimensions") {
+                    Button("Linear Dimension") { activateTool?(.linearDim) }
+                        .keyboardShortcut("d", modifiers: [])
+                        .disabled(activateTool == nil)
+                    Button("Aligned Dimension") { activateTool?(.alignedDim) }
+                        .keyboardShortcut("i", modifiers: [])
+                        .disabled(activateTool == nil)
+                    Button("Radius Dimension") { activateTool?(.radialDim) }
+                        .keyboardShortcut("u", modifiers: [])
+                        .disabled(activateTool == nil)
+                    Button("Diameter Dimension") { activateTool?(.diameterDim) }
+                        .keyboardShortcut("b", modifiers: [])
+                        .disabled(activateTool == nil)
+                    Button("Angular Dimension") { activateTool?(.angularDim) }
+                        .keyboardShortcut("n", modifiers: [])
+                        .disabled(activateTool == nil)
+                }
             }
         }
     }

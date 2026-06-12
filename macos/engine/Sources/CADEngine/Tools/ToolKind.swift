@@ -82,6 +82,20 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     case explode
     /// The Hatch draw tool (`HatchTool`) — fill the region bounded by the selection.
     case hatch
+    // --- Wire-wave-B tools (wired into the UI in this wave) ---
+    /// The Text authoring tool (`TextTool`) — click an insertion point, type, commit.
+    case text
+    /// The Linear dimension tool (`LinearDimTool`, horizontal) — distance between two
+    /// extension origins along a fixed direction.
+    case linearDim
+    /// The Aligned dimension tool (`AlignedDimTool`) — true distance between two points.
+    case alignedDim
+    /// The Radial (radius "R…") dimension tool (`RadialDimTool` in `.radius` mode).
+    case radialDim
+    /// The Diameter ("⌀…") dimension tool (`RadialDimTool` in `.diameter` mode).
+    case diameterDim
+    /// The Angular dimension tool (`AngularDimTool`) — angle between two rays/lines.
+    case angularDim
     // Append new draw tools here (one `case` per tool) — see the collision note.
 
     /// A short title for the UI (toolbar button / menu).
@@ -111,6 +125,12 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .divide:    return "Divide"
         case .explode:   return "Explode"
         case .hatch:     return "Hatch"
+        case .text:        return "Text"
+        case .linearDim:   return "Linear Dimension"
+        case .alignedDim:  return "Aligned Dimension"
+        case .radialDim:   return "Radius Dimension"
+        case .diameterDim: return "Diameter Dimension"
+        case .angularDim:  return "Angular Dimension"
         // Append a title arm per new case.
         }
     }
@@ -144,6 +164,12 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .divide:    return DivideTool()
         case .explode:   return ExplodeTool()
         case .hatch:     return HatchTool()
+        case .text:        return TextTool()
+        case .linearDim:   return LinearDimTool(orientation: .horizontal)
+        case .alignedDim:  return AlignedDimTool()
+        case .radialDim:   return RadialDimTool(mode: .radius)
+        case .diameterDim: return RadialDimTool(mode: .diameter)
+        case .angularDim:  return AngularDimTool()
         // Append a `case <kind>: return <Name>Tool()` arm per new tool.
         }
     }

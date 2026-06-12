@@ -498,6 +498,8 @@ final class CADCanvasController {
     ///                E=Ellipse, G=Polygon.
     ///   Modify (⇧):  M=Move, ⇧C=Copy, ⇧R=Rotate, ⇧S=Scale, ⇧M=Mirror, ⇧O=Offset.
     ///   Edit:        T=Trim, X=Extend, F=Fillet, ⇧F=Chamfer (pick under cursor).
+    ///   Annotate:    ⇧T=Text. Dimensions: D=Linear, I=Aligned, U=Radius,
+    ///                B=Diameter, N=Angular (wire-wave-B).
     /// These mirror the Tools-menu shortcuts in `LibreCADApp` (the discoverable
     /// source of truth) so the canvas and the menu stay in lockstep. Bare keys with
     /// a command modifier are NOT claimed here (⌘O Open / ⌘Z Undo / ⌘0 Zoom-to-Fit
@@ -594,13 +596,29 @@ final class CADCanvasController {
             activateTool(.hatch)
             return true
         case "d":
-            // ⇧D = Divide (modify); bare D is unassigned (falls through) so a future
-            // draw tool can claim it.
-            if shift { activateTool(.divide); return true }
-            return false
+            // Bare D = Linear Dimension (wire-wave-B); ⇧D = Divide (modify).
+            activateTool(shift ? .divide : .linearDim)
+            return true
+        case "i":
+            // Aligned Dimension (wire-wave-B; no draw/modify twin → plain I).
+            activateTool(.alignedDim)
+            return true
+        case "u":
+            // Radius Dimension (wire-wave-B; no draw/modify twin → plain U).
+            activateTool(.radialDim)
+            return true
+        case "b":
+            // Diameter Dimension (wire-wave-B; no draw/modify twin → plain B).
+            activateTool(.diameterDim)
+            return true
+        case "n":
+            // Angular Dimension (wire-wave-B; no draw/modify twin → plain N).
+            activateTool(.angularDim)
+            return true
         case "t":
-            // Edit tool: Trim (no draw/modify twin → plain T).
-            activateTool(.trim)
+            // Bare T = Trim (edit); ⇧T = Text (wire-wave-B). The inline NSTextView
+            // editor opens on the next canvas click (see `isTextToolActive`).
+            activateTool(shift ? .text : .trim)
             return true
         case "x":
             // Bare X = Extend (edit); ⇧X = Explode (modify) — shared-letter shift

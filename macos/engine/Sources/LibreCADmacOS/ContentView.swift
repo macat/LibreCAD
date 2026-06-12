@@ -152,6 +152,9 @@ struct ContentView: View {
             toolButton(.spline, symbol: "scribble.variable", help: "Draw spline (S)")
             // Hatch fills the region bounded by the current selection.
             toolButton(.hatch, symbol: "square.grid.2x2.fill", help: "Hatch fill selection (H)")
+            // Text authoring: a click sets the insertion point and raises the inline
+            // editor; type, then Return commits the text.
+            toolButton(.text, symbol: "character.textbox", help: "Add text (⇧T)")
 
             Divider()
             // Modify tools (act on the current selection).
@@ -176,6 +179,19 @@ struct ContentView: View {
             toolButton(.fillet, symbol: "circle.bottomrighthalf.checkered",
                        help: "Fillet (round) corner (F)")
             toolButton(.chamfer, symbol: "angle", help: "Chamfer (bevel) corner (⇧F)")
+
+            Divider()
+            // Dimension tools (annotate measurements). Linear/Aligned place two
+            // origins + a dimension-line point; Radius/Diameter pick a circle/arc +
+            // a leader point; Angular defines two rays + an arc location.
+            toolButton(.linearDim, symbol: "ruler", help: "Linear dimension (D)")
+            toolButton(.alignedDim, symbol: "arrow.up.left.and.arrow.down.right",
+                       help: "Aligned dimension (I)")
+            toolButton(.radialDim, symbol: "arrow.left.and.right",
+                       help: "Radius dimension (U)")
+            toolButton(.diameterDim, symbol: "circle.and.line.horizontal",
+                       help: "Diameter dimension (B)")
+            toolButton(.angularDim, symbol: "angle", help: "Angular dimension (N)")
         }
     }
 

@@ -74,19 +74,31 @@ enum OverlayGeometry {
     ///   - viewport: current transform (gives the visible rect + scale).
     ///   - renderOrigin: f64 floating origin to offset against (ADR-003).
     ///   - targetCellPx: desired grid cell size in points (default 64).
+    ///   - preferredSpacing: when non-`nil` and positive/finite, the EXACT world step
+    ///     to use (the Inspector's "Grid spacing"); the adaptive 1/2/5 × 10ⁿ pick is
+    ///     bypassed. `nil` (or a non-positive value) falls back to the adaptive
+    ///     spacing. The returned spacing is still fed to snapping, so grid-snap tracks
+    ///     whichever step is drawn.
     /// - Returns: (vertices, spacing) — spacing is the world step used (also the
     ///   snap grid spacing the caller should pass to `Snapping.snap`).
     static func grid(
         viewport: Viewport,
         renderOrigin: Vector,
-        targetCellPx: Double = 64
+        targetCellPx: Double = 64,
+        preferredSpacing: Double? = nil
     ) -> (vertices: [FlatVertex], spacing: Double) {
         let rect = viewport.visibleWorldRect
         guard !rect.isEmpty, viewport.scale > 0 else { return ([], 1) }
 
-        // Choose a "nice" world spacing whose screen size ≈ targetCellPx.
-        let rawWorld = targetCellPx / viewport.scale
-        let spacing = niceStep(rawWorld)
+        // Use the Inspector's preferred spacing when it is a usable positive value;
+        // otherwise choose a "nice" world spacing whose screen size ≈ targetCellPx.
+        let spacing: Double
+        if let pref = preferredSpacing, pref > 0, pref.isFinite {
+            spacing = pref
+        } else {
+            let rawWorld = targetCellPx / viewport.scale
+            spacing = niceStep(rawWorld)
+        }
         guard spacing > 0, spacing.isFinite else { return ([], 1) }
 
         // Avoid pathological line counts at extreme zoom-out: cap total lines.

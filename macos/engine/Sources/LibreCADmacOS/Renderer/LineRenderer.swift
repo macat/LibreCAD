@@ -473,8 +473,19 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     private func rebuildOverlay(viewport: Viewport) {
         let origin = model.renderOrigin
 
-        let (gridVerts, spacing) = OverlayGeometry.grid(viewport: viewport, renderOrigin: origin)
+        // Honor the Inspector's grid settings: the preferred spacing (when set)
+        // overrides the adaptive step, and `gridVisible` toggles whether the grid is
+        // DRAWN. The spacing is computed either way and fed to `lastGridSpacing` so
+        // grid-snap keeps working even when the grid is hidden (snap is independent of
+        // the visual guide).
+        let (gridVerts, spacing) = OverlayGeometry.grid(
+            viewport: viewport,
+            renderOrigin: origin,
+            preferredSpacing: model.preferredGridSpacing
+        )
         lastGridSpacing = spacing
+        // Drop the grid vertices when the guide is hidden (snap still uses `spacing`).
+        let drawnGridVerts = model.gridVisible ? gridVerts : []
 
         let selVerts = OverlayGeometry.selectionHighlight(
             selection: model.selection, drawing: model.drawing, renderOrigin: origin
@@ -492,12 +503,12 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             previewVerts = OverlayGeometry.toolPreview(tool.preview, renderOrigin: origin)
         }
 
-        gridVertexCount = gridVerts.count
+        gridVertexCount = drawnGridVerts.count
         selectionVertexCount = selVerts.count
         snapVertexCount = snapVerts.count
         previewVertexCount = previewVerts.count
 
-        let all = gridVerts + selVerts + snapVerts + previewVerts
+        let all = drawnGridVerts + selVerts + snapVerts + previewVerts
         overlayVertexCount = all.count
         guard !all.isEmpty else { return }
 

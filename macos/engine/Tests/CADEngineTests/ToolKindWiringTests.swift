@@ -70,6 +70,8 @@ struct ToolKindWiringTests {
             .offset,                                               // modify (wave 1)
             .trim, .extend, .fillet, .chamfer,                     // edit (wave 2)
             .spline, .array, .divide, .explode, .hatch,            // wave A
+            .text,                                                 // wave B (annotate)
+            .linearDim, .alignedDim, .radialDim, .diameterDim, .angularDim, // wave B (dimensions)
         ]
         #expect(Set(ToolKind.allCases) == expected,
                 "ToolKind.allCases (\(ToolKind.allCases)) != expected roster")
@@ -134,6 +136,39 @@ struct ToolKindWiringTests {
         }
     }
 
+    /// The six wave-B wiring additions: Text + the five dimension tools. Each mints a
+    /// non-nil tool whose own title matches the kind's UI title, so the toolbar/menu
+    /// label and the HUD prompt agree. The radial/diameter kinds both mint a
+    /// `RadialDimTool` (radius vs diameter MODE), so their DISTINCT titles also guard
+    /// that the mode is wired correctly.
+    @Test func waveBKindsAreWiredWithMatchingTitles() {
+        let waveB: [ToolKind: String] = [
+            .text:        "Text",
+            .linearDim:   "Linear Dimension",
+            .alignedDim:  "Aligned Dimension",
+            .radialDim:   "Radius Dimension",
+            .diameterDim: "Diameter Dimension",
+            .angularDim:  "Angular Dimension",
+        ]
+        for (kind, title) in waveB {
+            #expect(kind.title == title,
+                    "ToolKind.\(kind).title (\(kind.title)) != \(title)")
+            let tool = kind.makeTool()
+            #expect(tool != nil, "ToolKind.\(kind) minted a nil Tool")
+            #expect(tool?.title == title,
+                    "ToolKind.\(kind) tool.title (\(tool?.title ?? "nil")) != \(title)")
+        }
+    }
+
+    /// The Text kind's title MUST be exactly "Text" — the inline `NSTextView` editor
+    /// in `CADCanvasView` activates by matching the active tool's `title == "Text"`,
+    /// so a renamed title would silently break text authoring. (A focused guard on the
+    /// load-bearing string, separate from the general title checks above.)
+    @Test func textKindTitleIsExactlyText() {
+        #expect(ToolKind.text.title == "Text")
+        #expect(ToolKind.text.makeTool()?.title == "Text")
+    }
+
     /// The keyboard shortcuts the UI assigns to each kind must be UNIQUE — no two
     /// kinds may share the same key chord, or one would shadow the other. This is a
     /// data mirror of the canvas keymap (`CADCanvasView.handleKey`) / Tools menu /
@@ -156,9 +191,15 @@ struct ToolKindWiringTests {
             (.spline, "s", false), (.scale, "s", true),
             (.hatch, "h", false),
             (.divide, "d", true),
-            (.trim, "t", false),
+            (.trim, "t", false), (.text, "t", true),
             (.extend, "x", false), (.explode, "x", true),
             (.fillet, "f", false), (.chamfer, "f", true),
+            // wave B dimensions — bare, collision-free letters.
+            (.linearDim, "d", false),
+            (.alignedDim, "i", false),
+            (.radialDim, "u", false),
+            (.diameterDim, "b", false),
+            (.angularDim, "n", false),
         ]
         // No two entries share a (key, shift) chord.
         let chords = keymap.map { "\($0.1)\($0.2 ? "+shift" : "")" }
@@ -171,6 +212,10 @@ struct ToolKindWiringTests {
         // Every wave-A kind has a shortcut.
         for k in [ToolKind.spline, .array, .divide, .explode, .hatch] {
             #expect(kinds.contains(k), "wave-A kind \(k) has no keyboard shortcut")
+        }
+        // Every wave-B kind (Text + the five dimensions) has a shortcut.
+        for k in [ToolKind.text, .linearDim, .alignedDim, .radialDim, .diameterDim, .angularDim] {
+            #expect(kinds.contains(k), "wave-B kind \(k) has no keyboard shortcut")
         }
     }
 }
