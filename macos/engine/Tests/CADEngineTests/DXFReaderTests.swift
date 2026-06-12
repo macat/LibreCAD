@@ -36,7 +36,11 @@ struct DXFReaderTests {
     private struct KindTally {
         var line = 0, point = 0, circle = 0, arc = 0
         var ellipse = 0, polyline = 0, spline = 0, splinePoints = 0
-        var total: Int { line + point + circle + arc + ellipse + polyline + spline + splinePoints }
+        var text = 0, hatch = 0, solid = 0
+        var total: Int {
+            line + point + circle + arc + ellipse + polyline + spline + splinePoints
+                + text + hatch + solid
+        }
     }
 
     private func tally(_ records: [EntityRecord]) -> KindTally {
@@ -51,10 +55,10 @@ struct DXFReaderTests {
             case .polyline:     t.polyline += 1
             case .spline:       t.spline += 1
             case .splinePoints: t.splinePoints += 1
-            // Display kinds (text/hatch/solid) are not yet produced by the reader
-            // (separate import wave); they don't appear in this sample, so they
-            // are not tallied here.
-            case .text, .hatch, .solid: break
+            // Display kinds now imported by the reader (reader-import wave).
+            case .text:         t.text += 1
+            case .hatch:        t.hatch += 1
+            case .solid:        t.solid += 1
             }
         }
         return t
@@ -75,6 +79,36 @@ struct DXFReaderTests {
         #expect(t.circle >= 1)
         #expect(t.arc >= 1)
         #expect(t.polyline >= 1)
+
+        // Reader-import wave: the sample's 20 top-level MTEXT and 4 SOLID
+        // entities (previously surfaced only as unsupported warnings) are now
+        // imported as `.text` / `.solid` records.
+        #expect(t.text == 20)
+        #expect(t.solid == 4)
+    }
+
+    @Test("imports MTEXT as .text and SOLID as .solid from dim_sample.dxf")
+    func importsTextAndSolid() async throws {
+        let result = try await readSample()
+        let t = tally(result.records)
+
+        // Both display kinds are now mapped, not dropped.
+        #expect(t.text > 0)
+        #expect(t.solid > 0)
+
+        // Every imported text carries a non-empty string and a positive height;
+        // every imported solid carries 3 or 4 ring-ordered corners.
+        for r in result.records {
+            switch r.kind {
+            case .text(let d):
+                #expect(!d.text.isEmpty)
+                #expect(d.height > 0)
+            case .solid(let d):
+                #expect(d.corners.count >= 3 && d.corners.count <= 4)
+            default:
+                break
+            }
+        }
     }
 
     @Test("mints a unique id per parsed record")
@@ -104,6 +138,11 @@ struct DXFReaderTests {
         // than failing the read.
         #expect(!result.warnings.isEmpty)
         #expect(result.warnings.contains { $0.contains("DIMENSION") })
+
+        // The reader-import wave moves MTEXT and SOLID OUT of the warning list:
+        // they are imported now, so they must NOT appear as skipped warnings.
+        #expect(!result.warnings.contains { $0.contains("MTEXT") })
+        #expect(!result.warnings.contains { $0.contains("SOLID") })
     }
 
     @Test("entity pens carry resolved or sentinel colors")
@@ -130,6 +169,152 @@ struct DXFReaderTests {
         // The drawing has a finite, non-empty bounding box.
         let box = drawing.boundingBox()
         #expect(!box.isEmpty)
+    }
+
+    // MARK: - HATCH import (synthetic fixture).
+
+    /// A minimal DXF carrying one solid-fill HATCH whose single boundary loop is
+    /// four LINE edges forming a 10×10 square. Written to a temp file so the test
+    /// needs no bundled resource (the dim_sample fixture has no HATCH). The edge
+    /// boundary exercises the bridge's edge-walking loop reader.
+    private static let syntheticHatchDXF = """
+      0
+    SECTION
+      2
+    ENTITIES
+      0
+    HATCH
+      8
+    0
+    100
+    AcDbEntity
+    100
+    AcDbHatch
+     10
+    0.0
+     20
+    0.0
+     30
+    0.0
+    210
+    0.0
+    220
+    0.0
+    230
+    1.0
+      2
+    SOLID
+     70
+    1
+     71
+    0
+     91
+    1
+     92
+    1
+     93
+    4
+     72
+    1
+     10
+    0.0
+     20
+    0.0
+     11
+    10.0
+     21
+    0.0
+     72
+    1
+     10
+    10.0
+     20
+    0.0
+     11
+    10.0
+     21
+    10.0
+     72
+    1
+     10
+    10.0
+     20
+    10.0
+     11
+    0.0
+     21
+    10.0
+     72
+    1
+     10
+    0.0
+     20
+    10.0
+     11
+    0.0
+     21
+    0.0
+     97
+    0
+     75
+    0
+     76
+    1
+     98
+    1
+     10
+    5.0
+     20
+    5.0
+      0
+    ENDSEC
+      0
+    EOF
+
+    """
+
+    /// Writes `syntheticHatchDXF` to a unique temp file and returns its path.
+    private func writeSyntheticHatch() throws -> String {
+        let dir = FileManager.default.temporaryDirectory
+        let url = dir.appendingPathComponent("synthetic_hatch_\(UUID().uuidString).dxf")
+        try Self.syntheticHatchDXF.write(to: url, atomically: true, encoding: .utf8)
+        return url.path
+    }
+
+    @Test("imports a solid-fill HATCH with its boundary loop")
+    func importsHatch() async throws {
+        let path = try writeSyntheticHatch()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let result = try await CADEngine.shared.readEntities(dxfPath: path)
+        let t = tally(result.records)
+
+        // The synthetic file's one HATCH is imported (not warned).
+        #expect(t.hatch == 1)
+        #expect(!result.warnings.contains { $0.contains("HATCH") })
+
+        // The imported hatch is a solid fill with a non-degenerate boundary loop.
+        let hatch = result.records.compactMap { rec -> HatchData? in
+            if case .hatch(let d) = rec.kind { return d }
+            return nil
+        }.first
+        let h = try #require(hatch, "expected one .hatch record")
+        #expect(h.solidFill)
+        #expect(h.loops.count >= 1)
+        #expect((h.loops.first?.count ?? 0) >= 3)   // a real ring, not a sliver
+    }
+
+    @MainActor
+    @Test("loadDrawing resolves an imported HATCH to a fill")
+    func loadDrawingResolvesHatch() async throws {
+        let path = try writeSyntheticHatch()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let drawing = try await loadDrawing(dxfPath: path)
+        #expect(drawing.count == 1)
+        // The hatch resolves to non-empty geometry (a solid fill) without crashing.
+        let geometries = drawing.resolveAll()
+        #expect(geometries.count == 1)
     }
 
     // MARK: - Error paths.
