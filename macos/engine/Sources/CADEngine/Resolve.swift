@@ -124,6 +124,10 @@ public struct ResolveContext: Sendable {
     ///
     /// Reserved for additive extension by the other single owners (do not diverge):
     /// `// var dimStyleProvider: ((DimStyleID) -> ResolvedDimStyle)? = nil` — Dimension owner.
+    /// NOTE (S1 `ws/dim-entity`): the `.dimension` resolve uses defining-data
+    /// sizes (`DimData.textHeight`/`arrowSize`) and the existing `fontProvider`
+    /// for its measurement text (ADR-004), so this hook stays RESERVED until a
+    /// real DimStyle table lands (the dim-style fan-out wave wires it then).
     public var fontProvider: (@Sendable (String) -> StrokeFont?)? = nil
 
     public init(
@@ -677,7 +681,347 @@ extension EntityKind {
             // A filled triangle/quad: a single fill loop of its corners.
             guard d.corners.count >= 3 else { return ResolvedGeometry() }
             return ResolvedGeometry(fills: [ResolvedFill(outline: d.corners, color: pen.color)])
+
+        case .dimension(let d):
+            // Associative dimension → extension lines + dimension line +
+            // arrowheads (filled triangles) + measurement text (.lff strokes via
+            // ctx.fontProvider, ADR-004). The measurement value is recomputed
+            // from the geometry unless overridden. The renderer draws all of this
+            // for free (it consumes ResolvedGeometry only).
+            return Self.resolveDimension(d, pen: pen, ctx: ctx)
         }
+    }
+
+    // MARK: - Dimension resolve (RS_Dimension::update ported as a PURE function)
+
+    /// The default measurement-text height when a dimension carries a
+    /// non-positive `textHeight` (no dim style resolved yet).
+    static let dimDefaultTextHeight = 2.5
+    /// The default arrowhead length when a dimension carries a non-positive
+    /// `arrowSize`.
+    static let dimDefaultArrowSize = 2.5
+    /// Half-width of an arrowhead triangle as a fraction of its length (a slim
+    /// CAD arrowhead). LibreCAD's default arrow is ~1:3 wide:long.
+    static let dimArrowHalfWidthFactor = 1.0 / 6.0
+    /// Gap between an extension-line origin (the measured point) and where the
+    /// drawn extension line starts, as a fraction of the arrow size (DIMEXO).
+    static let dimExtensionOffsetFactor = 0.0
+    /// How far an extension line runs past the dimension line, as a fraction of
+    /// the arrow size (DIMEXE).
+    static let dimExtensionBeyondFactor = 0.5
+
+    /// Resolves a dimension's full graphic (ADR-001: PURE — no `clear()/addEntity`
+    /// mutation, unlike `RS_Dimension::update`). Dispatches per variant; each
+    /// helper emits the dimension line, extension lines, arrowheads, and the
+    /// measurement text positioned on/above the dimension line.
+    static func resolveDimension(_ d: DimData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        switch d.kind {
+        case let .linear(e1, e2, angle):
+            return dimLinearOrAligned(d, p1: e1, p2: e2, fixedAngle: angle, pen: pen, ctx: ctx)
+        case let .aligned(e1, e2):
+            // Aligned: the dimension-line direction is parallel to e1→e2.
+            return dimLinearOrAligned(d, p1: e1, p2: e2, fixedAngle: nil, pen: pen, ctx: ctx)
+        case let .radial(center, pointOnCircle):
+            return dimRadial(d, center: center, pointOnCircle: pointOnCircle,
+                             pen: pen, ctx: ctx)
+        case let .diameter(p1, p2):
+            return dimDiameter(d, point1: p1, point2: p2, pen: pen, ctx: ctx)
+        case let .angular(l1s, l1e, l2s, l2e):
+            return dimAngular(d, line1: (l1s, l1e), line2: (l2s, l2e), pen: pen, ctx: ctx)
+        }
+    }
+
+    /// Effective measurement-text height (style → default fallback).
+    static func dimTextHeight(_ d: DimData) -> Double {
+        d.textHeight > 0 ? d.textHeight : dimDefaultTextHeight
+    }
+
+    /// Effective arrow size (style → default fallback).
+    static func dimArrowSize(_ d: DimData) -> Double {
+        d.arrowSize > 0 ? d.arrowSize : dimDefaultArrowSize
+    }
+
+    /// Formats a measured length/diameter/radius for the label (trims trailing
+    /// zeros so "10.0" reads "10"; falls back to a short decimal otherwise).
+    static func dimFormat(_ value: Double) -> String {
+        let rounded = (value * 1e4).rounded() / 1e4
+        if abs(rounded - rounded.rounded()) < 1e-9 {
+            return String(Int(rounded.rounded()))
+        }
+        // Up to 4 decimals, trailing zeros stripped.
+        var s = String(format: "%.4f", rounded)
+        while s.hasSuffix("0") { s.removeLast() }
+        if s.hasSuffix(".") { s.removeLast() }
+        return s
+    }
+
+    /// The label string for a dimension: the explicit override if present
+    /// (a single space suppresses the text), else the computed measurement.
+    static func dimLabel(_ d: DimData, measured: Double, suffix: String = "") -> String {
+        if let override = d.textOverride {
+            // A single space is the DXF convention for "suppress the text".
+            if override == " " { return "" }
+            if !override.isEmpty { return override }
+        }
+        return suffix + dimFormat(measured)
+    }
+
+    /// A filled arrowhead triangle (as a `ResolvedFill`) whose tip is at `tip`
+    /// and whose body extends back along `direction` (a unit vector pointing FROM
+    /// the tip back toward the dimension line) by `size`, with a half-width of
+    /// `size * dimArrowHalfWidthFactor`.
+    static func dimArrowhead(tip: Vector, direction unit: Vector, size: Double, color: RGBAColor) -> ResolvedFill {
+        let back = tip + unit * size
+        let halfWidth = size * dimArrowHalfWidthFactor
+        let perpUnit = Vector(-unit.y, unit.x)
+        let perp = perpUnit * halfWidth
+        return ResolvedFill(outline: [tip, back + perp, back - perp], color: color)
+    }
+
+    /// Resolves the measurement label as a `.text` entity centered at `center` and
+    /// rotated by `rotation` (radians), reusing the SAME text-resolution path as
+    /// `.text` (`EntityKind.text(...).resolve`). Returns the text's full
+    /// `ResolvedGeometry` — which is stroke polylines today, but will carry FILLS
+    /// when the font provider serves outline glyphs (Core Text). Dimension text
+    /// therefore introduces NO new text-rendering code path and is forward
+    /// compatible. Returns empty geometry (no crash) when there is no provider /
+    /// font or the label is empty.
+    static func dimText(_ label: String, center: Vector, rotation: Double,
+                        height: Double, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        guard !label.isEmpty, height > 0 else { return ResolvedGeometry() }
+        // Estimate the run width (em units → world) to center it, using the same
+        // nominal advance the text-bbox estimate uses, then place the run so its
+        // mid-width lands on `center`.
+        let scale = height / lffCapHeight
+        let nominalAdvance = 9.0
+        let runWidth = Double(label.count) * nominalAdvance * scale
+        // Position the baseline-left so the run is centered on `center` and lifted
+        // half its cap height so the vertical middle sits on the line too.
+        let halfW = runWidth / 2
+        let halfH = height / 2
+        // Unrotated offset from center to the text origin (baseline-left).
+        let offset = Vector(-halfW, -halfH)
+        let origin = center + (rotation != 0 ? offset.rotated(by: rotation) : offset)
+        let data = TextData(position: origin, height: height, rotation: rotation,
+                            text: label, styleName: nil)
+        // Reuse the .text resolve arm so dimension text picks up strokes today and
+        // outline-glyph fills later, with zero dimension-specific text code.
+        return EntityKind.text(data).resolve(pen: pen, ctx: ctx)
+    }
+
+    /// Linear (fixed-angle) or aligned (angle = p1→p2 direction) dimension.
+    static func dimLinearOrAligned(_ d: DimData, p1: Vector, p2: Vector, fixedAngle: Double?,
+                                   pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        guard p1.valid, p2.valid, d.definitionPoint.valid else { return ResolvedGeometry() }
+        let arrow = dimArrowSize(d)
+        let textH = dimTextHeight(d)
+
+        // Dimension-line direction (unit). Aligned: along p1→p2. Linear: the
+        // fixed angle (the perpendicular distance between the points is measured
+        // along this direction).
+        let dirAngle = fixedAngle ?? (p2 - p1).angle
+        let dirUnit = Vector(angle: dirAngle)
+        let normal = Vector(-dirUnit.y, dirUnit.x)   // perpendicular to the dim line
+
+        // The dimension line passes through definitionPoint, parallel to dirUnit.
+        // Project each extension origin onto that line (slide along the normal).
+        func ontoDimLine(_ p: Vector) -> Vector {
+            // Offset from the dim line to p along the normal, removed.
+            let delta = p - d.definitionPoint
+            let alongNormal = delta.dot(normal)
+            return p - normal * alongNormal
+        }
+        let dimP1 = ontoDimLine(p1)
+        let dimP2 = ontoDimLine(p2)
+
+        // Measured value: distance between the projected points (= component of
+        // (p2 - p1) along dirUnit for linear; full distance for aligned).
+        let measured = (dimP2 - dimP1).magnitude
+
+        var polylines: [ResolvedPolyline] = []
+        var fills: [ResolvedFill] = []
+
+        // Extension lines: from each measured point out to (slightly past) the
+        // dimension line, in the direction from the measured point toward its
+        // projection on the dim line.
+        func extLine(_ measuredPt: Vector, _ dimPt: Vector) -> ResolvedPolyline {
+            let toDim = dimPt - measuredPt
+            let len = toDim.magnitude
+            let u = len > Tolerance.distance ? toDim / len : normal
+            let start = measuredPt + u * (arrow * dimExtensionOffsetFactor)
+            let end = dimPt + u * (arrow * dimExtensionBeyondFactor)
+            return ResolvedPolyline(points: [start, end], closed: false, pen: pen)
+        }
+        polylines.append(extLine(p1, dimP1))
+        polylines.append(extLine(p2, dimP2))
+
+        // Dimension line between the two projected points.
+        polylines.append(ResolvedPolyline(points: [dimP1, dimP2], closed: false, pen: pen))
+
+        // Arrowheads at each end, pointing OUTWARD (tips at dimP1/dimP2).
+        if measured > Tolerance.distance {
+            let along = (dimP2 - dimP1) / measured
+            fills.append(dimArrowhead(tip: dimP1, direction: along, size: arrow, color: pen.color))
+            fills.append(dimArrowhead(tip: dimP2, direction: -along, size: arrow, color: pen.color))
+        }
+
+        // Measurement text centered above the dimension line.
+        let label = dimLabel(d, measured: measured)
+        let textCenter = d.textMiddle.valid
+            ? d.textMiddle
+            : (dimP1 + dimP2) * 0.5 + normal * (textH * 0.7)
+        // Keep text upright-ish: normalize the baseline angle to [-90°, 90°].
+        let textAngle = dimTextAngle(dirAngle)
+        let textGeo = dimText(label, center: textCenter, rotation: textAngle,
+                              height: textH, pen: pen, ctx: ctx)
+
+        return ResolvedGeometry(polylines: polylines, fills: fills).merged(with: textGeo)
+    }
+
+    /// Normalizes a dimension-line angle so the text reads roughly upright
+    /// (DXF/CAD convention: text is never upside-down — angles in (90°, 270°)
+    /// flip by π).
+    static func dimTextAngle(_ angle: Double) -> Double {
+        var a = Vector.correctAngle(angle)
+        if a > Double.pi / 2 && a < 3 * Double.pi / 2 { a -= Double.pi }
+        return a
+    }
+
+    /// Radial dimension: a leader from the point on the circle toward the center,
+    /// an arrowhead at the circle, and the radius label.
+    static func dimRadial(_ d: DimData, center: Vector, pointOnCircle: Vector,
+                          pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        guard center.valid, pointOnCircle.valid else { return ResolvedGeometry() }
+        let arrow = dimArrowSize(d)
+        let textH = dimTextHeight(d)
+
+        let radial = pointOnCircle - center
+        let radius = radial.magnitude
+        guard radius > Tolerance.distance else { return ResolvedGeometry() }
+        let outward = radial / radius   // center → circle
+
+        var polylines: [ResolvedPolyline] = []
+        var fills: [ResolvedFill] = []
+
+        // Leader line from the center to the point on the circle.
+        polylines.append(ResolvedPolyline(points: [center, pointOnCircle], closed: false, pen: pen))
+        // Arrowhead at the circle, pointing outward (tip on the circle).
+        fills.append(dimArrowhead(tip: pointOnCircle, direction: -outward, size: arrow, color: pen.color))
+
+        // Label "R<radius>" near the mid-leader, baseline along the leader.
+        let label = dimLabel(d, measured: radius, suffix: "R")
+        let normal = Vector(-outward.y, outward.x)
+        let textCenter = d.textMiddle.valid
+            ? d.textMiddle
+            : center + outward * (radius * 0.5) + normal * (textH * 0.7)
+        let textAngle = dimTextAngle(outward.angle)
+        let textGeo = dimText(label, center: textCenter, rotation: textAngle,
+                              height: textH, pen: pen, ctx: ctx)
+
+        return ResolvedGeometry(polylines: polylines, fills: fills).merged(with: textGeo)
+    }
+
+    /// Diameter dimension: a line across the circle through both points, an
+    /// arrowhead at each end, and the diameter label.
+    static func dimDiameter(_ d: DimData, point1: Vector, point2: Vector,
+                            pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        guard point1.valid, point2.valid else { return ResolvedGeometry() }
+        let arrow = dimArrowSize(d)
+        let textH = dimTextHeight(d)
+
+        let across = point2 - point1
+        let diameter = across.magnitude
+        guard diameter > Tolerance.distance else { return ResolvedGeometry() }
+        let along = across / diameter
+
+        var polylines: [ResolvedPolyline] = []
+        var fills: [ResolvedFill] = []
+
+        // The diameter line and an arrowhead at each end (tips at the points).
+        polylines.append(ResolvedPolyline(points: [point1, point2], closed: false, pen: pen))
+        fills.append(dimArrowhead(tip: point1, direction: along, size: arrow, color: pen.color))
+        fills.append(dimArrowhead(tip: point2, direction: -along, size: arrow, color: pen.color))
+
+        // Label "⌀<diameter>" centered above the diameter line.
+        let label = dimLabel(d, measured: diameter, suffix: "\u{2300}")
+        let normal = Vector(-along.y, along.x)
+        let textCenter = d.textMiddle.valid
+            ? d.textMiddle
+            : (point1 + point2) * 0.5 + normal * (textH * 0.7)
+        let textAngle = dimTextAngle(along.angle)
+        let textGeo = dimText(label, center: textCenter, rotation: textAngle,
+                              height: textH, pen: pen, ctx: ctx)
+
+        return ResolvedGeometry(polylines: polylines, fills: fills).merged(with: textGeo)
+    }
+
+    /// Angular dimension: an arc between the two lines (through definitionPoint),
+    /// extension lines out to the arc ends, arrowheads, and the angle label.
+    static func dimAngular(_ d: DimData, line1: (Vector, Vector), line2: (Vector, Vector),
+                           pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        guard line1.0.valid, line1.1.valid, line2.0.valid, line2.1.valid,
+              d.definitionPoint.valid else { return ResolvedGeometry() }
+        let arrow = dimArrowSize(d)
+        let textH = dimTextHeight(d)
+
+        // Vertex = intersection of the two lines (fall back to the midpoint of the
+        // inner endpoints if the lines are parallel).
+        let vertex = lineLineIntersection(line1, line2)
+            ?? (line1.1 + line2.1) * 0.5
+
+        let a1 = (line1.1 - vertex).angle
+        let a2 = (line2.1 - vertex).angle
+        // Sweep from a1 to a2 (CCW), normalized to (0, 2π).
+        var sweep = Vector.correctAngle(a2 - a1)
+        if sweep < Tolerance.angle { sweep = 2 * Double.pi }
+
+        // Arc radius = distance from the vertex to the definition point.
+        let radius = (d.definitionPoint - vertex).magnitude
+        guard radius > Tolerance.distance else { return ResolvedGeometry() }
+
+        var polylines: [ResolvedPolyline] = []
+        var fills: [ResolvedFill] = []
+
+        // The dimension arc (vertex-centered, from a1 sweeping CCW to a2).
+        let arcPts = Tessellation.arcPointsBySweep(
+            center: vertex, radius: radius, startAngle: a1, sweep: sweep,
+            tolerance: ctx.tessellationTolerance)
+        polylines.append(ResolvedPolyline(points: arcPts, closed: false, pen: pen))
+
+        // Extension lines from each line's far endpoint to the arc ends.
+        let arcStart = vertex + Vector.polar(radius: radius, angle: a1)
+        let arcEnd = vertex + Vector.polar(radius: radius, angle: a2)
+        polylines.append(ResolvedPolyline(points: [line1.1, arcStart], closed: false, pen: pen))
+        polylines.append(ResolvedPolyline(points: [line2.1, arcEnd], closed: false, pen: pen))
+
+        // Arrowheads tangent to the arc at each end (pointing along the sweep).
+        let tan1 = Vector(angle: a1 + Double.pi / 2)        // CCW tangent at start
+        let tan2 = Vector(angle: a2 + Double.pi / 2)
+        fills.append(dimArrowhead(tip: arcStart, direction: -tan1, size: arrow, color: pen.color))
+        fills.append(dimArrowhead(tip: arcEnd, direction: tan2, size: arrow, color: pen.color))
+
+        // Angle label (degrees) at the arc midpoint.
+        let degrees = sweep * 180 / Double.pi
+        let label = dimLabel(d, measured: degrees, suffix: "") + "\u{00B0}"
+        let midA = a1 + sweep / 2
+        let textCenter = d.textMiddle.valid
+            ? d.textMiddle
+            : vertex + Vector.polar(radius: radius + textH * 0.7, angle: midA)
+        let textAngle = dimTextAngle(midA + Double.pi / 2)
+        let textGeo = dimText(label, center: textCenter, rotation: textAngle,
+                              height: textH, pen: pen, ctx: ctx)
+
+        return ResolvedGeometry(polylines: polylines, fills: fills).merged(with: textGeo)
+    }
+
+    /// Intersection of two infinite lines, or `nil` if parallel.
+    static func lineLineIntersection(_ l1: (Vector, Vector), _ l2: (Vector, Vector)) -> Vector? {
+        let p = l1.0, r = l1.1 - l1.0
+        let q = l2.0, s = l2.1 - l2.0
+        let denom = r.x * s.y - r.y * s.x
+        guard abs(denom) > Tolerance.distance else { return nil }
+        let t = ((q.x - p.x) * s.y - (q.y - p.y) * s.x) / denom
+        return p + r * t
     }
 
     // MARK: - Text layout (.lff stroked text, ADR-004)
@@ -994,6 +1338,117 @@ extension EntityKind {
 
         case .solid(let d):
             return AABB(points: d.corners)
+
+        case .dimension(let d):
+            return Self.dimensionBoundingBox(d)
+        }
+    }
+
+    /// Bounding box for a dimension, derived from its RESOLVED geometry (ADR-001:
+    /// the box is computed from `resolve()`, not a stroke-specific path). The
+    /// `boundingBox()` path has no `ResolveContext` (so no font provider), so the
+    /// graphic parts (extension lines, dimension line / leader / arc, arrowheads)
+    /// are resolved with the default context and unioned; the measurement text —
+    /// which would need a provider — is added as an estimated band so the box
+    /// still encloses where the label will draw (matching `textBoundingBox`). This
+    /// stays correct whether the provider later emits stroke polylines or outline
+    /// fills, because both contribute through the same resolved geometry.
+    static func dimensionBoundingBox(_ d: DimData) -> AABB {
+        // Resolve the geometric graphic with the default (font-less) context: text
+        // resolves to nothing, but every line / arc / arrowhead is present.
+        let geo = EntityKind.dimension(d).resolve(pen:
+            ResolvedPen(color: .black, lineType: .solid, lineWidth: .default), ctx: .default)
+        var box = AABB.empty
+        for pl in geo.polylines { for p in pl.points { box.expand(toInclude: p) } }
+        for fill in geo.fills { for loop in fill.loops { for p in loop { box.expand(toInclude: p) } } }
+
+        // Add an estimated text band around the label's center so the box covers
+        // the measurement text even without a font provider here.
+        let measured = dimMeasuredValue(d)
+        let label = dimLabel(d, measured: measured.value, suffix: measured.suffix)
+        if !label.isEmpty {
+            let h = dimTextHeight(d)
+            let center = dimTextCenter(d)
+            if center.valid {
+                let textBox = textBoundingBox(TextData(
+                    position: center, height: h, rotation: 0, text: label))
+                // The text-box is anchored at `position`; shift it so `center` is
+                // its middle (matching how dimText centers the run).
+                let shift = (textBox.min + textBox.max) * 0.5 - center
+                box = box.union(AABB(
+                    min: textBox.min - shift, max: textBox.max - shift))
+            }
+        }
+        if box.isEmpty {
+            // Degenerate dim (e.g. coincident points): collapse to the def point.
+            return AABB(point: d.definitionPoint.valid ? d.definitionPoint : Vector(0, 0))
+        }
+        return box
+    }
+
+    /// The measured value + label suffix for a dimension, recomputed from
+    /// geometry (matches `resolveDimension`'s per-variant measurement).
+    static func dimMeasuredValue(_ d: DimData) -> (value: Double, suffix: String) {
+        switch d.kind {
+        case let .linear(e1, e2, angle):
+            let u = Vector(angle: angle)
+            return (abs((e2 - e1).dot(u)), "")
+        case let .aligned(e1, e2):
+            return ((e2 - e1).magnitude, "")
+        case let .radial(center, pointOnCircle):
+            return ((pointOnCircle - center).magnitude, "R")
+        case let .diameter(p1, p2):
+            return ((p2 - p1).magnitude, "\u{2300}")
+        case let .angular(l1s, l1e, l2s, l2e):
+            let vertex = lineLineIntersection((l1s, l1e), (l2s, l2e)) ?? (l1e + l2e) * 0.5
+            var sweep = Vector.correctAngle((l2e - vertex).angle - (l1e - vertex).angle)
+            if sweep < Tolerance.angle { sweep = 2 * Double.pi }
+            return (sweep * 180 / Double.pi, "")
+        }
+    }
+
+    /// The default text center for a dimension (used by the bbox estimate; mirrors
+    /// `resolveDimension`'s text placement, honoring `textMiddle` overrides).
+    static func dimTextCenter(_ d: DimData) -> Vector {
+        if d.textMiddle.valid { return d.textMiddle }
+        let h = dimTextHeight(d)
+        switch d.kind {
+        case let .linear(e1, e2, angle):
+            let dirUnit = Vector(angle: angle)
+            let normal = Vector(-dirUnit.y, dirUnit.x)
+            func ontoDimLine(_ p: Vector) -> Vector {
+                p - normal * (p - d.definitionPoint).dot(normal)
+            }
+            return (ontoDimLine(e1) + ontoDimLine(e2)) * 0.5 + normal * (h * 0.7)
+        case let .aligned(e1, e2):
+            let dirUnit = Vector(angle: (e2 - e1).angle)
+            let normal = Vector(-dirUnit.y, dirUnit.x)
+            func ontoDimLine(_ p: Vector) -> Vector {
+                p - normal * (p - d.definitionPoint).dot(normal)
+            }
+            return (ontoDimLine(e1) + ontoDimLine(e2)) * 0.5 + normal * (h * 0.7)
+        case let .radial(center, pointOnCircle):
+            let radial = pointOnCircle - center
+            let r = radial.magnitude
+            guard r > Tolerance.distance else { return center }
+            let outward = radial / r
+            let normal = Vector(-outward.y, outward.x)
+            return center + outward * (r * 0.5) + normal * (h * 0.7)
+        case let .diameter(p1, p2):
+            let across = p2 - p1
+            let len = across.magnitude
+            guard len > Tolerance.distance else { return (p1 + p2) * 0.5 }
+            let along = across / len
+            let normal = Vector(-along.y, along.x)
+            return (p1 + p2) * 0.5 + normal * (h * 0.7)
+        case let .angular(l1s, l1e, l2s, l2e):
+            let vertex = lineLineIntersection((l1s, l1e), (l2s, l2e)) ?? (l1e + l2e) * 0.5
+            let a1 = (l1e - vertex).angle
+            let a2 = (l2e - vertex).angle
+            var sweep = Vector.correctAngle(a2 - a1)
+            if sweep < Tolerance.angle { sweep = 2 * Double.pi }
+            let radius = (d.definitionPoint - vertex).magnitude
+            return vertex + Vector.polar(radius: radius + h * 0.7, angle: a1 + sweep / 2)
         }
     }
 

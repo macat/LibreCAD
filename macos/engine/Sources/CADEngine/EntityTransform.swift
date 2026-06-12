@@ -236,6 +236,7 @@ public enum EntityTransform {
         case .text(let tx):           return .text(transformText(tx, t))
         case .hatch(let h):           return .hatch(transformHatch(h, t))
         case .solid(let s):           return .solid(transformSolid(s, t))
+        case .dimension(let dm):      return .dimension(transformDimension(dm, t))
         }
     }
 
@@ -422,5 +423,49 @@ public enum EntityTransform {
 
     static func transformSolid(_ s: SolidData, _ t: Affine2D) -> SolidData {
         SolidData(corners: s.corners.map { t.apply($0) })
+    }
+
+    // MARK: dimension — transform every defining point + the text-override point,
+    //       scale the text/arrow sizes by the uniform factor, and rotate the
+    //       linear-dim direction angle (or reflect it under a mirror). Mirrors
+    //       RS_Dimension::move/rotate/scale/mirror, which transform the defining
+    //       points and re-run update() — here update() is the PURE resolve() so we
+    //       only transform the DEFINING data (ADR-001).
+
+    static func transformDimension(_ dm: DimData, _ t: Affine2D) -> DimData {
+        // Re-derive a direction angle under the transform (rotate, or reflect
+        // across the mirror axis), matching RS_Arc/RS_Text angle handling.
+        func mappedAngle(_ a: Double) -> Double {
+            t.isMirror
+                ? Vector.correctAngle(t.mirrorAxisAngle * 2 - a)
+                : Vector.correctAngle(a + t.rotationDelta)
+        }
+
+        let newKind: DimKind
+        switch dm.kind {
+        case let .linear(e1, e2, angle):
+            newKind = .linear(extension1: t.apply(e1), extension2: t.apply(e2),
+                              angle: mappedAngle(angle))
+        case let .aligned(e1, e2):
+            newKind = .aligned(extension1: t.apply(e1), extension2: t.apply(e2))
+        case let .radial(center, pointOnCircle):
+            newKind = .radial(center: t.apply(center), pointOnCircle: t.apply(pointOnCircle))
+        case let .diameter(p1, p2):
+            newKind = .diameter(point1: t.apply(p1), point2: t.apply(p2))
+        case let .angular(l1s, l1e, l2s, l2e):
+            newKind = .angular(line1Start: t.apply(l1s), line1End: t.apply(l1e),
+                               line2Start: t.apply(l2s), line2End: t.apply(l2e))
+        }
+
+        return DimData(
+            kind: newKind,
+            definitionPoint: t.apply(dm.definitionPoint),
+            textOverride: dm.textOverride,
+            // An invalid (unset) text-middle stays invalid; a real one transforms.
+            textMiddle: dm.textMiddle.valid ? t.apply(dm.textMiddle) : .invalid,
+            styleName: dm.styleName,
+            textHeight: abs(dm.textHeight * t.uniformScale),
+            arrowSize: abs(dm.arrowSize * t.uniformScale)
+        )
     }
 }

@@ -206,7 +206,13 @@ extension CADEngine {
             guard corners.count >= 3 else { return nil }
             return .solid(SolidData(corners: corners))
 
-        default: // LC_ENT_UNSUPPORTED and anything else
+        // DIMENSION skip arm: libdxfrw delivers every DIMENSION variant
+        // (linear/aligned/radial/diametric/angular/ordinate) through the bridge as
+        // LC_ENT_UNSUPPORTED with typeName "DIMENSION" (see lcdxf.cpp's addDim*),
+        // so it falls into the default below and becomes a warning rather than a
+        // crash. Full dimension IMPORT (mapping the def points → `.dimension`) is
+        // a follow-up wave; for S1 the reader only needs to skip it cleanly.
+        default: // LC_ENT_UNSUPPORTED (incl. DIMENSION) and anything else
             return nil
         }
     }

@@ -14,8 +14,9 @@
 //  is non-reentrant, so there is exactly one serialization point per process).
 //
 //  Supported kinds round-trip: line / point / circle / arc / ellipse / polyline /
-//  text / solid / hatch. Spline / splinePoints (and any other kind) are skipped
-//  for now (counted, not fatal). HATCH writes its boundary loops as edge (line)
+//  text / solid / hatch. Spline / splinePoints / dimension (and any other kind)
+//  are skipped for now (counted, not fatal) — dimension WRITE is a later wave
+//  (S3 `ws/dim-write`). HATCH writes its boundary loops as edge (line)
 //  boundaries (libdxfrw's polyline-boundary writer is an unimplemented stub), so
 //  boundary-arc bulges are not preserved across the round-trip — see backlog.md.
 //
@@ -292,6 +293,13 @@ private final class PODBuilder {
             // Not yet supported by the writer; the C side skips UNSUPPORTED.
             e.kind = Int32(LC_ENT_UNSUPPORTED.rawValue)
             e.typeName = intern("SPLINE")
+
+        case .dimension:
+            // Dimension WRITE is a later wave (S3 `ws/dim-write`); for now the
+            // writer skips it (the C side counts UNSUPPORTED). The `.dimension`
+            // EntityKind + its resolve()/round-trip graphic land in S1.
+            e.kind = Int32(LC_ENT_UNSUPPORTED.rawValue)
+            e.typeName = intern("DIMENSION")
 
         case .text(let d):
             // Emitted as a single-line DXF TEXT (the C side writes DRW_Text). The
