@@ -148,7 +148,8 @@ public struct ExtendTool: Tool {
         case .line, .arc: return true
         // TODO(backlog): extend polylines (grow the end segment), ellipse arcs,
         // and open splines to a boundary. Out of scope for this pass.
-        case .circle, .polyline, .ellipse, .spline, .splinePoints, .point:
+        case .circle, .polyline, .ellipse, .spline, .splinePoints, .point,
+             .text, .hatch, .solid:
             return false
         }
     }
@@ -165,7 +166,8 @@ public struct ExtendTool: Tool {
             return extendLine(d, near: near, boundaries: boundaries).map(EntityKind.line)
         case .arc(let d):
             return extendArc(d, near: near, boundaries: boundaries).map(EntityKind.arc)
-        case .circle, .polyline, .ellipse, .spline, .splinePoints, .point:
+        case .circle, .polyline, .ellipse, .spline, .splinePoints, .point,
+             .text, .hatch, .solid:
             return nil
         }
     }
@@ -231,7 +233,8 @@ public struct ExtendTool: Tool {
                                                  fullCircle: false, segment: false)
                 out.append(contentsOf: sols.filter(\.valid))
             // TODO(backlog): ellipse / spline boundaries.
-            case .ellipse, .spline, .splinePoints, .polyline, .point:
+            case .ellipse, .spline, .splinePoints, .polyline, .point,
+                 .text, .hatch, .solid:
                 continue
             }
         }
@@ -305,7 +308,8 @@ public struct ExtendTool: Tool {
                                                    arcReversed: bd.reversed)
                 out.append(contentsOf: sols.filter(\.valid))
             // TODO(backlog): ellipse / spline boundaries.
-            case .ellipse, .spline, .splinePoints, .polyline, .point:
+            case .ellipse, .spline, .splinePoints, .polyline, .point,
+                 .text, .hatch, .solid:
                 continue
             }
         }
