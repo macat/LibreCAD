@@ -87,6 +87,13 @@ typedef enum LCEntityKind {
      *  `vertices` array, already un-swapped from DXF's bow-tie 3rd/4th order into
      *  ring order. */
     LC_ENT_SOLID = 10,
+    /** Rich multi-line text (DXF MTEXT). The raw inline-coded string is in
+     *  `textValue` (kept verbatim for lossless round-trip of the format codes);
+     *  insertion point in p1; `height`/`startAngle` (radians); `mtextRectWidth`
+     *  (code 41 reference/wrap width), `mtextAttachment` (code 71, 1..9),
+     *  `mtextLineSpacingStyle` (code 73) and `mtextLineSpacingFactor` (code 44).
+     *  Distinct from LC_ENT_TEXT so the Swift reader maps it to `.mtext`. */
+    LC_ENT_MTEXT = 11,
     /** An entity libdxfrw delivered but the reader does not flatten
      *  (INSERT/DIMENSION/IMAGE/...). Carries only its `typeName` so Swift can
      *  collect a warning; geometry fields are unset. */
@@ -157,6 +164,12 @@ typedef struct LCEntity {
     int32_t hAlign;        /**< text horizontal align (code 72): 0 left, 1 center, 2 right. */
     int32_t vAlign;        /**< text vertical align (code 73): 0 baseline, 1 bottom, 2 middle, 3 top. */
     int32_t solidFill;     /**< HATCH solid-fill flag (0 pattern, 1 solid). */
+
+    /* MTEXT-only layout (meaningful when kind == LC_ENT_MTEXT). */
+    double mtextRectWidth;        /**< MTEXT reference / wrap width (code 41); 0 == no wrap. */
+    int32_t mtextAttachment;      /**< MTEXT attachment point (code 71): 1..9 (TL..BR). */
+    int32_t mtextLineSpacingStyle;/**< MTEXT line-spacing style (code 73): 1 at-least, 2 exact. */
+    double mtextLineSpacingFactor;/**< MTEXT line-spacing factor (code 44); default 1. */
 
     /* Variable-length data — borrowed pointers into the owning list's pools. */
     const LCVertex *vertices;   /**< polyline vertices, spline control points, hatch

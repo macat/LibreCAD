@@ -314,6 +314,14 @@ private final class PODBuilder {
             e.textValue = intern(d.text)
             if let style = d.styleName, !style.isEmpty { e.styleName = intern(style) }
 
+        case .mtext:
+            // MTEXT WRITE is a follow-up wave; for now the writer skips it (the C
+            // side counts UNSUPPORTED). MTEXT IMPORT (read DXF MTEXT → `.mtext`
+            // with the raw coded string) lands in this wave; re-emitting the run
+            // tree as a coded MTEXT string is the next step.
+            e.kind = Int32(LC_ENT_UNSUPPORTED.rawValue)
+            e.typeName = intern("MTEXT")
+
         case .solid(let d):
             // Emitted as a DXF SOLID. Corners are stored in ring order; the C side
             // re-applies DXF's bow-tie 3rd/4th swap. A degenerate (<3 corner)

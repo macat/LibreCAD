@@ -493,6 +493,12 @@ public enum EntityKind: Sendable, Hashable, Codable {
     case splinePoints(SplinePointsData)
     /// Single-line CAD text drawn as `.lff` stroked polylines (`RS_Text`).
     case text(TextData)
+    /// Rich multi-line formatted text — paragraphs of per-run-formatted runs with
+    /// word wrapping, attachment-point alignment, stacked fractions, and per-run
+    /// font/height/colour/decoration (`RS_MText`, DXF `MTEXT`). Its laid-out
+    /// geometry (glyph fills/strokes + decoration strokes) is computed in
+    /// `resolve()` via `ResolveContext.fontProvider`, never stored (ADR-001).
+    case mtext(MTextData)
     /// A filled region defined by boundary loops (`RS_Hatch`).
     case hatch(HatchData)
     /// A filled triangle/quadrilateral (`RS_Solid`, DXF `SOLID`/`TRACE`).

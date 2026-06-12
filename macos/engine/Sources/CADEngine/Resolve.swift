@@ -692,6 +692,15 @@ extension EntityKind {
             // provider / font ⇒ empty geometry (no crash).
             return TextShaper.resolve(d, pen: pen, ctx: ctx)
 
+        case .mtext(let d):
+            // Rich MTEXT → per-run shaped glyph geometry (native outlines → fills,
+            // `.lff` strokes → polylines) laid out with word wrapping to the
+            // reference width, line spacing, attachment-point alignment, stacked
+            // fractions, and underline/overline/strike decorations. All runs go
+            // through the SAME FontProvider as `.text` (no second text path). No
+            // provider / font ⇒ empty geometry (no crash).
+            return MTextShaper.resolve(d, pen: pen, ctx: ctx)
+
         case .hatch(let d):
             // Solid fill of the boundary loops. Pattern lines are backlog, so a
             // pattern hatch still fills its boundary for visibility. Bulged
@@ -1241,6 +1250,10 @@ extension EntityKind {
             if let tight = TextShaper.boundingBox(d, ctx: ctx) { return tight }
             return Self.textBoundingBox(d)
         }
+        if case .mtext(let d) = self {
+            if let tight = MTextShaper.boundingBox(d, ctx: ctx) { return tight }
+            return Self.mtextBoundingBox(d)
+        }
         return boundingBox()
     }
 
@@ -1287,6 +1300,9 @@ extension EntityKind {
 
         case .text(let d):
             return Self.textBoundingBox(d)
+
+        case .mtext(let d):
+            return Self.mtextBoundingBox(d)
 
         case .hatch(let d):
             // Union of every boundary loop's vertices (bulge-arc bow is ignored —
@@ -1443,5 +1459,52 @@ extension EntityKind {
             box.expand(toInclude: d.position + rotated)
         }
         return box
+    }
+
+    /// Conservative world-space bounding box for rich MTEXT, used on the font-less
+    /// `boundingBox()` path (the ctx-carrying path uses the tight font-aware box).
+    /// Estimates the block from the run-tree text: a width of the reference width
+    /// when set, else the longest paragraph's character count × a nominal advance;
+    /// a height from the paragraph/line count × the line height. The estimated
+    /// block is anchored by the attachment point and rotated about `position`.
+    static func mtextBoundingBox(_ d: MTextData) -> AABB {
+        guard d.height > 0 else { return AABB(point: d.position) }
+        // Approximate line count = paragraphs (wrap adds lines; ignored in the
+        // estimate). Longest paragraph length drives the width estimate.
+        let lineCount = Swift.max(d.paragraphs.count, 1)
+        var maxChars = 1
+        for p in d.paragraphs {
+            var chars = 0
+            for inline in p.inlines {
+                switch inline {
+                case .run(let r): chars += r.text.count
+                case .stacked(let s): chars += Swift.max(s.upper.count, s.lower.count)
+                case .tab: chars += 4
+                }
+            }
+            maxChars = Swift.max(maxChars, chars)
+        }
+        let nominalAdvance = 0.6 * d.height            // ~0.6 × height per glyph
+        let estWidth = d.rectWidth > 0 ? d.rectWidth
+            : Double(maxChars) * nominalAdvance
+        let lineHeight = d.height * 1.6 * (d.lineSpacingFactor > 0 ? d.lineSpacingFactor : 1)
+        let blockHeight = Double(lineCount) * lineHeight
+        let blockTop = d.height                        // first cap top
+
+        // Attachment shift in the local frame (mirrors MTextShaper.attachmentShift).
+        let (dx, dy) = MTextShaper.attachmentShift(
+            d.attachment, columnWidth: estWidth, blockTop: blockTop, blockHeight: blockHeight)
+
+        let corners = [
+            Vector(0, blockTop), Vector(estWidth, blockTop),
+            Vector(estWidth, blockTop - blockHeight), Vector(0, blockTop - blockHeight),
+        ]
+        var box = AABB.empty
+        for c in corners {
+            let shifted = Vector(c.x + dx, c.y + dy)
+            let rotated = d.rotation != 0 ? shifted.rotated(by: d.rotation) : shifted
+            box.expand(toInclude: d.position + rotated)
+        }
+        return box.isEmpty ? AABB(point: d.position) : box
     }
 }

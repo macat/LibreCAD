@@ -56,8 +56,8 @@ struct DXFWriterTests {
 
     private struct KindTally: Equatable {
         var line = 0, point = 0, circle = 0, arc = 0, ellipse = 0, polyline = 0
-        var text = 0, solid = 0, hatch = 0
-        /// The supported set the writer emits (spline/splinePoints excluded).
+        var text = 0, mtext = 0, solid = 0, hatch = 0
+        /// The supported set the writer emits (spline/splinePoints/mtext excluded).
         var supportedTotal: Int {
             line + point + circle + arc + ellipse + polyline + text + solid + hatch
         }
@@ -74,6 +74,7 @@ struct DXFWriterTests {
             case .ellipse:      t.ellipse += 1
             case .polyline:     t.polyline += 1
             case .text:         t.text += 1      // now written (DRW_Text)
+            case .mtext:        t.mtext += 1     // skipped by the writer (MTEXT-write follow-up)
             case .solid:        t.solid += 1     // now written (DRW_Solid)
             case .hatch:        t.hatch += 1     // now written (DRW_Hatch)
             case .spline, .splinePoints: break   // still skipped by the writer
@@ -97,23 +98,27 @@ struct DXFWriterTests {
         #expect(firstTally.arc >= 1)
         #expect(firstTally.polyline >= 1)
 
-        // dim_sample carries MTEXT (-> .text) and SOLID (-> .solid), which the
-        // writer now emits, so they should round-trip rather than be dropped.
-        #expect(firstTally.text >= 1)
+        // dim_sample carries MTEXT (-> .mtext, skipped by the writer until the
+        // MTEXT-write follow-up) and SOLID (-> .solid, written), so SOLID should
+        // round-trip while MTEXT is counted as skipped.
+        #expect(firstTally.mtext >= 1)
         #expect(firstTally.solid >= 1)
 
         let outPath = tempDXFPath()
         defer { removeFile(outPath) }
 
-        // Write everything the reader produced. dim_sample has no splines, so
-        // every record is in the writer's supported set -> nothing is skipped.
+        // Write everything the reader produced. dim_sample has no splines, but its
+        // MTEXT records are skipped (MTEXT-write follow-up).
         let writeResult = try await CADEngine.shared.writeEntities(
             first.records, layers: first.layers, toPath: outPath
         )
         let unsupported = first.records.filter {
-            switch $0.kind { case .spline, .splinePoints: return true; default: return false }
+            switch $0.kind {
+            case .spline, .splinePoints, .mtext: return true
+            default: return false
+            }
         }.count
-        #expect(writeResult.skipped == unsupported)   // 0 for dim_sample
+        #expect(writeResult.skipped == unsupported)   // == the MTEXT count for dim_sample
         #expect(FileManager.default.fileExists(atPath: outPath))
 
         // Re-read and compare the supported-kind tallies exactly.
@@ -452,7 +457,7 @@ struct DXFWriterTests {
         switch r.kind {
         case .line, .point, .circle, .arc, .ellipse, .polyline,
              .text, .solid, .hatch: return true
-        case .spline, .splinePoints, .dimension: return false
+        case .spline, .splinePoints, .dimension, .mtext: return false
         }
     }
 }

@@ -36,10 +36,10 @@ struct DXFReaderTests {
     private struct KindTally {
         var line = 0, point = 0, circle = 0, arc = 0
         var ellipse = 0, polyline = 0, spline = 0, splinePoints = 0
-        var text = 0, hatch = 0, solid = 0, dimension = 0
+        var text = 0, mtext = 0, hatch = 0, solid = 0, dimension = 0
         var total: Int {
             line + point + circle + arc + ellipse + polyline + spline + splinePoints
-                + text + hatch + solid + dimension
+                + text + mtext + hatch + solid + dimension
         }
     }
 
@@ -57,6 +57,8 @@ struct DXFReaderTests {
             case .splinePoints: t.splinePoints += 1
             // Display kinds now imported by the reader (reader-import wave).
             case .text:         t.text += 1
+            // Rich MTEXT now imported as `.mtext` (Phase 2 rich-MTEXT wave).
+            case .mtext:        t.mtext += 1
             case .hatch:        t.hatch += 1
             case .solid:        t.solid += 1
             // Dimensions are not yet IMPORTED by the reader (skip arm only — they
@@ -84,29 +86,32 @@ struct DXFReaderTests {
         #expect(t.arc >= 1)
         #expect(t.polyline >= 1)
 
-        // Reader-import wave: the sample's 20 top-level MTEXT and 4 SOLID
-        // entities (previously surfaced only as unsupported warnings) are now
-        // imported as `.text` / `.solid` records.
-        #expect(t.text == 20)
+        // Reader-import wave: the sample's 20 top-level MTEXT (now imported as
+        // `.mtext`, the rich-MTEXT wave) and 4 SOLID entities (previously surfaced
+        // only as unsupported warnings) are now imported as records.
+        #expect(t.mtext == 20)
+        #expect(t.text == 0)        // dim_sample carries only MTEXT, no single-line TEXT
         #expect(t.solid == 4)
     }
 
-    @Test("imports MTEXT as .text and SOLID as .solid from dim_sample.dxf")
+    @Test("imports MTEXT as .mtext and SOLID as .solid from dim_sample.dxf")
     func importsTextAndSolid() async throws {
         let result = try await readSample()
         let t = tally(result.records)
 
         // Both display kinds are now mapped, not dropped.
-        #expect(t.text > 0)
+        #expect(t.mtext > 0)
         #expect(t.solid > 0)
 
-        // Every imported text carries a non-empty string and a positive height;
-        // every imported solid carries 3 or 4 ring-ordered corners.
+        // Every imported MTEXT carries a non-empty raw coded string, a positive
+        // height, and a parsed run tree; every imported solid carries 3 or 4
+        // ring-ordered corners.
         for r in result.records {
             switch r.kind {
-            case .text(let d):
-                #expect(!d.text.isEmpty)
+            case .mtext(let d):
+                #expect(d.rawCode?.isEmpty == false)
                 #expect(d.height > 0)
+                #expect(!d.paragraphs.isEmpty)
             case .solid(let d):
                 #expect(d.corners.count >= 3 && d.corners.count <= 4)
             default:
