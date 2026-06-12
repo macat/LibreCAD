@@ -389,14 +389,30 @@ public struct SplinePointsData: Sendable, Hashable, Codable {
 ///   computed measurement. `nil`/empty ⇒ use the measured value; `" "` (a single
 ///   space, DXF convention) ⇒ suppress the text. `DRW_Dimension::getText`.
 /// - `textMiddle`       — DXF code 11: optional override for the text's middle
-///   point. `.invalid` ⇒ the resolve computes a default text position centered on
-///   the dimension line. `DRW_Dimension::getTextPoint`.
+///   point. `nil` ⇒ the resolve computes a default text position centered on the
+///   dimension line. `DRW_Dimension::getTextPoint`.
 /// - `styleName`        — DXF code 3: the dimension style name (carried for
 ///   round-trip; not yet resolved against a style table — that is the reserved
 ///   `dimStyleProvider` hook on `ResolveContext`). `DRW_Dimension::getStyle`.
 /// - `textHeight`       — measurement-text cap height in world units (from the
 ///   dim style's text height; defaulted here until a style table lands).
 /// - `arrowSize`        — arrowhead length in world units (dim style arrow size).
+/// - `textRotation`     — DXF code 53: an explicit rotation (radians) for the
+///   measurement text, independent of the dimension-line angle. `nil` ⇒ the
+///   resolve derives the upright baseline angle from the geometry.
+/// - `attachmentPoint`  — DXF code 71: the text attachment / justification
+///   (`DRW_MText::Attach` semantics, reused). Carried for round-trip; the
+///   dimension tools + DXF write consume it.
+/// - `lineSpacingStyle` — DXF code 72/73: at-least vs exact line spacing for
+///   multi-line measurement text (round-trip; tolerance text uses it).
+/// - `lineSpacingFactor`— DXF code 41: a multiplier on the default line spacing
+///   for multi-line measurement text.
+/// - `obliqueAngle`     — DXF code 52: an extension-line oblique (slant) angle in
+///   radians for linear/aligned dimensions (oblique-dimension support). Carried
+///   for round-trip; the tools + write consume it.
+///
+/// (The measurement value — DXF code 42 — is **recomputed** from the geometry in
+/// `resolve()` and is deliberately NOT stored, so a dimension re-measures on edit.)
 ///
 /// The per-variant defining points live in `DimKind`.
 public struct DimData: Sendable, Hashable, Codable {
@@ -409,24 +425,42 @@ public struct DimData: Sendable, Hashable, Codable {
     /// DXF code 1 — explicit text that REPLACES the computed measurement. `nil`
     /// or empty ⇒ show the measured value; a single space suppresses the text.
     public var textOverride: String?
-    /// DXF code 11 — optional override for the text middle point. `.invalid`
+    /// DXF code 11 — optional override for the text middle point. `nil`
     /// (the default) ⇒ resolve centers the text on the dimension line.
-    public var textMiddle: Vector
+    public var textMiddle: Vector?
     /// DXF code 3 — the dimension style name (round-trip; style resolution TBD).
     public var styleName: String?
     /// Measurement-text cap height in world units.
     public var textHeight: Double
     /// Arrowhead length in world units.
     public var arrowSize: Double
+    /// DXF code 53 — explicit measurement-text rotation (radians). `nil` ⇒ the
+    /// resolve derives the upright baseline angle from the dimension geometry.
+    public var textRotation: Double?
+    /// DXF code 71 — text attachment / justification (`DRW_MText::Attach`).
+    /// Carried for round-trip + consumed by the dimension tools / DXF write.
+    public var attachmentPoint: MTextAttachment
+    /// DXF code 72/73 — line-spacing style for multi-line measurement text.
+    public var lineSpacingStyle: MTextLineSpacingStyle
+    /// DXF code 41 — line-spacing factor (multiplier on default line spacing).
+    public var lineSpacingFactor: Double
+    /// DXF code 52 — extension-line oblique (slant) angle, radians, for
+    /// linear/aligned dimensions. `0` ⇒ extension lines are perpendicular.
+    public var obliqueAngle: Double
 
     public init(
         kind: DimKind,
         definitionPoint: Vector,
         textOverride: String? = nil,
-        textMiddle: Vector = .invalid,
+        textMiddle: Vector? = nil,
         styleName: String? = nil,
         textHeight: Double = 2.5,
-        arrowSize: Double = 2.5
+        arrowSize: Double = 2.5,
+        textRotation: Double? = nil,
+        attachmentPoint: MTextAttachment = .middleCenter,
+        lineSpacingStyle: MTextLineSpacingStyle = .atLeast,
+        lineSpacingFactor: Double = 1.0,
+        obliqueAngle: Double = 0.0
     ) {
         self.kind = kind
         self.definitionPoint = definitionPoint
@@ -435,6 +469,11 @@ public struct DimData: Sendable, Hashable, Codable {
         self.styleName = styleName
         self.textHeight = textHeight
         self.arrowSize = arrowSize
+        self.textRotation = textRotation
+        self.attachmentPoint = attachmentPoint
+        self.lineSpacingStyle = lineSpacingStyle
+        self.lineSpacingFactor = lineSpacingFactor
+        self.obliqueAngle = obliqueAngle
     }
 }
 

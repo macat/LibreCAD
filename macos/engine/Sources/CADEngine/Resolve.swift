@@ -740,7 +740,10 @@ extension EntityKind {
     static let dimArrowHalfWidthFactor = 1.0 / 6.0
     /// Gap between an extension-line origin (the measured point) and where the
     /// drawn extension line starts, as a fraction of the arrow size (DIMEXO).
-    static let dimExtensionOffsetFactor = 0.0
+    /// A small non-zero default so the extension line does not touch the measured
+    /// feature (the standard CAD DIMEXO gap; AutoCAD's default ~0.0625" ≈ a small
+    /// fraction of the arrow length).
+    static let dimExtensionOffsetFactor = 0.2
     /// How far an extension line runs past the dimension line, as a fraction of
     /// the arrow size (DIMEXE).
     static let dimExtensionBeyondFactor = 0.5
@@ -869,10 +872,31 @@ extension EntityKind {
         // Extension lines: from each measured point out to (slightly past) the
         // dimension line, in the direction from the measured point toward its
         // projection on the dim line.
+        //
+        // M2 FIX: when an origin lies ON the dim line (`len ≈ 0`) the toDim
+        // vector vanishes and its normalized direction is undefined; the old
+        // `normal` fallback had an ARBITRARY sign, so the (zero-length, but the
+        // DIMEXO/DIMEXE offsets are non-zero) extension line could point the wrong
+        // way. Derive the direction ROBUSTLY from the dim-line normal, signed so it
+        // points from the measured point toward the dim line: the dim line sits at
+        // the projection of `definitionPoint` along the normal, so the sign is
+        // `sign((dimPt − measuredPt)·normal)` and, at len≈0, `sign((measuredPt −
+        // definitionPoint)·normal)` flipped — equivalently the side the def point
+        // is NOT on. We compute it from the def point so it is stable at len≈0.
         func extLine(_ measuredPt: Vector, _ dimPt: Vector) -> ResolvedPolyline {
             let toDim = dimPt - measuredPt
             let len = toDim.magnitude
-            let u = len > Tolerance.distance ? toDim / len : normal
+            let u: Vector
+            if len > Tolerance.distance {
+                u = toDim / len
+            } else {
+                // Origin is on the dim line: take the normal, signed so it points
+                // AWAY from the def point (the dim line runs through the def point,
+                // the extension runs out the opposite side of the measured point).
+                let side = (measuredPt - d.definitionPoint).dot(normal)
+                let sign = side >= 0 ? 1.0 : -1.0
+                u = normal * sign
+            }
             let start = measuredPt + u * (arrow * dimExtensionOffsetFactor)
             let end = dimPt + u * (arrow * dimExtensionBeyondFactor)
             return ResolvedPolyline(points: [start, end], closed: false, pen: pen)
@@ -892,11 +916,11 @@ extension EntityKind {
 
         // Measurement text centered above the dimension line.
         let label = dimLabel(d, measured: measured)
-        let textCenter = d.textMiddle.valid
-            ? d.textMiddle
-            : (dimP1 + dimP2) * 0.5 + normal * (textH * 0.7)
+        let textCenter = (d.textMiddle.flatMap { $0.valid ? $0 : nil })
+            ?? (dimP1 + dimP2) * 0.5 + normal * (textH * 0.7)
         // Keep text upright-ish: normalize the baseline angle to [-90°, 90°].
-        let textAngle = dimTextAngle(dirAngle)
+        // An explicit textRotation (DXF 53) overrides the derived angle.
+        let textAngle = d.textRotation ?? dimTextAngle(dirAngle)
         let textGeo = dimText(label, center: textCenter, rotation: textAngle,
                               height: textH, pen: pen, ctx: ctx)
 
@@ -936,10 +960,9 @@ extension EntityKind {
         // Label "R<radius>" near the mid-leader, baseline along the leader.
         let label = dimLabel(d, measured: radius, suffix: "R")
         let normal = Vector(-outward.y, outward.x)
-        let textCenter = d.textMiddle.valid
-            ? d.textMiddle
-            : center + outward * (radius * 0.5) + normal * (textH * 0.7)
-        let textAngle = dimTextAngle(outward.angle)
+        let textCenter = (d.textMiddle.flatMap { $0.valid ? $0 : nil })
+            ?? center + outward * (radius * 0.5) + normal * (textH * 0.7)
+        let textAngle = d.textRotation ?? dimTextAngle(outward.angle)
         let textGeo = dimText(label, center: textCenter, rotation: textAngle,
                               height: textH, pen: pen, ctx: ctx)
 
@@ -970,14 +993,48 @@ extension EntityKind {
         // Label "⌀<diameter>" centered above the diameter line.
         let label = dimLabel(d, measured: diameter, suffix: "\u{2300}")
         let normal = Vector(-along.y, along.x)
-        let textCenter = d.textMiddle.valid
-            ? d.textMiddle
-            : (point1 + point2) * 0.5 + normal * (textH * 0.7)
-        let textAngle = dimTextAngle(along.angle)
+        let textCenter = (d.textMiddle.flatMap { $0.valid ? $0 : nil })
+            ?? (point1 + point2) * 0.5 + normal * (textH * 0.7)
+        let textAngle = d.textRotation ?? dimTextAngle(along.angle)
         let textGeo = dimText(label, center: textCenter, rotation: textAngle,
                               height: textH, pen: pen, ctx: ctx)
 
         return ResolvedGeometry(polylines: polylines, fills: fills).merged(with: textGeo)
+    }
+
+    /// The angular dimension's vertex + start angle + SIGNED sweep, selected so
+    /// the dimension spans the angular sector the **definition point** sits in
+    /// (M1). The single source of truth for the arc, the measured value, and the
+    /// text center so all three AGREE.
+    ///
+    /// The vertex is the lines' intersection (parallel ⇒ inner-endpoint midpoint).
+    /// `a1`/`a2` are the angles of line1End/line2End about the vertex; the CCW
+    /// sweep a1→a2 is `correctAngle(a2 − a1)`. The def point SELECTS the sector:
+    /// if its angle (relative to a1, normalized to [0, 2π)) lies within the CCW
+    /// sweep, the dim spans CCW (positive sweep); otherwise it spans the
+    /// COMPLEMENTARY arc CW (negative sweep = CCWsweep − 2π). The returned
+    /// `sweep` is signed and feeds `arcPointsBySweep` directly; its magnitude is
+    /// the measured angle. (Mirrors `RS_DimAngular::getAngle`/`update`, where the
+    /// definition point chooses which of the four sectors the dimension covers.)
+    static func dimAngularGeometry(_ d: DimData,
+                                   line1: (Vector, Vector), line2: (Vector, Vector))
+        -> (vertex: Vector, a1: Double, sweep: Double) {
+        let vertex = lineLineIntersection(line1, line2)
+            ?? (line1.1 + line2.1) * 0.5
+        let a1 = (line1.1 - vertex).angle
+        let a2 = (line2.1 - vertex).angle
+
+        // CCW sweep a1→a2, normalized to (0, 2π].
+        var ccw = Vector.correctAngle(a2 - a1)
+        if ccw < Tolerance.angle { ccw = 2 * Double.pi }
+
+        // Where does the def point sit, measured CCW from a1?
+        let defOffset = Vector.correctAngle((d.definitionPoint - vertex).angle - a1)
+        // Inside the CCW sector ⇒ span CCW; otherwise span the complementary arc
+        // CW (a signed negative sweep covering 2π − ccw the other way).
+        let withinCCW = defOffset <= ccw + Tolerance.angle
+        let sweep = withinCCW ? ccw : ccw - 2 * Double.pi
+        return (vertex, a1, sweep)
     }
 
     /// Angular dimension: an arc between the two lines (through definitionPoint),
@@ -989,16 +1046,10 @@ extension EntityKind {
         let arrow = dimArrowSize(d)
         let textH = dimTextHeight(d)
 
-        // Vertex = intersection of the two lines (fall back to the midpoint of the
-        // inner endpoints if the lines are parallel).
-        let vertex = lineLineIntersection(line1, line2)
-            ?? (line1.1 + line2.1) * 0.5
-
-        let a1 = (line1.1 - vertex).angle
-        let a2 = (line2.1 - vertex).angle
-        // Sweep from a1 to a2 (CCW), normalized to (0, 2π).
-        var sweep = Vector.correctAngle(a2 - a1)
-        if sweep < Tolerance.angle { sweep = 2 * Double.pi }
+        // Vertex + start angle + SIGNED sweep, with the sector selected by the
+        // definition point (M1 — the single shared source of truth).
+        let (vertex, a1, sweep) = dimAngularGeometry(d, line1: line1, line2: line2)
+        let a2 = a1 + sweep   // arc-end angle in the chosen direction
 
         // Arc radius = distance from the vertex to the definition point.
         let radius = (d.definitionPoint - vertex).magnitude
@@ -1007,7 +1058,7 @@ extension EntityKind {
         var polylines: [ResolvedPolyline] = []
         var fills: [ResolvedFill] = []
 
-        // The dimension arc (vertex-centered, from a1 sweeping CCW to a2).
+        // The dimension arc (vertex-centered, from a1 along the SIGNED sweep).
         let arcPts = Tessellation.arcPointsBySweep(
             center: vertex, radius: radius, startAngle: a1, sweep: sweep,
             tolerance: ctx.tessellationTolerance)
@@ -1019,20 +1070,29 @@ extension EntityKind {
         polylines.append(ResolvedPolyline(points: [line1.1, arcStart], closed: false, pen: pen))
         polylines.append(ResolvedPolyline(points: [line2.1, arcEnd], closed: false, pen: pen))
 
-        // Arrowheads tangent to the arc at each end (pointing along the sweep).
-        let tan1 = Vector(angle: a1 + Double.pi / 2)        // CCW tangent at start
-        let tan2 = Vector(angle: a2 + Double.pi / 2)
+        // Arrowheads tangent to the arc at each end. The tangent direction follows
+        // the SIGN of the sweep so heads point along the (CW or CCW) arc.
+        let dir = sweep >= 0 ? 1.0 : -1.0
+        let tan1 = Vector(angle: a1 + dir * Double.pi / 2)   // tangent at start
+        let tan2 = Vector(angle: a2 + dir * Double.pi / 2)   // tangent at end
         fills.append(dimArrowhead(tip: arcStart, direction: -tan1, size: arrow, color: pen.color))
         fills.append(dimArrowhead(tip: arcEnd, direction: tan2, size: arrow, color: pen.color))
 
-        // Angle label (degrees) at the arc midpoint.
-        let degrees = sweep * 180 / Double.pi
-        let label = dimLabel(d, measured: degrees, suffix: "") + "\u{00B0}"
+        // Angle label (degrees) at the arc midpoint. The MAGNITUDE of the signed
+        // sweep is the measured angle (agrees with dimMeasuredValue).
+        let degrees = abs(sweep) * 180 / Double.pi
+        // N1: a textOverride REPLACES the whole label — do not append "°" to it.
+        let label: String
+        if let override = d.textOverride {
+            label = override == " " ? "" : (override.isEmpty ? dimFormat(degrees) + "\u{00B0}" : override)
+        } else {
+            label = dimFormat(degrees) + "\u{00B0}"
+        }
         let midA = a1 + sweep / 2
-        let textCenter = d.textMiddle.valid
-            ? d.textMiddle
-            : vertex + Vector.polar(radius: radius + textH * 0.7, angle: midA)
-        let textAngle = dimTextAngle(midA + Double.pi / 2)
+        let textCenter = (d.textMiddle.flatMap { $0.valid ? $0 : nil })
+            ?? vertex + Vector.polar(radius: radius + textH * 0.7, angle: midA)
+        // Baseline tangent to the arc, in the sweep direction, kept upright.
+        let textAngle = d.textRotation ?? dimTextAngle(midA + dir * Double.pi / 2)
         let textGeo = dimText(label, center: textCenter, rotation: textAngle,
                               height: textH, pen: pen, ctx: ctx)
 
@@ -1374,17 +1434,17 @@ extension EntityKind {
         case let .diameter(p1, p2):
             return ((p2 - p1).magnitude, "\u{2300}")
         case let .angular(l1s, l1e, l2s, l2e):
-            let vertex = lineLineIntersection((l1s, l1e), (l2s, l2e)) ?? (l1e + l2e) * 0.5
-            var sweep = Vector.correctAngle((l2e - vertex).angle - (l1e - vertex).angle)
-            if sweep < Tolerance.angle { sweep = 2 * Double.pi }
-            return (sweep * 180 / Double.pi, "")
+            // Use the SAME sector selection as the arc (M1): the def point picks
+            // which angular sector is measured, so value + arc + label agree.
+            let (_, _, sweep) = dimAngularGeometry(d, line1: (l1s, l1e), line2: (l2s, l2e))
+            return (abs(sweep) * 180 / Double.pi, "")
         }
     }
 
     /// The default text center for a dimension (used by the bbox estimate; mirrors
     /// `resolveDimension`'s text placement, honoring `textMiddle` overrides).
     static func dimTextCenter(_ d: DimData) -> Vector {
-        if d.textMiddle.valid { return d.textMiddle }
+        if let tm = d.textMiddle, tm.valid { return tm }
         let h = dimTextHeight(d)
         switch d.kind {
         case let .linear(e1, e2, angle):
@@ -1416,11 +1476,9 @@ extension EntityKind {
             let normal = Vector(-along.y, along.x)
             return (p1 + p2) * 0.5 + normal * (h * 0.7)
         case let .angular(l1s, l1e, l2s, l2e):
-            let vertex = lineLineIntersection((l1s, l1e), (l2s, l2e)) ?? (l1e + l2e) * 0.5
-            let a1 = (l1e - vertex).angle
-            let a2 = (l2e - vertex).angle
-            var sweep = Vector.correctAngle(a2 - a1)
-            if sweep < Tolerance.angle { sweep = 2 * Double.pi }
+            // SAME sector selection as the arc (M1): the def point picks the
+            // sector, so the text center sits on the measured arc's midpoint.
+            let (vertex, a1, sweep) = dimAngularGeometry(d, line1: (l1s, l1e), line2: (l2s, l2e))
             let radius = (d.definitionPoint - vertex).magnitude
             return vertex + Vector.polar(radius: radius + h * 0.7, angle: a1 + sweep / 2)
         }
