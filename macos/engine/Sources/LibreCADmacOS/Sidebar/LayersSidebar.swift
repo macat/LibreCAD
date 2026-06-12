@@ -176,9 +176,13 @@ struct LayersSidebar: View {
 
     private func addLayer() {
         let name = uniqueLayerName()
-        // New layers inherit the active layer's color as a sensible default.
-        let base = model.drawing.layers.activeLayer.color
-        if model.drawing.addLayer(Layer(name: name, color: base)) {
+        // New layers are born with the Document Settings layer defaults (color /
+        // line width / line type — app policy set in the Document Settings sheet).
+        let layer = Layer(name: name,
+                          color: model.defaultLayerColor,
+                          lineType: model.defaultLineType,
+                          lineWidth: model.defaultLineWidth)
+        if model.drawing.addLayer(layer) {
             selectedLayer = name
             model.drawing.setActiveLayer(name)
         }

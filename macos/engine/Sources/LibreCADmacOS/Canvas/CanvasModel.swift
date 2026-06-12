@@ -167,6 +167,27 @@ final class CanvasModel {
     /// Divide tool: number of equal pieces (drops `count − 1` division points).
     var divideCount: Int = 2
 
+    // MARK: Layer defaults (Document Settings — app policy for new layers)
+
+    /// The default color a NEW layer is born with (Document Settings ▸ Layers).
+    /// `LayersSidebar.addLayer` seeds a new `Layer` with this. App policy (not a DXF
+    /// header var) — new layers are local creation choices, not document round-trip
+    /// state. Defaults to LibreCAD green.
+    var defaultLayerColor: RGBAColor = .librecadGreen
+    /// The default line width a new layer is born with.
+    var defaultLineWidth: PenLineWidth = .default
+    /// The default line type a new layer is born with.
+    var defaultLineType: PenLineType = .solid
+
+    // MARK: Paper defaults (Document Settings — pre-fill Print/Export)
+
+    /// The preferred paper size for Print/Export (app-side default). The paper
+    /// insertion base point round-trips via `$PINSBASE`; the size/orientation are
+    /// local print defaults stored on the model. Defaults to A4.
+    var paperSize: PaperSize = .a4
+    /// Whether the preferred paper orientation is landscape (vs portrait).
+    var paperLandscape: Bool = false
+
     // MARK: Derived (for the SwiftUI HUD)
 
     var entityCount: Int { drawing.count }
@@ -214,6 +235,10 @@ final class CanvasModel {
         drawing = newDrawing
         drawing.undoManager = undoManager
         undoManager.removeAllActions()
+        // Adopt the document's persisted grid/snap settings into the live model
+        // flags so a loaded file (Save→Open) restores the user's grid + snap state
+        // (Document Settings round-trip). Header vars are the source of truth.
+        loadSettingsFromDrawing()
         rebuildIndex()
         let box = drawing.boundingBox()
         renderOrigin = RendererGeometry.renderOrigin(for: box)
@@ -223,6 +248,22 @@ final class CanvasModel {
         viewport = Viewport.fit(box, in: viewSize)
         modelDirty = true
         modelVersion &+= 1
+    }
+
+    /// Mirrors the drawing's persisted Document-Settings header vars into the live
+    /// model flags the renderer/snapper read (`gridVisible`, `preferredGridSpacing`,
+    /// `snapModes`). Called on every `setDrawing` so an opened document restores its
+    /// grid + snap state. The header vars are the source of truth; this is a one-way
+    /// load (the apply* setters below keep the two in sync going forward). Snap modes
+    /// load from the private `$LC_SNAPMODE` var only if it was persisted (decision
+    /// D5); otherwise the built-in interactive default is kept.
+    private func loadSettingsFromDrawing() {
+        gridVisible = drawing.graphicVariables.gridOn
+        let spacing = drawing.graphicVariables.gridSpacing
+        if spacing > 0 { preferredGridSpacing = spacing }
+        if let raw = drawing.graphicVariables.snapModeRaw {
+            snapModes = SnapMode(rawValue: UInt16(truncatingIfNeeded: raw))
+        }
     }
 
     /// Rebuilds the quadtree from the current drawing's per-entity AABBs. Text uses
@@ -763,10 +804,124 @@ final class CanvasModel {
     /// Whether a snap mode is currently enabled.
     func isSnapModeOn(_ mode: SnapMode) -> Bool { snapModes.contains(mode) }
 
-    /// Enables/disables a single snap mode (the Inspector's per-mode toggles).
+    /// Enables/disables a single snap mode (the Inspector's per-mode toggles + the
+    /// Document Settings sheet). Persists the resulting set to the document's private
+    /// `$LC_SNAPMODE` header var (decision D5) as ONE undoable step so the snap modes
+    /// travel with the file (Save→Open) and ⌘Z reverts the toggle.
     func setSnapMode(_ mode: SnapMode, _ on: Bool) {
         if on { snapModes.insert(mode) } else { snapModes.remove(mode) }
+        persistSnapModes()
     }
+
+    /// Writes the current `snapModes` set to the private `$LC_SNAPMODE` header var
+    /// (undoable). Called by `setSnapMode` and the settings sheet so the persisted
+    /// value always tracks the live set. The undo also restores the live `snapModes`
+    /// (the header var alone wouldn't), so ⌘Z fully reverts a toggle.
+    private func persistSnapModes() {
+        let liveModes = snapModes
+        let priorModes = snapModes  // captured for the live-state restore below
+        drawing.mutateGraphicVariables { $0.snapModeRaw = Int(liveModes.rawValue) }
+        // mutateGraphicVariables registers an undo that restores the header var; also
+        // restore the live `snapModes` so the toggle visually reverts on ⌘Z.
+        undoManager.registerUndo(withTarget: self) { model in
+            MainActor.assumeIsolated {
+                let current = model.snapModes
+                model.snapModes = priorModes
+                // Re-register so redo restores `current` (value-snapshot pattern).
+                model.reRegisterSnapModeUndo(restoring: current)
+                model.modelDirty = true
+                model.modelVersion &+= 1
+            }
+        }
+    }
+
+    /// Re-registers the live-`snapModes` restore for redo (paired with the header-var
+    /// undo `mutateGraphicVariables` already manages). Keeps the live set and the
+    /// header var in lock-step across undo/redo.
+    private func reRegisterSnapModeUndo(restoring modes: SnapMode) {
+        undoManager.registerUndo(withTarget: self) { model in
+            MainActor.assumeIsolated {
+                let current = model.snapModes
+                model.snapModes = modes
+                model.reRegisterSnapModeUndo(restoring: current)
+                model.modelDirty = true
+                model.modelVersion &+= 1
+            }
+        }
+    }
+
+    // MARK: - Document Settings (live-apply + per-field undo; D3)
+    //
+    // The Document Settings sheet binds to the typed `graphicVariables` accessors
+    // and applies each edit IMMEDIATELY (D3: live-apply + Done). Every setter below
+    // funnels the header-var write through the engine's undoable
+    // `CADDrawing.mutateGraphicVariables` (value-snapshot, ADR-002) so each field is
+    // ONE undo step, and marks the model dirty so the renderer/document update. The
+    // few settings that mirror a live model flag (grid on/off ↔ `gridVisible`, grid
+    // spacing ↔ `preferredGridSpacing`) update BOTH so the canvas reflects the change
+    // without a reload. Persistence is automatic: the header vars round-trip via the
+    // document payload (Save→Open).
+
+    /// Applies one header-var edit through the undoable engine mutator and marks the
+    /// model dirty (so the document becomes dirty + the renderer repaints). The body
+    /// receives the variables bag by `inout`; a no-op edit registers no undo.
+    private func applySetting(_ body: (inout GraphicVariables) -> Void) {
+        drawing.mutateGraphicVariables(body)
+        modelDirty = true
+        modelVersion &+= 1
+    }
+
+    // Units ---------------------------------------------------------------------
+
+    /// `$INSUNITS` — the drawing unit.
+    func setDrawingUnit(_ unit: DrawingUnit) { applySetting { $0.unit = unit } }
+    /// `$LUNITS` — linear display format.
+    func setLinearFormat(_ f: LinearFormat) { applySetting { $0.linearFormat = f } }
+    /// `$LUPREC` — linear precision (clamped 0…8).
+    func setLinearPrecision(_ p: Int) { applySetting { $0.linearPrecision = Swift.max(0, Swift.min(8, p)) } }
+    /// `$AUNITS` — angle display format.
+    func setAngleFormat(_ f: AngleFormat) { applySetting { $0.angleFormat = f } }
+    /// `$AUPREC` — angle precision (clamped 0…8).
+    func setAnglePrecision(_ p: Int) { applySetting { $0.anglePrecision = Swift.max(0, Swift.min(8, p)) } }
+    /// `$ANGBASE` — base angle (stored radians; the sheet edits degrees).
+    func setAngleBaseDegrees(_ deg: Double) { applySetting { $0.anglesBase = deg * .pi / 180 } }
+    /// `$ANGDIR` — angle direction (true == counter-clockwise).
+    func setAnglesCounterClockwise(_ ccw: Bool) { applySetting { $0.anglesCounterClockwise = ccw } }
+
+    // Grid & snap ---------------------------------------------------------------
+
+    /// `$GRIDMODE` ↔ `gridVisible`. Updates both the header var (persist) and the
+    /// live render flag so the canvas reflects the toggle immediately.
+    func setGridOn(_ on: Bool) {
+        gridVisible = on
+        applySetting { $0.gridOn = on }
+    }
+
+    /// `$GRIDUNIT` ↔ `preferredGridSpacing`. Updates both. A non-positive spacing is
+    /// ignored (would make the grid degenerate).
+    func setGridSpacing(_ spacing: Double) {
+        guard spacing > 0 else { return }
+        preferredGridSpacing = spacing
+        applySetting { $0.gridSpacing = spacing }
+    }
+
+    // Dimensions ----------------------------------------------------------------
+
+    /// `$DIMTXT` — document-default dimension text height (>0).
+    func setDimTextHeight(_ h: Double) { guard h > 0 else { return }; applySetting { $0.dimTextHeight = h } }
+    /// `$DIMASZ` — document-default arrow size (>0).
+    func setDimArrowSize(_ s: Double) { guard s > 0 else { return }; applySetting { $0.dimArrowSize = s } }
+    /// `$DIMSCALE` — overall dimension scale (>0).
+    func setDimScale(_ s: Double) { guard s > 0 else { return }; applySetting { $0.dimScale = s } }
+    /// `$DIMLUNIT` — dimension-text linear format.
+    func setDimLinearFormat(_ f: LinearFormat) { applySetting { $0.dimLinearFormat = f } }
+    /// `$DIMDEC` — dimension-text linear precision (clamped 0…8).
+    func setDimLinearPrecision(_ p: Int) { applySetting { $0.dimLinearPrecision = Swift.max(0, Swift.min(8, p)) } }
+
+    // Paper ---------------------------------------------------------------------
+
+    /// `$PINSBASE` — paper-space insertion base point.
+    func setPaperInsertionBase(_ v: Vector) { applySetting { $0.paperInsertionBase = v } }
 
     // MARK: - Undo / redo (rebuild the index, which the undo closures don't touch)
 

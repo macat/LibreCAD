@@ -69,6 +69,10 @@ struct ContentView: View {
     /// View ▸ Command Palette… menu item (⌘K) via a focused scene value.
     @State private var showPalette = false
 
+    /// Whether the per-document Document Settings sheet is presented. Raised by
+    /// File ▸ Document Settings… (⌥⌘, — decision D8) via a focused scene value.
+    @State private var showSettings = false
+
     /// The live text of the bottom command / coordinate input line (UX-plan U1).
     /// Cleared after each successful submit; the field echoes parse errors via the
     /// model's `lastCommandError`.
@@ -142,6 +146,14 @@ struct ContentView: View {
                 isPresented: $showPalette,
                 commands: paletteCommands
             ))
+            // The per-document Document Settings sheet (File ▸ Document Settings…,
+            // ⌥⌘, — D8). Tabs: Units · Grid & Snap · Dimensions · Layers · Paper.
+            // Live-apply + Done (D3); binds to the SAME live model so edits apply
+            // immediately, are undoable, and round-trip via the document payload.
+            .sheet(isPresented: $showSettings) {
+                DocumentSettingsView(model: model, controllerBox: controllerBox)
+            }
+            .focusedSceneValue(\.openDocumentSettings) { showSettings = true }
             .focusedSceneValue(\.commandPalette) { showPalette = true }
             .focusedSceneValue(\.zoomToFit) { controllerBox.controller?.zoomToFit() }
             // Export… (PDF/PNG/SVG): present a save panel whose format follows the
@@ -545,6 +557,13 @@ extension FocusedValues {
         set { self[CommandPaletteKey.self] = newValue }
     }
 
+    /// Open the per-document Document Settings sheet on the focused window
+    /// (File ▸ Document Settings…, ⌥⌘, — D8).
+    var openDocumentSettings: (() -> Void)? {
+        get { self[OpenDocumentSettingsKey.self] }
+        set { self[OpenDocumentSettingsKey.self] = newValue }
+    }
+
     /// Focus the bottom command/coordinate line on the focused window
     /// (View ▸ Show Command Line, ⇧⌘L) — U1.
     var focusCommandLine: (() -> Void)? {
@@ -602,6 +621,10 @@ extension FocusedValues {
 }
 
 private struct CommandPaletteKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct OpenDocumentSettingsKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 
