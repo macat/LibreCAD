@@ -32,8 +32,25 @@ extern "C" {
 typedef enum LCStatus {
     LC_OK = 0,                /**< Success. */
     LC_ERR_INVALID_PATH = 1,  /**< path was null or empty. */
-    LC_ERR_READ_FAILED = 2    /**< libdxfrw could not read the file (bad/missing/corrupt). */
+    LC_ERR_READ_FAILED = 2,   /**< libdxfrw could not read the file (bad/missing/corrupt). */
+    LC_ERR_WRITE_FAILED = 3   /**< libdxfrw could not write the file (bad path, I/O, or an
+                                   exception escaping the export). */
 } LCStatus;
+
+/**
+ * DXF output version, mirroring the subset of `DRW::Version` the writer accepts.
+ * Default is `LC_DXF_R2000` (AutoCAD 2000 / AC1015) — the version LibreCAD's
+ * `fileExport` defaults to and the most broadly-compatible modern DXF. An
+ * out-of-range value falls back to R2000.
+ */
+typedef enum LCDxfVersion {
+    LC_DXF_R12   = 0,   /**< AC1009 (R11/R12) — ellipses/lwpolylines downgraded by libdxfrw. */
+    LC_DXF_R14   = 1,   /**< AC1014. */
+    LC_DXF_R2000 = 2,   /**< AC1015 — the default. */
+    LC_DXF_R2004 = 3,   /**< AC1018. */
+    LC_DXF_R2007 = 4,   /**< AC1021. */
+    LC_DXF_R2018 = 5    /**< AC1032. */
+} LCDxfVersion;
 
 /* ------------------------------------------------------------------------- *
  *  Flattened entity model
@@ -198,6 +215,49 @@ int32_t lc_aci_to_rgb(int32_t aci);
  * @return LC_OK / LC_ERR_INVALID_PATH / LC_ERR_READ_FAILED.
  */
 LCStatus lc_dxf_count_entities(const char *path, int *out_count);
+
+/* ------------------------------------------------------------------------- *
+ *  Writer (CADDrawing -> .dxf)
+ *
+ *  The inverse of the reader: Swift builds flat POD arrays (the same LCEntity /
+ *  LCVertex / LCLayer structs the reader hands back) and this writes them to a
+ *  DXF file via libdxfrw's write path. A DRW_Interface subclass emits the PODs
+ *  through libdxfrw's write* callbacks (writeLine/writeCircle/...). The whole
+ *  body is wrapped in try/catch — no exception crosses the C boundary.
+ *
+ *  libdxfrw is non-reentrant; callers MUST serialize through the single shared
+ *  engine actor (see CADEngine), exactly as for the reader.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Write a DXF file from flat POD entity + layer arrays.
+ *
+ * Supported `LCEntity::kind` values are emitted: LINE, POINT, CIRCLE, ARC,
+ * ELLIPSE, LWPOLYLINE, POLYLINE. Any other kind (SPLINE, UNSUPPORTED, ...) is
+ * silently skipped and counted in `*out_skipped`. Common attributes
+ * (layer/linetype/color/color24/lineweight) map onto the DRW_* fields, mirroring
+ * the reader's POD mapping in reverse.
+ *
+ * @param path          UTF-8 filesystem path to write. Overwritten if it exists.
+ * @param entities      Pointer to `entityCount` LCEntity PODs (may be NULL iff
+ *                      entityCount == 0).
+ * @param entityCount   Number of entities (>= 0).
+ * @param layers        Pointer to `layerCount` LCLayer PODs (may be NULL iff
+ *                      layerCount == 0). Layer "0" is always emitted; if it is
+ *                      absent from this array a default one is synthesized.
+ * @param layerCount    Number of layers (>= 0).
+ * @param version       An LCDxfVersion. Out-of-range falls back to R2000.
+ * @param out_skipped   If non-NULL, receives the count of entities whose kind is
+ *                      not yet supported by the writer (skipped). 0 on error.
+ * @return LC_OK on success; LC_ERR_INVALID_PATH for a null/empty path or a
+ *         negative count with a NULL array; LC_ERR_WRITE_FAILED if libdxfrw
+ *         fails to write (also covers any exception escaping the export).
+ */
+LCStatus lc_dxf_write(const char *path,
+                      const LCEntity *entities, int entityCount,
+                      const LCLayer *layers, int layerCount,
+                      int version,
+                      int *out_skipped);
 
 #ifdef __cplusplus
 }
