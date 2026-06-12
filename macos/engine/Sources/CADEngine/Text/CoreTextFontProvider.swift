@@ -47,6 +47,14 @@ public final class CoreTextFontProvider: FontProvider, @unchecked Sendable {
         return font(family: family, bold: false, italic: false)
     }
 
+    /// Traits-aware resolution: routes the style's bold/italic into face selection
+    /// (`CTFontCreateCopyWithSymbolicTraits`), so a `TextStyle(bold:true)` renders a
+    /// heavier face instead of Regular.
+    public func resolveFont(_ source: FontSource, bold: Bool, italic: Bool) -> ShapedFont? {
+        guard case let .native(family) = source else { return nil }
+        return font(family: family, bold: bold, italic: italic)
+    }
+
     /// Resolves a native family + bold/italic traits. Public so the resolve arm
     /// (which knows the run attributes) can pick the right face directly.
     public func font(family: String, bold: Bool, italic: Bool) -> CoreTextFont? {
@@ -185,9 +193,11 @@ public final class CoreTextFont: ShapedFont, @unchecked Sendable {
 
     /// Flattens one glyph's `CGPath` into closed loops in em space. Quadratics →
     /// reuse the existing `QuadSpline.point`; cubics → de Casteljau. Subdivides
-    /// until the chord (sagitta) error is below `tolerance`. Loops are emitted
-    /// outer-CCW / holes-CW (the `ResolvedFill` loop contract) by ordering the
-    /// outer boundary first and reversing any sub-loop with the same winding.
+    /// until the chord (sagitta) error is below `tolerance`. Contours are then
+    /// classified by CONTAINMENT (even-odd nesting depth) into containment GROUPS —
+    /// one outer (CCW) + its directly-contained holes (CW) per group — so disjoint
+    /// outer blobs (the dot of `i`/`j`, the slash of `Ø`/`⌀`, accent marks) stay
+    /// POSITIVE ink instead of being subtracted as bogus holes.
     static func flattenGlyph(_ font: CTFont, _ glyph: CGGlyph, tolerance: Double) -> GlyphGeometry {
         guard let path = CTFontCreatePathForGlyph(font, glyph, nil) else {
             return GlyphGeometry()   // e.g. space — no drawable path
@@ -232,9 +242,10 @@ public final class CoreTextFont: ShapedFont, @unchecked Sendable {
         }
         acc.finish()
 
-        // Normalize winding: outer (largest |area|) CCW, the rest are holes (CW).
-        let normalized = normalizeWinding(acc.contours)
-        return GlyphGeometry(fills: normalized)
+        // Classify contours by containment (even-odd nesting) into groups: each
+        // group is one outer (CCW) + the holes it directly contains (CW).
+        let groups = groupByContainment(acc.contours)
+        return GlyphGeometry(fillGroups: groups)
     }
 
     /// Mutable accumulator for the `CGPath` walk. The path-apply block is a
@@ -330,31 +341,93 @@ public final class CoreTextFont: ShapedFont, @unchecked Sendable {
         return sum * 0.5
     }
 
-    /// Orders contours so `[0]` is the outer boundary (largest area, CCW) and the
-    /// rest are holes (CW). Glyph counters (the inside of O/e/A) come back from
-    /// Core Text already wound opposite to the outer; we make that explicit so the
-    /// triangulator's hole-bridge cuts them out.
-    static func normalizeWinding(_ contours: [[Vector]]) -> [[Vector]] {
-        guard !contours.isEmpty else { return [] }
-        // Find the outer boundary: the contour with the largest absolute area.
-        var areas = contours.map { signedArea($0) }
-        var outerIdx = 0
-        var maxAbs = 0.0
-        for (i, a) in areas.enumerated() where abs(a) > maxAbs {
-            maxAbs = abs(a); outerIdx = i
+    /// Classifies contours by CONTAINMENT (even-odd nesting depth) and groups them
+    /// into fill sub-shapes. For each contour we count how many OTHER contours
+    /// contain its representative point: EVEN depth ⇒ an OUTER boundary (forced CCW);
+    /// ODD depth ⇒ a HOLE (forced CW) belonging to its nearest enclosing outer.
+    ///
+    /// This replaces the old "largest |area| is the only outer" heuristic, which
+    /// wrongly flipped every secondary blob of a multi-blob glyph (the dot of
+    /// `i`/`j`, the dots of `:`/`;`, bars of `=`, the slash of `Ø`/`⌀`, accent
+    /// marks) into a subtracted hole. Each outer + its directly-contained holes is
+    /// emitted as ONE group (`[outer, holes...]`) so the renderer's per-fill
+    /// hole-bridge cuts only the real counters.
+    ///
+    /// Returns groups; each group is `[outer]` or `[outer, hole, ...]`.
+    static func groupByContainment(_ contours: [[Vector]]) -> [[[Vector]]] {
+        let n = contours.count
+        guard n > 0 else { return [] }
+        // A representative interior-ish point per contour (vertex 0 is on the
+        // boundary; using a vertex is fine for the even-odd parent test since glyph
+        // contours don't share vertices across the outer/hole boundary).
+        let reps = contours.map { $0.first ?? Vector(0, 0) }
+        let areas = contours.map { abs(signedArea($0)) }
+
+        // depth[i] = number of OTHER contours that contain reps[i].
+        var depth = [Int](repeating: 0, count: n)
+        // parent[i] = the smallest-area contour that strictly contains reps[i]
+        //             (the immediate enclosing ring), or nil if none.
+        var parent = [Int?](repeating: nil, count: n)
+        for i in 0..<n {
+            var bestParent: Int? = nil
+            var bestArea = Double.greatestFiniteMagnitude
+            for j in 0..<n where j != i {
+                if pointInPolygon(reps[i], contours[j]) {
+                    depth[i] += 1
+                    // The immediate parent is the smallest container.
+                    if areas[j] < bestArea {
+                        bestArea = areas[j]; bestParent = j
+                    }
+                }
+            }
+            parent[i] = bestParent
         }
-        var result: [[Vector]] = []
-        result.reserveCapacity(contours.count)
-        // Outer first, forced CCW.
-        var outer = contours[outerIdx]
-        if areas[outerIdx] < 0 { outer.reverse(); areas[outerIdx] = -areas[outerIdx] }
-        result.append(outer)
-        // The rest as holes, forced CW.
-        for (i, c) in contours.enumerated() where i != outerIdx {
-            var hole = c
-            if areas[i] > 0 { hole.reverse() }   // make CW
-            result.append(hole)
+
+        // Outers are even-depth contours; holes are odd-depth contours assigned to
+        // their immediate even-depth parent. (Deeper even rings — an island inside a
+        // hole, e.g. the bowl-in-counter case — start their own group.)
+        var groupIndexForOuter = [Int: Int](minimumCapacity: n)
+        var groups: [[[Vector]]] = []
+        // First pass: create a group per outer (even depth).
+        for i in 0..<n where depth[i] % 2 == 0 {
+            var outer = contours[i]
+            if signedArea(outer) < 0 { outer.reverse() }   // force CCW
+            groupIndexForOuter[i] = groups.count
+            groups.append([outer])
         }
-        return result
+        // Second pass: attach each hole (odd depth) to its immediate outer's group.
+        for i in 0..<n where depth[i] % 2 == 1 {
+            var hole = contours[i]
+            if signedArea(hole) > 0 { hole.reverse() }      // force CW
+            if let p = parent[i], let gi = groupIndexForOuter[p] {
+                groups[gi].append(hole)
+            } else {
+                // Orphan hole (shouldn't happen): emit it as its own (CCW) shape so
+                // it is at least visible ink, never a stray subtraction.
+                hole.reverse()
+                groups.append([hole])
+            }
+        }
+        return groups
+    }
+
+    /// Even-odd point-in-polygon (ray casting). `poly` is a closed ring (implicit
+    /// last→first edge). Returns true when `p` is strictly inside.
+    static func pointInPolygon(_ p: Vector, _ poly: [Vector]) -> Bool {
+        let m = poly.count
+        guard m >= 3 else { return false }
+        var inside = false
+        var j = m - 1
+        for i in 0..<m {
+            let a = poly[i], b = poly[j]
+            // Does the horizontal ray at p.y cross edge a→b?
+            if (a.y > p.y) != (b.y > p.y) {
+                let t = (p.y - a.y) / (b.y - a.y)
+                let xCross = a.x + t * (b.x - a.x)
+                if p.x < xCross { inside.toggle() }
+            }
+            j = i
+        }
+        return inside
     }
 }

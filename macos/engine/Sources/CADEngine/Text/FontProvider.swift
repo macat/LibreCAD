@@ -35,6 +35,19 @@ public protocol FontProvider: Sendable {
     /// source is unavailable (the caller then walks the substitution chain, §4.3).
     /// `source` carries native-family vs `.lff` vs `.shx`.
     func resolveFont(_ source: FontSource) -> ShapedFont?
+
+    /// Resolve a font source PLUS the style's bold/italic traits to a concrete face.
+    /// Native providers select a heavier/oblique face (symbolic traits); stroke/SHX
+    /// providers ignore the traits (the format has no faces). Has a default impl that
+    /// falls back to `resolveFont(_:)` so existing conformers keep working.
+    func resolveFont(_ source: FontSource, bold: Bool, italic: Bool) -> ShapedFont?
+}
+
+public extension FontProvider {
+    /// Default: traits-agnostic resolution (stroke/SHX have no faces).
+    func resolveFont(_ source: FontSource, bold: Bool, italic: Bool) -> ShapedFont? {
+        resolveFont(source)
+    }
 }
 
 /// A resolved, ready-to-shape font (one family/face at unit em). Immutable +
@@ -106,19 +119,37 @@ public struct RunAttributes: Sendable, Hashable {
 /// OR strokes (`.lff`/SHX), never both — but the type carries both so the cache +
 /// resolve seam is uniform.
 public struct GlyphGeometry: Sendable, Hashable {
-    /// Closed loops (outline contours), em space — native fonts.
-    /// By convention `[0]` is the outer boundary (CCW) and `[1...]` are holes
-    /// (counters, CW) per the `ResolvedFill` loop contract.
-    public var fills: [[Vector]]
+    /// Containment-GROUPED fill sub-shapes (em space) — native fonts. Each group is
+    /// ONE outer contour (CCW) followed by the holes it directly contains (CW), i.e.
+    /// the `ResolvedFill` loop contract per group. A glyph with multiple DISJOINT
+    /// outer blobs (the dot of `i`/`j`, the dots of `:`/`;`, the bars of `=`, the
+    /// slash of `Ø`/`⌀`, accented glyphs) yields ONE group per blob so each blob is
+    /// POSITIVE ink — NOT subtracted from the main body. The resolve arm emits one
+    /// `ResolvedFill` per group. (text-system-design §2.2 winding contract.)
+    public var fillGroups: [[[Vector]]]
     /// Open polylines, em space — stroke fonts.
     public var strokes: [[Vector]]
 
-    public init(fills: [[Vector]] = [], strokes: [[Vector]] = []) {
-        self.fills = fills
+    /// Backward-compatible FLAT view of all fill contours: every group's loops
+    /// concatenated (outer-then-holes per group). For a single-group glyph this is
+    /// `[outer, hole1, ...]` exactly as before. Callers that need per-shape hole
+    /// subtraction MUST use `fillGroups`; this flat view is for bounds/inspection.
+    public var fills: [[Vector]] { fillGroups.flatMap { $0 } }
+
+    /// Constructs from already-grouped sub-fills (the native path).
+    public init(fillGroups: [[[Vector]]] = [], strokes: [[Vector]] = []) {
+        self.fillGroups = fillGroups
         self.strokes = strokes
     }
 
-    public var isEmpty: Bool { fills.isEmpty && strokes.isEmpty }
+    /// Convenience for callers/tests that supply a single group's flat loop list
+    /// (`[outer, holes...]`) or just strokes. A non-empty `fills` becomes ONE group.
+    public init(fills: [[Vector]], strokes: [[Vector]] = []) {
+        self.fillGroups = fills.isEmpty ? [] : [fills]
+        self.strokes = strokes
+    }
+
+    public var isEmpty: Bool { fillGroups.isEmpty && strokes.isEmpty }
 
     /// Axis-aligned em-space extent of all points, or `nil` if empty. Used for the
     /// font-aware tight bounding box.
