@@ -68,6 +68,7 @@ struct ToolKindWiringTests {
             .ellipse, .polygon,                                    // draw (wave 1)
             .move, .copy, .rotate, .scale, .mirror,                // modify
             .offset,                                               // modify (wave 1)
+            .trim, .extend, .fillet, .chamfer,                     // edit (wave 2)
         ]
         #expect(Set(ToolKind.allCases) == expected,
                 "ToolKind.allCases (\(ToolKind.allCases)) != expected roster")
@@ -82,6 +83,26 @@ struct ToolKindWiringTests {
             .offset:  "Offset",
         ]
         for (kind, title) in wave1 {
+            #expect(kind.title == title,
+                    "ToolKind.\(kind).title (\(kind.title)) != \(title)")
+            let tool = kind.makeTool()
+            #expect(tool != nil, "ToolKind.\(kind) minted a nil Tool")
+            #expect(tool?.title == title,
+                    "ToolKind.\(kind) tool.title (\(tool?.title ?? "nil")) != \(title)")
+        }
+    }
+
+    /// The four wave-2 EDIT wiring additions: Trim / Extend / Fillet / Chamfer.
+    /// Each mints a non-nil tool whose own title matches the kind's UI title, so
+    /// the toolbar/menu label and the HUD prompt ("Trim: …") agree.
+    @Test func waveTwoEditKindsAreWiredWithMatchingTitles() {
+        let wave2: [ToolKind: String] = [
+            .trim:    "Trim",
+            .extend:  "Extend",
+            .fillet:  "Fillet",
+            .chamfer: "Chamfer",
+        ]
+        for (kind, title) in wave2 {
             #expect(kind.title == title,
                     "ToolKind.\(kind).title (\(kind.title)) != \(title)")
             let tool = kind.makeTool()

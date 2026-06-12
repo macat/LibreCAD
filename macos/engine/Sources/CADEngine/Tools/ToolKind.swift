@@ -62,6 +62,15 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     case polygon
     /// The Offset modify tool (`OffsetTool`) — acts on `ToolContext.selected`.
     case offset
+    // --- Edit tools (pick entities under the cursor; no pre-selection needed) ---
+    /// The Trim edit tool (`TrimTool`) — click the part of a line/arc to cut away.
+    case trim
+    /// The Extend edit tool (`ExtendTool`) — click near an end to grow it to a boundary.
+    case extend
+    /// The Fillet edit tool (`FilletTool`) — round the corner between two lines.
+    case fillet
+    /// The Chamfer edit tool (`ChamferTool`) — bevel the corner between two lines.
+    case chamfer
     // Append new draw tools here (one `case` per tool) — see the collision note.
 
     /// A short title for the UI (toolbar button / menu).
@@ -82,6 +91,10 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .ellipse:   return "Ellipse"
         case .polygon:   return "Polygon"
         case .offset:    return "Offset"
+        case .trim:      return "Trim"
+        case .extend:    return "Extend"
+        case .fillet:    return "Fillet"
+        case .chamfer:   return "Chamfer"
         // Append a title arm per new case.
         }
     }
@@ -106,6 +119,10 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .ellipse:   return EllipseTool()
         case .polygon:   return PolygonTool()
         case .offset:    return OffsetTool()
+        case .trim:      return TrimTool()
+        case .extend:    return ExtendTool()
+        case .fillet:    return FilletTool()
+        case .chamfer:   return ChamferTool()
         // Append a `case <kind>: return <Name>Tool()` arm per new tool.
         }
     }

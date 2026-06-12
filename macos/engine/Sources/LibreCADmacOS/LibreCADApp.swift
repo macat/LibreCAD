@@ -110,7 +110,9 @@ struct LibreCADApp: App {
             // then activate); with nothing selected the tool's HUD prompts "Select
             // objects…". Shift picks the modify variant where a letter is shared
             // (⇧C Copy vs C Circle, ⇧R Rotate vs R Rectangle, ⇧M Mirror vs M Move,
-            // ⇧O Offset vs O Point). New draw tools: E Ellipse, G Polygon.
+            // ⇧O Offset vs O Point). New draw tools: E Ellipse, G Polygon. Edit
+            // tools (pick under the cursor, no pre-selection): T Trim, X Extend,
+            // F Fillet, ⇧F Chamfer.
             CommandMenu("Tools") {
                 Button("Select") { activateTool?(.select) }
                     .keyboardShortcut("v", modifiers: [])
@@ -162,6 +164,24 @@ struct LibreCADApp: App {
                     .disabled(activateTool == nil)
                 Button("Mirror") { activateTool?(.mirror) }
                     .keyboardShortcut("m", modifiers: .shift)
+                    .disabled(activateTool == nil)
+
+                Divider()
+                // Edit tools (pick entities under the cursor; no pre-selection).
+                // Their letters are free (no draw/modify twin), so they take plain
+                // keys; Chamfer shares F with Fillet via the shift convention
+                // (⇧F Chamfer vs F Fillet, like ⇧C Copy vs C Circle).
+                Button("Trim") { activateTool?(.trim) }
+                    .keyboardShortcut("t", modifiers: [])
+                    .disabled(activateTool == nil)
+                Button("Extend") { activateTool?(.extend) }
+                    .keyboardShortcut("x", modifiers: [])
+                    .disabled(activateTool == nil)
+                Button("Fillet") { activateTool?(.fillet) }
+                    .keyboardShortcut("f", modifiers: [])
+                    .disabled(activateTool == nil)
+                Button("Chamfer") { activateTool?(.chamfer) }
+                    .keyboardShortcut("f", modifiers: .shift)
                     .disabled(activateTool == nil)
             }
         }
