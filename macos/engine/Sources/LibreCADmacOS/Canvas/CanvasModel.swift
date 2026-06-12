@@ -149,6 +149,36 @@ final class CanvasModel {
     /// like `1,,2` shows "Expected x,y" instead of silently doing nothing.
     private(set) var lastCommandError: String?
 
+    // MARK: Selection interaction state (UX-plan U5 — marquee + hover)
+
+    /// The entity currently UNDER the cursor in select mode (the hover-highlight
+    /// pre-selection affordance, U5/gap G8). `nil` when nothing is under the cursor,
+    /// a tool is active, or the cursor is outside. The hover overlay reads this; the
+    /// canvas refreshes it on `mouseMoved` via `updateHover`. Kept distinct from
+    /// `selection` so the highlight color can differ from the selected color.
+    @ObservationIgnored
+    private(set) var hoverID: EntityID?
+
+    /// The live rubber-band marquee rectangle in WORLD coordinates while the user is
+    /// dragging a selection box on empty space (U5/gap G8), or `nil` when no marquee
+    /// is in progress. The marquee overlay reads this (with `marqueeCrossing`) to draw
+    /// the box; the canvas sets it on drag and clears it on mouse-up.
+    @ObservationIgnored
+    private(set) var marqueeRect: AABB?
+
+    /// Whether the in-progress marquee is a CROSSING box (right→left drag, green,
+    /// dashed — selects any touched entity) vs a WINDOW box (left→right drag, blue,
+    /// solid — selects only fully-enclosed entities). Only meaningful while
+    /// `marqueeRect != nil`.
+    @ObservationIgnored
+    private(set) var marqueeCrossing: Bool = false
+
+    /// The in-app entity clipboard (UX-plan U5 — Cut/Copy/Paste/Duplicate). Holds a
+    /// value snapshot of copied records; paste re-mints ids + offsets the geometry
+    /// through the pure engine `EntityClipboard`. One per window (per model).
+    @ObservationIgnored
+    private var clipboard = EntityClipboard()
+
     // MARK: Tool config (the parameterized tools' "options", surfaced by the Inspector)
 
     /// Editable defaults for the parameterized tools. These tools (`FilletTool`,
@@ -1167,6 +1197,188 @@ final class CanvasModel {
         let ids = Set(SelectionPolicy.invertedIDs(current: selection.ids, in: drawing))
         guard ids != selection.ids else { return false }
         selection = Selection(ids: ids)
+        modelVersion &+= 1
+        return true
+    }
+
+    // MARK: - Marquee (rubber-band) selection (UX-plan U5, gap G8)
+
+    /// Begins a live marquee at a world point: sets a degenerate box anchored there.
+    /// The canvas calls this on a select-mode mouse-down that did NOT hit an entity
+    /// (an empty-space drag), then `updateMarquee` on each drag step.
+    func beginMarquee(at world: Vector) {
+        marqueeRect = AABB(point: world)
+        marqueeCrossing = false
+    }
+
+    /// Updates the live marquee to span from its anchor (`from`) to the current
+    /// cursor world point (`to`), setting `marqueeCrossing` from the drag DIRECTION:
+    /// a right→left drag (`to.x < from.x`) is a CROSSING box (green, any touched), a
+    /// left→right drag is a WINDOW box (blue, only fully enclosed) — the LibreCAD /
+    /// AutoCAD convention. Bumps `modelVersion` so the overlay repaints.
+    func updateMarquee(from anchor: Vector, to cursor: Vector) {
+        marqueeRect = AABB(points: [anchor, cursor])
+        marqueeCrossing = cursor.x < anchor.x
+        modelVersion &+= 1
+    }
+
+    /// Commits the in-progress marquee: window/crossing-selects every selectable
+    /// entity inside/touching `rect` (the engine's `Selection.windowSelect` +
+    /// `SelectionPolicy.isSelectable` gate) and REPLACES the current selection (or,
+    /// when `additive`, UNIONS into it — ⇧-drag adds). Clears the live marquee.
+    /// Returns whether the selection changed (so the caller can skip a redraw).
+    ///
+    /// A degenerate (near-zero-area) marquee is treated as "no box" — it selects
+    /// nothing and (when not additive) clears the selection, matching a plain click
+    /// on empty space; the canvas only starts a marquee past the click threshold, so
+    /// in practice this guards a stray sub-pixel drag.
+    @discardableResult
+    func commitMarquee(crossing: Bool, additive: Bool) -> Bool {
+        defer { marqueeRect = nil }
+        guard let rect = marqueeRect, !rect.isEmpty else {
+            // No real box → behave like an empty-space click (clear unless additive).
+            if !additive { return deselectAll() }
+            return false
+        }
+        let layers = drawing.layers
+        let hits = selection.windowSelect(
+            rect: rect, crossing: crossing, in: drawing, using: quadtree
+        ).filter { id in
+            // Apply the same selectability gate Select All uses (skip locked/frozen).
+            guard let e = drawing.entity(id) else { return false }
+            return SelectionPolicy.isSelectable(e, layers: layers)
+        }
+        let newIDs: Set<EntityID> = additive
+            ? selection.ids.union(hits)
+            : Set(hits)
+        guard newIDs != selection.ids else { return false }
+        selection = Selection(ids: newIDs)
+        modelVersion &+= 1
+        return true
+    }
+
+    /// Cancels an in-progress marquee WITHOUT changing the selection (e.g. Esc).
+    func cancelMarquee() {
+        guard marqueeRect != nil else { return }
+        marqueeRect = nil
+        modelVersion &+= 1
+    }
+
+    // MARK: - Hover highlight (UX-plan U5, gap G8)
+
+    /// Updates the hover-highlight target to the selectable entity under a screen
+    /// point in SELECT mode (the cheap pre-selection affordance). Reuses the same
+    /// `hitTest` a click uses (quadtree-prefiltered → exact distance), so it is the
+    /// EXACT entity a click would select. No hover while a tool is active or the
+    /// cursor is outside. Returns whether the hover target changed (so the caller can
+    /// skip a redraw when it didn't).
+    @discardableResult
+    func updateHover(atScreenPoint screen: CGPoint) -> Bool {
+        guard !isToolActive else { return setHover(nil) }
+        let world = viewport.screenToWorld(screen)
+        let id = selection.hitTest(
+            worldPoint: world, worldTolerance: worldTolerance,
+            in: drawing, using: quadtree
+        )
+        return setHover(id)
+    }
+
+    /// Clears the hover target (mouse left the canvas / tool activated). Returns
+    /// whether it changed.
+    @discardableResult
+    func clearHover() -> Bool { setHover(nil) }
+
+    /// Sets `hoverID` and returns whether it changed.
+    @discardableResult
+    private func setHover(_ id: EntityID?) -> Bool {
+        guard hoverID != id else { return false }
+        hoverID = id
+        return true
+    }
+
+    // MARK: - Entity clipboard (UX-plan U5 — Cut / Copy / Paste / Duplicate)
+
+    /// Whether the clipboard has content to paste (drives the context menu's Paste
+    /// enabled state).
+    var hasClipboard: Bool { !clipboard.isEmpty }
+
+    /// Copies the current selection's records onto the in-app clipboard (a value
+    /// snapshot). No-op for an empty selection. Returns whether anything was copied.
+    @discardableResult
+    func copySelection() -> Bool {
+        guard !selection.isEmpty else { return false }
+        let recs = selection.ids.compactMap { drawing.entity($0) }
+        guard !recs.isEmpty else { return false }
+        clipboard.copy(recs)
+        return true
+    }
+
+    /// Cut = Copy then Delete the selection (one undoable deletion). Returns whether
+    /// anything was cut.
+    @discardableResult
+    func cutSelection() -> Bool {
+        guard copySelection() else { return false }
+        return deleteSelection()
+    }
+
+    /// Pastes the clipboard at a target WORLD point (the right-click location), so the
+    /// pasted geometry's reference corner lands at the cursor. The added records have
+    /// RE-MINTED ids + offset geometry (via the pure `EntityClipboard`), go through the
+    /// undoable `applyCommit(.add)` path (one undo step), and become the new selection.
+    /// Returns whether anything was pasted.
+    @discardableResult
+    func paste(at target: Vector) -> Bool {
+        paste(records: clipboard.pasteRecords(at: target))
+    }
+
+    /// Pastes the clipboard at the default offset (no cursor anchor — the menu-bar /
+    /// keyboard Paste). Returns whether anything was pasted.
+    @discardableResult
+    func paste() -> Bool {
+        paste(records: clipboard.pasteRecords())
+    }
+
+    /// Duplicates the current selection in place at the default offset WITHOUT
+    /// touching the clipboard (the ⌘D / "Duplicate" verb): snapshots the selected
+    /// records, re-mints + offsets them via a transient clipboard, and adds them as
+    /// the new selection (one undo step). Returns whether anything was duplicated.
+    @discardableResult
+    func duplicateSelection() -> Bool {
+        guard !selection.isEmpty else { return false }
+        let recs = selection.ids.compactMap { drawing.entity($0) }
+        guard !recs.isEmpty else { return false }
+        var scratch = EntityClipboard()
+        scratch.copy(recs)
+        return paste(records: scratch.pasteRecords())
+    }
+
+    /// Shared add-and-select for paste/duplicate: routes `records` through the
+    /// undoable `applyCommit(.add)` path (which mints each id + strips `.selected`)
+    /// while CAPTURING the minted ids so the freshly-added geometry becomes the new
+    /// selection. No-op (false) for an empty list.
+    @discardableResult
+    private func paste(records: [EntityRecord]) -> Bool {
+        guard !records.isEmpty else { return false }
+        // `applyCommit` mints ids internally but doesn't report them back; mint here
+        // through the same undoable group so we can select the results. We open one
+        // group, add each (capturing its id), keep the quadtree in sync, and select
+        // the new ids — mirroring `applyCommit`'s `.add` arm exactly.
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+
+        var newIDs: Set<EntityID> = []
+        for record in records {
+            var added = record
+            added.id = EntityID(0)                  // ensure a fresh mint
+            added.flags.remove(.selected)
+            let id = drawing.add(added)             // undoable; mints a real id
+            let box = drawing.entity(id)?.boundingBox() ?? added.boundingBox()
+            if !box.isEmpty { quadtree.insert(id, bounds: box) }
+            newIDs.insert(id)
+        }
+        selection = Selection(ids: newIDs)
+        modelDirty = true
         modelVersion &+= 1
         return true
     }
