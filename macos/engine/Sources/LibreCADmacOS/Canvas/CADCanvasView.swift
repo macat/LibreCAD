@@ -283,13 +283,24 @@ final class CADCanvasController {
     }
 
     /// Routes a keyboard event to tool/mode control. Returns `true` if handled.
-    ///   L            → activate the Line tool.
     ///   V / Esc      → return to select mode (Esc also cancels an in-progress run).
     ///   Return/Enter → commit the current tool run.
     ///   Delete/⌫     → backspace the current tool run (tool active) OR delete the
     ///                  current selection (select mode, if non-empty).
+    ///   Draw (bare): L=Line, C=Circle, A=Arc, R=Rectangle, P=Polyline, O=Point.
+    ///   Modify (⇧):  M=Move, ⇧C=Copy, ⇧R=Rotate, ⇧S=Scale, ⇧M=Mirror.
+    /// These mirror the Tools-menu shortcuts in `LibreCADApp` (the discoverable
+    /// source of truth) so the canvas and the menu stay in lockstep. Bare keys with
+    /// a command modifier are NOT claimed here (⌘O Open / ⌘Z Undo / ⌘0 Zoom-to-Fit
+    /// reach the menu via the responder chain).
     func handleKey(_ event: NSEvent) -> Bool {
         let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        // Shift distinguishes a modify tool (⇧C Copy) from its draw twin (C Circle).
+        // `charactersIgnoringModifiers` upper-cases a shifted letter, so we lower-case
+        // for the lookup and read the Shift flag separately rather than off the char.
+        let shift = event.modifierFlags.contains(.shift)
+        // A command-key combo is a menu shortcut (⌘O/⌘Z/⌘0); let it pass through.
+        let command = event.modifierFlags.contains(.command)
         // Esc is key code 53 (no reliable character).
         let isEscape = event.keyCode == 53
         let isReturn = event.keyCode == 36 || event.keyCode == 76  // Return / keypad Enter
@@ -325,13 +336,39 @@ final class CADCanvasController {
             }
             return false
         }
+        // Bare letter keys (no command modifier) activate tools. Shift selects the
+        // modify variant where a draw tool shares the letter (C/R/S/M).
+        guard !command else { return false }
         switch chars {
-        case "l":
-            activateTool(.line)
-            return true
         case "v":
             activateTool(.select)
             return true
+        case "l":
+            activateTool(.line)
+            return true
+        case "c":
+            activateTool(shift ? .copy : .circle)
+            return true
+        case "a":
+            activateTool(.arc)
+            return true
+        case "r":
+            activateTool(shift ? .rotate : .rectangle)
+            return true
+        case "p":
+            activateTool(.polyline)
+            return true
+        case "o":
+            activateTool(.point)
+            return true
+        case "m":
+            activateTool(shift ? .mirror : .move)
+            return true
+        case "s":
+            // No bare-S draw tool; ⇧S is Scale. A bare S is unassigned (falls
+            // through) so a future draw tool can claim it.
+            if shift { activateTool(.scale); return true }
+            return false
         default:
             return false
         }

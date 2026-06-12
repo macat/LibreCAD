@@ -75,27 +75,51 @@ struct ContentView: View {
             }
     }
 
-    // MARK: - Toolbar (minimal but real: Select + Line)
+    // MARK: - Toolbar (Select + Draw group + Modify group)
 
+    /// One toolbar button per tool, grouped Select → Draw → Modify (dividers
+    /// between groups). Each button activates its tool on the focused canvas and
+    /// shows the active badge. SF Symbols where one fits; the `help` carries the
+    /// shortcut so the toolbar is self-documenting. The shortcuts shown match the
+    /// Tools menu / canvas keymap exactly.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .principal) {
-            Button {
-                controllerBox.controller?.activateTool(.select)
-            } label: {
-                Label("Select", systemImage: "cursorarrow")
-            }
-            .help("Select / pan (V)")
-            .background(activeBadge(.select))
+            toolButton(.select, symbol: "cursorarrow", help: "Select / pan (V)")
 
-            Button {
-                controllerBox.controller?.activateTool(.line)
-            } label: {
-                Label("Line", systemImage: "line.diagonal")
-            }
-            .help("Draw line (L)")
-            .background(activeBadge(.line))
+            Divider()
+            // Draw tools.
+            toolButton(.line, symbol: "line.diagonal", help: "Draw line (L)")
+            toolButton(.circle, symbol: "circle", help: "Draw circle (C)")
+            toolButton(.arc, symbol: "point.topleft.down.to.point.bottomright.curvepath",
+                       help: "Draw arc (A)")
+            toolButton(.rectangle, symbol: "rectangle", help: "Draw rectangle (R)")
+            toolButton(.polyline, symbol: "scribble", help: "Draw polyline (P)")
+            toolButton(.point, symbol: "smallcircle.filled.circle", help: "Place point (O)")
+
+            Divider()
+            // Modify tools (act on the current selection).
+            toolButton(.move, symbol: "arrow.up.and.down.and.arrow.left.and.right",
+                       help: "Move selection (M)")
+            toolButton(.copy, symbol: "plus.square.on.square", help: "Copy selection (⇧C)")
+            toolButton(.rotate, symbol: "rotate.right", help: "Rotate selection (⇧R)")
+            toolButton(.scale, symbol: "arrow.up.left.and.arrow.down.right",
+                       help: "Scale selection (⇧S)")
+            toolButton(.mirror, symbol: "flip.horizontal", help: "Mirror selection (⇧M)")
         }
+    }
+
+    /// A single toolbar tool button: activates `kind`, labels it with `symbol`, and
+    /// shows the active-tool badge.
+    @ViewBuilder
+    private func toolButton(_ kind: ToolKind, symbol: String, help: String) -> some View {
+        Button {
+            controllerBox.controller?.activateTool(kind)
+        } label: {
+            Label(kind.title, systemImage: symbol)
+        }
+        .help(help)
+        .background(activeBadge(kind))
     }
 
     /// A subtle highlight behind the active tool's toolbar button.

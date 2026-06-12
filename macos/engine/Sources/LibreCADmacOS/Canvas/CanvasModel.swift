@@ -328,8 +328,17 @@ final class CanvasModel {
         for edit in edits {
             switch edit {
             case .add(let record):
-                let id = drawing.add(record)           // undoable; mints a real id
-                let box = drawing.entity(id)?.boundingBox() ?? record.boundingBox()
+                // Strip the persisted `.selected` flag from any added record so new
+                // geometry never arrives pre-selected. Selection is tracked view-side
+                // in `selection` (a separate Set) — the live app never sets the flag —
+                // but a MODIFY tool that ADDs copies (CopyTool) clones the original's
+                // `flags`, and a record loaded with the bit set could carry it. We do
+                // NOT add the new id to `selection`, so a copy stays unselected
+                // regardless; clearing the flag keeps the persisted state honest too.
+                var added = record
+                added.flags.remove(.selected)
+                let id = drawing.add(added)            // undoable; mints a real id
+                let box = drawing.entity(id)?.boundingBox() ?? added.boundingBox()
                 if !box.isEmpty { quadtree.insert(id, bounds: box) }
 
             case .replace(let id, let newKind):
