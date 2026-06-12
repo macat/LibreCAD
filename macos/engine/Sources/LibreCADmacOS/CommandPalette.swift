@@ -78,6 +78,7 @@ enum CommandRegistry {
         var redo: () -> Void
         var toggleInspector: () -> Void
         var toggleGrid: () -> Void
+        var documentSettings: () -> Void
     }
 
     /// SF Symbol + shortcut hint for each tool, mirroring the toolbar/menu so the
@@ -94,7 +95,7 @@ enum CommandRegistry {
         case .move:        return ("arrow.up.and.down.and.arrow.left.and.right", "M")
         case .copy:        return ("plus.square.on.square", "⇧C")
         case .rotate:      return ("rotate.right", "⇧R")
-        case .scale:       return ("arrow.up.left.and.arrow.down.right", "⇧S")
+        case .scale:       return ("square.resize", "⇧S")
         case .mirror:      return ("flip.horizontal", "⇧M")
         case .ellipse:     return ("oval", "E")
         case .polygon:     return ("hexagon", "G")
@@ -102,7 +103,7 @@ enum CommandRegistry {
         case .trim:        return ("scissors", "T")
         case .extend:      return ("arrow.right.to.line", "X")
         case .fillet:      return ("circle.bottomrighthalf.checkered", "F")
-        case .chamfer:     return ("angle", "⇧F")
+        case .chamfer:     return ("skew", "⇧F")
         case .spline:      return ("scribble.variable", "S")
         case .array:       return ("square.grid.3x3", "⇧A")
         case .divide:      return ("divide", "⇧D")
@@ -165,6 +166,8 @@ enum CommandRegistry {
                            systemImage: "sidebar.trailing", run: actions.toggleInspector),
             PaletteCommand(id: "app.toggleGrid", title: "Toggle Grid",
                            systemImage: "grid", run: actions.toggleGrid),
+            PaletteCommand(id: "app.documentSettings", title: "Document Settings…",
+                           systemImage: "gearshape", shortcut: "⌥⌘,", run: actions.documentSettings),
         ])
 
         return list
