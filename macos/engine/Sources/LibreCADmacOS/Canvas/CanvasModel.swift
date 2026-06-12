@@ -159,11 +159,27 @@ final class CanvasModel {
     /// Whether a draw tool is active (vs select/pan mode).
     var isToolActive: Bool { activeToolKind != .select }
 
-    /// The window's `UndoManager`. We own one (there is no `DocumentGroup` to
-    /// supply one — see LibreCADApp's note) and inject it into the drawing so tool
-    /// commits register undo (ADR-002). Re-injected on `setDrawing`.
+    /// The window's `UndoManager`. Defaults to a fresh instance the model owns and
+    /// injects into the drawing so tool commits register undo (ADR-002); re-injected
+    /// on `setDrawing`. Under `DocumentGroup` the view swaps in SwiftUI's environment
+    /// `UndoManager` via `adoptUndoManager(_:)` so edits ALSO mark the native
+    /// document dirty (and ⌘Z/Revert route through the document) — that is why this
+    /// is a `var`, not a `let`. All existing call sites (and the 973 unit tests) keep
+    /// the default fresh manager and are unaffected.
     @ObservationIgnored
-    let undoManager = UndoManager()
+    private(set) var undoManager = UndoManager()
+
+    /// Swaps in an externally-owned `UndoManager` (SwiftUI's environment manager
+    /// under `DocumentGroup`) so drawing mutations register against IT — which is
+    /// how the native document learns it is dirty. Idempotent: a no-op if the same
+    /// manager is already adopted. Repoints the drawing's `undoManager` (a `weak var`)
+    /// and clears the new manager's stack so a freshly-opened document starts clean.
+    func adoptUndoManager(_ manager: UndoManager) {
+        guard manager !== undoManager else { return }
+        undoManager = manager
+        drawing.undoManager = manager
+        manager.removeAllActions()
+    }
 
     // MARK: Init
 

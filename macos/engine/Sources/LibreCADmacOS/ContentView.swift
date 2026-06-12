@@ -2,22 +2,30 @@
 //  ContentView.swift
 //  LibreCADmacOS
 //
-//  The single window: the interactive Metal canvas (CADCanvasView) plus a
-//  coordinate / status HUD. It owns the live model directly — a `@MainActor
-//  @Observable CanvasModel` — so there is no NSDocument and nothing on the
-//  launch path that crosses actor boundaries.
+//  One document window's UI: the modern Layers sidebar + the interactive Metal
+//  canvas (CADCanvasView) + the Inspector + the tool toolbar + the ⌘K palette +
+//  on-canvas gizmos. Hosted by `DocumentGroup` (see LibreCADApp), which gives us
+//  native Open / Open Recent / Save / Save As / autosave / versions / the dirty
+//  dot / multi-window for free over `.dxf` files.
 //
-//  On first appear it loads the bundled `dim_sample.dxf` (falling back to the
-//  repo copy) so a fresh launch shows real geometry. File▸Open uses a SwiftUI
-//  `.fileImporter` driven by the ⌘O command via a focused scene value.
+//  ⚠️ LAUNCH-SAFETY (read before editing) — the document/launch path SIGTRAP-
+//  crashed once. The crash was `MainActor.assumeIsolated` in a document `init`
+//  that NSDocument constructs OFF the main actor. The safe split this view
+//  enforces:
+//    • `LibreCADDocument` holds ONLY a `Sendable DXFPayload` (parsed off-main).
+//    • THIS view builds the `@MainActor CADDrawing` + `CanvasModel` FROM that
+//      payload, on the MAIN ACTOR, in `.task` — never in the document, and with
+//      NO `MainActor.assumeIsolated` anywhere.
+//  See LibreCADDocument.swift and macos/docs/DEVLOG.md ("SIGTRAP").
 //
-//  Crash-fix note: the previous DocumentGroup path constructed the document off
-//  the main thread and trapped on `MainActor.assumeIsolated`. There is NO
-//  `assumeIsolated` here: `CanvasModel`/`CADDrawing` are touched only on the
-//  main actor (this whole view runs there), and `loadDrawing(dxfPath:)` is
-//  itself `@MainActor`.
+//  Native Open/Save/Save As/Open Recent/autosave/versions/dirty come from
+//  DocumentGroup, so this view no longer carries the custom NSOpenPanel/NSSavePanel
+//  Open/Save (those focused-scene-value actions were removed). Export (PDF/PNG/SVG)
+//  and Print STAY custom — they are not the document type.
 //
 //  GPLv2-or-later (LibreCAD derivative).
+//
+//  Copyright (C) 2026 LibreCAD macOS contributors.
 //
 
 import SwiftUI
@@ -26,20 +34,28 @@ import AppKit
 import CADEngine
 
 struct ContentView: View {
+    /// The native document backing this window (`ReferenceFileDocument`, holding a
+    /// Sendable payload only). `DocumentGroup`'s editor closure hands us this
+    /// reference. The view reads its payload to build the live model, and pushes the
+    /// live geometry back into it so Save/autosave serialize the latest drawing. A
+    /// reference type, so a plain `let` is enough — its identity is fixed per window.
+    let document: LibreCADDocument
+
+    /// SwiftUI's environment `UndoManager` (supplied by `DocumentGroup`). Adopted by
+    /// the model so edits register against IT — which is how the native document
+    /// learns it is dirty and how ⌘Z / Revert route through the document.
+    @Environment(\.undoManager) private var environmentUndoManager
+
     /// The canvas state (model, viewport, index, selection, snap). Owned by this
     /// window; `@MainActor @Observable`, so it is only ever touched on the main
-    /// actor — which is where this whole view runs.
+    /// actor — which is where this whole view runs. Built from the document payload
+    /// in `.task` (NOT in the document init — that is the launch-crash boundary).
     @State private var model = CanvasModel()
-    /// Tracks the window's current file URL (the doc opened or last saved to) and
-    /// its unsaved-changes flag. Drives Save (⌘S) vs Save As… (⇧⌘S) and the title.
-    @State private var doc = DocumentState()
     /// Bridge so the Zoom-to-Fit command can reach the live canvas controller.
     @State private var controllerBox = CADCanvasView.ControllerBox()
-    @State private var status: String = "Loading…"
-    /// Drives the File▸Open importer (toggled by the ⌘O command).
-    @State private var showOpen = false
-    /// Set once so the launch sample is loaded exactly one time.
-    @State private var didLoadSample = false
+    @State private var status: String = ""
+    /// Set once so the document payload is loaded into the live model exactly once.
+    @State private var didLoadPayload = false
 
     /// The sidebar's visibility column state (lets the toolbar toggle drive it).
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
@@ -61,15 +77,32 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
                 .navigationTitle("Document")
         } detail: {
-            // Detail pane: the existing interactive canvas + HUD + toolbar,
-            // unchanged from the pre-sidebar layout.
+            // Detail pane: the existing interactive canvas + HUD + toolbar.
             canvasDetail
         }
+        // Build the live @MainActor model from the document's Sendable payload, on
+        // the MAIN ACTOR, exactly once. This is the safe boundary: the parse already
+        // happened off-main in the document; here we just construct the drawing the
+        // canvas renders. NO MainActor.assumeIsolated — this whole view is main-actor.
+        .task {
+            guard !didLoadPayload else { return }
+            didLoadPayload = true
+            loadFromDocument()
+        }
+        // Adopt SwiftUI's environment UndoManager so edits dirty the native document
+        // (and ⌘Z/Revert route through it). Re-applied if the environment manager
+        // appears after first build (it can be nil for the very first body pass).
+        .onChange(of: environmentUndoManagerID) { _, _ in adoptEnvironmentUndo() }
+        // Keep the document's payload in sync with the live drawing so Save /
+        // autosave / versions serialize the LATEST geometry. `modelVersion` bumps on
+        // every edit (and on the initial load); pushing the value-type snapshot is
+        // cheap and never touches the off-main document codec.
+        .onChange(of: model.modelVersion) { _, _ in syncPayloadToDocument() }
     }
 
-    /// The canvas detail pane — the prior single-window body, verbatim. Kept
-    /// separate so the `NavigationSplitView` above stays readable and the canvas /
-    /// HUD / toolbar wiring is untouched.
+    /// The canvas detail pane — the interactive canvas + HUD + toolbar + Inspector +
+    /// palette wiring. Open/Save/Save As are NO LONGER here (DocumentGroup owns
+    /// them); Export / Print remain as custom focused-scene-value actions.
     private var canvasDetail: some View {
         CADCanvasView(model: model, controllerBox: controllerBox)
             .ignoresSafeArea()
@@ -90,21 +123,16 @@ struct ContentView: View {
             // The ⌘K command palette: a fuzzy-searchable overlay over the canvas
             // that can run any tool or app action. Built from the SAME closures the
             // menus/toolbar use, so a palette pick is identical to the real action.
-            // Bundled into ONE modifier (overlay + ⌘K focused value) so the long
-            // `canvasDetail` modifier chain stays type-checkable.
             .modifier(CommandPaletteModifier(
                 isPresented: $showPalette,
                 commands: paletteCommands
             ))
+            .focusedSceneValue(\.commandPalette) { showPalette = true }
             .focusedSceneValue(\.zoomToFit) { controllerBox.controller?.zoomToFit() }
-            .focusedSceneValue(\.openDocument) { showOpen = true }
-            // Save (⌘S): write in place if we have a current file, else Save As…
-            .focusedSceneValue(\.saveDocument) { Task { await save() } }
-            // Save As… (⇧⌘S): always present the panel.
-            .focusedSceneValue(\.saveDocumentAs) { Task { await saveAs() } }
             // Export… (PDF/PNG/SVG): present a save panel whose format follows the
             // chosen extension, then render the current drawing through the shared
-            // export facade. Print… (⌘P): the system print dialog.
+            // export facade. Print… (⌘P): the system print dialog. These STAY custom
+            // (they are not the document type — DocumentGroup handles only DXF I/O).
             .focusedSceneValue(\.exportDocument) { format in Task { await exportDrawing(format) } }
             .focusedSceneValue(\.printDocument) { printDrawing() }
             .focusedSceneValue(\.activateTool) { kind in
@@ -121,22 +149,46 @@ struct ContentView: View {
             // (which runs BEFORE the canvas `keyDown`), so ⌫ falls through to the
             // canvas, where the tool consumes it as `.backspace`. See MUST-FIX 1.
             .focusedSceneValue(\.isToolActive, model.isToolActive)
-            .fileImporter(
-                isPresented: $showOpen,
-                allowedContentTypes: Self.dxfTypes,
-                allowsMultipleSelection: false
-            ) { result in
-                handleImport(result)
-            }
-            .onAppear {
-                guard !didLoadSample else { return }
-                didLoadSample = true
-                Task { await loadSample() }
-            }
-            // Reflect the current file in the window title bar (and show the proxy
-            // icon when a real file backs the document). Untitled before first save.
-            .navigationTitle(doc.displayName)
-            .modifier(NavigationDocumentIfAny(url: doc.currentURL))
+    }
+
+    // MARK: - Document ⇄ live model bridge (MAIN ACTOR)
+
+    /// Builds the live `@MainActor CADDrawing`/`CanvasModel` from the document's
+    /// Sendable payload, frames it, and adopts the environment UndoManager. Runs on
+    /// the main actor (the whole view does); the payload was parsed OFF-main in the
+    /// document, so nothing here crosses the launch-crash boundary.
+    @MainActor
+    private func loadFromDocument() {
+        let drawing = CADDrawing.make(from: document.payload)
+        model.setDrawing(drawing, viewSize: model.viewport.size)
+        adoptEnvironmentUndo()
+        controllerBox.controller?.zoomToFit()
+        let n = model.entityCount
+        status = n == 0 ? "New drawing" : "\(n) entities"
+    }
+
+    /// Adopts SwiftUI's environment `UndoManager` (from `DocumentGroup`) into the
+    /// model so edits dirty the native document. No-op when unavailable (the very
+    /// first body pass) or already adopted.
+    @MainActor
+    private func adoptEnvironmentUndo() {
+        guard let manager = environmentUndoManager else { return }
+        model.adoptUndoManager(manager)
+    }
+
+    /// A change-detection id for the environment UndoManager (object identity), so
+    /// `.onChange` re-adopts when SwiftUI supplies/replaces it after the first pass.
+    private var environmentUndoManagerID: ObjectIdentifier? {
+        environmentUndoManager.map(ObjectIdentifier.init)
+    }
+
+    /// Pushes the live drawing's latest contents into the document's payload so the
+    /// next Save / autosave / version serializes the current geometry. Value-type
+    /// snapshot only — no off-main codec call here (serialization happens later in
+    /// the document's `fileWrapper`, off-main).
+    @MainActor
+    private func syncPayloadToDocument() {
+        document.updatePayload(model.drawing.payloadSnapshot)
     }
 
     // MARK: - Toolbar (Select + Draw group + Modify group)
@@ -251,12 +303,16 @@ struct ContentView: View {
     /// closures the menu items fire — so running a command from the palette is
     /// indistinguishable from using the menu/toolbar. The matcher/ranking is the
     /// pure `CommandMatcher` in CADEngine.
+    ///
+    /// Open / Save / Save As are now native DocumentGroup commands (not view actions),
+    /// so the palette's Open/Save entries route through the standard responder-chain
+    /// menu selectors rather than custom panels (see CommandRegistry wiring).
     private var paletteCommands: [PaletteCommand] {
         CommandRegistry.commands(.init(
             activateTool: { kind in controllerBox.controller?.activateTool(kind) },
-            open: { showOpen = true },
-            save: { Task { await save() } },
-            saveAs: { Task { await saveAs() } },
+            open: { sendDocumentAction(#selector(NSDocumentController.openDocument(_:))) },
+            save: { sendDocumentAction(#selector(NSDocument.save(_:))) },
+            saveAs: { sendDocumentAction(#selector(NSDocument.saveAs(_:))) },
             export: { format in Task { await exportDrawing(format) } },
             print: { printDrawing() },
             zoomToFit: { controllerBox.controller?.zoomToFit() },
@@ -265,6 +321,12 @@ struct ContentView: View {
             toggleInspector: { showInspector.toggle() },
             toggleGrid: { model.gridVisible.toggle(); controllerBox.controller?.requestRedraw() }
         ))
+    }
+
+    /// Fires a standard document menu selector down the responder chain (used by the
+    /// ⌘K palette's Open/Save/Save As entries now that DocumentGroup owns those).
+    private func sendDocumentAction(_ selector: Selector) {
+        NSApp.sendAction(selector, to: nil, from: nil)
     }
 
     // MARK: - HUD
@@ -279,6 +341,7 @@ struct ContentView: View {
             // + semantic `.secondary` text invert with the appearance).
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
             .padding(8)
+            .opacity(status.isEmpty ? 0 : 1)
     }
 
     /// The active tool's prompt ("Specify first point" / "Specify next point"),
@@ -321,147 +384,13 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Open (File▸Open via ⌘O)
-
-    /// Accepted file types for the importer. Prefers the exported DXF UTType but
-    /// always also offers the plain `.dxf` extension type as a robust fallback.
-    private static let dxfTypes: [UTType] = {
-        var types: [UTType] = [.librecadDXF]
-        if let byExt = UTType(filenameExtension: "dxf") { types.append(byExt) }
-        return types
-    }()
-
-    /// Handles the importer result: resolves the security-scoped URL and loads it.
-    private func handleImport(_ result: Result<[URL], Error>) {
-        switch result {
-        case .success(let urls):
-            guard let url = urls.first else { return }
-            Task { await open(url) }
-        case .failure(let error):
-            status = "Open cancelled: \(error.localizedDescription)"
-        }
-    }
-
-    /// Loads a user-picked file, honoring the security-scoped URL lifecycle, and
-    /// records it as the document's current file so a later ⌘S writes back to it.
-    /// On error the message lands in the status HUD — never a crash.
-    @MainActor
-    private func open(_ url: URL) async {
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        let ok = await load(path: url.path, label: url.lastPathComponent)
-        if ok { doc.markOpened(url) }
-    }
-
-    // MARK: - Initial sample load
-
-    /// Loads the launch sample from the app bundle if present, else the repo copy,
-    /// so the bundled app is path-independent. Runs on the main actor; on failure
-    /// the status HUD shows the error rather than crashing.
-    @MainActor
-    private func loadSample() async {
-        status = "Loading dim_sample.dxf…"
-        if let bundled = Bundle.main.url(forResource: "dim_sample", withExtension: "dxf") {
-            await load(path: bundled.path, label: "dim_sample.dxf")
-            return
-        }
-        // Fallback to the in-repo copy (useful when running the bare binary).
-        await load(path: Self.repoSamplePath, label: "dim_sample.dxf")
-    }
-
-    /// Repo-relative fallback path for the launch sample (used only when the
-    /// sample is not bundled, e.g. running the SwiftPM binary directly).
-    private static let repoSamplePath =
-        "/Users/macatt/w/LibreCAD/librecad/res/dxf/dim_sample.dxf"
-
-    // MARK: - Shared load
-
-    /// Parses a DXF at `path` on the main actor, installs it in the model, frames
-    /// it, and updates the HUD. Errors surface in the status HUD (no crash).
-    /// Returns whether the load succeeded (so callers can record the file URL).
-    @MainActor
-    @discardableResult
-    private func load(path: String, label: String) async -> Bool {
-        let size = model.viewport.size
-        do {
-            let drawing = try await loadDrawing(dxfPath: path)
-            model.setDrawing(drawing, viewSize: size)
-            status = "\(label) — \(model.entityCount) entities"
-            NSLog("CADCanvas: loaded \(model.entityCount) entities from \(label)")
-            controllerBox.controller?.zoomToFit()
-            return true
-        } catch {
-            status = "Load failed: \(error.localizedDescription)"
-            NSLog("CADCanvas: load failed: \(error)")
-            return false
-        }
-    }
-
-    // MARK: - Save (⌘S) / Save As… (⇧⌘S)
-
-    /// Save (⌘S): if the document already has a file, write the current drawing to
-    /// it; otherwise fall through to Save As… The write runs through the
-    /// `@MainActor` `writeDrawing` (which hops to the engine actor for the
-    /// non-reentrant libdxfrw call). Status/errors land in the HUD — never a crash.
-    @MainActor
-    private func save() async {
-        if let url = doc.currentURL {
-            await write(to: url)
-        } else {
-            await saveAs()
-        }
-    }
-
-    /// Save As… (⇧⌘S): present an `NSSavePanel` for a `.dxf`, then write the
-    /// current drawing there and record it as the document's current file. The
-    /// chosen URL is security-scoped (start/stop around the write).
-    @MainActor
-    private func saveAs() async {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = Self.dxfTypes
-        panel.canCreateDirectories = true
-        panel.isExtensionHidden = false
-        panel.nameFieldStringValue = "\(doc.displayName).dxf"
-        panel.title = "Save Drawing"
-        panel.prompt = "Save"
-
-        let response = panel.runModal()
-        guard response == .OK, let url = panel.url else {
-            status = "Save cancelled"
-            return
-        }
-        await write(to: url)
-    }
-
-    /// Writes `model.drawing` to `url` via the merged DXF writer, honoring the
-    /// security-scoped URL lifecycle (the Save As… panel hands back a scoped URL;
-    /// an in-place ⌘S URL is already accessible, so start/stop is a harmless no-op
-    /// there). On success records the file (clears dirty) and reports the
-    /// written/skipped tallies in the HUD; on failure shows the error (no crash).
-    @MainActor
-    private func write(to url: URL) async {
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        do {
-            let result = try await writeDrawing(model.drawing, toPath: url.path)
-            doc.markSaved(to: url)
-            var msg = "Saved \(url.lastPathComponent) — \(result.written) entities"
-            if result.skipped > 0 {
-                // Some kinds (text/hatch/solid/spline) aren't yet emitted by the
-                // writer; make that visible rather than silently dropping them.
-                msg += " (\(result.skipped) unsupported skipped)"
-            }
-            status = msg
-            NSLog("CADCanvas: \(msg)")
-        } catch {
-            status = "Save failed: \(error.localizedDescription)"
-            NSLog("CADCanvas: save failed: \(error)")
-        }
-    }
-
     // MARK: - Export (PDF / PNG / SVG) and Print (⌘P)
+    //
+    // These STAY custom (not the document type). DocumentGroup owns only DXF
+    // Open/Save/Save As/autosave; export renders the live drawing to other formats
+    // and Print drives the system print dialog.
 
-    /// Export… for one `format`: present an `NSSavePanel` defaulting to the document
+    /// Export… for one `format`: present an `NSSavePanel` defaulting to a sensible
     /// name with that format's extension, then render the current drawing through
     /// the shared export facade (PDF/PNG via the CGContext renderer, SVG via the
     /// engine's pure-Swift emitter). Status/errors land in the HUD — never a crash.
@@ -471,7 +400,7 @@ struct ContentView: View {
         panel.allowedContentTypes = [format.utType]
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
-        panel.nameFieldStringValue = "\(doc.displayName).\(format.fileExtension)"
+        panel.nameFieldStringValue = "\(exportBaseName).\(format.fileExtension)"
         panel.title = "Export \(format.displayName)"
         panel.prompt = "Export"
 
@@ -491,6 +420,14 @@ struct ContentView: View {
         }
     }
 
+    /// A reasonable default base name for an exported file: the focused document
+    /// window's title (the file name DocumentGroup shows), else "Drawing".
+    private var exportBaseName: String {
+        let title = NSApp.keyWindow?.title ?? ""
+        let trimmed = title.replacingOccurrences(of: " — Edited", with: "")
+        return trimmed.isEmpty ? "Drawing" : trimmed
+    }
+
     /// Print… (⌘P): present the system print dialog for the current drawing,
     /// fitted to the chosen paper. Attaches to the key window as a sheet when one
     /// is available.
@@ -503,27 +440,12 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Conditional window-document modifier
-
-/// Applies `.navigationDocument(url)` only when a real file backs the document so
-/// the title bar shows the proxy icon / path popover; before the first save there
-/// is no URL and the modifier is a no-op (the title alone reads "Untitled").
-private struct NavigationDocumentIfAny: ViewModifier {
-    let url: URL?
-    func body(content: Content) -> some View {
-        if let url {
-            content.navigationDocument(url)
-        } else {
-            content
-        }
-    }
-}
-
 // MARK: - Focused command plumbing
 
-/// Focused scene values carrying the active window's "Zoom to Fit" and "Open…"
-/// actions, so menu/keyboard commands (⌘0 / ⌘O) can drive the focused window
-/// without a global singleton (LibreCADApp reads them in its `.commands`).
+/// Focused scene values carrying the active window's app actions (Zoom-to-Fit,
+/// Export, Print, tool activation, undo/redo, delete, command palette, and the
+/// "a tool is mid-run" flag). Open/Save/Save As are NO LONGER here — they are
+/// native DocumentGroup commands. LibreCADApp reads these in its `.commands`.
 extension FocusedValues {
     /// Raise the ⌘K command palette on the focused window (View ▸ Command Palette…).
     var commandPalette: (() -> Void)? {
@@ -534,21 +456,6 @@ extension FocusedValues {
     var zoomToFit: (() -> Void)? {
         get { self[ZoomToFitKey.self] }
         set { self[ZoomToFitKey.self] = newValue }
-    }
-
-    var openDocument: (() -> Void)? {
-        get { self[OpenDocumentKey.self] }
-        set { self[OpenDocumentKey.self] = newValue }
-    }
-
-    /// Save / Save As… the focused window's drawing (File menu, ⌘S / ⇧⌘S).
-    var saveDocument: (() -> Void)? {
-        get { self[SaveDocumentKey.self] }
-        set { self[SaveDocumentKey.self] = newValue }
-    }
-    var saveDocumentAs: (() -> Void)? {
-        get { self[SaveDocumentAsKey.self] }
-        set { self[SaveDocumentAsKey.self] = newValue }
     }
 
     /// Export the focused window's drawing to a given format (File ▸ Export…).
@@ -600,18 +507,6 @@ private struct CommandPaletteKey: FocusedValueKey {
 }
 
 private struct ZoomToFitKey: FocusedValueKey {
-    typealias Value = () -> Void
-}
-
-private struct OpenDocumentKey: FocusedValueKey {
-    typealias Value = () -> Void
-}
-
-private struct SaveDocumentKey: FocusedValueKey {
-    typealias Value = () -> Void
-}
-
-private struct SaveDocumentAsKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 
