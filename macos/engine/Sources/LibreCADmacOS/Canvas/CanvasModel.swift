@@ -1217,7 +1217,8 @@ final class CanvasModel {
     /// geometry, so they do not. `nil` snap ⇒ not active.
     var osnapActive: Bool {
         switch snap?.kind {
-        case .endpoint, .center, .middle, .intersection, .onEntity:
+        case .endpoint, .center, .middle, .intersection, .onEntity,
+             .perpendicular, .tangent, .nearest, .parallel:
             return true
         case .grid, .free, .none:
             return false
