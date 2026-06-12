@@ -75,6 +75,11 @@ struct ContentView: View {
             .focusedSceneValue(\.saveDocument) { Task { await save() } }
             // Save As… (⇧⌘S): always present the panel.
             .focusedSceneValue(\.saveDocumentAs) { Task { await saveAs() } }
+            // Export… (PDF/PNG/SVG): present a save panel whose format follows the
+            // chosen extension, then render the current drawing through the shared
+            // export facade. Print… (⌘P): the system print dialog.
+            .focusedSceneValue(\.exportDocument) { format in Task { await exportDrawing(format) } }
+            .focusedSceneValue(\.printDocument) { printDrawing() }
             .focusedSceneValue(\.activateTool) { kind in
                 controllerBox.controller?.activateTool(kind)
             }
@@ -372,6 +377,49 @@ struct ContentView: View {
             NSLog("CADCanvas: save failed: \(error)")
         }
     }
+
+    // MARK: - Export (PDF / PNG / SVG) and Print (⌘P)
+
+    /// Export… for one `format`: present an `NSSavePanel` defaulting to the document
+    /// name with that format's extension, then render the current drawing through
+    /// the shared export facade (PDF/PNG via the CGContext renderer, SVG via the
+    /// engine's pure-Swift emitter). Status/errors land in the HUD — never a crash.
+    @MainActor
+    private func exportDrawing(_ format: ExportFormat) async {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [format.utType]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = "\(doc.displayName).\(format.fileExtension)"
+        panel.title = "Export \(format.displayName)"
+        panel.prompt = "Export"
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            status = "Export cancelled"
+            return
+        }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let count = try DrawingExporter.export(model.drawing, to: url, format: format)
+            status = "Exported \(url.lastPathComponent) — \(count) elements"
+            NSLog("CADCanvas: exported \(count) elements to \(url.lastPathComponent)")
+        } catch {
+            status = "Export failed: \(error.localizedDescription)"
+            NSLog("CADCanvas: export failed: \(error)")
+        }
+    }
+
+    /// Print… (⌘P): present the system print dialog for the current drawing,
+    /// fitted to the chosen paper. Attaches to the key window as a sheet when one
+    /// is available.
+    @MainActor
+    private func printDrawing() {
+        let window = NSApp.keyWindow ?? NSApp.mainWindow
+        if !DrawingPrinter.print(model.drawing, in: window) {
+            status = "Print cancelled"
+        }
+    }
 }
 
 // MARK: - Conditional window-document modifier
@@ -414,6 +462,17 @@ extension FocusedValues {
     var saveDocumentAs: (() -> Void)? {
         get { self[SaveDocumentAsKey.self] }
         set { self[SaveDocumentAsKey.self] = newValue }
+    }
+
+    /// Export the focused window's drawing to a given format (File ▸ Export…).
+    var exportDocument: ((ExportFormat) -> Void)? {
+        get { self[ExportDocumentKey.self] }
+        set { self[ExportDocumentKey.self] = newValue }
+    }
+    /// Print the focused window's drawing (File ▸ Print…, ⌘P).
+    var printDocument: (() -> Void)? {
+        get { self[PrintDocumentKey.self] }
+        set { self[PrintDocumentKey.self] = newValue }
     }
 
     /// Activate a tool kind in the focused window (Tools menu / shortcuts).
@@ -462,6 +521,14 @@ private struct SaveDocumentKey: FocusedValueKey {
 }
 
 private struct SaveDocumentAsKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct ExportDocumentKey: FocusedValueKey {
+    typealias Value = (ExportFormat) -> Void
+}
+
+private struct PrintDocumentKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 
