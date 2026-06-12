@@ -61,7 +61,7 @@ struct DimensionEntityTests {
         let font = digitFont()
         return ResolveContext(
             tessellationTolerance: 0.01,
-            fontProvider: { _ in font }
+            fontProvider: SingleStrokeFontProvider(font)
         )
     }
 

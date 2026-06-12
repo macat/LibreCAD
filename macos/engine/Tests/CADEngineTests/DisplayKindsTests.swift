@@ -49,12 +49,16 @@ struct DisplayKindsTests {
 
     /// A real font provider over the shipped `standard.lff`, registered under
     /// both "standard" and the empty key (so a `nil` style name resolves too).
-    private func realProvider() throws -> @Sendable (String) -> StrokeFont? {
+    /// Returns the `StrokeFontProvider` (which conforms to `FontProvider`): it
+    /// serves only `.stroke(...)` sources, so the resolve arm's substitution chain
+    /// falls back from the (unavailable) native default to the `.lff` "standard"
+    /// stroke font — text resolves to STROKES, as these tests assert.
+    private func realProvider() throws -> StrokeFontProvider {
         let url = try standardFontURL()
         let provider = StrokeFontProvider()
         provider.registerFont(at: url, name: "standard")
         provider.registerFont(at: url, name: "")
-        return provider.makeProvider()
+        return provider
     }
 
     private func contextWithFont() throws -> ResolveContext {
@@ -166,8 +170,7 @@ struct DisplayKindsTests {
         // by the parser). Resolving a string with an absent glyph must still draw
         // (the replacement) and never crash.
         let font = LFFParser.parse(text: "[0041] A\n0,0;6,9")
-        let provider: @Sendable (String) -> StrokeFont? = { _ in font }
-        let ctx = ResolveContext(fontProvider: provider)
+        let ctx = ResolveContext(fontProvider: SingleStrokeFontProvider(font))
         let e = EntityRecord(id: EntityID(1),
                              kind: .text(TextData(position: Vector(0, 0), height: 10, text: "AZ")))
         let geo = e.resolve(ctx)
@@ -175,16 +178,34 @@ struct DisplayKindsTests {
         #expect(geo.polylines.count >= 2)
     }
 
-    @Test("unknown font name resolves to empty (provider returns nil), no crash")
+    @Test("unknown font name SUBSTITUTES to the fallback font, no crash (ADR-004 §4.3)")
     func unknownFontGraceful() throws {
+        // With no textStyleProvider, an unknown style name synthesizes a native
+        // default style. This ctx's provider serves ONLY `.lff` strokes, so the
+        // substitution chain falls back native-default → `.lff` "standard" and the
+        // text STILL DRAWS (the design's "never vanish, always substitute" rule),
+        // never crashing.
         let ctx = try contextWithFont()
         let e = EntityRecord(
             id: EntityID(1),
             kind: .text(TextData(position: Vector(0, 0), height: 10, text: "ABC",
                                  styleName: "no-such-font-xyz"))
         )
-        // The provider has no "no-such-font-xyz" registration ⇒ nil ⇒ empty.
-        #expect(e.resolve(ctx).polylines.isEmpty)
+        // Substituted to the stroke "standard" → real strokes (not empty).
+        #expect(!e.resolve(ctx).polylines.isEmpty)
+    }
+
+    @Test("no font provider at all resolves to empty geometry, no crash")
+    func noProviderGraceful() {
+        // The truly graceful-empty case: no provider wired ⇒ empty geometry.
+        let ctx = ResolveContext(tessellationTolerance: 0.01)
+        let e = EntityRecord(
+            id: EntityID(1),
+            kind: .text(TextData(position: Vector(0, 0), height: 10, text: "ABC"))
+        )
+        let geo = e.resolve(ctx)
+        #expect(geo.polylines.isEmpty)
+        #expect(geo.fills.isEmpty)
     }
 
     // MARK: - Text: bounding box
@@ -335,23 +356,23 @@ struct DisplayKindsTests {
     @MainActor
     @Test("CADDrawing.makeResolveContext wires a working default font provider")
     func drawingDefaultFontProvider() {
-        // The shared CADFonts provider should resolve the default "standard"
-        // font (from the repo fonts dir via #filePath when not bundled).
+        // The shared CADFonts provider should resolve the DEFAULT style, which is
+        // now a NATIVE font (Helvetica Neue) → outline FILLS (ADR-004 revision).
         let drawing = CADDrawing()
         let ctx = drawing.makeResolveContext()
         #expect(ctx.fontProvider != nil)
         let e = EntityRecord(id: EntityID(1),
                              kind: .text(TextData(position: Vector(0, 0), height: 10, text: "A")))
-        // With the default provider, a text entity resolves to real strokes.
-        #expect(e.resolve(ctx).polylines.count >= 1)
+        // With the default native provider, a text entity resolves to outline fills.
+        #expect(e.resolve(ctx).fills.count >= 1)
     }
 
-    @Test("CADFonts default provider loads the standard font")
+    @Test("CADFonts stroke provider loads the standard .lff font")
     func cadFontsDefaultProvider() {
-        let hook = CADFonts.provider.makeProvider()
-        // Default font resolves under its name and the empty key.
-        #expect(hook("standard") != nil)
-        #expect(hook("") != nil)
-        #expect((hook("standard")?.glyph(for: Character("A"))) != nil)
+        let provider = CADFonts.strokeProvider
+        // Default `.lff` font resolves under its name and the empty key.
+        #expect(provider.font(named: "standard") != nil)
+        #expect(provider.font(named: "") != nil)
+        #expect((provider.font(named: "standard")?.glyph(for: Character("A"))) != nil)
     }
 }

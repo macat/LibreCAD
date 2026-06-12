@@ -60,14 +60,15 @@ struct LineInstance: Equatable {
 /// normalizes to CCW internally). It returns a flat triangle list — every group of
 /// three consecutive `Vector`s is one CCW triangle.
 ///
-/// ## Holes — backlog
-/// `ResolvedFill.loops[1...]` (islands) are NOT yet stitched in. The standard fix is
-/// the earcut "bridge" technique (cut a zero-area channel from the outer ring to each
-/// hole so the whole thing becomes one simple polygon). Most hatches/SOLIDs in the
-/// wild are single-boundary, so this covers the 99% case; holed fills currently render
-/// as their solid outer boundary (over-fill, never a crash).
-// TODO(backlog): holes — stitch loops[1...] into the outer ring via the earcut bridge
-// technique (or fall back to stencil even-odd for loops the ear-clipper rejects, §1.3).
+/// ## Holes — implemented (earcut bridge)
+/// `triangulateLoops(_:)` stitches `ResolvedFill.loops[1...]` (islands / counters)
+/// into the outer ring via the earcut **bridge** technique: cut a zero-area channel
+/// from a visible outer-ring vertex to each hole's rightmost vertex so the whole
+/// thing becomes ONE simple polygon, then ear-clip it. This is essential for nice
+/// outline text — glyph counters (the hole in O / e / A / Ø) render correctly
+/// instead of over-filling. (Self-intersecting loops the ear-clipper rejects fall
+/// back to a partial fan — never a crash; the §1.3 stencil even-odd path is a later
+/// refinement for those.)
 enum FillTriangulation {
 
     /// Triangulates a simple polygon (one ring; first vertex NOT repeated at the end —
@@ -114,10 +115,16 @@ enum FillTriangulation {
                 // Convex (CCW) corner? (cross > 0 in a CCW ring is a convex vertex.)
                 if cross(a, b, c) <= 0 { continue }
 
-                // No other vertex inside triangle (a, b, c) → it's an ear.
+                // No other vertex inside triangle (a, b, c) → it's an ear. A vertex
+                // that COINCIDES with one of the corners (a/b/c) is ignored — this
+                // is the case for the duplicated bridge endpoints introduced when
+                // stitching a hole (`triangulateLoops`): two distinct indices share
+                // the same coordinate, and they must not block the ear.
                 var isEar = true
                 for j in indices where j != iPrev && j != iCurr && j != iNext {
-                    if pointInTriangle(ring[j], a, b, c) { isEar = false; break }
+                    let p = ring[j]
+                    if approxEqual(p, a) || approxEqual(p, b) || approxEqual(p, c) { continue }
+                    if pointInTriangle(p, a, b, c) { isEar = false; break }
                 }
                 guard isEar else { continue }
 
@@ -138,6 +145,143 @@ enum FillTriangulation {
             out.append(ring[indices[2]])
         }
         return out
+    }
+
+    /// Triangulates a polygon WITH holes (`loops[0]` outer, `loops[1...]` islands /
+    /// counters) into a flat CCW triangle list. Each hole is stitched into the
+    /// outer ring via the earcut **bridge** technique, producing one simple polygon
+    /// the single-ring `triangulate(_:)` then ear-clips. Holes render as cut-outs
+    /// (glyph counters, hatch islands) instead of over-filling.
+    ///
+    /// - A single-loop fill (no holes) is forwarded straight to `triangulate(_:)`.
+    /// - Degenerate holes (< 3 points) are skipped.
+    /// - Robust to CCW/CW input: the outer ring is normalized CCW and each hole CW
+    ///   before bridging (the bridge math assumes opposite windings).
+    static func triangulateLoops(_ loops: [[Vector]]) -> [Vector] {
+        guard let first = loops.first else { return [] }
+        // Strip degenerate holes.
+        let holes = loops.dropFirst().filter { $0.count >= 3 }
+        if holes.isEmpty { return triangulate(first) }
+
+        // Normalize the outer ring to CCW (drop a duplicated closing vertex first).
+        var outer = first
+        if outer.count >= 2, approxEqual(outer.first!, outer.last!) { outer.removeLast() }
+        guard outer.count >= 3 else { return [] }
+        if signedArea(outer) < 0 { outer.reverse() }
+
+        // Normalize each hole to CW and sort by descending rightmost-x so the
+        // outermost (rightmost) holes bridge first (avoids a later bridge crossing
+        // an already-spliced one — the standard earcut ordering).
+        var preppedHoles: [[Vector]] = holes.map { h in
+            var hole = h
+            if hole.count >= 2, approxEqual(hole.first!, hole.last!) { hole.removeLast() }
+            if signedArea(hole) > 0 { hole.reverse() }   // make CW
+            return hole
+        }
+        preppedHoles.sort { (maxX($0) ) > (maxX($1)) }
+
+        // Splice each hole into the outer ring via a bridge.
+        var ring = outer
+        for hole in preppedHoles {
+            guard hole.count >= 3 else { continue }
+            ring = bridgeHole(ring, hole)
+        }
+
+        return triangulate(ring)
+    }
+
+    /// Splices `hole` (CW) into `outer` (CCW) by connecting the hole's rightmost
+    /// vertex to a mutually-visible vertex of the outer ring with a zero-area
+    /// bridge (the two bridge vertices are duplicated so the ring stays a single
+    /// closed loop). Returns the merged ring.
+    private static func bridgeHole(_ outer: [Vector], _ hole: [Vector]) -> [Vector] {
+        // 1. The hole's rightmost vertex (largest x; ties → largest y).
+        var hIdx = 0
+        for i in 1..<hole.count {
+            if hole[i].x > hole[hIdx].x ||
+               (hole[i].x == hole[hIdx].x && hole[i].y > hole[hIdx].y) {
+                hIdx = i
+            }
+        }
+        let m = hole[hIdx]   // bridge endpoint on the hole
+
+        // 2. Find a visible outer vertex: cast a ray from `m` to the right (+x),
+        //    find the closest intersection with an outer edge, then pick the best
+        //    visible outer vertex near that intersection (the earcut heuristic).
+        var bestOuterIdx = -1
+        var bestX = Double.greatestFiniteMagnitude
+        var bestPoint = Vector(0, 0)
+        let n = outer.count
+        for i in 0..<n {
+            let a = outer[i]
+            let b = outer[(i + 1) % n]
+            // Edge must straddle the horizontal line y == m.y, to the right of m.
+            if (a.y <= m.y && b.y >= m.y) || (b.y <= m.y && a.y >= m.y) {
+                let dy = b.y - a.y
+                if abs(dy) < 1e-18 { continue }
+                let t = (m.y - a.y) / dy
+                let x = a.x + t * (b.x - a.x)
+                if x >= m.x - 1e-12, x < bestX {
+                    bestX = x
+                    bestPoint = Vector(x, m.y)
+                    // Candidate bridge vertex: the edge endpoint with the larger x
+                    // (closer to the ray's exit), refined below by visibility.
+                    bestOuterIdx = (outer[i].x > outer[(i + 1) % n].x) ? i : (i + 1) % n
+                }
+            }
+        }
+        if bestOuterIdx < 0 {
+            // No visible outer edge (degenerate): bridge to vertex 0 (never
+            // crashes; may over/under fill a pathological case).
+            bestOuterIdx = 0
+            bestPoint = outer[0]
+        }
+
+        // 3. Refine: among outer vertices inside the triangle (m, intersection,
+        //    candidate) pick the one with the smallest angle to the ray (the
+        //    classic earcut "most visible" reflex-vertex check). Cheap version:
+        //    keep the candidate unless a reflex vertex lies inside the cone and is
+        //    angularly closer.
+        let p = bestPoint
+        var visibleIdx = bestOuterIdx
+        let cand = outer[bestOuterIdx]
+        var bestTan = Double.greatestFiniteMagnitude
+        if cand.x > m.x {
+            bestTan = abs(cand.y - m.y) / (cand.x - m.x)
+        }
+        for i in 0..<n where i != bestOuterIdx {
+            let v = outer[i]
+            // Only vertices to the right of m and within the m→intersection→cand
+            // triangle can occlude.
+            if v.x <= m.x { continue }
+            if pointInTriangle(v, m, p, cand) {
+                let tan = abs(v.y - m.y) / Swift.max(v.x - m.x, 1e-18)
+                if tan < bestTan { bestTan = tan; visibleIdx = i }
+            }
+        }
+
+        // 4. Build the merged ring: outer[0...visibleIdx], then the hole starting
+        //    at hIdx (going around once back to hIdx), then the bridge vertices
+        //    duplicated (hole's hIdx and outer's visibleIdx), then the rest of
+        //    the outer ring.
+        var merged: [Vector] = []
+        merged.reserveCapacity(outer.count + hole.count + 2)
+        for i in 0...visibleIdx { merged.append(outer[i]) }
+        // Hole, starting at its bridge vertex, wrapping fully around.
+        for k in 0..<hole.count {
+            merged.append(hole[(hIdx + k) % hole.count])
+        }
+        merged.append(hole[hIdx])          // close back to the hole bridge vertex
+        merged.append(outer[visibleIdx])   // bridge back to the outer ring
+        if visibleIdx + 1 < outer.count {
+            for i in (visibleIdx + 1)..<outer.count { merged.append(outer[i]) }
+        }
+        return merged
+    }
+
+    /// The maximum x of a ring (the rightmost vertex), used to order holes.
+    private static func maxX(_ ring: [Vector]) -> Double {
+        ring.reduce(-Double.greatestFiniteMagnitude) { Swift.max($0, $1.x) }
     }
 
     /// Signed area of a 2D polygon (shoelace). Positive == CCW, negative == CW.
@@ -286,12 +430,13 @@ enum RendererGeometry {
         }
     }
 
-    /// Triangulates one `ResolvedFill`'s OUTER boundary (`loops[0]`) into flat
-    /// triangle vertices (`FlatVertex`, render-space f32 offsets + the fill color)
-    /// and appends them to `verts` for the shared flat/triangle pipeline.
+    /// Triangulates one `ResolvedFill` (outer boundary `loops[0]` + holes
+    /// `loops[1...]`) into flat triangle vertices (`FlatVertex`, render-space f32
+    /// offsets + the fill color) and appends them to `verts` for the shared flat/
+    /// triangle pipeline.
     ///
-    /// - Holes (`loops[1...]`) are NOT yet subtracted — see `FillTriangulation`'s
-    ///   holes-backlog note; a holed fill renders as its solid outer boundary.
+    /// - Holes (`loops[1...]`) ARE subtracted via the earcut bridge — glyph
+    ///   counters / hatch islands render as cut-outs (essential for nice text).
     /// - Output is appended (3 vertices per triangle) so many fills pack into one
     ///   contiguous buffer with no intermediate allocation.
     /// - A degenerate boundary (< 3 effective points) appends nothing.
@@ -301,7 +446,9 @@ enum RendererGeometry {
         into verts: inout [FlatVertex]
     ) {
         guard let outer = fill.outerLoop, outer.count >= 3 else { return }
-        let tris = FillTriangulation.triangulate(outer)
+        let tris = fill.loops.count > 1
+            ? FillTriangulation.triangulateLoops(fill.loops)
+            : FillTriangulation.triangulate(outer)
         guard !tris.isEmpty else { return }
         let color = SIMD4<Float>(fill.color.r, fill.color.g, fill.color.b, fill.color.a)
         verts.reserveCapacity(verts.count + tris.count)

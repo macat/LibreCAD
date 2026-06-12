@@ -116,19 +116,30 @@ public struct ResolveContext: Sendable {
     /// placing Insert's pen (ADR-001). It is threaded through `blockAttributes`.
     public var currentBlockPen: ResolvedPen? = nil
 
-    /// Resolves a text style's font base name (e.g. `"standard"`) to a parsed
-    /// `.lff` stroke font (ADR-004). The Text resolve arm calls this to lay out
-    /// glyphs; `nil` (or a `nil` return) makes text resolve to empty geometry
-    /// rather than crash. Wired by `CADDrawing.makeResolveContext` from a shared
-    /// `StrokeFontProvider` (see `StrokeFontProvider.makeProvider()`).
+    /// The glyph/shaping abstraction (ADR-004 REVISION; text-system-design §2).
+    /// The `.text`/`.dimension` resolve arms shape through this ONE provider, which
+    /// has two impls behind it: `CoreTextFontProvider` (native outlines → fills,
+    /// the default) and `StrokeFontProvider` (`.lff` → polyline strokes). `nil`
+    /// makes text resolve to empty geometry rather than crash. Wired by
+    /// `CADDrawing.makeResolveContext`.
     ///
     /// Reserved for additive extension by the other single owners (do not diverge):
     /// `// var dimStyleProvider: ((DimStyleID) -> ResolvedDimStyle)? = nil` — Dimension owner.
-    /// NOTE (S1 `ws/dim-entity`): the `.dimension` resolve uses defining-data
-    /// sizes (`DimData.textHeight`/`arrowSize`) and the existing `fontProvider`
-    /// for its measurement text (ADR-004), so this hook stays RESERVED until a
-    /// real DimStyle table lands (the dim-style fan-out wave wires it then).
-    public var fontProvider: (@Sendable (String) -> StrokeFont?)? = nil
+    public var fontProvider: (any FontProvider)? = nil
+
+    /// Resolves a text-style NAME (DXF code 7, e.g. "Standard") to a concrete
+    /// `TextStyle` (font source, height, width factor, oblique, annotative …),
+    /// defaulting to "Standard". `nil` (or a `nil` return) makes the resolve arm
+    /// synthesize a default native style. Parallel to the reserved `dimStyleProvider`
+    /// hook; wired by `CADDrawing.makeResolveContext` from the drawing's
+    /// `TextStyleTable`.
+    public var textStyleProvider: (@Sendable (String) -> TextStyle?)? = nil
+
+    /// The active annotation scale (text-system-design §"annotative mechanism";
+    /// ADR T4). When a text's style is annotative, `resolve()` multiplies its
+    /// height by this. `1.0` (no scaling) by default. Full paper-space/viewport-
+    /// aware annotative is a later wave; this wires the mechanism + field now.
+    public var annotationScale: Double = 1.0
 
     public init(
         tessellationTolerance: Double = 0.05,
@@ -139,13 +150,17 @@ public struct ResolveContext: Sendable {
             currentBlockPen ?? ResolvedPen(color: .librecadGreen, lineType: .solid, lineWidth: .default)
         },
         currentBlockPen: ResolvedPen? = nil,
-        fontProvider: (@Sendable (String) -> StrokeFont?)? = nil
+        fontProvider: (any FontProvider)? = nil,
+        textStyleProvider: (@Sendable (String) -> TextStyle?)? = nil,
+        annotationScale: Double = 1.0
     ) {
         self.tessellationTolerance = tessellationTolerance
         self.layerAttributes = layerAttributes
         self.blockAttributes = blockAttributes
         self.currentBlockPen = currentBlockPen
         self.fontProvider = fontProvider
+        self.textStyleProvider = textStyleProvider
+        self.annotationScale = annotationScale
     }
 
     /// A sensible default context for tests/previews.
@@ -660,11 +675,13 @@ extension EntityKind {
             return ResolvedGeometry()
 
         case .text(let d):
-            // CAD text → stroked polylines via the .lff stroke font (ADR-004).
-            // No font provider (or a missing font) ⇒ resolve to empty geometry
-            // rather than crash; the renderer simply draws nothing for that text.
-            let strokes = Self.layoutText(d, pen: pen, ctx: ctx)
-            return ResolvedGeometry(polylines: strokes)
+            // CAD text → glyph geometry via the unified FontProvider (ADR-004
+            // REVISION): native outline glyphs become FILLS, `.lff` stroke glyphs
+            // become polylines. All 15 justification modes, width factor, oblique,
+            // multi-line (\n), the special-char pre-pass, and annotative scaling
+            // are handled by the shared TextShaper (no second text path). No
+            // provider / font ⇒ empty geometry (no crash).
+            return TextShaper.resolve(d, pen: pen, ctx: ctx)
 
         case .hatch(let d):
             // Solid fill of the boundary loops. Pattern lines are backlog, so a
@@ -789,24 +806,14 @@ extension EntityKind {
     static func dimText(_ label: String, center: Vector, rotation: Double,
                         height: Double, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
         guard !label.isEmpty, height > 0 else { return ResolvedGeometry() }
-        // Estimate the run width (em units → world) to center it, using the same
-        // nominal advance the text-bbox estimate uses, then place the run so its
-        // mid-width lands on `center`.
-        let scale = height / lffCapHeight
-        let nominalAdvance = 9.0
-        let runWidth = Double(label.count) * nominalAdvance * scale
-        // Position the baseline-left so the run is centered on `center` and lifted
-        // half its cap height so the vertical middle sits on the line too.
-        let halfW = runWidth / 2
-        let halfH = height / 2
-        // Unrotated offset from center to the text origin (baseline-left).
-        let offset = Vector(-halfW, -halfH)
-        let origin = center + (rotation != 0 ? offset.rotated(by: rotation) : offset)
-        let data = TextData(position: origin, height: height, rotation: rotation,
-                            text: label, styleName: nil)
-        // Reuse the .text resolve arm so dimension text picks up strokes today and
-        // outline-glyph fills later, with zero dimension-specific text code.
-        return EntityKind.text(data).resolve(pen: pen, ctx: ctx)
+        // Reuse the SAME text-resolution path as `.text` (no second text path,
+        // per ADR-004 revision). `.middle` justification centers the run on
+        // `center` both horizontally and vertically — the shaper handles the
+        // metrics-aware centering, so dimension text picks up native fills or
+        // `.lff` strokes identically.
+        let data = TextData(position: center, height: height, rotation: rotation,
+                            text: label, styleName: nil, hAlign: .middle, vAlign: .middle)
+        return TextShaper.resolve(data, pen: pen, ctx: ctx)
     }
 
     /// Linear (fixed-angle) or aligned (angle = p1→p2 direction) dimension.
@@ -1030,78 +1037,6 @@ extension EntityKind {
     /// ~9-unit cap height). DXF text `height` is the cap height in world units,
     /// so glyph em coords are scaled by `height / lffCapHeight`.
     static let lffCapHeight = 9.0
-
-    /// Lays out a text string into world-space stroked polylines using the
-    /// context's `.lff` font provider (ADR-004).
-    ///
-    /// ## Layout
-    /// Glyphs are placed left-to-right along the baseline starting at
-    /// `data.position`. Each glyph's em strokes are scaled by
-    /// `height / lffCapHeight`, then the running pen advance is added and the
-    /// whole run is rotated by `data.rotation` about `position`. Per-glyph
-    /// advance is the glyph's em width plus the font's `letterSpacing` (× the
-    /// data's `letterSpacingFactor`); a space (or a missing glyph) advances by
-    /// the font's `wordSpacing`. A missing glyph falls back to the font's U+FFFD
-    /// replacement glyph; if even that is absent the character is skipped (only
-    /// advancing the pen) — never a crash.
-    ///
-    /// ## Deferred (backlog)
-    /// `hAlign`/`vAlign` beyond the default left/baseline, multi-line `\n`
-    /// handling, and oblique/width-factor are NOT applied here — the fields are
-    /// carried on `TextData` for round-trip and a follow-up layout pass. Returns
-    /// `[]` (empty, no crash) when there is no font provider, the font can't be
-    /// loaded, or the string is empty.
-    static func layoutText(_ data: TextData, pen: ResolvedPen, ctx: ResolveContext) -> [ResolvedPolyline] {
-        guard !data.text.isEmpty, data.height > 0 else { return [] }
-        guard let provider = ctx.fontProvider else { return [] }
-        // An explicit style name, else the provider's default (empty key).
-        guard let font = provider(data.styleName ?? "") else { return [] }
-
-        let scale = data.height / lffCapHeight
-        let advanceSpacing = font.letterSpacing * data.letterSpacingFactor
-        let rotation = data.rotation
-        let origin = data.position
-
-        var out: [ResolvedPolyline] = []
-        var penX = 0.0   // running em-space x advance along the (unrotated) baseline
-
-        for ch in data.text {
-            if ch == " " {
-                penX += font.wordSpacing
-                continue
-            }
-
-            // Resolve the glyph (or the replacement glyph for a missing one).
-            let glyph = font.glyph(for: ch) ?? font.replacementGlyph
-            guard let glyph, !glyph.isEmpty else {
-                // No drawable glyph at all: advance a word space so following
-                // text doesn't pile up, then move on (graceful, no crash).
-                penX += font.wordSpacing
-                continue
-            }
-
-            // Emit each stroke, transformed em→world: translate by the pen x,
-            // scale by `scale`, rotate by `rotation`, then offset by `origin`.
-            for stroke in glyph.strokes where stroke.count >= 2 {
-                var pts: [Vector] = []
-                pts.reserveCapacity(stroke.count)
-                for p in stroke {
-                    // em-space placement along the baseline, then world scale.
-                    let placed = Vector((p.x + penX) * scale, p.y * scale)
-                    let rotated = rotation != 0 ? placed.rotated(by: rotation) : placed
-                    pts.append(origin + rotated)
-                }
-                out.append(ResolvedPolyline(points: pts, closed: false, pen: pen))
-            }
-
-            // Advance the pen by the glyph's em width + letter spacing. The em
-            // width is the glyph's right extent (so spacing is measured from the
-            // ink, matching LibreCAD's per-glyph advance from glyph bounds).
-            let glyphWidth = glyph.bounds().map(\.max.x) ?? 0
-            penX += glyphWidth + advanceSpacing
-        }
-        return out
-    }
 
     /// Expands a polyline's vertices into a flat point list, turning bulged
     /// segments into tessellated arc runs.

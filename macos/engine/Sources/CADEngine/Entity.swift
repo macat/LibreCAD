@@ -202,14 +202,21 @@ public struct SplineData: Sendable, Hashable, Codable {
 
 // MARK: - Text / fill defining data (RS_TextData / RS_HatchData / RS_SolidData)
 
-/// Horizontal text alignment, mirroring the essential `RS_TextData::HAlign`
-/// cases (DXF group 72). Layout honoring beyond `.left` is backlog (see the
-/// `text` resolve arm); the field is carried so the reader-import wave can map
-/// DXF group 72 without a contract change.
+/// Horizontal text alignment, mirroring the full `RS_TextData::HAlign` /
+/// `DRW_Text::HAlign` set (DXF group 72). The 15 AutoCAD justification modes are
+/// the product of this (72) and `TextVAlign` (73), plus the three special H-only
+/// modes (`.aligned`/`.middle`/`.fit`) that apply when V == baseline. ALL are
+/// honored by the text resolve arm (text-system-design §2.4).
 public enum TextHAlign: Int, Sendable, Hashable, Codable {
     case left = 0
     case center = 1
     case right = 2
+    /// Fit between insertion (10) and second point (11); height auto-scales.
+    case aligned = 3
+    /// Centered H+V on the midpoint (the "TL…BR" Middle, distinct from center).
+    case middle = 4
+    /// Fit between two points keeping height, varying the width factor.
+    case fit = 5
 }
 
 /// Vertical text alignment, mirroring the essential `RS_TextData::VAlign`
@@ -244,12 +251,24 @@ public enum TextVAlign: Int, Sendable, Hashable, Codable {
 ///                uses the font's declared spacing (LibreCAD default).
 public struct TextData: Sendable, Hashable, Codable {
     public var position: Vector
+    /// DXF group 11 — the second alignment point, required for `.aligned`/`.fit`
+    /// (the run is fit between `position` and `secondPoint`); `nil` otherwise. [NEW]
+    public var secondPoint: Vector?
     public var height: Double
     public var rotation: Double
     public var text: String
     public var styleName: String?
     public var hAlign: TextHAlign
     public var vAlign: TextVAlign
+    /// DXF group 41 — per-entity horizontal scale, overriding the style's width
+    /// factor (AutoCAD precedence: entity 41 over STYLE 41). Default `1`.       [NEW]
+    public var widthFactor: Double
+    /// DXF group 51 — per-entity slant (radians), overriding the style's oblique
+    /// angle. Default `0`.                                                       [NEW]
+    public var obliqueAngle: Double
+    /// DXF group 71 — backward (X-mirror) / upside-down (Y-mirror) flags. Carried
+    /// for round-trip.                                                           [NEW]
+    public var generation: TextGenerationFlags
     public var letterSpacingFactor: Double
 
     public init(
@@ -260,15 +279,23 @@ public struct TextData: Sendable, Hashable, Codable {
         styleName: String? = nil,
         hAlign: TextHAlign = .left,
         vAlign: TextVAlign = .baseline,
+        secondPoint: Vector? = nil,
+        widthFactor: Double = 1.0,
+        obliqueAngle: Double = 0,
+        generation: TextGenerationFlags = [],
         letterSpacingFactor: Double = 1.0
     ) {
         self.position = position
+        self.secondPoint = secondPoint
         self.height = height
         self.rotation = rotation
         self.text = text
         self.styleName = styleName
         self.hAlign = hAlign
         self.vAlign = vAlign
+        self.widthFactor = widthFactor
+        self.obliqueAngle = obliqueAngle
+        self.generation = generation
         self.letterSpacingFactor = letterSpacingFactor
     }
 }

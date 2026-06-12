@@ -341,6 +341,13 @@ public final class CADDrawing {
     /// into `entities` (ADR-001); this table holds the definitions, not objects.
     public private(set) var blocks = BlockTable()
 
+    /// The text-style registry (the DXF STYLE table). TEXT/MTEXT reference a style
+    /// by name (DXF code 7); resolve()-time indirection re-flows every entity that
+    /// uses a style when it is edited (text-system-design §1.1). Always contains
+    /// "Standard" (native default font). The DXF reader/writer STYLE round-trip is
+    /// a Phase-3 bridge pass; until then this defaults to a native "Standard".
+    public var textStyles = TextStyleTable()
+
     /// The drawing's graphic variables (`RS_VariableDict` + `LC_GraphicVariables`).
     /// Use the typed accessors (`graphicVariables.unit`, `.linearFormat`, ...) or
     /// `convenience` `drawingUnit` below.
@@ -646,16 +653,21 @@ public final class CADDrawing {
     /// default). The block hook still defers to `currentBlockPen` (the Insert/
     /// Block-resolve owner sets that when recursing). The text hook is the shared
     /// `.lff` font provider (ADR-004) so text entities resolve to stroked glyphs.
-    public func makeResolveContext(tessellationTolerance: Double = 0.05) -> ResolveContext {
+    public func makeResolveContext(tessellationTolerance: Double = 0.05,
+                                   annotationScale: Double = 1.0) -> ResolveContext {
         // Snapshot the layer table into a Sendable closure (value type copy).
         let table = layers
+        // Snapshot the STYLE table into a Sendable closure (value type copy).
+        let styleTable = textStyles
         return ResolveContext(
             tessellationTolerance: tessellationTolerance,
             layerAttributes: { layerID in
                 table.layer(layerID)?.resolvedPen
                     ?? ResolvedPen(color: .librecadGreen, lineType: .solid, lineWidth: .default)
             },
-            fontProvider: CADFonts.provider.makeProvider()
+            fontProvider: CADFonts.provider,
+            textStyleProvider: { name in styleTable.style(named: name) },
+            annotationScale: annotationScale
         )
     }
 
@@ -668,34 +680,58 @@ public final class CADDrawing {
     }
 }
 
-// MARK: - Shared stroke-font provider (.lff, ADR-004)
+// MARK: - Composite font provider (native Core Text + .lff stroke, ADR-004)
 
-/// Process-wide `.lff` stroke-font registry feeding `ResolveContext.fontProvider`.
+/// The unified `FontProvider` feeding `ResolveContext.fontProvider`: native
+/// outline fonts (Core Text, the default) AND `.lff` stroke fonts behind ONE
+/// abstraction. `resolveFont(.native(...))` goes to Core Text; `.stroke(...)`
+/// goes to the `.lff` registry; `.shx(...)` is unsupported (Phase 3) and returns
+/// `nil` so the resolve arm walks the substitution chain.
+public final class CompositeFontProvider: FontProvider, @unchecked Sendable {
+    public let native: CoreTextFontProvider
+    public let stroke: StrokeFontProvider
+
+    public init(native: CoreTextFontProvider, stroke: StrokeFontProvider) {
+        self.native = native
+        self.stroke = stroke
+    }
+
+    public func resolveFont(_ source: FontSource) -> ShapedFont? {
+        switch source {
+        case .native:
+            return native.resolveFont(source)
+        case .stroke:
+            return stroke.resolveFont(source)
+        case .shx:
+            // Phase 3: SHX is read via the substitution chain until a parser lands.
+            return nil
+        }
+    }
+}
+
+/// Process-wide font registry feeding `ResolveContext.fontProvider`. Combines the
+/// native Core Text provider (the default for new text) with the `.lff` stroke
+/// registry (retained for DXF fidelity), behind ONE `FontProvider` (ADR-004).
 ///
-/// One shared `StrokeFontProvider` (its own internal lock makes it thread-safe)
-/// is configured once with the font search directories and a registered default
-/// font ("standard"). `makeResolveContext` hands its `makeProvider()` closure to
-/// the resolve context so text entities (and later dimension text) resolve to
-/// stroked glyphs.
-///
-/// ## Font lookup
+/// ## Font lookup (stroke fonts)
 /// - The bundled app: `LibreCADmacOS.app/Contents/Resources/fonts/*.lff`
 ///   (copied by `macos/scripts/make-app.sh`), found via `Bundle.main`.
 /// - The bare SwiftPM binary / dev: the in-repo `librecad/support/fonts/`,
 ///   derived from this file's `#filePath` (stable absolute path), so the
 ///   provider works without a bundle.
 ///
-/// An empty/`nil` style name (text with no explicit style) resolves to the
-/// default font, which is also registered under the empty key.
+/// An empty/`nil` `.lff` style name resolves to the default stroke font, which is
+/// also registered under the empty key.
 public enum CADFonts {
 
     /// The default stroke-font base name (LibreCAD's ISO 3098-2 "standard").
     public static let defaultFontName = "standard"
 
-    /// The shared provider, configured on first access. `nonisolated(unsafe)` is
-    /// sound: the value is assigned exactly once (here) and `StrokeFontProvider`
-    /// is internally locked, so concurrent reads of the let are safe.
-    public static let provider: StrokeFontProvider = {
+    /// The shared native provider (Core Text outlines → fills, the default).
+    public static let nativeProvider = CoreTextFontProvider()
+
+    /// The shared `.lff` stroke provider (retained for DXF fidelity).
+    public static let strokeProvider: StrokeFontProvider = {
         let p = StrokeFontProvider()
         for dir in fontSearchDirectories() {
             p.registerSearchDirectory(dir)
@@ -708,6 +744,10 @@ public enum CADFonts {
         }
         return p
     }()
+
+    /// The unified provider handed to `ResolveContext.fontProvider`.
+    public static let provider: CompositeFontProvider =
+        CompositeFontProvider(native: nativeProvider, stroke: strokeProvider)
 
     /// Directories searched for `<name>.lff`, in priority order: the app bundle's
     /// `Resources/fonts`, then the in-repo `librecad/support/fonts`.
