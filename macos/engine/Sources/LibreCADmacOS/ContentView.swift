@@ -142,6 +142,15 @@ struct ContentView: View {
             toolButton(.scale, symbol: "arrow.up.left.and.arrow.down.right",
                        help: "Scale selection (⇧S)")
             toolButton(.mirror, symbol: "flip.horizontal", help: "Mirror selection (⇧M)")
+
+            Divider()
+            // Edit tools (pick entities under the cursor; no pre-selection needed).
+            toolButton(.trim, symbol: "scissors", help: "Trim to boundary (T)")
+            toolButton(.extend, symbol: "arrow.right.to.line",
+                       help: "Extend to boundary (X)")
+            toolButton(.fillet, symbol: "circle.bottomrighthalf.checkered",
+                       help: "Fillet (round) corner (F)")
+            toolButton(.chamfer, symbol: "angle", help: "Chamfer (bevel) corner (⇧F)")
         }
     }
 

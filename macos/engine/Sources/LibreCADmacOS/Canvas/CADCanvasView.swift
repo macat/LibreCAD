@@ -357,6 +357,7 @@ final class CADCanvasController {
     ///   Draw (bare): L=Line, C=Circle, A=Arc, R=Rectangle, P=Polyline, O=Point,
     ///                E=Ellipse, G=Polygon.
     ///   Modify (⇧):  M=Move, ⇧C=Copy, ⇧R=Rotate, ⇧S=Scale, ⇧M=Mirror, ⇧O=Offset.
+    ///   Edit:        T=Trim, X=Extend, F=Fillet, ⇧F=Chamfer (pick under cursor).
     /// These mirror the Tools-menu shortcuts in `LibreCADApp` (the discoverable
     /// source of truth) so the canvas and the menu stay in lockstep. Bare keys with
     /// a command modifier are NOT claimed here (⌘O Open / ⌘Z Undo / ⌘0 Zoom-to-Fit
@@ -445,6 +446,19 @@ final class CADCanvasController {
             // through) so a future draw tool can claim it.
             if shift { activateTool(.scale); return true }
             return false
+        case "t":
+            // Edit tool: Trim (no draw/modify twin → plain T).
+            activateTool(.trim)
+            return true
+        case "x":
+            // Edit tool: Extend (no draw/modify twin → plain X).
+            activateTool(.extend)
+            return true
+        case "f":
+            // Edit tools: bare F = Fillet (round), ⇧F = Chamfer (bevel) — the
+            // shared-letter shift convention (like ⇧C/⇧R/⇧M/⇧O).
+            activateTool(shift ? .chamfer : .fillet)
+            return true
         default:
             return false
         }
