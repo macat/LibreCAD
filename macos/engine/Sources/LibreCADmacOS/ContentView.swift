@@ -52,6 +52,15 @@ struct ContentView: View {
             }
             .focusedSceneValue(\.undoAction) { model.undo() }
             .focusedSceneValue(\.redoAction) { model.redo() }
+            .focusedSceneValue(\.deleteSelection) {
+                if model.deleteSelection() { controllerBox.controller?.requestRedraw() }
+            }
+            // Publish whether a draw tool is mid-run so the Edit ▸ Delete menu item
+            // (bound to bare ⌫) can DISABLE itself while a tool is active. A disabled
+            // item's key equivalent is NOT consumed by `NSMenu.performKeyEquivalent`
+            // (which runs BEFORE the canvas `keyDown`), so ⌫ falls through to the
+            // canvas, where the tool consumes it as `.backspace`. See MUST-FIX 1.
+            .focusedSceneValue(\.isToolActive, model.isToolActive)
             .fileImporter(
                 isPresented: $showOpen,
                 allowedContentTypes: Self.dxfTypes,
@@ -249,6 +258,22 @@ extension FocusedValues {
         get { self[RedoActionKey.self] }
         set { self[RedoActionKey.self] = newValue }
     }
+
+    /// Delete the focused window's current selection (Edit ▸ Delete, ⌫).
+    var deleteSelection: (() -> Void)? {
+        get { self[DeleteSelectionKey.self] }
+        set { self[DeleteSelectionKey.self] = newValue }
+    }
+
+    /// Whether the focused window has a draw tool mid-run. Used by LibreCADApp to
+    /// disable the Edit ▸ Delete item (so its bare-⌫ shortcut does not pre-empt the
+    /// tool's `.backspace` — MUST-FIX 1). `nil` when no canvas is focused; the
+    /// reader treats `nil`/`false` alike (no tool ⇒ enablement governed only by
+    /// `deleteSelection`).
+    var isToolActive: Bool? {
+        get { self[IsToolActiveKey.self] }
+        set { self[IsToolActiveKey.self] = newValue }
+    }
 }
 
 private struct ZoomToFitKey: FocusedValueKey {
@@ -269,4 +294,16 @@ private struct UndoActionKey: FocusedValueKey {
 
 private struct RedoActionKey: FocusedValueKey {
     typealias Value = () -> Void
+}
+
+private struct DeleteSelectionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+/// Carries the focused window's "a draw tool is mid-run" flag. Unlike the action
+/// keys above (whose absence means "no canvas focused"), this is a plain `Bool`;
+/// `FocusedValues` returns `nil` when unset, so the accessor defaults it to
+/// `false` (no tool active ⇒ Delete enablement is governed only by the selection).
+private struct IsToolActiveKey: FocusedValueKey {
+    typealias Value = Bool
 }

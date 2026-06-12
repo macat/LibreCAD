@@ -37,6 +37,12 @@ struct LibreCADApp: App {
     /// Undo / redo actions published by the focused window.
     @FocusedValue(\.undoAction) private var undoAction
     @FocusedValue(\.redoAction) private var redoAction
+    /// Delete-selection action published by the focused window (Edit ▸ Delete, ⌫).
+    @FocusedValue(\.deleteSelection) private var deleteSelection
+    /// Whether the focused window has a draw tool mid-run. When true the Edit ▸
+    /// Delete item is disabled so its bare-⌫ shortcut does NOT pre-empt the tool's
+    /// `.backspace` (see the Delete button below and MUST-FIX 1).
+    @FocusedValue(\.isToolActive) private var isToolActive
 
     var body: some Scene {
         WindowGroup {
@@ -56,6 +62,22 @@ struct LibreCADApp: App {
                 Button("Redo") { redoAction?() }
                     .keyboardShortcut("z", modifiers: [.command, .shift])
                     .disabled(redoAction == nil)
+            }
+            // Edit ▸ Delete — removes the current selection (undoable). The ⌫ key on
+            // the canvas is also handled directly by the controller (select mode);
+            // this menu item makes it discoverable and gives it a standard shortcut.
+            //
+            // It is DISABLED while a draw tool is mid-run (`isToolActive == true`).
+            // `NSMenu.performKeyEquivalent` runs BEFORE the canvas `keyDown`, so an
+            // enabled bare-⌫ item would steal ⌫ from the active tool (where ⌫ must
+            // be the tool's `.backspace`). A disabled item's key equivalent is not
+            // consumed, so ⌫ falls through to the canvas `keyDown`, which routes it
+            // to the tool. In select mode (`isToolActive` false/nil) the item stays
+            // enabled and ⌫ deletes the selection. (MUST-FIX 1.)
+            CommandGroup(after: .pasteboard) {
+                Button("Delete") { deleteSelection?() }
+                    .keyboardShortcut(.delete, modifiers: [])
+                    .disabled(deleteSelection == nil || (isToolActive ?? false))
             }
             CommandGroup(after: .toolbar) {
                 Button("Zoom to Fit") { zoomToFit?() }
