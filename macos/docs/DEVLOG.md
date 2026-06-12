@@ -151,6 +151,15 @@ Engine modules on native-macos: CADEngine core (Vector/Geometry/Pen/Entity/Resol
 
 - [2026-06-12 ~12:50] 📋 coordinator — review-fillet-chamfer APPROVE both (geometry hand-verified). MERGED ws/tool-fillet + ws/tool-chamfer → native-macos. **653 tests, 162 commits.** 18 tool files. Dispatched wire-wave2 (Trim/Extend/Fillet/Chamfer → ToolKind+toolbar+keys T/X/F/⇧F+Tools menu) — last build step before the consolidated GUI verify.
 
+## FEATURES V2 COMPLETE (2026-06-12) — all 4 directions merged
+- MERGED ws/wire-wave2 → native-macos. **654 tests in 64 suites, 165 commits, .app reassembled.** Tasks #8/#9/#10/#11 DONE (engineering; awaiting user GUI verify).
+- #8 Render text/dims/fills: text/hatch/solid EntityKinds + resolve (.lff text + fills) + DXF import + Metal fill pipeline. dim_sample imports 20 text + 4 solid; hatch fills triangulated.
+- #9 Save/file I/O: DXF writer (round-trip verified) + Save/Save As (⌘S/⇧⌘S) + current-file tracking.
+- #10 Trim/Extend/Fillet/Chamfer: ToolContext widened (nearby/all entities) + 4 editing tools, wired (T/X/F/⇧F).
+- #11 Layers sidebar: NavigationSplitView (visible/lock/active/color/rename/add/remove) + render visibility filter.
+- 22 tools total wired: Line/Circle/Arc/Rectangle/Polyline/Point/Ellipse/Polygon (draw) + Move/Copy/Rotate/Scale/Mirror/Offset/Trim/Extend/Fillet/Chamfer (modify) + Select. Open/Save .dxf. Backlog in backlog.md (hatch holes, MTEXT align, radius/distance UI, DocumentGroup, etc.).
+- Every workstream: builder → independent reviewer (all APPROVE) → coordinator merge (overlap-checked, build+test green) + additive-EntityKind exhaustiveness fixups. Controlled ≤4 batches after the earlier infra stall.
+
 ## BROAD-PARITY P0 TOOLSET COMPLETE (2026-06-12) — usable native CAD editor
 All P0 tools wired + usable: DRAW line/circle/arc/rectangle/polyline/point; MODIFY move/copy/rotate/scale/mirror; select (single/window/crossing) + ⌫ delete + ⌘Z/⇧⌘Z undo/redo; snap (endpoint/center/mid/intersection/on-entity) + coord HUD; pan/zoom/fit/grid; open .dxf. 471 tests, 113 commits on native-macos, app launches (user-confirmed earlier). Cursor-offset fixed. AWAITING user GUI verification of the full toolset (task #5). All local — push blocked all session.
 
