@@ -97,6 +97,17 @@ final class CanvasModel {
     /// renderer adoption is owned by the canvas agent — see the report).
     var preferredGridSpacing: Double = 1.0
 
+    /// Whether ORTHO restriction is on (LibreCAD's Ortho mode, AutoCAD F8). When on,
+    /// a draw tool's candidate point is locked to the horizontal/vertical axis through
+    /// the last placed point (`relativeZero`) before the tool receives it. This is the
+    /// PERSISTENT toggle (View ▸ Ortho / status bar); the canvas ALSO honors a
+    /// transient hold-⇧ override during point input (see `CADCanvasView`), so the
+    /// *effective* ortho state at a given click is `orthoEnabled XOR shiftHeld`.
+    /// Observed so the menu checkmark + status-bar chip track it live. Purely a live
+    /// interaction policy (not persisted to the document — it is a drafting aid, like
+    /// the cursor mode, not drawing content).
+    var orthoEnabled: Bool = false
+
     /// The grid step (world units) last seen via `updateSnap`/`snappedWorldPoint`.
     /// The renderer owns the live grid spacing and the canvas view passes it down
     /// on every cursor event; we cache the latest here so `handleToolInput` can put
@@ -1111,4 +1122,106 @@ final class CanvasModel {
         selection.clear()
         return true
     }
+
+    // MARK: - Selection primitives (Edit ▸ Select All / Deselect / Invert)
+
+    /// Selects EVERY selectable entity (Edit ▸ Select All, ⌘A). "Selectable" is the
+    /// engine policy `SelectionPolicy.selectableIDs`: visible entities NOT on a locked
+    /// or frozen layer (you cannot edit what is locked / can't see what is hidden), so
+    /// Select All never picks up locked or hidden geometry. Bumps `modelVersion` so the
+    /// renderer repaints the highlight overlay. Selection is view-side state (a separate
+    /// `Set`), so this registers NO undo — it is not a document mutation. Returns whether
+    /// the selection changed (so the caller can skip a redraw).
+    @discardableResult
+    func selectAll() -> Bool {
+        let ids = Set(SelectionPolicy.selectableIDs(in: drawing))
+        guard ids != selection.ids else { return false }
+        selection = Selection(ids: ids)
+        modelVersion &+= 1
+        return true
+    }
+
+    /// Clears the whole selection (Edit ▸ Deselect All, ⇧⌘A, and reachable via Esc).
+    /// No-op (returns `false`) when nothing is selected. Bumps `modelVersion` so the
+    /// highlight overlay disappears.
+    @discardableResult
+    func deselectAll() -> Bool {
+        guard !selection.isEmpty else { return false }
+        selection.clear()
+        modelVersion &+= 1
+        return true
+    }
+
+    /// Inverts the selection (Edit ▸ Invert Selection): every *selectable* entity that
+    /// is not currently selected becomes selected, and vice-versa, computed by the
+    /// engine policy `SelectionPolicy.invertedIDs` (which excludes locked/hidden
+    /// entities from the universe — an invert never selects something uneditable, and
+    /// drops any selected locked entity). Bumps `modelVersion`; selection is view-side
+    /// state so no undo is registered. Returns whether the selection changed.
+    @discardableResult
+    func invertSelection() -> Bool {
+        let ids = Set(SelectionPolicy.invertedIDs(current: selection.ids, in: drawing))
+        guard ids != selection.ids else { return false }
+        selection = Selection(ids: ids)
+        modelVersion &+= 1
+        return true
+    }
+
+    // MARK: - Ortho restriction (LibreCAD Ortho / AutoCAD F8)
+
+    /// Toggles the persistent ortho flag (View ▸ Ortho / status bar). Bumps
+    /// `modelVersion` so the menu checkmark + status chip refresh. (The transient
+    /// hold-⇧ override is read live by the canvas — it does NOT flip this flag.)
+    func toggleOrtho() {
+        orthoEnabled.toggle()
+        modelVersion &+= 1
+    }
+
+    /// The EFFECTIVE ortho state for a point input given whether ⇧ is held: the
+    /// persistent flag XOR the transient hold-⇧ override (LibreCAD lets ⇧ flip ortho
+    /// on-the-fly — ⇧ turns ortho ON when it is off, and OFF when it is on). The canvas
+    /// passes the live Shift flag from the point-input path ONLY (it never reads the
+    /// per-tool gizmo/keymap Shift), so this never disturbs the existing Shift uses.
+    func orthoEffective(shiftHeld: Bool) -> Bool {
+        orthoEnabled != shiftHeld
+    }
+
+    /// Applies the ortho constraint to a candidate world point for the active draw run,
+    /// honoring CAD snap precedence (osnap > ortho > free):
+    ///
+    ///   1. If a REAL geometry snap is under the cursor (endpoint/center/middle/
+    ///      intersection/onEntity — i.e. `osnapActive`), ortho is SKIPPED: the point is
+    ///      returned unchanged so the user can always bind to existing geometry. (Grid
+    ///      and free snaps are NOT geometry, so they don't override ortho.)
+    ///   2. Else, with ortho effective AND a reference point (`relativeZero`, the last
+    ///      placed point), the point is axis-locked via `OrthoConstraint.constrain`.
+    ///   3. Else the point passes through unchanged (free).
+    ///
+    /// `point` is the already-snapped world point the tool would otherwise receive;
+    /// `shiftHeld` is the live ⇧ flag from the point-input path. With no `relativeZero`
+    /// (the FIRST point of a run) there is nothing to be orthogonal to, so the point is
+    /// returned unchanged — ortho only constrains the second point onward.
+    func orthoConstrained(_ point: Vector, shiftHeld: Bool) -> Vector {
+        guard orthoEffective(shiftHeld: shiftHeld) else { return point }
+        guard !osnapActive else { return point }                 // osnap wins
+        guard let reference = relativeZero else { return point }  // need a last point
+        return OrthoConstraint.constrain(point, relativeTo: reference)
+    }
+
+    /// Whether the latest `snap` is a REAL geometry snap (endpoint/center/middle/
+    /// intersection/onEntity) — the snaps that must override ortho. Grid/free are not
+    /// geometry, so they do not. `nil` snap ⇒ not active.
+    var osnapActive: Bool {
+        switch snap?.kind {
+        case .endpoint, .center, .middle, .intersection, .onEntity:
+            return true
+        case .grid, .free, .none:
+            return false
+        }
+    }
+
+    /// Short status-bar label for the ortho readout: "Ortho" when the persistent flag
+    /// is on, "—" when off (the transient ⇧ override is momentary and not shown here,
+    /// mirroring how LibreCAD's status bar reflects the persistent mode).
+    var orthoReadout: String { orthoEnabled ? "Ortho" : "\u{2014}" }
 }

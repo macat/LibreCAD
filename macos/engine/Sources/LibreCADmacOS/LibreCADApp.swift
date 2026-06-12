@@ -27,10 +27,18 @@
 //
 
 import SwiftUI
+import AppKit
 import CADEngine
 
 @main
 struct LibreCADApp: App {
+
+    /// The F8 key as a SwiftUI `KeyEquivalent`. SwiftUI ships no function-key
+    /// constants, so it is built from AppKit's `NSF8FunctionKey` Unicode scalar — the
+    /// same code AppKit's menu key-equivalent matching uses, so ⌥-free F8 in the menu
+    /// fires the Ortho toggle. (The canvas `keyDown` also handles F8 via keyCode 100,
+    /// so it works whether the menu or the canvas has key focus.)
+    private static let f8Key = KeyEquivalent(Character(UnicodeScalar(NSF8FunctionKey)!))
     /// The "open command palette" (⌘K) action published by the focused window.
     @FocusedValue(\.commandPalette) private var commandPalette
     @FocusedValue(\.focusCommandLine) private var focusCommandLine
@@ -121,6 +129,26 @@ struct LibreCADApp: App {
                 Button("Delete") { deleteSelection?() }
                     .keyboardShortcut(.delete, modifiers: [])
                     .disabled(deleteSelection == nil || (isToolActive ?? false))
+
+                Divider()
+                // Edit ▸ Select All / Deselect All / Invert Selection — the standard
+                // editing-selection primitives. Each routes through the responder
+                // chain (`NSApp.sendAction(_:to:nil:from:)`) to the focused window's
+                // canvas (FlippedMTKView), which implements the matching `@objc`
+                // action and operates on its CanvasModel. Select All skips locked /
+                // hidden geometry (engine `SelectionPolicy`). ⌘A / ⇧⌘A are standard;
+                // Invert has no standard shortcut (matches AutoCAD/most CAD apps).
+                Button("Select All") {
+                    NSApp.sendAction(#selector(NSResponder.selectAll(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut("a", modifiers: .command)
+                Button("Deselect All") {
+                    NSApp.sendAction(Selector(("deselectAllEntities:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("a", modifiers: [.command, .shift])
+                Button("Invert Selection") {
+                    NSApp.sendAction(Selector(("invertSelectionAction:")), to: nil, from: nil)
+                }
             }
             CommandGroup(after: .toolbar) {
                 // ⌘K — the command palette: fuzzy-find and run any tool/app action.
@@ -136,6 +164,17 @@ struct LibreCADApp: App {
                 Button("Zoom to Fit") { zoomToFit?() }
                     .keyboardShortcut("0", modifiers: .command)
                     .disabled(zoomToFit == nil)
+
+                Divider()
+                // View ▸ Ortho (F8) — toggles the persistent ortho restriction
+                // (horizontal/vertical lock relative to the last point while drawing).
+                // Routed through the responder chain to the focused canvas (which also
+                // drives the menu checkmark via `validateUserInterfaceItem`). Hold-⇧
+                // during point input flips ortho on-the-fly without touching this flag.
+                Button("Ortho") {
+                    NSApp.sendAction(Selector(("toggleOrthoAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut(Self.f8Key, modifiers: [])
             }
             // The Tools menu — the discoverable source of truth for EVERY tool and
             // its shortcut. Each item activates the tool on the focused canvas via
