@@ -275,3 +275,59 @@ struct OverlayGeometryTests {
         }
     }
 }
+
+// MARK: - Light-mode entity color auto-invert (theme polish)
+
+/// Exercises `RendererGeometry.autoInvertWhite`, the pure light-mode auto-invert
+/// the renderer applies so the CAD "automatic color" (near-white) default pen stays
+/// legible on the light canvas. Domain-namespaced suite name per CONVENTIONS so it
+/// can't collide with another fan-out's test type.
+@Suite("Renderer theme — light-mode color auto-invert")
+struct RendererThemeAutoInvertTests {
+
+    @Test("near-white pen flips to near-black, preserving alpha")
+    func nearWhiteInverts() {
+        let white = SIMD4<Float>(1, 1, 1, 1)
+        let out = RendererGeometry.autoInvertWhite(white)
+        // R/G/B drop to ink; alpha is preserved.
+        #expect(out.x < 0.2 && out.y < 0.2 && out.z < 0.2)
+        #expect(out.w == 1)
+
+        let faintOffWhite = SIMD4<Float>(0.9, 0.92, 0.88, 0.5)
+        let out2 = RendererGeometry.autoInvertWhite(faintOffWhite)
+        #expect(out2.x < 0.2 && out2.y < 0.2 && out2.z < 0.2)
+        #expect(out2.w == 0.5)   // alpha preserved
+    }
+
+    @Test("explicit non-white colors pass through unchanged")
+    func nonWhiteUnchanged() {
+        let colors = [
+            SIMD4<Float>(0.31, 0.80, 0.31, 1),   // librecad green
+            SIMD4<Float>(0.2, 0.4, 0.6, 0.8),    // a blue
+            SIMD4<Float>(0.0, 0.0, 0.0, 1),      // already black
+            SIMD4<Float>(0.5, 0.5, 0.5, 1),      // mid gray (below the white threshold)
+        ]
+        for c in colors {
+            #expect(RendererGeometry.autoInvertWhite(c) == c)
+        }
+    }
+
+    @Test("appendInstances applies the auto-invert via colorTransform; default is identity")
+    func colorTransformWiring() {
+        let poly = ResolvedPolyline(
+            points: [Vector(0, 0), Vector(1, 0)],
+            closed: false,
+            pen: ResolvedPen(color: RGBAColor(1, 1, 1, 1), lineType: .solid, lineWidth: .default))
+        // Default (no transform): white passes through unchanged (dark-mode path).
+        var dark: [LineInstance] = []
+        RendererGeometry.appendInstances(for: poly, renderOrigin: Vector(0, 0), into: &dark)
+        #expect(dark[0].color == SIMD4<Float>(1, 1, 1, 1))
+
+        // With the auto-invert transform (light-mode path): white → ink.
+        var light: [LineInstance] = []
+        RendererGeometry.appendInstances(for: poly, renderOrigin: Vector(0, 0),
+                                         colorTransform: RendererGeometry.autoInvertWhite,
+                                         into: &light)
+        #expect(light[0].color.x < 0.2)
+    }
+}

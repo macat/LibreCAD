@@ -47,6 +47,25 @@ final class FlippedMTKView: MTKView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    /// Re-apply the adaptive canvas chrome whenever the effective appearance flips
+    /// (System Settings ▸ Appearance light↔dark, or a per-window override). This
+    /// swaps the Metal clear color and the `OverlayStyle` grid/axis/accent colors,
+    /// then forces a model rebuild (so the light-mode entity auto-invert re-runs)
+    /// and a redraw so the canvas tracks the system theme live.
+    ///
+    /// `NSView`/`MTKView` are `@MainActor`-isolated in the SDK and this override
+    /// inherits that isolation, so it reaches the `@MainActor` controller/model and
+    /// `CanvasTheme.apply` directly — NO `assumeIsolated` (which the project bans on
+    /// OS-invoked entry points; here the inherited isolation makes the hop unneeded).
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        CanvasTheme.apply(to: self, appearance: effectiveAppearance)
+        // Force the line/fill buffers to repack so the auto-invert (applied at pack
+        // time) reflects the new appearance.
+        controller?.model.modelDirty = true
+        setNeedsDisplay(bounds)
+    }
+
     // Mouse tracking for snap-on-move even without a button held.
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -506,7 +525,11 @@ struct CADCanvasView: NSViewRepresentable {
         view.isPaused = true
         view.autoResizeDrawable = true
         view.colorPixelFormat = .bgra8Unorm_srgb   // sRGB drawable (rendering-perf §4.4)
-        view.clearColor = MTLClearColor(red: 0.07, green: 0.08, blue: 0.10, alpha: 1.0)
+        // Adaptive canvas chrome: sets the clear color + OverlayStyle grid/axis/
+        // accent colors for the CURRENT system appearance (dark == the prior
+        // hardcoded look; light == a tuned light palette). `viewDidChangeEffective-
+        // Appearance` re-applies it on every light↔dark toggle.
+        CanvasTheme.apply(to: view, appearance: view.effectiveAppearance)
         view.preferredFramesPerSecond = 120
 
         guard let renderer = LineRenderer(model: model, device: device) else {
