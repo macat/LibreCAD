@@ -99,6 +99,9 @@ public:
         e.ratio = 1.0;
         e.degree = 0;
         e.closed = 0;
+        e.splineFlags = 0;
+        e.fitPoints = nullptr;
+        e.fitPointCount = 0;
         e.height = 0.0;
         e.hAlign = 0;
         e.vAlign = 0;
@@ -275,6 +278,7 @@ public:
         fillCommon(e, *data);
         e.degree = data->degree;
         e.closed = (data->flags & 0x1) ? 1 : 0;
+        e.splineFlags = data->flags;   // raw code-70 flags, for a faithful re-write
 
         // Control points -> vertices (bulge unused). Mirrors addSpline's
         // controllist walk in rs_filterdxfrw.cpp.
@@ -857,12 +861,13 @@ private:
         case LC_ENT_ELLIPSE:    writeEllipse(e);    break;
         case LC_ENT_LWPOLYLINE: writeLWPolyline(e); break;
         case LC_ENT_POLYLINE:   writeLWPolyline(e); break; // emit as LWPOLYLINE
+        case LC_ENT_SPLINE:     writeSpline(e);     break;
         case LC_ENT_TEXT:       writeText(e);       break;
         case LC_ENT_MTEXT:      writeMText(e);      break;
         case LC_ENT_SOLID:      writeSolid(e);      break;
         case LC_ENT_HATCH:      writeHatch(e);      break;
         case LC_ENT_DIMENSION:  writeDimension(e);  break;
-        default:                ++m_skipped;        break; // SPLINE / UNSUPPORTED / ...
+        default:                ++m_skipped;        break; // UNSUPPORTED / ...
         }
     }
 
@@ -922,6 +927,73 @@ private:
         }
         pol.vertexnum = static_cast<int>(pol.vertlist.size());
         m_dxf->writeLWPolyline(&pol);
+    }
+
+    // ----- SPLINE --------------------------------------------------------
+    // Emit a DXF SPLINE (the inverse of FlatteningReader::addSpline). The POD
+    // carries the degree, the control polygon in `vertices`, the (optional) knot
+    // and rational-weight vectors, the raw code-70 flags in `splineFlags`, and —
+    // for a fit-point/interpolation spline (`.splinePoints`) — its on-curve
+    // interpolation points in `fitPoints`. We set DRW_Spline's nknots/ncontrol/
+    // nfit counts ourselves because libdxfrw's writeSpline loops on those (not on
+    // the list sizes). Mirrors rs_filterdxfrw.cpp::writeSpline /
+    // writeSplinePoints. SPLINE only exists for R2000+; at R12 libdxfrw's
+    // writeSpline is a no-op, so the entity is dropped — count it as skipped so
+    // the written/skipped tally stays honest (matches MTEXT/HATCH/DIMENSION).
+    void writeSpline(const LCEntity &e) {
+        if (m_dxf->getVersion() <= DRW::AC1009) {
+            ++m_skipped;
+            return;
+        }
+        const int ncontrol = (e.vertices != nullptr && e.vertexCount > 0) ? e.vertexCount : 0;
+        // A spline needs at least degree+1 control points to be valid; drop a
+        // degenerate one (matches the reader rejecting it on read).
+        if (e.degree < 1 || ncontrol < e.degree + 1) {
+            ++m_skipped;
+            return;
+        }
+        DRW_Spline sp{};
+        fillCommon(sp, e);
+        sp.degree = e.degree;
+
+        // code-70 bit flags: 1 closed, 2 periodic, 4 rational, 8 planar, 16 linear.
+        // Prefer the preserved raw flags (a faithful re-write of a read spline);
+        // otherwise derive a sane default — planar, plus closed+periodic when the
+        // `closed` flag is set (mirrors rs_filterdxfrw.cpp::writeSpline's
+        // 0b1011 / 0b1000).
+        sp.flags = (e.splineFlags != 0) ? e.splineFlags
+                                        : ((e.closed != 0) ? 0b1011 : 0b1000);
+
+        // Control points (code 10/20/30).
+        for (int i = 0; i < ncontrol; ++i) {
+            const LCVertex &v = e.vertices[i];
+            sp.controllist.push_back(std::make_shared<DRW_Coord>(v.x, v.y, 0.0));
+        }
+        sp.ncontrol = ncontrol;
+
+        // Rational weights (code 41), only when they cover every control point.
+        if (e.weights != nullptr && e.weightCount == ncontrol) {
+            sp.weightlist.assign(e.weights, e.weights + e.weightCount);
+        }
+
+        // Knot vector (code 40). Use the supplied one if present; otherwise leave
+        // it empty (a downstream reader / our NURBS evaluator generates a clamped
+        // uniform vector from degree + control-point count).
+        if (e.knots != nullptr && e.knotCount > 0) {
+            sp.knotslist.assign(e.knots, e.knots + e.knotCount);
+        }
+        sp.nknots = static_cast<dint32>(sp.knotslist.size());
+
+        // Fit points (code 11/21) for an interpolation spline (`.splinePoints`).
+        if (e.fitPoints != nullptr && e.fitPointCount > 0) {
+            for (int i = 0; i < e.fitPointCount; ++i) {
+                const LCVertex &v = e.fitPoints[i];
+                sp.fitlist.push_back(std::make_shared<DRW_Coord>(v.x, v.y, 0.0));
+            }
+        }
+        sp.nfit = static_cast<dint32>(sp.fitlist.size());
+
+        m_dxf->writeSpline(&sp);
     }
 
     // ----- TEXT ----------------------------------------------------------

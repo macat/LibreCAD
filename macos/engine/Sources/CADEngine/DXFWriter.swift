@@ -14,8 +14,13 @@
 //  is non-reentrant, so there is exactly one serialization point per process).
 //
 //  Supported kinds round-trip: line / point / circle / arc / ellipse / polyline /
-//  text / mtext / solid / hatch / dimension. Spline / splinePoints (and any other
-//  kind) are skipped for now (counted, not fatal). Dimension writes the DIMENSION
+//  spline / splinePoints / text / mtext / solid / hatch / dimension. `.spline`
+//  maps to a control-point DXF SPLINE (degree, control points, knots, rational
+//  weights, code-70 flags); `.splinePoints` maps to a degree-2 SPLINE whose
+//  control polygon IS the quadratic-Bézier polygon (so it reads back as the same
+//  geometry) plus DXF fit points. SPLINE needs R2000+; at R12 the C bridge drops
+//  it (counted as skipped), like MTEXT/HATCH/DIMENSION. Any remaining unsupported
+//  kind is skipped (counted, not fatal). Dimension writes the DIMENSION
 //  entity definition (linear/aligned/radial/diameter/angular); the associated
 //  anonymous block is NOT authored — a real CAD app regenerates it, and our own
 //  resolve() regenerates the visual on read. MTEXT writes the preserved raw inline-coded string
@@ -168,11 +173,15 @@ private final class PODBuilder {
     private var vertexBuffers: [UnsafeMutableBufferPointer<LCVertex>] = []
     /// Each interned hatch-loop array is a heap `LCLoop` buffer, same lifetime.
     private var loopBuffers: [UnsafeMutableBufferPointer<LCLoop>] = []
+    /// Each interned double array (spline knots / weights) is a heap `Double`
+    /// buffer, same lifetime.
+    private var doubleBuffers: [UnsafeMutableBufferPointer<Double>] = []
 
     deinit {
         for s in strings { s.deallocate() }
         for v in vertexBuffers { v.deallocate() }
         for l in loopBuffers { l.deallocate() }
+        for d in doubleBuffers { d.deallocate() }
     }
 
     /// Interns a Swift string as a stable, null-terminated C string.
@@ -195,6 +204,28 @@ private final class PODBuilder {
         }
         vertexBuffers.append(buf)
         return (UnsafePointer(buf.baseAddress!), Int32(verts.count))
+    }
+
+    /// Interns a `Vector` point list (spline control / fit points; bulge unused)
+    /// as a stable contiguous `LCVertex` block. Returns `(nil, 0)` for empty.
+    private func internPoints(_ points: [Vector]) -> (UnsafePointer<LCVertex>?, Int32) {
+        guard !points.isEmpty else { return (nil, 0) }
+        let buf = UnsafeMutableBufferPointer<LCVertex>.allocate(capacity: points.count)
+        for (i, p) in points.enumerated() {
+            buf[i] = LCVertex(x: p.x, y: p.y, bulge: 0.0)
+        }
+        vertexBuffers.append(buf)
+        return (UnsafePointer(buf.baseAddress!), Int32(points.count))
+    }
+
+    /// Interns a `Double` list (spline knots / weights) as a stable contiguous
+    /// block. Returns `(nil, 0)` for an empty list.
+    private func internDoubles(_ values: [Double]) -> (UnsafePointer<Double>?, Int32) {
+        guard !values.isEmpty else { return (nil, 0) }
+        let buf = UnsafeMutableBufferPointer<Double>.allocate(capacity: values.count)
+        _ = buf.initialize(from: values)
+        doubleBuffers.append(buf)
+        return (UnsafePointer(buf.baseAddress!), Int32(values.count))
     }
 
     /// Interns a hatch's boundary loops as a single flat `LCVertex` array plus a
@@ -232,9 +263,9 @@ private final class PODBuilder {
 
     // MARK: Entity mapping (inverse of DXFReader.mapKind)
 
-    /// Maps one `EntityRecord` to an `LCEntity` POD. Kinds the writer does not
-    /// support (spline/splinePoints) are emitted as `LC_ENT_UNSUPPORTED`; the C
-    /// side counts and skips them.
+    /// Maps one `EntityRecord` to an `LCEntity` POD. Every modeled kind maps to a
+    /// concrete `LCEntityKind`; only a kind the writer genuinely cannot represent
+    /// would fall through to `LC_ENT_UNSUPPORTED` (the C side counts and skips it).
     func makeEntity(_ record: EntityRecord) -> LCEntity {
         var e = LCEntity()
         e.color = 256              // ByLayer default; overwritten by applyPen
@@ -294,10 +325,63 @@ private final class PODBuilder {
             e.vertices = ptr
             e.vertexCount = count
 
-        case .spline, .splinePoints:
-            // Not yet supported by the writer; the C side skips UNSUPPORTED.
-            e.kind = Int32(LC_ENT_UNSUPPORTED.rawValue)
-            e.typeName = intern("SPLINE")
+        case .spline(let d):
+            // Control-point (rational) B-spline / NURBS -> DXF SPLINE. The degree,
+            // control polygon, knots and rational weights map straight onto the
+            // POD's spline fields; `closed` carries via the closed flag, and we
+            // synthesize the code-70 flags (planar + closed/periodic) since
+            // SplineData doesn't preserve the raw DXF flags. The C side sets
+            // nknots/ncontrol from these and writes DRW_Spline. Mirrors
+            // rs_filterdxfrw.cpp::writeSpline.
+            e.kind = Int32(LC_ENT_SPLINE.rawValue)
+            e.degree = Int32(d.degree)
+            e.closed = d.closed ? 1 : 0
+            // code 70: 1 closed, 2 periodic, 4 rational, 8 planar. Planar always;
+            // a rational spline (per-control weights) sets bit 2; a closed spline
+            // is also periodic (bits 0|1), matching the reference writer.
+            var flags: Int32 = 0b1000
+            if d.closed { flags |= 0b0011 }
+            if d.weights.count == d.controlPoints.count, !d.weights.isEmpty {
+                flags |= 0b0100
+            }
+            e.splineFlags = flags
+            let (cptr, ccount) = internPoints(d.controlPoints)
+            e.vertices = cptr
+            e.vertexCount = ccount
+            let (kptr, kcount) = internDoubles(d.knots)
+            e.knots = kptr
+            e.knotCount = kcount
+            // Only carry weights when they cover every control point (a rational
+            // spline); a partial array would mis-weight the curve (mirrors the
+            // reader's guard in mapSpline).
+            if d.weights.count == d.controlPoints.count {
+                let (wptr, wcount) = internDoubles(d.weights)
+                e.weights = wptr
+                e.weightCount = wcount
+            }
+
+        case .splinePoints(let d):
+            // Interpolation (fit-point) spline drawn as quadratic Béziers ->
+            // DXF SPLINE. We store the quadratic-Bézier CONTROL polygon (degree 2)
+            // as the spline's control points so the geometry reads back exactly as
+            // a degree-2 control-point `.spline`. The on-curve fit points (== the
+            // control points for our model, which keeps both in lockstep) are also
+            // emitted as DXF fit points (codes 11/21) so other CAD apps see a
+            // fit-point spline. Mirrors rs_filterdxfrw.cpp::writeSplinePoints.
+            e.kind = Int32(LC_ENT_SPLINE.rawValue)
+            e.degree = 2
+            e.closed = d.closed ? 1 : 0
+            var flags: Int32 = 0b1000           // planar
+            if d.closed { flags |= 0b0011 }     // + closed | periodic
+            e.splineFlags = flags
+            let (cptr, ccount) = internPoints(d.controlPoints)
+            e.vertices = cptr
+            e.vertexCount = ccount
+            // Knots: leave empty — the reader/NURBS evaluator generates a clamped
+            // uniform vector from degree (2) + control-point count.
+            let (fptr, fcount) = internPoints(d.controlPoints)
+            e.fitPoints = fptr
+            e.fitPointCount = fcount
 
         case .dimension(let d):
             // Emitted as a DXF DIMENSION (the C side builds the matching DRW_Dim*).

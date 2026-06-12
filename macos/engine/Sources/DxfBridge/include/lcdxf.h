@@ -151,7 +151,8 @@ typedef struct LCLoop {
  *                 ratio, startAngle, endAngle (ellipse parameters, radians)
  *  - LWPOLYLINE / POLYLINE: vertices[vertexCount], closed
  *  - SPLINE:      degree, controlPoints (as vertices[].x/.y), knots/weights,
- *                 closed
+ *                 closed, splineFlags (code 70), fitPoints[fitPointCount] (a
+ *                 fit-point/interpolation spline carries its on-curve points)
  *  - TEXT:        p1 (insertion point), height, startAngle (rotation, radians),
  *                 hAlign/vAlign, textValue (string), styleName
  *  - HATCH:       loops[loopCount] (each a window into vertices[]), solidFill,
@@ -183,6 +184,19 @@ typedef struct LCEntity {
 
     int32_t closed;        /**< polyline/spline closed flag (0/1). */
     int32_t degree;        /**< spline degree. */
+    /** SPLINE DXF code-70 bit flags (1 closed, 2 periodic, 4 rational, 8 planar,
+     *  16 linear). The reader copies the raw flags here so a write round-trips
+     *  the closed/periodic/rational state; the writer sets DRW_Spline::flags from
+     *  it. 0 == the writer derives a default (planar, +closed/periodic when the
+     *  `closed` flag is set). */
+    int32_t splineFlags;
+    /** SPLINE fit points (DXF codes 11/21), borrowed pointer into the owning
+     *  list's vertex pool (bulge unused), or NULL/0 if none. A fit-point spline
+     *  (`.splinePoints`) carries its on-curve interpolation points here in
+     *  addition to the control points in `vertices`; a pure control-point spline
+     *  leaves it empty. */
+    const LCVertex *fitPoints;
+    int32_t fitPointCount;
 
     /* Text (TEXT / MTEXT). */
     double height;         /**< text cap height (code 40). */
@@ -329,10 +343,10 @@ LCStatus lc_dxf_count_entities(const char *path, int *out_count);
  * Write a DXF file from flat POD entity + layer arrays.
  *
  * Supported `LCEntity::kind` values are emitted: LINE, POINT, CIRCLE, ARC,
- * ELLIPSE, LWPOLYLINE, POLYLINE, TEXT, MTEXT, SOLID, HATCH, DIMENSION. Any other
- * kind (SPLINE, UNSUPPORTED, ...) is silently skipped and counted in
- * `*out_skipped`. (MTEXT and DIMENSION only exist for R2000+; at R12 they are
- * dropped and counted as skipped.)
+ * ELLIPSE, LWPOLYLINE, POLYLINE, SPLINE, TEXT, MTEXT, SOLID, HATCH, DIMENSION.
+ * Any other kind (UNSUPPORTED, ...) is silently skipped and counted in
+ * `*out_skipped`. (MTEXT, DIMENSION and SPLINE only exist for R2000+; at R12
+ * they are dropped and counted as skipped.)
  * Common attributes
  * (layer/linetype/color/color24/lineweight) map onto the DRW_* fields, mirroring
  * the reader's POD mapping in reverse.

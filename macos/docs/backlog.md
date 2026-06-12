@@ -63,8 +63,9 @@ pass or by the relevant downstream owner. Each cites its source.
   the 72/73 alignment codes (which `DRW_Text` round-trips); an MTEXT read back as `.text` is written
   as TEXT. Multi-line layout, MTEXT attachment-point alignment, and inline format codes are not
   reconstructed (the reader already strips them). *(ws-dxf-write-fidelity)*
-- **SPLINE / splinePoints write still skipped** (counted, not fatal) — no `writeSpline` mapping yet.
-  *(ws-dxf-write-fidelity)*
+- ~~**SPLINE / splinePoints write still skipped**~~ DONE: `writeSpline` added to the C bridge
+  (`.spline` → control-point DXF SPLINE w/ degree+knots+weights+code-70 flags; `.splinePoints` →
+  degree-2 SPLINE w/ control polygon + fit points). No longer counted as skipped. *(ws-dxf-write-fidelity)*
 - **DIMENSION read+write covers linear/aligned/radial/diametric/angular only** — the five
   `DimKind`-modelled variants round-trip (read: `addDim*` → `LC_ENT_DIMENSION` → `.dimension`; write:
   `.dimension` → `DRW_Dim*`). DXF **ordinate** and **angular-3p** dimensions are NOT in the frozen
@@ -88,7 +89,7 @@ pass or by the relevant downstream owner. Each cites its source.
 - Remove (or keep env-gated) the `LC_DEBUG_COORDS` instrumentation in CADCanvasView once we're confident the offset stays fixed.
 
 ## Layers / rendering
-- **Layer visibility render filter** (sidebar gap): the render path (`LineRenderer.rebuildLineInstancesIfNeeded`) + `resolve()` don't skip entities on hidden/frozen layers — toggling the eye in the sidebar updates model state but doesn't hide pixels. Fix in the renderer (skip ids whose `layers.layer(e.layer)?.isVisible==false`) — fold into the renderer-fills wave. (ws-sidebar flag)
+- ~~**Layer visibility render filter** (sidebar gap)~~ DONE (verified already-correct): `LineRenderer.packEntity` skips hidden/frozen-layer entities (lines AND fills) via `layers.layer(e.layer)?.isVisible==false`, and the sidebar eye toggle bumps `modelVersion` to re-cull. Extracted the predicate into GPU-free `RendererVisibility` + added `RendererVisibilityTests`. (ws-sidebar flag)
 - Add a `CADDrawing.setLayerColor(_:_:)` convenience wrapper (sidebar used `mutateLayers{ setColor }`). (ws-sidebar)
 
 ## App shell
