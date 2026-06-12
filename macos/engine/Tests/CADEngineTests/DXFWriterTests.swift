@@ -58,11 +58,13 @@ struct DXFWriterTests {
 
     private struct KindTally: Equatable {
         var line = 0, point = 0, circle = 0, arc = 0, ellipse = 0, polyline = 0
-        var text = 0, mtext = 0, solid = 0, hatch = 0
+        var text = 0, mtext = 0, solid = 0, hatch = 0, dimension = 0
         /// The supported set the writer emits (spline/splinePoints excluded; MTEXT
-        /// is now written, so it counts toward the round-trippable total).
+        /// and DIMENSION are now written, so they count toward the round-trippable
+        /// total).
         var supportedTotal: Int {
-            line + point + circle + arc + ellipse + polyline + text + mtext + solid + hatch
+            line + point + circle + arc + ellipse + polyline
+                + text + mtext + solid + hatch + dimension
         }
     }
 
@@ -80,8 +82,8 @@ struct DXFWriterTests {
             case .mtext:        t.mtext += 1     // now written (DRW_MText)
             case .solid:        t.solid += 1     // now written (DRW_Solid)
             case .hatch:        t.hatch += 1     // now written (DRW_Hatch)
+            case .dimension:    t.dimension += 1 // now written (DRW_Dim*)
             case .spline, .splinePoints: break   // still skipped by the writer
-            case .dimension:    break            // skipped by the writer (S3 wave)
             }
         }
         return t
@@ -105,23 +107,27 @@ struct DXFWriterTests {
         // (-> .solid, written), so both should round-trip.
         #expect(firstTally.mtext >= 1)
         #expect(firstTally.solid >= 1)
+        // …and the 14 DimKind-modelled DIMENSION entities (-> .dimension, now
+        // WRITTEN as DRW_Dim*).
+        #expect(firstTally.dimension == 14)
 
         let outPath = tempDXFPath()
         defer { removeFile(outPath) }
 
-        // Write everything the reader produced. dim_sample has no splines; MTEXT is
-        // now emitted (R2000 default), so only spline/dimension kinds (none here)
-        // are skipped.
+        // Write everything the reader produced. dim_sample has no splines; MTEXT
+        // and DIMENSION are now emitted (R2000 default), so only spline kinds
+        // (none here) are skipped.
         let writeResult = try await CADEngine.shared.writeEntities(
             first.records, layers: first.layers, toPath: outPath
         )
         let unsupported = first.records.filter {
             switch $0.kind {
-            case .spline, .splinePoints, .dimension: return true
+            case .spline, .splinePoints: return true
             default: return false
             }
         }.count
-        #expect(writeResult.skipped == unsupported)   // MTEXT no longer counts as skipped
+        // MTEXT and DIMENSION no longer count as skipped.
+        #expect(writeResult.skipped == unsupported)
         #expect(FileManager.default.fileExists(atPath: outPath))
 
         // Re-read and compare the supported-kind tallies exactly.
@@ -137,6 +143,9 @@ struct DXFWriterTests {
         #expect(secondTally.text == firstTally.text)
         #expect(secondTally.mtext == firstTally.mtext)
         #expect(secondTally.solid == firstTally.solid)
+        // Dimensions survive the round-trip as `.dimension` (the writer no longer
+        // drops them).
+        #expect(secondTally.dimension == firstTally.dimension)
         #expect(secondTally.supportedTotal == firstTally.supportedTotal)
     }
 
@@ -515,6 +524,173 @@ struct DXFWriterTests {
         #expect(secondTally.line == firstTally.line)
     }
 
+    // MARK: - DIMENSION round-trips (linear / aligned / radial / diameter / angular).
+
+    /// Recompute the measured value of a `DimKind` from its defining points,
+    /// mirroring what `resolve()` measures (linear/aligned = distance; radial =
+    /// radius; diameter = |p1-p2|; angular = subtended angle in radians). Used to
+    /// assert the measurement survives the round-trip (it is recomputed on read,
+    /// never stored, so equal defining points => equal measure).
+    private func measure(_ kind: DimKind) -> Double {
+        switch kind {
+        case let .linear(e1, e2, angle):
+            // Distance projected onto the dimension-line direction (angle).
+            let dir = Vector(angle: angle)
+            return abs((e2 - e1).dot(dir))
+        case let .aligned(e1, e2):
+            return (e2 - e1).magnitude
+        case let .radial(center, pointOnCircle):
+            return (pointOnCircle - center).magnitude
+        case let .diameter(p1, p2):
+            return (p2 - p1).magnitude
+        case let .angular(l1s, l1e, l2s, l2e):
+            let a1 = (l1e - l1s).angle
+            let a2 = (l2e - l2s).angle
+            return abs(Vector.correctAngle(a2 - a1))
+        }
+    }
+
+    @Test("DIMwrite: a linear, radial, and angular dimension survive read->write->read")
+    func dimensionRoundTrips() async throws {
+        // A LINEAR dimension: horizontal distance between (0,0) and (10,0),
+        // dim line offset up to y=5. Explicit text override + style to exercise the
+        // shared base-field round-trip.
+        let linear = EntityRecord(
+            id: EntityID(1),
+            layer: LayerID("dims"),
+            kind: .dimension(DimData(
+                kind: .linear(extension1: Vector(0, 0), extension2: Vector(10, 0), angle: 0),
+                definitionPoint: Vector(5, 5),
+                textOverride: "10.0",
+                styleName: "STANDARD",
+                attachmentPoint: .middleCenter))
+        )
+        // A RADIAL dimension: radius from center (20,20) to a point on the circle.
+        let radial = EntityRecord(
+            id: EntityID(2),
+            layer: LayerID("dims"),
+            kind: .dimension(DimData(
+                kind: .radial(center: Vector(20, 20), pointOnCircle: Vector(25, 20)),
+                definitionPoint: Vector(25, 20)))
+        )
+        // An ANGULAR dimension: angle between two lines meeting at (0,30); arc
+        // through the definitionPoint.
+        let angular = EntityRecord(
+            id: EntityID(3),
+            layer: LayerID("dims"),
+            kind: .dimension(DimData(
+                kind: .angular(line1Start: Vector(0, 30), line1End: Vector(10, 30),
+                               line2Start: Vector(0, 30), line2End: Vector(10, 40)),
+                definitionPoint: Vector(5, 35)))
+        )
+        let records = [linear, radial, angular]
+
+        let outPath = tempDXFPath()
+        defer { removeFile(outPath) }
+
+        let result = try await CADEngine.shared.writeEntities(
+            records,
+            layers: LayerTable(layers: [Layer(name: "0"), Layer(name: "dims")],
+                               activeLayerName: "0"),
+            toPath: outPath
+        )
+        // All three written, none skipped — dimensions are no longer dropped.
+        #expect(result.written == 3)
+        #expect(result.skipped == 0)
+
+        let back = try await CADEngine.shared.readEntities(dxfPath: outPath)
+        let dims = back.records.compactMap { r -> DimData? in
+            if case .dimension(let d) = r.kind { return d } else { return nil }
+        }
+        #expect(dims.count == 3)
+
+        let tol = 1e-6
+
+        // LINEAR survived as `.linear` with its extension points + angle + measure.
+        let l = try #require(dims.first { if case .linear = $0.kind { return true }; return false },
+                             "linear dimension missing after round-trip")
+        if case let .linear(e1, e2, angle) = l.kind {
+            #expect(abs(e1.x - 0) < tol && abs(e1.y - 0) < tol)
+            #expect(abs(e2.x - 10) < tol && abs(e2.y - 0) < tol)
+            #expect(abs(angle - 0) < tol)
+        }
+        #expect(abs(l.definitionPoint.x - 5) < tol && abs(l.definitionPoint.y - 5) < tol)
+        #expect(l.textOverride == "10.0")
+        #expect(l.styleName == "STANDARD")
+        #expect(abs(measure(l.kind) - 10.0) < tol)
+
+        // RADIAL survived as `.radial` with center + point + radius measure.
+        let r = try #require(dims.first { if case .radial = $0.kind { return true }; return false },
+                             "radial dimension missing after round-trip")
+        if case let .radial(center, pt) = r.kind {
+            #expect(abs(center.x - 20) < tol && abs(center.y - 20) < tol)
+            #expect(abs(pt.x - 25) < tol && abs(pt.y - 20) < tol)
+        }
+        #expect(abs(measure(r.kind) - 5.0) < tol)   // radius == 5
+
+        // ANGULAR survived as `.angular` with its four line points + arc point
+        // (definitionPoint) + the 90° subtended angle.
+        let a = try #require(dims.first { if case .angular = $0.kind { return true }; return false },
+                             "angular dimension missing after round-trip")
+        if case let .angular(l1s, l1e, l2s, l2e) = a.kind {
+            #expect(abs(l1s.x - 0) < tol && abs(l1s.y - 30) < tol)
+            #expect(abs(l1e.x - 10) < tol && abs(l1e.y - 30) < tol)
+            #expect(abs(l2s.x - 0) < tol && abs(l2s.y - 30) < tol)
+            #expect(abs(l2e.x - 10) < tol && abs(l2e.y - 40) < tol)
+        }
+        #expect(abs(a.definitionPoint.x - 5) < tol && abs(a.definitionPoint.y - 35) < tol)
+        #expect(abs(measure(a.kind) - .pi / 4) < 1e-9)   // 45° between horizontal and the diagonal
+    }
+
+    @Test("DIMwrite: aligned + diameter dimensions also round-trip")
+    func alignedAndDiameterRoundTrip() async throws {
+        // ALIGNED: distance measured parallel to the line through the two points.
+        let aligned = EntityRecord(
+            id: EntityID(1),
+            kind: .dimension(DimData(
+                kind: .aligned(extension1: Vector(0, 0), extension2: Vector(3, 4)),
+                definitionPoint: Vector(1, 5)))
+        )
+        // DIAMETER: across a circle through the two opposite points.
+        let diameter = EntityRecord(
+            id: EntityID(2),
+            kind: .dimension(DimData(
+                kind: .diameter(point1: Vector(0, 0), point2: Vector(8, 0)),
+                definitionPoint: Vector(8, 0)))
+        )
+        let outPath = tempDXFPath()
+        defer { removeFile(outPath) }
+
+        let result = try await CADEngine.shared.writeEntities(
+            [aligned, diameter], layers: LayerTable(), toPath: outPath
+        )
+        #expect(result.written == 2)
+        #expect(result.skipped == 0)
+
+        let back = try await CADEngine.shared.readEntities(dxfPath: outPath)
+        let dims = back.records.compactMap { r -> DimData? in
+            if case .dimension(let d) = r.kind { return d } else { return nil }
+        }
+        #expect(dims.count == 2)
+        let tol = 1e-6
+
+        let al = try #require(dims.first { if case .aligned = $0.kind { return true }; return false },
+                              "aligned dimension missing after round-trip")
+        if case let .aligned(e1, e2) = al.kind {
+            #expect(abs(e1.x - 0) < tol && abs(e1.y - 0) < tol)
+            #expect(abs(e2.x - 3) < tol && abs(e2.y - 4) < tol)
+        }
+        #expect(abs(measure(al.kind) - 5.0) < tol)   // 3-4-5 distance
+
+        let di = try #require(dims.first { if case .diameter = $0.kind { return true }; return false },
+                              "diameter dimension missing after round-trip")
+        if case let .diameter(p1, p2) = di.kind {
+            #expect(abs(p1.x - 0) < tol && abs(p1.y - 0) < tol)
+            #expect(abs(p2.x - 8) < tol && abs(p2.y - 0) < tol)
+        }
+        #expect(abs(measure(di.kind) - 8.0) < tol)   // diameter == 8
+    }
+
     // MARK: - Skipped kinds are counted, not fatal.
 
     @Test("unsupported kinds are skipped and counted")
@@ -577,8 +753,8 @@ struct DXFWriterTests {
     private func isSupported(_ r: EntityRecord) -> Bool {
         switch r.kind {
         case .line, .point, .circle, .arc, .ellipse, .polyline,
-             .text, .mtext, .solid, .hatch: return true
-        case .spline, .splinePoints, .dimension: return false
+             .text, .mtext, .solid, .hatch, .dimension: return true
+        case .spline, .splinePoints: return false
         }
     }
 }

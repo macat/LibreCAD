@@ -94,11 +94,33 @@ typedef enum LCEntityKind {
      *  `mtextLineSpacingStyle` (code 73) and `mtextLineSpacingFactor` (code 44).
      *  Distinct from LC_ENT_TEXT so the Swift reader maps it to `.mtext`. */
     LC_ENT_MTEXT = 11,
+    /** An associative CAD dimension (DXF DIMENSION). The concrete variant is in
+     *  `dimType` (an LCDimType); the defining points are in the `dim*` fields
+     *  below plus `definitionPoint`/`textMiddle`; the user text override is in
+     *  `textValue` (NULL/empty == use the measured value); the style name (code 3)
+     *  is in `styleName`. `dimAngle`/`dimOblique` carry the linear angle/oblique
+     *  (codes 50/52); `dimAlign` the attachment (code 71); `dimLineStyle`/
+     *  `dimLineFactor` the text line spacing (codes 72/41); `dimTextRotation` the
+     *  explicit text rotation (code 53). Distinct from LC_ENT_UNSUPPORTED so the
+     *  reader maps it to `.dimension`. */
+    LC_ENT_DIMENSION = 12,
     /** An entity libdxfrw delivered but the reader does not flatten
-     *  (INSERT/DIMENSION/IMAGE/...). Carries only its `typeName` so Swift can
-     *  collect a warning; geometry fields are unset. */
+     *  (INSERT/IMAGE/ordinate-DIMENSION/...). Carries only its `typeName` so Swift
+     *  can collect a warning; geometry fields are unset. */
     LC_ENT_UNSUPPORTED = 100
 } LCEntityKind;
+
+/** Discriminator for `LCEntity::dimType` (which DRW_Dim* subtype). The values
+ *  mirror the DXF type-70 low-nibble codes libdxfrw dispatches on
+ *  (processDimension: `dim.type & 0x0F`). ORDINATE is not in the frozen DimKind
+ *  model, so the reader maps it to LC_ENT_UNSUPPORTED rather than this enum. */
+typedef enum LCDimType {
+    LC_DIM_LINEAR    = 0,   /**< DRW_DimLinear  — def1/def2 (codes 13/14) + dimAngle (50). */
+    LC_DIM_ALIGNED   = 1,   /**< DRW_DimAligned — def1/def2 (codes 13/14). */
+    LC_DIM_ANGULAR   = 2,   /**< DRW_DimAngular (2-line) — def1/def2/def5 + defPoint + arc (16). */
+    LC_DIM_DIAMETRIC = 3,   /**< DRW_DimDiametric — def5 (code 15) + defPoint (code 10). */
+    LC_DIM_RADIAL    = 4     /**< DRW_DimRadial — defPoint (center, 10) + def5 (radius point, 15). */
+} LCDimType;
 
 /** One flattened polyline vertex: a 2D point plus a DXF bulge. */
 typedef struct LCVertex {
@@ -135,6 +157,9 @@ typedef struct LCLoop {
  *  - HATCH:       loops[loopCount] (each a window into vertices[]), solidFill,
  *                 textValue (pattern name)
  *  - SOLID:       vertices[vertexCount] (3-4 ring-ordered corners)
+ *  - DIMENSION:   dimType, definitionPoint (p1), the dim* defining points,
+ *                 dimAngle/dimOblique/dimTextRotation, dimAlign/dimLineStyle/
+ *                 dimLineFactor, textValue (text override), styleName (dim style)
  *  - UNSUPPORTED: typeName only
  */
 typedef struct LCEntity {
@@ -170,6 +195,27 @@ typedef struct LCEntity {
     int32_t mtextAttachment;      /**< MTEXT attachment point (code 71): 1..9 (TL..BR). */
     int32_t mtextLineSpacingStyle;/**< MTEXT line-spacing style (code 73): 1 at-least, 2 exact. */
     double mtextLineSpacingFactor;/**< MTEXT line-spacing factor (code 44); default 1. */
+
+    /* DIMENSION-only fields (meaningful when kind == LC_ENT_DIMENSION).
+     * The shared DRW_Dimension data (defPoint code 10, textPoint code 11) reuses
+     * the geometry block: definitionPoint -> p1{x,y,z}, textMiddle -> dimText*.
+     * Per-variant defining points live in the dedicated dim* coords below; which
+     * are meaningful depends on `dimType` (see LCDimType). `textValue` carries the
+     * user text override (code 1); `styleName` the dim style (code 3). */
+    int32_t dimType;              /**< an LCDimType value (which DRW_Dim* subtype). */
+    double dimDef1x, dimDef1y, dimDef1z;   /**< def1 — code 13/23/33 (linear/aligned/angular). */
+    double dimDef2x, dimDef2y, dimDef2z;   /**< def2 — code 14/24/34 (linear/aligned/angular). */
+    double dimDef5x, dimDef5y, dimDef5z;   /**< circlePoint — code 15/25/35 (radial/diametric/angular). */
+    double dimArcx,  dimArcy,  dimArcz;    /**< arcPoint — code 16/26/36 (angular). */
+    double dimTextx, dimTexty, dimTextz;   /**< textMiddle — code 11/21/31 (all variants). */
+    int32_t dimHasText;           /**< 1 if textMiddle (dimText*) was set, else 0. */
+    double dimAngle;              /**< linear angle (code 50, radians). */
+    double dimOblique;           /**< linear oblique (code 52, radians). */
+    double dimTextRotation;      /**< text rotation (code 53, radians). */
+    int32_t dimHasTextRotation;  /**< 1 if dimTextRotation (code 53) was set, else 0. */
+    int32_t dimAlign;            /**< attachment point (code 71): 1..9. */
+    int32_t dimLineStyle;        /**< text line-spacing style (code 72): 1 at-least, 2 exact. */
+    double dimLineFactor;        /**< text line-spacing factor (code 41); default 1. */
 
     /* Variable-length data — borrowed pointers into the owning list's pools. */
     const LCVertex *vertices;   /**< polyline vertices, spline control points, hatch
@@ -283,9 +329,10 @@ LCStatus lc_dxf_count_entities(const char *path, int *out_count);
  * Write a DXF file from flat POD entity + layer arrays.
  *
  * Supported `LCEntity::kind` values are emitted: LINE, POINT, CIRCLE, ARC,
- * ELLIPSE, LWPOLYLINE, POLYLINE, TEXT, MTEXT, SOLID, HATCH. Any other kind
- * (SPLINE, UNSUPPORTED, ...) is silently skipped and counted in `*out_skipped`.
- * (MTEXT only exists for R2000+; at R12 it is dropped and counted as skipped.)
+ * ELLIPSE, LWPOLYLINE, POLYLINE, TEXT, MTEXT, SOLID, HATCH, DIMENSION. Any other
+ * kind (SPLINE, UNSUPPORTED, ...) is silently skipped and counted in
+ * `*out_skipped`. (MTEXT and DIMENSION only exist for R2000+; at R12 they are
+ * dropped and counted as skipped.)
  * Common attributes
  * (layer/linetype/color/color24/lineweight) map onto the DRW_* fields, mirroring
  * the reader's POD mapping in reverse.

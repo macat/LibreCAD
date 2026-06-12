@@ -209,15 +209,95 @@ extension CADEngine {
             guard corners.count >= 3 else { return nil }
             return .solid(SolidData(corners: corners))
 
-        // DIMENSION skip arm: libdxfrw delivers every DIMENSION variant
-        // (linear/aligned/radial/diametric/angular/ordinate) through the bridge as
-        // LC_ENT_UNSUPPORTED with typeName "DIMENSION" (see lcdxf.cpp's addDim*),
-        // so it falls into the default below and becomes a warning rather than a
-        // crash. Full dimension IMPORT (mapping the def points → `.dimension`) is
-        // a follow-up wave; for S1 the reader only needs to skip it cleanly.
-        default: // LC_ENT_UNSUPPORTED (incl. DIMENSION) and anything else
+        case Int32(LC_ENT_DIMENSION.rawValue):
+            // The bridge flattens the five DimKind-modelled DIMENSION variants
+            // (linear/aligned/radial/diametric/angular) into LC_ENT_DIMENSION with
+            // the concrete subtype in `dimType` and the per-variant defining points
+            // in the `dim*` fields. Angular-3p and ordinate dimensions (not in the
+            // frozen DimKind) still arrive as LC_ENT_UNSUPPORTED -> warning.
+            return mapDimension(e)
+
+        default: // LC_ENT_UNSUPPORTED (incl. ordinate/3p DIMENSION) and anything else
             return nil
         }
+    }
+
+    /// Maps a flattened DIMENSION POD to `DimData`. The `dimType` discriminator
+    /// (an `LCDimType`) selects the `DimKind` variant and which `dim*` defining
+    /// points are meaningful; the shared base fields (text override, style,
+    /// attachment, line-spacing, text rotation) map straight onto `DimData`. The
+    /// measured value (DXF code 42) is deliberately NOT carried — `resolve()`
+    /// recomputes it from the geometry, so a dimension re-measures on edit. An
+    /// unrecognised `dimType` is dropped (returns `nil` -> warning).
+    private static func mapDimension(_ e: LCEntity) -> EntityKind? {
+        let definitionPoint = Vector(e.p1x, e.p1y, e.p1z)
+        let kind: DimKind
+        switch e.dimType {
+        case Int32(LC_DIM_LINEAR.rawValue):
+            kind = .linear(
+                extension1: Vector(e.dimDef1x, e.dimDef1y, e.dimDef1z),
+                extension2: Vector(e.dimDef2x, e.dimDef2y, e.dimDef2z),
+                angle: e.dimAngle)
+        case Int32(LC_DIM_ALIGNED.rawValue):
+            kind = .aligned(
+                extension1: Vector(e.dimDef1x, e.dimDef1y, e.dimDef1z),
+                extension2: Vector(e.dimDef2x, e.dimDef2y, e.dimDef2z))
+        case Int32(LC_DIM_RADIAL.rawValue):
+            // center == defPoint (code 10); pointOnCircle == code 15.
+            kind = .radial(
+                center: definitionPoint,
+                pointOnCircle: Vector(e.dimDef5x, e.dimDef5y, e.dimDef5z))
+        case Int32(LC_DIM_DIAMETRIC.rawValue):
+            // point1 == code 15; point2 == defPoint (code 10).
+            kind = .diameter(
+                point1: Vector(e.dimDef5x, e.dimDef5y, e.dimDef5z),
+                point2: definitionPoint)
+        case Int32(LC_DIM_ANGULAR.rawValue):
+            // line1 = (def1 code13 -> def2 code14); line2 = (def5 code15 ->
+            // defPoint code10); the dimension arc passes through `definitionPoint`,
+            // which DimData reads from `definitionPoint` while the arc-through point
+            // (code 16) drives the resolve. We store the def points; the resolve
+            // uses `definitionPoint` (the arc point, code 16) for the arc location.
+            kind = .angular(
+                line1Start: Vector(e.dimDef1x, e.dimDef1y, e.dimDef1z),
+                line1End: Vector(e.dimDef2x, e.dimDef2y, e.dimDef2z),
+                line2Start: Vector(e.dimDef5x, e.dimDef5y, e.dimDef5z),
+                line2End: definitionPoint)
+        default:
+            return nil
+        }
+
+        let textMiddle = e.dimHasText != 0
+            ? Vector(e.dimTextx, e.dimTexty, e.dimTextz) : nil
+        let textOverride = string(e.textValue)
+        let attachment = MTextAttachment(rawValue: Int(e.dimAlign)) ?? .middleCenter
+        let lineSpacingStyle = MTextLineSpacingStyle(rawValue: Int(e.dimLineStyle)) ?? .atLeast
+        let lineSpacingFactor = e.dimLineFactor > 0 ? e.dimLineFactor : 1.0
+        let textRotation: Double? = e.dimHasTextRotation != 0 ? e.dimTextRotation : nil
+
+        // For an angular dimension the DXF def point (code 10) is the second
+        // line's endpoint; the arc-through point (code 16) is the dimension-line
+        // location. Use the arc point as `definitionPoint` so the resolve draws
+        // the arc where the file specifies; for all other variants code 10 IS the
+        // definition point.
+        let resolvedDefPoint: Vector
+        if e.dimType == Int32(LC_DIM_ANGULAR.rawValue) {
+            resolvedDefPoint = Vector(e.dimArcx, e.dimArcy, e.dimArcz)
+        } else {
+            resolvedDefPoint = definitionPoint
+        }
+
+        return .dimension(DimData(
+            kind: kind,
+            definitionPoint: resolvedDefPoint,
+            textOverride: textOverride,
+            textMiddle: textMiddle,
+            styleName: string(e.styleName),
+            textRotation: textRotation,
+            attachmentPoint: attachment,
+            lineSpacingStyle: lineSpacingStyle,
+            lineSpacingFactor: lineSpacingFactor,
+            obliqueAngle: e.dimType == Int32(LC_DIM_LINEAR.rawValue) ? e.dimOblique : 0.0))
     }
 
     /// Maps a TEXT/MTEXT POD to `TextData`. An empty string (or non-positive
