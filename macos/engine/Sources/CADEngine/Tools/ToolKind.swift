@@ -71,6 +71,17 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     case fillet
     /// The Chamfer edit tool (`ChamferTool`) — bevel the corner between two lines.
     case chamfer
+    // --- Wave-A tools (wired into the UI in this wave) ---
+    /// The Spline draw tool (`SplineTool`) — click fit points, commit one spline.
+    case spline
+    /// The Array modify tool (`ArrayTool`) — replicate the selection in a grid/ring.
+    case array
+    /// The Divide modify tool (`DivideTool`) — drop N−1 division points on a selected entity.
+    case divide
+    /// The Explode modify tool (`ExplodeTool`) — break a selected polyline into segments.
+    case explode
+    /// The Hatch draw tool (`HatchTool`) — fill the region bounded by the selection.
+    case hatch
     // Append new draw tools here (one `case` per tool) — see the collision note.
 
     /// A short title for the UI (toolbar button / menu).
@@ -95,6 +106,11 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .extend:    return "Extend"
         case .fillet:    return "Fillet"
         case .chamfer:   return "Chamfer"
+        case .spline:    return "Spline"
+        case .array:     return "Array"
+        case .divide:    return "Divide"
+        case .explode:   return "Explode"
+        case .hatch:     return "Hatch"
         // Append a title arm per new case.
         }
     }
@@ -123,6 +139,11 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .extend:    return ExtendTool()
         case .fillet:    return FilletTool()
         case .chamfer:   return ChamferTool()
+        case .spline:    return SplineTool()
+        case .array:     return ArrayTool()
+        case .divide:    return DivideTool()
+        case .explode:   return ExplodeTool()
+        case .hatch:     return HatchTool()
         // Append a `case <kind>: return <Name>Tool()` arm per new tool.
         }
     }
