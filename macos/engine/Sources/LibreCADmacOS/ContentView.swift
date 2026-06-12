@@ -121,9 +121,11 @@ struct ContentView: View {
         CADCanvasView(model: model, controllerBox: controllerBox)
             .ignoresSafeArea()
             .frame(minWidth: 480, minHeight: 320)
+            // U3 replaces the transient corner HUD chips (coordinateHUD /
+            // toolPromptHUD) with the persistent bottom status bar; the small
+            // top-leading file-status chip stays (it is the load/export status, not a
+            // coordinate/tool readout).
             .overlay(alignment: .topLeading) { statusHUD }
-            .overlay(alignment: .top) { toolPromptHUD }
-            .overlay(alignment: .bottomLeading) { coordinateHUD }
             // U2: the contextual tool-options bar, pinned directly under the toolbar
             // and above the canvas. It shows ONLY the active tool's parameters (and
             // collapses to nothing for tools without options), two-way bound to the
@@ -132,11 +134,19 @@ struct ContentView: View {
             .safeAreaInset(edge: .top, spacing: 0) {
                 ToolOptionsBar(model: model, controllerBox: controllerBox)
             }
-            // U1: a persistent command / coordinate input line pinned to the bottom
-            // of the window, below the canvas. Always present (D1); focusing it routes
-            // typed keystrokes to it (not tool activation); Return parses + feeds the
-            // active tool a `.value(point)`; Esc returns focus to the canvas.
-            .safeAreaInset(edge: .bottom, spacing: 0) { commandBar }
+            // U3 + U1 bottom chrome, stacked so the persistent STATUS BAR sits just
+            // ABOVE the command/coordinate line (both pinned to the bottom, below the
+            // canvas). One inset VStack keeps their order deterministic: status bar
+            // (read-only telemetry) on top, command line (focusable input) at the very
+            // bottom. The command line stays exactly as U1 built it — focus on Space,
+            // Return parses → `.value(point)`, Esc returns focus to the canvas — and
+            // the status bar never takes focus, so the two coexist cleanly.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(spacing: 0) {
+                    StatusBar(model: model)
+                    commandBar
+                }
+            }
             // Trailing Inspector: the selected entity's editable properties, plus
             // snap/grid controls and the active tool's options. Bound to the SAME
             // live model the canvas + layers sidebar use, so edits reflect live and
@@ -374,6 +384,9 @@ struct ContentView: View {
 
     // MARK: - HUD
 
+    /// The small top-leading file/operation status chip (load count, export result).
+    /// This is NOT a coordinate/tool readout (those moved to the persistent status
+    /// bar in U3) — it surfaces document-level status messages, so it stays.
     private var statusHUD: some View {
         Text(status)
             .font(.caption.monospaced())
@@ -385,46 +398,6 @@ struct ContentView: View {
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
             .padding(8)
             .opacity(status.isEmpty ? 0 : 1)
-    }
-
-    /// The active tool's prompt ("Specify first point" / "Specify next point"),
-    /// shown centered at the top while a draw tool is active.
-    @ViewBuilder
-    private var toolPromptHUD: some View {
-        if model.isToolActive, !model.toolStatus.isEmpty {
-            Text("\(model.activeToolKind.title): \(model.toolStatus)")
-                .font(.callout.monospaced())
-                .foregroundStyle(.primary)
-                .padding(.horizontal, 10).padding(.vertical, 5)
-                .background(.tint.opacity(0.30), in: Capsule())
-                .padding(8)
-        }
-    }
-
-    @ViewBuilder
-    private var coordinateHUD: some View {
-        if let w = model.cursorWorld {
-            let snapLabel = model.snap.map { " · \(label(for: $0.kind))" } ?? ""
-            Text(String(format: "x %.3f   y %.3f%@", w.x, w.y, snapLabel))
-                .font(.caption.monospaced())
-                .foregroundStyle(.primary)
-                // Adaptive chip (see statusHUD): a system material so the coordinate
-                // readout stays legible over both the light and dark canvas.
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
-                .padding(8)
-        }
-    }
-
-    private func label(for kind: SnapKind) -> String {
-        switch kind {
-        case .endpoint: return "end"
-        case .center: return "center"
-        case .middle: return "mid"
-        case .onEntity: return "on"
-        case .intersection: return "intersect"
-        case .grid: return "grid"
-        case .free: return "free"
-        }
     }
 
     // MARK: - Command / coordinate input line (U1)

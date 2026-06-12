@@ -47,6 +47,24 @@ final class FlippedMTKView: MTKView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    /// The cursor to show over the canvas while a tool is active (the CAD crosshair),
+    /// or `nil` for the default arrow (select mode). Set by the controller's
+    /// `refreshCrosshair`; consumed by `resetCursorRects`. Driving the system cursor
+    /// through the cursor-rect machinery (vs `NSCursor.set()`) keeps it correct across
+    /// window activation, tracking, and resize — AppKit re-applies it automatically.
+    var toolCursor: NSCursor?
+
+    /// Installs `toolCursor` (if any) over the whole canvas, so the pointer becomes a
+    /// CAD crosshair while a tool is active and reverts to the arrow in select mode.
+    /// `invalidateCursorRects(for:)` (called by the controller on a mode change) makes
+    /// AppKit re-run this.
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if let cursor = toolCursor {
+            addCursorRect(bounds, cursor: cursor)
+        }
+    }
+
     /// Re-apply the adaptive canvas chrome whenever the effective appearance flips
     /// (System Settings ▸ Appearance light↔dark, or a per-window override). This
     /// swaps the Metal clear color and the `OverlayStyle` grid/axis/accent colors,
@@ -201,9 +219,25 @@ final class CADCanvasController {
     /// keeps it sized + refreshed as the view/selection/tool change.
     private(set) var gizmo: GizmoOverlayView?
 
+    /// The full-canvas CAD crosshair overlay (UX-plan U3, a subview of the MTKView).
+    /// Created in `attach`, shown only while a drawing/edit tool is active
+    /// (`model.crosshairVisible`), and refreshed on every cursor move. It is always
+    /// click-through (`hitTest` returns nil), so it never affects select/draw/pan.
+    private(set) var crosshair: CrosshairOverlayView?
+
     func attach(view: FlippedMTKView, renderer: LineRenderer) {
         self.view = view
         self.renderer = renderer
+
+        // Float the CAD crosshair UNDER the gizmo (added first). It is fully
+        // click-through, so ordering only matters for paint layering — keeping it
+        // below the gizmo means the gizmo handles paint over the crosshair lines.
+        let crosshairView = CrosshairOverlayView(model: model)
+        crosshairView.frame = view.bounds
+        crosshairView.autoresizingMask = [.width, .height]
+        crosshairView.isHidden = !model.crosshairVisible
+        view.addSubview(crosshairView)
+        crosshair = crosshairView
 
         // Float the transform gizmo over the canvas. It is transparent to clicks
         // that are NOT on a handle (its `hitTest` returns nil there), so normal
@@ -215,6 +249,27 @@ final class CADCanvasController {
         view.addSubview(gizmoView)
         gizmo = gizmoView
         refreshGizmo()
+        refreshCrosshair()
+    }
+
+    /// Shows/hides + repaints the CAD crosshair overlay to match the current mode:
+    /// visible while a drawing/edit tool is active (`model.crosshairVisible`), hidden
+    /// in select mode. Also swaps the system cursor over the canvas — the tighter
+    /// `.crosshair` arrow while a tool is active (so the pointer reinforces the mode,
+    /// HIG: "make the current mode obvious"), the normal arrow in select mode, via
+    /// the view's cursor-rect machinery. Called after any tool change and on every
+    /// cursor move.
+    func refreshCrosshair() {
+        guard let crosshair else { return }
+        let show = model.crosshairVisible
+        crosshair.isHidden = !show
+        if show { crosshair.refresh() }
+        // Drive the system cursor over the canvas through the cursor-rect machinery:
+        // set the desired cursor on the view + invalidate so `resetCursorRects` runs.
+        if let v = view {
+            v.toolCursor = show ? .crosshair : nil
+            v.window?.invalidateCursorRects(for: v)
+        }
     }
 
     /// Recomputes the gizmo handle positions and toggles its visibility: shown only
@@ -242,6 +297,9 @@ final class CADCanvasController {
         // selection bounds are unchanged until commit) but we skip it to avoid any
         // churn while the user is actively dragging a handle.
         if let gizmo, !gizmo.isDragging { refreshGizmo() }
+        // Keep the crosshair glued to the (snapped) cursor across pan/zoom repaints
+        // (its center is `worldToScreen(cursor)`, which moves when the viewport does).
+        if let crosshair, !crosshair.isHidden { crosshair.refresh() }
         view?.setNeedsDisplay(view?.bounds ?? .zero)
     }
 
@@ -342,6 +400,8 @@ final class CADCanvasController {
             let p = model.snappedWorldPoint(atScreenPoint: point, gridSpacing: spacing)
             model.handleToolInput(.move(p))
         }
+        // Keep the CAD crosshair glued to the (snapped) cursor on every move.
+        refreshCrosshair()
         // Redraw the coordinate HUD + snap marker (and tool preview) on every move
         // (overlay-only; the model instance buffer is untouched — §5).
         redraw()
@@ -349,6 +409,9 @@ final class CADCanvasController {
 
     func mouseExited() {
         model.clearCursor()
+        // The cursor left the canvas — repaint so the crosshair (which keys off
+        // `cursorWorld`) clears.
+        refreshCrosshair()
         redraw()
     }
 
@@ -533,6 +596,8 @@ final class CADCanvasController {
     func activateTool(_ kind: ToolKind) {
         teardownEditor(commit: false)
         model.activateTool(kind)
+        // The mode changed → show/hide the crosshair + swap the system cursor.
+        refreshCrosshair()
         redraw()
     }
 
@@ -586,6 +651,8 @@ final class CADCanvasController {
             // Cancel any in-progress run, then drop to select mode.
             if model.isToolActive { model.handleToolInput(.cancel) }
             model.activateTool(.select)
+            // Dropping to select mode hides the crosshair + restores the arrow.
+            refreshCrosshair()
             redraw()
             return true
         }

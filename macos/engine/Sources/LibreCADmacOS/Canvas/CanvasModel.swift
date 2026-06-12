@@ -528,6 +528,90 @@ final class CanvasModel {
         }
     }
 
+    // MARK: - Status bar readouts (UX-plan U3) — derived, formatted via the engine
+
+    /// The drawing's display unit (`$INSUNITS`), for the status bar's unit suffix.
+    var drawingUnit: DrawingUnit { drawing.graphicVariables.unit }
+
+    /// The cursor's world position formatted as a unit-aware `"X 12.5   Y 8 mm"`
+    /// readout (the document's linear format/precision + unit sign), or `nil` when
+    /// the cursor is outside the canvas. Pure formatting via the engine's
+    /// `CoordinateFormatter` so the status bar stays a thin view.
+    var cursorReadout: String? {
+        guard let w = cursorWorld else { return nil }
+        let gv = drawing.graphicVariables
+        return CoordinateFormatter.coordinatePair(
+            x: w.x, y: w.y,
+            format: gv.linearFormat, precision: gv.linearPrecision, unit: gv.unit)
+    }
+
+    /// The signed `@Δx, Δy` offset of the cursor FROM the relative-zero (the last
+    /// placed point), formatted with the document's linear format/precision, or `nil`
+    /// when there is no relative-zero yet OR the cursor is outside. Lets the status
+    /// bar show the relative coordinate while drawing (LibreCAD's relative readout).
+    var relativeReadout: String? {
+        guard let zero = relativeZero, let w = cursorWorld else { return nil }
+        let gv = drawing.graphicVariables
+        let dx = CoordinateFormatter.length(w.x - zero.x, format: gv.linearFormat, precision: gv.linearPrecision)
+        let dy = CoordinateFormatter.length(w.y - zero.y, format: gv.linearFormat, precision: gv.linearPrecision)
+        return "@\(dx), \(dy)"
+    }
+
+    /// The distance + bearing of the cursor FROM the relative-zero — the live
+    /// "rubber-band" measurement while drawing (e.g. `"⟂ 14.14  ∠ 45°"`). `nil` when
+    /// there is no relative-zero, the cursor is outside, or the two are coincident.
+    /// Distance uses the document's linear format/precision + unit sign; the angle is
+    /// shown in whole degrees (CCW from +X) for a compact, always-legible readout.
+    var distanceAngleReadout: String? {
+        guard let zero = relativeZero, let w = cursorWorld else { return nil }
+        let d = w.distance(to: zero)
+        guard d > 1e-9 else { return nil }
+        let gv = drawing.graphicVariables
+        let distStr = CoordinateFormatter.length(
+            d, format: gv.linearFormat, precision: gv.linearPrecision, unit: gv.unit)
+        let deg = (w - zero).angle * 180 / .pi
+        let degStr = String(format: "%.0f", deg)
+        return "\u{27C2} \(distStr)   \u{2220} \(degStr)\u{00B0}"
+    }
+
+    /// The current snap mode's short label for the status bar's snap readout (e.g.
+    /// "Endpoint" / "Grid"), or "—" when nothing is snapped. Distinct, capitalized
+    /// names (vs the terse `coordinateHUD` chip) since the status bar has room.
+    var snapReadout: String {
+        guard let kind = snap?.kind else { return "\u{2014}" }
+        switch kind {
+        case .endpoint:     return "Endpoint"
+        case .center:       return "Center"
+        case .middle:       return "Midpoint"
+        case .onEntity:     return "On entity"
+        case .intersection: return "Intersection"
+        case .grid:         return "Grid"
+        case .free:         return "Free"
+        }
+    }
+
+    /// The current zoom as a percentage of 1:1 (1 world unit == 1 point), rounded to
+    /// a whole percent — the status bar's zoom readout.
+    var zoomPercent: Int { Int((viewport.scale * 100).rounded()) }
+
+    /// The active tool + step prompt for the status bar's left segment, plus the
+    /// always-on verb hints (Return / ⌫ / Esc) so the keyboard verbs (G4) are
+    /// discoverable. Empty `toolStatus` ⇒ just the tool title; select mode ⇒ a
+    /// neutral "Select" prompt so the bar is never blank.
+    var toolStepReadout: String {
+        guard isToolActive else { return "Select \u{2014} click to select, drag to pan" }
+        let prompt = toolStatus.isEmpty ? "" : ": \(toolStatus)"
+        return "\(activeToolKind.title)\(prompt)"
+    }
+
+    // MARK: - Crosshair cursor (UX-plan U3, gap G3)
+
+    /// Whether the full-canvas crosshair cursor is drawn. ON whenever a draw/edit
+    /// tool is active (the mode is then unmistakable — G3); the canvas reads this to
+    /// show/hide the AppKit crosshair overlay and to hide the system arrow. A future
+    /// "always show crosshair" setting can OR into this without touching call sites.
+    var crosshairVisible: Bool { isToolActive }
+
     // MARK: - Command / coordinate line (UX-plan U1)
 
     /// A short hint of the input the active tool's current step expects, for the
