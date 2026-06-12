@@ -49,6 +49,10 @@ struct ContentView: View {
     /// editing surface is discoverable on launch.
     @State private var showInspector = true
 
+    /// Whether the ⌘K command palette overlay is presented. Toggled by the
+    /// View ▸ Command Palette… menu item (⌘K) via a focused scene value.
+    @State private var showPalette = false
+
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             // Leading pane: the modern Layers (+ Blocks stub) sidebar, bound to
@@ -83,6 +87,15 @@ struct ContentView: View {
             }
             .toolbar { toolbarContent }
             .toolbar { inspectorToolbarContent }
+            // The ⌘K command palette: a fuzzy-searchable overlay over the canvas
+            // that can run any tool or app action. Built from the SAME closures the
+            // menus/toolbar use, so a palette pick is identical to the real action.
+            // Bundled into ONE modifier (overlay + ⌘K focused value) so the long
+            // `canvasDetail` modifier chain stays type-checkable.
+            .modifier(CommandPaletteModifier(
+                isPresented: $showPalette,
+                commands: paletteCommands
+            ))
             .focusedSceneValue(\.zoomToFit) { controllerBox.controller?.zoomToFit() }
             .focusedSceneValue(\.openDocument) { showOpen = true }
             // Save (⌘S): write in place if we have a current file, else Save As…
@@ -229,6 +242,29 @@ struct ContentView: View {
         if model.activeToolKind == kind {
             RoundedRectangle(cornerRadius: 6).fill(.tint.opacity(0.25))
         }
+    }
+
+    // MARK: - Command palette registry
+
+    /// The full ⌘K command list. Tool entries call the controller's `activateTool`
+    /// (the same call the toolbar button makes); app actions fire the exact same
+    /// closures the menu items fire — so running a command from the palette is
+    /// indistinguishable from using the menu/toolbar. The matcher/ranking is the
+    /// pure `CommandMatcher` in CADEngine.
+    private var paletteCommands: [PaletteCommand] {
+        CommandRegistry.commands(.init(
+            activateTool: { kind in controllerBox.controller?.activateTool(kind) },
+            open: { showOpen = true },
+            save: { Task { await save() } },
+            saveAs: { Task { await saveAs() } },
+            export: { format in Task { await exportDrawing(format) } },
+            print: { printDrawing() },
+            zoomToFit: { controllerBox.controller?.zoomToFit() },
+            undo: { model.undo() },
+            redo: { model.redo() },
+            toggleInspector: { showInspector.toggle() },
+            toggleGrid: { model.gridVisible.toggle(); controllerBox.controller?.requestRedraw() }
+        ))
     }
 
     // MARK: - HUD
@@ -489,6 +525,12 @@ private struct NavigationDocumentIfAny: ViewModifier {
 /// actions, so menu/keyboard commands (⌘0 / ⌘O) can drive the focused window
 /// without a global singleton (LibreCADApp reads them in its `.commands`).
 extension FocusedValues {
+    /// Raise the ⌘K command palette on the focused window (View ▸ Command Palette…).
+    var commandPalette: (() -> Void)? {
+        get { self[CommandPaletteKey.self] }
+        set { self[CommandPaletteKey.self] = newValue }
+    }
+
     var zoomToFit: (() -> Void)? {
         get { self[ZoomToFitKey.self] }
         set { self[ZoomToFitKey.self] = newValue }
@@ -551,6 +593,10 @@ extension FocusedValues {
         get { self[IsToolActiveKey.self] }
         set { self[IsToolActiveKey.self] = newValue }
     }
+}
+
+private struct CommandPaletteKey: FocusedValueKey {
+    typealias Value = () -> Void
 }
 
 private struct ZoomToFitKey: FocusedValueKey {

@@ -28,6 +28,8 @@ import CADEngine
 
 @main
 struct LibreCADApp: App {
+    /// The "open command palette" (⌘K) action published by the focused window.
+    @FocusedValue(\.commandPalette) private var commandPalette
     /// The Zoom-to-Fit action published by the focused window.
     @FocusedValue(\.zoomToFit) private var zoomToFit
     /// The Open action published by the focused window (drives its .fileImporter).
@@ -120,6 +122,10 @@ struct LibreCADApp: App {
                     .disabled(deleteSelection == nil || (isToolActive ?? false))
             }
             CommandGroup(after: .toolbar) {
+                // ⌘K — the command palette: fuzzy-find and run any tool/app action.
+                Button("Command Palette…") { commandPalette?() }
+                    .keyboardShortcut("k", modifiers: .command)
+                    .disabled(commandPalette == nil)
                 Button("Zoom to Fit") { zoomToFit?() }
                     .keyboardShortcut("0", modifiers: .command)
                     .disabled(zoomToFit == nil)
