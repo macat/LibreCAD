@@ -27,8 +27,11 @@
 #include <vector>
 
 #include "libdxfrw.h"
+#include "libdwgr.h"       // dwgRW: the DWG (binary AutoCAD) read/write path
 #include "drw_interface.h"
 #include "drw_objects.h"   // DRW::dxfColors[][3]
+
+#include <map>             // DWG block name -> block_record handle (INSERT resolve)
 
 /**
  * The owned result handle. Holds the flat POD arrays handed to Swift plus the
@@ -813,6 +816,8 @@ private:
  */
 class WritingInterface final : public DRW_Interface {
 public:
+    // DXF mode: drive the DXF writer (`dxfRW`). `m_dwg` stays null, so every
+    // per-entity emit and the table callbacks route to `m_dxf`.
     WritingInterface(dxfRW *dxf,
                      const LCEntity *entities, int entityCount,
                      const LCLayer *layers, int layerCount,
@@ -825,7 +830,46 @@ public:
           m_blockEntities(blockEntities),
           m_blockEntityCount(blockEntityCount < 0 ? 0 : blockEntityCount) {}
 
+    // DWG mode: drive the DWG writer (`dwgRW`). The SAME per-kind geometry
+    // mapping runs; the only differences are routed through the `emit*` helpers
+    // and the table/block callbacks below: dwgWriter15 emits the standard
+    // R2000 tables internally (so writeLayers/LTypes/Textstyles are no-ops),
+    // and user blocks are declared via `defineBlock` (empty, no member geometry).
+    WritingInterface(dwgRW *dwg,
+                     const LCEntity *entities, int entityCount,
+                     const LCLayer *layers, int layerCount,
+                     const LCBlock *blocks, int blockCount,
+                     const LCEntity *blockEntities, int blockEntityCount)
+        : m_dwg(dwg),
+          m_entities(entities), m_entityCount(entityCount < 0 ? 0 : entityCount),
+          m_layers(layers), m_layerCount(layerCount < 0 ? 0 : layerCount),
+          m_blocks(blocks), m_blockCount(blockCount < 0 ? 0 : blockCount),
+          m_blockEntities(blockEntities),
+          m_blockEntityCount(blockEntityCount < 0 ? 0 : blockEntityCount) {}
+
     int skipped() const { return m_skipped; }
+
+    // ----- per-entity emit dispatch (DXF vs DWG) ---------------------------
+    // dxfRW and dwgRW expose identical per-entity write signatures but share no
+    // base class, so route through these thin helpers: drive whichever writer is
+    // set. Exactly one of m_dxf / m_dwg is non-null (set by the ctor used).
+    DRW::Version writerVersion() const {
+        // DWG write is always R2000 (AC1015); the DXF writer carries its own.
+        return m_dwg ? DRW::AC1015 : m_dxf->getVersion();
+    }
+    void emitPoint(DRW_Point *e)        { if (m_dwg) m_dwg->writePoint(e);     else m_dxf->writePoint(e); }
+    void emitLine(DRW_Line *e)          { if (m_dwg) m_dwg->writeLine(e);      else m_dxf->writeLine(e); }
+    void emitCircle(DRW_Circle *e)      { if (m_dwg) m_dwg->writeCircle(e);    else m_dxf->writeCircle(e); }
+    void emitArc(DRW_Arc *e)            { if (m_dwg) m_dwg->writeArc(e);       else m_dxf->writeArc(e); }
+    void emitEllipse(DRW_Ellipse *e)    { if (m_dwg) m_dwg->writeEllipse(e);   else m_dxf->writeEllipse(e); }
+    void emitLWPolyline(DRW_LWPolyline *e) { if (m_dwg) m_dwg->writeLWPolyline(e); else m_dxf->writeLWPolyline(e); }
+    void emitSpline(DRW_Spline *e)      { if (m_dwg) m_dwg->writeSpline(e);    else m_dxf->writeSpline(e); }
+    void emitText(DRW_Text *e)          { if (m_dwg) m_dwg->writeText(e);      else m_dxf->writeText(e); }
+    void emitMText(DRW_MText *e)        { if (m_dwg) m_dwg->writeMText(e);     else m_dxf->writeMText(e); }
+    void emitSolid(DRW_Solid *e)        { if (m_dwg) m_dwg->writeSolid(e);     else m_dxf->writeSolid(e); }
+    void emitHatch(DRW_Hatch *e)        { if (m_dwg) m_dwg->writeHatch(e);     else m_dxf->writeHatch(e); }
+    void emitDimension(DRW_Dimension *e){ if (m_dwg) m_dwg->writeDimension(e); else m_dxf->writeDimension(e); }
+    void emitInsert(DRW_Insert *e)      { if (m_dwg) m_dwg->writeInsert(e);    else m_dxf->writeInsert(e); }
 
     // ----- attribute mapping (inverse of FlatteningReader::fillCommon) -----
     void fillCommon(DRW_Entity &ent, const LCEntity &src) {
@@ -840,6 +884,10 @@ public:
 
     // ----- the table/entity callbacks libdxfrw drives during write() -------
     void writeLayers() override {
+        // DWG: dwgWriter15 emits the standard R2000 LAYER table internally (the
+        // fixed-handle layer "0"); it has no public per-layer write path, so the
+        // caller's layer table is not authored beyond "0". No-op in DWG mode.
+        if (m_dwg) return;
         bool wroteLayer0 = false;
         for (int i = 0; i < m_layerCount; ++i) {
             const LCLayer &l = m_layers[i];
@@ -871,7 +919,10 @@ public:
 
     // libdxfrw drives this once; emit the minimal standard linetypes LibreCAD
     // also writes so referencing CONTINUOUS/BYLAYER/BYBLOCK names resolve.
+    // DWG: dwgWriter15 emits the standard LTYPE table (BYBLOCK/BYLAYER/
+    // CONTINUOUS) internally — no-op here.
     void writeLTypes() override {
+        if (m_dwg) return;
         writeStdLType("CONTINUOUS", "Solid line");
         writeStdLType("ByLayer", "");
         writeStdLType("ByBlock", "");
@@ -879,7 +930,9 @@ public:
 
     void writeTextstyles() override {
         // A single "Standard" text style keeps R2000 readers happy even though
-        // we emit no TEXT entities yet.
+        // we emit no TEXT entities yet. DWG: dwgWriter15 emits the standard
+        // STANDARD text style internally — no-op here.
+        if (m_dwg) return;
         DRW_Textstyle ts;
         ts.name = "Standard";
         m_dxf->writeTextstyle(&ts);
@@ -895,6 +948,9 @@ public:
     // block, with the block's member entities between BLOCK and the auto-emitted
     // ENDBLK (dxfRW closes the previous block on the next writeBlock / at the end).
     void writeBlockRecords() override {
+        // DWG: there is no separate block-record write step — `defineBlock`
+        // (called from writeBlocks) allocates the block_record itself. No-op.
+        if (m_dwg) return;
         for (int i = 0; i < m_blockCount; ++i) {
             const std::string name = blockName(m_blocks[i]);
             if (name.empty()) continue;
@@ -903,6 +959,22 @@ public:
     }
 
     void writeBlocks() override {
+        // DWG: declare each user block via `defineBlock`, capturing the returned
+        // block_record handle so a later INSERT can set `blockRecH.ref` to resolve
+        // the block name on re-read. dwgWriter15's defineBlock makes an EMPTY
+        // block (no member-geometry path yet), so the block's member entities are
+        // NOT written for DWG — the INSERT references an empty block. (DXF writes
+        // the members; this is the documented DWG round-trip gap.)
+        if (m_dwg) {
+            for (int i = 0; i < m_blockCount; ++i) {
+                const LCBlock &blk = m_blocks[i];
+                const std::string name = blockName(blk);
+                if (name.empty()) continue;
+                const duint32 h = m_dwg->defineBlock(name, DRW_Coord{blk.bx, blk.by, blk.bz});
+                if (h != 0) m_dwgBlockHandles[name] = h;
+            }
+            return;
+        }
         for (int i = 0; i < m_blockCount; ++i) {
             const LCBlock &blk = m_blocks[i];
             const std::string name = blockName(blk);
@@ -974,7 +1046,10 @@ public:
     void addPlotSettings(const DRW_PlotSettings *data) override { (void)data; }
 
 private:
-    dxfRW *m_dxf;
+    // Exactly one of these is set (by the matching ctor): DXF -> m_dxf, DWG ->
+    // m_dwg. The emit*/table callbacks branch on whether m_dwg is non-null.
+    dxfRW *m_dxf = nullptr;
+    dwgRW *m_dwg = nullptr;
     const LCEntity *m_entities;
     int m_entityCount;
     const LCLayer *m_layers;
@@ -984,6 +1059,10 @@ private:
     const LCEntity *m_blockEntities;
     int m_blockEntityCount;
     int m_skipped = 0;
+
+    // DWG-only: block name -> block_record handle from `dwgRW::defineBlock`, so a
+    // later INSERT sets `blockRecH.ref` to resolve the block name on re-read.
+    std::map<std::string, duint32> m_dwgBlockHandles;
 
     // The block's name, or "" if unnamed/null (such a block is skipped).
     static std::string blockName(const LCBlock &b) {
@@ -1041,14 +1120,22 @@ private:
         ins.rowcount = e.insRows > 0 ? e.insRows : 1;
         ins.colspace = e.insColSpacing;
         ins.rowspace = e.insRowSpacing;
-        m_dxf->writeInsert(&ins);
+        // DWG: resolve the block name to the block_record handle captured in
+        // writeBlocks (defineBlock). dwgWriter15 encodes INSERT by `blockRecH.ref`,
+        // not by name; without this the INSERT can't reference its block on re-read.
+        if (m_dwg) {
+            auto it = m_dwgBlockHandles.find(ins.name);
+            if (it == m_dwgBlockHandles.end()) { ++m_skipped; return; }
+            ins.blockRecH.ref = it->second;
+        }
+        emitInsert(&ins);
     }
 
     void writePoint(const LCEntity &e) {
         DRW_Point p;
         fillCommon(p, e);
         p.basePoint.x = e.p1x; p.basePoint.y = e.p1y; p.basePoint.z = e.p1z;
-        m_dxf->writePoint(&p);
+        emitPoint(&p);
     }
 
     void writeLine(const LCEntity &e) {
@@ -1056,7 +1143,7 @@ private:
         fillCommon(l, e);
         l.basePoint.x = e.p1x; l.basePoint.y = e.p1y; l.basePoint.z = e.p1z;
         l.secPoint.x  = e.p2x; l.secPoint.y  = e.p2y; l.secPoint.z  = e.p2z;
-        m_dxf->writeLine(&l);
+        emitLine(&l);
     }
 
     void writeCircle(const LCEntity &e) {
@@ -1064,7 +1151,7 @@ private:
         fillCommon(c, e);
         c.basePoint.x = e.cx; c.basePoint.y = e.cy; c.basePoint.z = e.cz;
         c.radious = e.radius;
-        m_dxf->writeCircle(&c);
+        emitCircle(&c);
     }
 
     void writeArc(const LCEntity &e) {
@@ -1074,7 +1161,7 @@ private:
         a.radious  = e.radius;
         a.staangle = e.startAngle;   // POD already carries CCW start/end
         a.endangle = e.endAngle;
-        m_dxf->writeArc(&a);
+        emitArc(&a);
     }
 
     void writeEllipse(const LCEntity &e) {
@@ -1085,7 +1172,7 @@ private:
         el.ratio    = e.ratio;
         el.staparam = e.startAngle;
         el.endparam = e.endAngle;
-        m_dxf->writeEllipse(&el);
+        emitEllipse(&el);
     }
 
     void writeLWPolyline(const LCEntity &e) {
@@ -1099,7 +1186,7 @@ private:
             }
         }
         pol.vertexnum = static_cast<int>(pol.vertlist.size());
-        m_dxf->writeLWPolyline(&pol);
+        emitLWPolyline(&pol);
     }
 
     // ----- SPLINE --------------------------------------------------------
@@ -1114,7 +1201,7 @@ private:
     // writeSpline is a no-op, so the entity is dropped — count it as skipped so
     // the written/skipped tally stays honest (matches MTEXT/HATCH/DIMENSION).
     void writeSpline(const LCEntity &e) {
-        if (m_dxf->getVersion() <= DRW::AC1009) {
+        if (writerVersion() <= DRW::AC1009) {
             ++m_skipped;
             return;
         }
@@ -1166,7 +1253,7 @@ private:
         }
         sp.nfit = static_cast<dint32>(sp.fitlist.size());
 
-        m_dxf->writeSpline(&sp);
+        emitSpline(&sp);
     }
 
     // ----- TEXT ----------------------------------------------------------
@@ -1190,7 +1277,7 @@ private:
         t.style  = (e.styleName && e.styleName[0]) ? std::string(e.styleName) : std::string("STANDARD");
         t.alignH = static_cast<DRW_Text::HAlign>(e.hAlign);
         t.alignV = static_cast<DRW_Text::VAlign>(e.vAlign);
-        m_dxf->writeText(&t);
+        emitText(&t);
     }
 
     // ----- MTEXT ---------------------------------------------------------
@@ -1206,7 +1293,7 @@ private:
     // MTEXT), so at that version the entity is dropped; count it as skipped so
     // the caller's written/skipped tally is honest (matches the HATCH/R12 note).
     void writeMText(const LCEntity &e) {
-        if (m_dxf->getVersion() <= DRW::AC1009) {
+        if (writerVersion() <= DRW::AC1009) {
             ++m_skipped;
             return;
         }
@@ -1228,7 +1315,7 @@ private:
                        ? static_cast<DRW_Text::VAlign>(2)
                        : static_cast<DRW_Text::VAlign>(1);
         t.interlin = (e.mtextLineSpacingFactor > 0) ? e.mtextLineSpacingFactor : 1.0;
-        m_dxf->writeMText(&t);
+        emitMText(&t);
     }
 
     // ----- SOLID ---------------------------------------------------------
@@ -1260,7 +1347,7 @@ private:
             s.thirdPoint.x = r2.x; s.thirdPoint.y = r2.y; s.thirdPoint.z = 0.0;
             s.fourPoint.x  = r2.x; s.fourPoint.y  = r2.y; s.fourPoint.z  = 0.0;
         }
-        m_dxf->writeSolid(&s);
+        emitSolid(&s);
     }
 
     // ----- HATCH ---------------------------------------------------------
@@ -1305,7 +1392,7 @@ private:
             }
         }
         h.loopsnum = static_cast<int>(h.looplist.size());
-        m_dxf->writeHatch(&h);
+        emitHatch(&h);
     }
 
     // ----- DIMENSION -----------------------------------------------------
@@ -1322,7 +1409,7 @@ private:
     // only exists for R2000+; at R12 dxfRW::writeDimension is a no-op, so the
     // entity is dropped — count it as skipped so the tally stays honest.
     void writeDimension(const LCEntity &e) {
-        if (m_dxf->getVersion() <= DRW::AC1009) {
+        if (writerVersion() <= DRW::AC1009) {
             ++m_skipped;
             return;
         }
@@ -1356,14 +1443,14 @@ private:
             d.setDef2Point(def2);
             d.setAngle(e.dimAngle * 180.0 / M_PI);     // radians -> DXF degrees
             d.setOblique(e.dimOblique * 180.0 / M_PI);
-            m_dxf->writeDimension(&d);
+            emitDimension(&d);
             break; }
         case LC_DIM_ALIGNED: {
             base.type = 1;                       // aligned
             DRW_DimAligned d(base);
             d.setDef1Point(def1);
             d.setDef2Point(def2);
-            m_dxf->writeDimension(&d);
+            emitDimension(&d);
             break; }
         case LC_DIM_ANGULAR: {
             base.type = 2;                       // 2-line angular
@@ -1373,21 +1460,21 @@ private:
             d.setSecondLine1(def5);
             // secondLine2 == defPoint (code 10), already set on base.
             d.setDimPoint(arc);                  // code 16: arc-through point
-            m_dxf->writeDimension(&d);
+            emitDimension(&d);
             break; }
         case LC_DIM_DIAMETRIC: {
             base.type = 3;                       // diametric
             DRW_DimDiametric d(base);
             d.setDiameter1Point(def5);           // code 15
             // diameter2Point == defPoint (code 10), already set on base.
-            m_dxf->writeDimension(&d);
+            emitDimension(&d);
             break; }
         case LC_DIM_RADIAL: {
             base.type = 4;                       // radial
             DRW_DimRadial d(base);
             // centerPoint == defPoint (code 10), already set on base.
             d.setDiameterPoint(def5);            // code 15: radius point
-            m_dxf->writeDimension(&d);
+            emitDimension(&d);
             break; }
         default:
             ++m_skipped;
@@ -1435,6 +1522,31 @@ extern "C" LCStatus lc_dxf_read(const char *path, LCEntityList **out) {
         // Flatten the collected block definitions + their members into the list's
         // contiguous arrays (after parsing, so interned block-name pointers stay
         // valid and member windows are correct).
+        reader.finalizeBlocks();
+        *out = list;
+        return LC_OK;
+    } catch (...) {
+        return LC_ERR_READ_FAILED;
+    }
+}
+
+extern "C" LCStatus lc_dwg_read(const char *path, LCEntityList **out) {
+    if (path == nullptr || path[0] == '\0' || out == nullptr) {
+        return LC_ERR_INVALID_PATH;
+    }
+    // Identical to lc_dxf_read except the parser: DWG is binary, so libdxfrw
+    // routes it through `dwgRW` instead of `dxfRW`. The SAME FlatteningReader
+    // (DRW_Interface subclass) flattens every entity/layer/block into the same
+    // POD model — the read path downstream of this call is byte-for-byte shared.
+    try {
+        auto *list = new LCEntityList();
+        FlatteningReader reader(list);
+        dwgRW dwg(path);
+        const bool ok = dwg.read(&reader, /*ext=*/false);
+        if (!ok) {
+            delete list;
+            return LC_ERR_READ_FAILED;
+        }
         reader.finalizeBlocks();
         *out = list;
         return LC_OK;
@@ -1542,6 +1654,47 @@ extern "C" LCStatus lc_dxf_write(const char *path,
                                blocks, blockCount, blockEntities, blockEntityCount);
         // bin=false -> ASCII DXF (matches the reader and rs_filterdxfrw).
         const bool ok = dxf.write(&iface, toDrwVersion(version), /*bin=*/false);
+        if (!ok) {
+            return LC_ERR_WRITE_FAILED;
+        }
+        if (out_skipped != nullptr) {
+            *out_skipped = iface.skipped();
+        }
+        return LC_OK;
+    } catch (...) {
+        return LC_ERR_WRITE_FAILED;
+    }
+}
+
+extern "C" LCStatus lc_dwg_write(const char *path,
+                                 const LCEntity *entities, int entityCount,
+                                 const LCLayer *layers, int layerCount,
+                                 const LCBlock *blocks, int blockCount,
+                                 const LCEntity *blockEntities, int blockEntityCount,
+                                 int version,
+                                 int *out_skipped) {
+    (void)version;   // DWG write is R2000-only; the arg is accepted for ABI symmetry.
+    if (out_skipped != nullptr) {
+        *out_skipped = 0;
+    }
+    if (path == nullptr || path[0] == '\0') {
+        return LC_ERR_INVALID_PATH;
+    }
+    if ((entityCount > 0 && entities == nullptr) ||
+        (layerCount  > 0 && layers   == nullptr) ||
+        (blockCount  > 0 && blocks   == nullptr) ||
+        (blockEntityCount > 0 && blockEntities == nullptr)) {
+        return LC_ERR_INVALID_PATH;
+    }
+    // The DWG counterpart of lc_dxf_write: same PODs, same WritingInterface, but
+    // driven through dwgRW (its dwgWriter15) at the only version it supports,
+    // R2000 (AC1015). try/catch keeps any exception from crossing the C boundary.
+    try {
+        dwgRW dwg(path);
+        WritingInterface iface(&dwg, entities, entityCount, layers, layerCount,
+                               blocks, blockCount, blockEntities, blockEntityCount);
+        // bin is ignored by dwgRW (DWG is always binary); pass false for symmetry.
+        const bool ok = dwg.write(&iface, DRW::AC1015, /*bin=*/false);
         if (!ok) {
             return LC_ERR_WRITE_FAILED;
         }

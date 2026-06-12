@@ -122,23 +122,36 @@ extension CADDrawing {
 /// document entry points run on a background queue (never main).
 enum DXFDocumentCodec {
 
+    /// The on-disk drawing format the codec reads/writes. DXF is ASCII text; DWG
+    /// is binary AutoCAD. Both flow through the same engine value model — only the
+    /// bridge function (and the temp-file extension) differ.
+    enum Format {
+        case dxf
+        case dwg
+
+        /// The temp-file extension the bridge keys nothing on (it reads by path),
+        /// but kept format-correct so the file is self-describing on disk.
+        var ext: String { self == .dwg ? "dwg" : "dxf" }
+    }
+
     /// Errors surfaced to the SwiftUI document machinery (mapped to user alerts).
     enum CodecError: Error {
         /// The read configuration carried no regular-file bytes.
         case noFileContents
         /// Reading/writing the temp file used to bridge the path-only C API failed.
         case tempFileFailed
-        /// The engine reader/writer threw (bad/corrupt DXF, I/O).
+        /// The engine reader/writer threw (bad/corrupt DXF/DWG, I/O).
         case engine(Error)
     }
 
-    /// Parses DXF `data` into a `Sendable` payload, OFF the main actor. Writes the
-    /// bytes to a temp file (the bridge reads by path only), parses through the
-    /// shared engine actor, then removes the temp file. Never touches a
-    /// `@MainActor` type — safe to call from `init(configuration:)`.
-    static func payload(from data: Data) throws -> DXFPayload {
+    /// Parses drawing `data` (DXF or DWG per `format`) into a `Sendable` payload,
+    /// OFF the main actor. Writes the bytes to a temp file (the bridge reads by
+    /// path only), parses through the shared engine actor's matching read path,
+    /// then removes the temp file. Never touches a `@MainActor` type — safe to
+    /// call from `init(configuration:)`.
+    static func payload(from data: Data, format: Format = .dxf) throws -> DXFPayload {
         let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("librecad-open-\(UUID().uuidString).dxf")
+            .appendingPathComponent("librecad-open-\(UUID().uuidString).\(format.ext)")
         do {
             try data.write(to: tmp, options: .atomic)
         } catch {
@@ -147,7 +160,12 @@ enum DXFDocumentCodec {
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         do {
-            let result = try runBlocking { try await CADEngine.shared.readEntities(dxfPath: tmp.path) }
+            let result = try runBlocking {
+                switch format {
+                case .dxf: return try await CADEngine.shared.readEntities(dxfPath: tmp.path)
+                case .dwg: return try await CADEngine.shared.readEntities(dwgPath: tmp.path)
+                }
+            }
             return DXFPayload(
                 entities: result.records,
                 layers: result.layers,
@@ -159,20 +177,28 @@ enum DXFDocumentCodec {
         }
     }
 
-    /// Serializes a `Sendable` payload to DXF bytes, OFF the main actor. Writes to
-    /// a temp file through the shared engine actor (path-only C API), reads the
-    /// bytes back, then removes the temp file. Never touches a `@MainActor` type —
-    /// safe to call from `fileWrapper(snapshot:configuration:)`.
-    static func data(from payload: DXFPayload) throws -> Data {
+    /// Serializes a `Sendable` payload to drawing bytes (DXF or DWG per `format`),
+    /// OFF the main actor. Writes to a temp file through the shared engine actor's
+    /// matching write path (path-only C API), reads the bytes back, then removes
+    /// the temp file. Never touches a `@MainActor` type — safe to call from
+    /// `fileWrapper(snapshot:configuration:)`.
+    static func data(from payload: DXFPayload, format: Format = .dxf) throws -> Data {
         let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("librecad-save-\(UUID().uuidString).dxf")
+            .appendingPathComponent("librecad-save-\(UUID().uuidString).\(format.ext)")
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         do {
             _ = try runBlocking {
-                try await CADEngine.shared.writeEntities(
-                    payload.entities, layers: payload.layers, toPath: tmp.path
-                )
+                switch format {
+                case .dxf:
+                    return try await CADEngine.shared.writeEntities(
+                        payload.entities, layers: payload.layers, toPath: tmp.path
+                    )
+                case .dwg:
+                    return try await CADEngine.shared.writeEntities(
+                        payload.entities, layers: payload.layers, toDWGPath: tmp.path
+                    )
+                }
             }
         } catch {
             throw CodecError.engine(error)
@@ -252,12 +278,14 @@ final class LibreCADDocument: ReferenceFileDocument, @unchecked Sendable {
     /// geometry. NOT `@MainActor` — it is plain value state on the document.
     private(set) var payload: DXFPayload
 
-    /// DXF is the only readable/writable type. We accept BOTH the exported
-    /// `org.librecad.dxf` UTI (from the bundle's Info.plist) and the system's
-    /// extension-derived type, so double-click / Open work regardless of which the
-    /// Launch Services database resolves the file to.
-    static var readableContentTypes: [UTType] { dxfTypes }
-    static var writableContentTypes: [UTType] { dxfTypes }
+    /// Readable types: DXF (text) AND DWG (binary AutoCAD). For each we accept the
+    /// declared UTI plus the extension-derived type, so double-click / Open work
+    /// regardless of which UTI Launch Services resolves the file to.
+    static var readableContentTypes: [UTType] { dxfTypes + dwgTypes }
+    /// Writable types: DXF and DWG. DWG write covers top-level geometry + the
+    /// standard tables at R2000; a block's MEMBER geometry does NOT round-trip to
+    /// DWG (libdxfrw writes empty blocks) — full block content needs DXF.
+    static var writableContentTypes: [UTType] { dxfTypes + dwgTypes }
 
     /// The DXF content types: the exported UTI first, then the extension-derived
     /// type as a robust fallback.
@@ -268,6 +296,27 @@ final class LibreCADDocument: ReferenceFileDocument, @unchecked Sendable {
         }
         return types
     }()
+
+    /// The DWG content types: the system `com.autodesk.dwg` UTI first, then the
+    /// extension-derived type as a robust fallback (same pattern as `dxfTypes`).
+    static let dwgTypes: [UTType] = {
+        var types: [UTType] = [.librecadDWG]
+        if let byExt = UTType(filenameExtension: "dwg"), !types.contains(byExt) {
+            types.append(byExt)
+        }
+        return types
+    }()
+
+    /// Classifies a content type as DXF or DWG so the codec routes to the right
+    /// engine path. A type that conforms to (or matches) any DWG type is DWG;
+    /// everything else (the default) is treated as DXF.
+    static func format(for contentType: UTType) -> DXFDocumentCodec.Format {
+        for t in dwgTypes where contentType == t || contentType.conforms(to: t) {
+            return .dwg
+        }
+        if contentType.preferredFilenameExtension?.lowercased() == "dwg" { return .dwg }
+        return .dxf
+    }
 
     /// File ▸ New: an empty document (one default layer "0"). Synchronous, value
     /// data only — no engine call, no `@MainActor` access.
@@ -285,7 +334,10 @@ final class LibreCADDocument: ReferenceFileDocument, @unchecked Sendable {
         guard let data = configuration.file.regularFileContents else {
             throw DXFDocumentCodec.CodecError.noFileContents
         }
-        self.payload = try DXFDocumentCodec.payload(from: data)
+        // Route to the DXF or DWG read path by the opened file's content type
+        // (binary DWG and text DXF need different libdxfrw parsers).
+        let format = Self.format(for: configuration.contentType)
+        self.payload = try DXFDocumentCodec.payload(from: data, format: format)
     }
 
     /// Captures the document's current payload for a write. Called on the main
@@ -304,7 +356,10 @@ final class LibreCADDocument: ReferenceFileDocument, @unchecked Sendable {
         snapshot: DXFPayload,
         configuration: WriteConfiguration
     ) throws -> FileWrapper {
-        let data = try DXFDocumentCodec.data(from: snapshot)
+        // Serialize as DXF or DWG per the destination content type (Save As can
+        // switch formats); the codec routes to the matching engine write path.
+        let format = Self.format(for: configuration.contentType)
+        let data = try DXFDocumentCodec.data(from: snapshot, format: format)
         return FileWrapper(regularFileWithContents: data)
     }
 

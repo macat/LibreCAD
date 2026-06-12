@@ -22,10 +22,57 @@
 
 import Testing
 import Foundation
+import UniformTypeIdentifiers
 @testable import CADEngine
 
 @Suite("LibreCAD document payload")
 struct LibreCADDocumentTests {
+
+    // MARK: - Format routing (DXF vs DWG by content type).
+
+    @Test("the document advertises BOTH DXF and DWG as readable + writable")
+    func advertisesDxfAndDwgTypes() {
+        let readable = LibreCADDocument.readableContentTypes
+        let writable = LibreCADDocument.writableContentTypes
+        // DXF (exported UTI) and DWG (system com.autodesk.dwg) are both present.
+        #expect(readable.contains(.librecadDXF))
+        #expect(readable.contains(.librecadDWG))
+        #expect(writable.contains(.librecadDXF))
+        #expect(writable.contains(.librecadDWG))
+    }
+
+    @Test("content-type classification routes DWG types to .dwg and DXF to .dxf")
+    func formatRoutingByContentType() {
+        // The system DWG UTI -> .dwg.
+        #expect(LibreCADDocument.format(for: .librecadDWG) == .dwg)
+        // The extension-derived DWG type (Open / double-click fallback) -> .dwg.
+        if let byExt = UTType(filenameExtension: "dwg") {
+            #expect(LibreCADDocument.format(for: byExt) == .dwg)
+        }
+        // DXF types (and the default) -> .dxf.
+        #expect(LibreCADDocument.format(for: .librecadDXF) == .dxf)
+        if let byExt = UTType(filenameExtension: "dxf") {
+            #expect(LibreCADDocument.format(for: byExt) == .dxf)
+        }
+        // An unrelated type defaults to .dxf (the codec never crashes on it).
+        #expect(LibreCADDocument.format(for: .plainText) == .dxf)
+    }
+
+    @Test("the codec round-trips an empty payload as DWG via the .dwg format")
+    func codecRoundTripsEmptyPayloadAsDWG() async throws {
+        let empty = DXFPayload.empty
+        let data = try await offMain {
+            try DXFDocumentCodec.data(from: empty, format: .dwg)
+        }
+        #expect(!data.isEmpty)
+        // Binary DWG: "AC1015" at byte 0 (distinguishes it from an ASCII DXF).
+        #expect(String(decoding: data.prefix(6), as: UTF8.self) == "AC1015")
+
+        let back = try await offMain {
+            try DXFDocumentCodec.payload(from: data, format: .dwg)
+        }
+        #expect(back.entities.isEmpty)
+    }
 
     /// Runs an off-main codec call on a background queue (mirroring how NSDocument
     /// invokes the document entry points) and returns its result, so the test never

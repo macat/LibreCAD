@@ -65,8 +65,39 @@ extension CADEngine {
     /// - Throws: `CADEngineError.invalidPath` for a null/empty path;
     ///   `CADEngineError.readFailed` if libdxfrw cannot read the file.
     public func readEntities(dxfPath: String) throws -> DXFReadResult {
+        let list = try Self.openList(path: dxfPath, reader: lc_dxf_read)
+        defer { lc_entity_list_free(list) }
+        return Self.mapList(list)
+    }
+
+    /// Reads a DWG (binary AutoCAD) file, flattening it into the SAME
+    /// `DXFReadResult` model the DXF reader produces — every entity kind, the
+    /// layer table, and blocks flow through the identical POD→`EntityRecord`
+    /// mapping (the bridge's `FlatteningReader` is shared across both formats).
+    /// DWG is binary so it has a distinct entry point + bridge function
+    /// (`lc_dwg_read` → libdxfrw `dwgRW`); everything downstream is unchanged.
+    ///
+    /// libdxfrw reads DWG R2000 (AC1015) and newer; an older/corrupt file fails
+    /// the read and surfaces as `CADEngineError.readFailed`.
+    ///
+    /// - Throws: `CADEngineError.invalidPath` for a null/empty path;
+    ///   `CADEngineError.readFailed` if libdxfrw cannot read the file (also
+    ///   covers an unsupported/old DWG version).
+    public func readEntities(dwgPath: String) throws -> DXFReadResult {
+        let list = try Self.openList(path: dwgPath, reader: lc_dwg_read)
+        defer { lc_entity_list_free(list) }
+        return Self.mapList(list)
+    }
+
+    /// Opens a drawing file through the given bridge reader (`lc_dxf_read` or
+    /// `lc_dwg_read`), mapping the C status to a thrown `CADEngineError`. The
+    /// caller owns the returned handle and must `lc_entity_list_free` it.
+    private static func openList(
+        path: String,
+        reader: (UnsafePointer<CChar>?, UnsafeMutablePointer<OpaquePointer?>?) -> LCStatus
+    ) throws -> OpaquePointer {
         var handle: OpaquePointer?
-        let status = dxfPath.withCString { lc_dxf_read($0, &handle) }
+        let status = path.withCString { reader($0, &handle) }
         switch status {
         case LC_OK:
             break
@@ -76,9 +107,15 @@ extension CADEngine {
             throw CADEngineError.readFailed
         }
         guard let list = handle else { throw CADEngineError.readFailed }
-        // Free the C handle no matter how we leave; every field is copied into
-        // Swift values below, so nothing dangles into freed C memory.
-        defer { lc_entity_list_free(list) }
+        return list
+    }
+
+    /// Maps an opened bridge handle into a `DXFReadResult`. Shared by the DXF and
+    /// DWG readers — the flattened POD model is format-independent, so the entire
+    /// entity/layer/block mapping below is reused verbatim across both. The caller
+    /// owns the handle's lifetime; every field is copied into Swift values here, so
+    /// nothing dangles once the caller frees the handle.
+    private static func mapList(_ list: OpaquePointer) -> DXFReadResult {
 
         let layers = Self.mapLayers(list)
         var records: [EntityRecord] = []
@@ -573,6 +610,17 @@ public func loadDrawing(dxfPath: String) async throws -> CADDrawing {
     let drawing = CADDrawing()
     // Load the block table too so any INSERT resolves to its block's geometry
     // (the block's member records are part of `result.records`).
+    drawing.load(entities: result.records, layers: result.layers, blocks: result.blocks)
+    return drawing
+}
+
+/// Loads a DWG file into a fully-built `CADDrawing` — the DWG counterpart of
+/// `loadDrawing(dxfPath:)`. Reads through the shared engine actor's DWG path and
+/// applies the same value records to a fresh `@MainActor` drawing.
+@MainActor
+public func loadDrawing(dwgPath: String) async throws -> CADDrawing {
+    let result = try await CADEngine.shared.readEntities(dwgPath: dwgPath)
+    let drawing = CADDrawing()
     drawing.load(entities: result.records, layers: result.layers, blocks: result.blocks)
     return drawing
 }
