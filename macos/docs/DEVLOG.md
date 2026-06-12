@@ -151,6 +151,16 @@ Engine modules on native-macos: CADEngine core (Vector/Geometry/Pen/Entity/Resol
 
 - [2026-06-12 ~12:50] 📋 coordinator — review-fillet-chamfer APPROVE both (geometry hand-verified). MERGED ws/tool-fillet + ws/tool-chamfer → native-macos. **653 tests, 162 commits.** 18 tool files. Dispatched wire-wave2 (Trim/Extend/Fillet/Chamfer → ToolKind+toolbar+keys T/X/F/⇧F+Tools menu) — last build step before the consolidated GUI verify.
 
+## V3 — PALETTE + GIZMOS + DIMENSION DXF + SHX + CI (2026-06-12) — v3 scope essentially complete
+native-macos @ 14f407845, **973 tests / 102 suites, 223 commits**. Final feature batch:
+- **⌘K command palette** (Task #14): fuzzy command/tool finder over all 29 tools + app actions; pure `CommandMatcher` (engine-tested ranking).
+- **On-canvas gizmos** (Task #14): move / corner-scale / rotate handles on the selection, Shift-constrain, undoable; pure `GizmoTransform` math (engine-tested); CG overlay (renderer untouched).
+- **Dimension DXF read+write** (Task #12): linear/aligned/radial/diameter/angular round-trip via new `LC_ENT_DIMENSION` bridge POD; dim_sample now imports its 14 dims (81→95 entities). Deferred: ordinate + angular-3p (no DimKind); textHeight/arrowSize live in DIMSTYLE (don't round-trip). Closes the last save-data-loss gap.
+- **SHX import** (interop): `.shx` shape-bytecode decoder (all opcodes incl. octant/bulge arcs; shapes/unifont/bigfont) + `SHXFontProvider` + font-substitution chain. Caveat: real-font fidelity unverifiable in-repo (licensed .shx not shippable); tested via hand-built buffer + graceful degradation.
+- **CI + signing** (Task #15): `.github/workflows/macos-ci.yml` (build/test/assemble, path-scoped to macos/), env-gated `sign-and-notarize.sh` (ad-hoc default unchanged) + entitlements + `ci-and-release.md`. Notarization needs a Developer ID (documented constraint).
+- TASKS #13/#14/#15/#16/#17/#18 DONE. **ONLY remaining v3 item: DocumentGroup** (native recents/autosave/versions/dirty) — HELD pending the user's GUI verify of the current build, because it rewrites the app launch path (the one thing that SIGTRAP-crashed before) and must be isolated + GUI-verified. Lower-priority future: ordinate/angular-3p dims, real-.shx fidelity check, true notarized release.
+- Session ran ~25+ parallel worktree agents; merge-by-reported-hash + verify-test-count-before-delete held throughout; two agent stalls/deaths (rich-mtext, dim-fixes) recovered with zero work lost.
+
 ## V3 — TEXT AUTHORING + INSPECTOR + FULL WIRING + LOSSLESS MTEXT (2026-06-12)
 native-macos @ f107dbe00, **936 tests / 99 suites, 212 commits**. The professional-text loop is CLOSED end-to-end (create → edit → style → render → export → save):
 - **Text authoring** (Task #17/#14): `TextTool` + inline `NSTextView` editor over the Metal canvas (click-to-type, double-click-to-edit; single-line → `.text`, multi-line → `.mtext`).
