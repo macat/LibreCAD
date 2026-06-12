@@ -138,6 +138,10 @@ Engine modules on native-macos: CADEngine core (Vector/Geometry/Pen/Entity/Resol
 - 🔨 ws-displaykinds — DONE (94a26fbc1): text/hatch/solid kinds + resolve (.lff text layout, fills) + fontProvider activated + 46 fonts bundled. 558t. NECESSARILY edited exhaustive switches (EntityTransform/Snapping/OffsetTool/DXFReaderTests — additive arms, no existing-kind behavior change). In review (review-displaykinds).
 - 🔨 ws-dxfwrite — DONE (6072e6101): lc_dxf_write C-ABI + DXFWriter; round-trip test (dim_sample read→write→reread, counts in==out); reader untouched; R2000. 543t. In review (review-dxfwrite).
 
+- [2026-06-12 ~11:00] 📋 coordinator — MERGED ws/dxfwrite (552t) + ws/displaykinds (+integration fixups: DXFWriter & DXFWriterTests exhaustiveness skip-arms for text/hatch/solid) → native-macos. **574 tests, 143 commits.** Tasks #8/#9 engine sides in.
+- 🔨 Wave 2a DONE: tool-trim (0626998992, click-side trim of line/arc to nearest crossing, 561t) + tool-extend (dc0409b31, extend line/arc to boundary, 557t). To review+merge+wire.
+- [2026-06-12 ~11:15] 📋 coordinator — controlled batch (4, disjoint): review-trim-extend; ws-reader-import (DXF import TEXT/MTEXT/HATCH/SOLID → .text/.hatch/.solid; DxfBridge+DXFReader; task #8 reader); ws-renderfills (Metal fill pipeline = earcut ResolvedFill + layer-visibility render filter for the sidebar eye; Renderer/*; task #8 render + #11 gap); ws-savepanels (Save/Save As ⌘S/⇧⌘S via DXFWriter; ContentView/LibreCADApp; task #9 UI). Outcome: running. Next: Fillet/Chamfer (wave 2b) + wire trim/extend/fillet/chamfer into ToolKind.
+
 ## BROAD-PARITY P0 TOOLSET COMPLETE (2026-06-12) — usable native CAD editor
 All P0 tools wired + usable: DRAW line/circle/arc/rectangle/polyline/point; MODIFY move/copy/rotate/scale/mirror; select (single/window/crossing) + ⌫ delete + ⌘Z/⇧⌘Z undo/redo; snap (endpoint/center/mid/intersection/on-entity) + coord HUD; pan/zoom/fit/grid; open .dxf. 471 tests, 113 commits on native-macos, app launches (user-confirmed earlier). Cursor-offset fixed. AWAITING user GUI verification of the full toolset (task #5). All local — push blocked all session.
 
