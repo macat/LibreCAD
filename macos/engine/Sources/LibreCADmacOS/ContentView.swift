@@ -130,6 +130,9 @@ struct ContentView: View {
             toolButton(.point, symbol: "smallcircle.filled.circle", help: "Place point (O)")
             toolButton(.ellipse, symbol: "oval", help: "Draw ellipse (E)")
             toolButton(.polygon, symbol: "hexagon", help: "Draw polygon (G)")
+            toolButton(.spline, symbol: "scribble.variable", help: "Draw spline (S)")
+            // Hatch fills the region bounded by the current selection.
+            toolButton(.hatch, symbol: "square.grid.2x2.fill", help: "Hatch fill selection (H)")
 
             Divider()
             // Modify tools (act on the current selection).
@@ -142,6 +145,9 @@ struct ContentView: View {
             toolButton(.scale, symbol: "arrow.up.left.and.arrow.down.right",
                        help: "Scale selection (⇧S)")
             toolButton(.mirror, symbol: "flip.horizontal", help: "Mirror selection (⇧M)")
+            toolButton(.array, symbol: "square.grid.3x3", help: "Array selection (⇧A)")
+            toolButton(.divide, symbol: "divide", help: "Divide selection (⇧D)")
+            toolButton(.explode, symbol: "burst", help: "Explode selection (⇧X)")
 
             Divider()
             // Edit tools (pick entities under the cursor; no pre-selection needed).

@@ -69,6 +69,7 @@ struct ToolKindWiringTests {
             .move, .copy, .rotate, .scale, .mirror,                // modify
             .offset,                                               // modify (wave 1)
             .trim, .extend, .fillet, .chamfer,                     // edit (wave 2)
+            .spline, .array, .divide, .explode, .hatch,            // wave A
         ]
         #expect(Set(ToolKind.allCases) == expected,
                 "ToolKind.allCases (\(ToolKind.allCases)) != expected roster")
@@ -109,6 +110,67 @@ struct ToolKindWiringTests {
             #expect(tool != nil, "ToolKind.\(kind) minted a nil Tool")
             #expect(tool?.title == title,
                     "ToolKind.\(kind) tool.title (\(tool?.title ?? "nil")) != \(title)")
+        }
+    }
+
+    /// The five wave-A wiring additions: Spline / Array / Divide / Explode / Hatch.
+    /// Each mints a non-nil tool whose own title matches the kind's UI title, so the
+    /// toolbar/menu label and the HUD prompt ("Spline: …") agree.
+    @Test func waveAKindsAreWiredWithMatchingTitles() {
+        let waveA: [ToolKind: String] = [
+            .spline:  "Spline",
+            .array:   "Array",
+            .divide:  "Divide",
+            .explode: "Explode",
+            .hatch:   "Hatch",
+        ]
+        for (kind, title) in waveA {
+            #expect(kind.title == title,
+                    "ToolKind.\(kind).title (\(kind.title)) != \(title)")
+            let tool = kind.makeTool()
+            #expect(tool != nil, "ToolKind.\(kind) minted a nil Tool")
+            #expect(tool?.title == title,
+                    "ToolKind.\(kind) tool.title (\(tool?.title ?? "nil")) != \(title)")
+        }
+    }
+
+    /// The keyboard shortcuts the UI assigns to each kind must be UNIQUE — no two
+    /// kinds may share the same key chord, or one would shadow the other. This is a
+    /// data mirror of the canvas keymap (`CADCanvasView.handleKey`) / Tools menu /
+    /// toolbar tooltips, kept here so a future collision (e.g. assigning an already-
+    /// used chord to a new tool) fails loudly in the engine test target. A chord is
+    /// `(key, shift)`; `.select` and the wave-A additions are all included.
+    @Test func toolShortcutsAreUnique() {
+        // (kind, key, shiftHeld) — the single source of truth mirrored from the UI.
+        let keymap: [(ToolKind, Character, Bool)] = [
+            (.select, "v", false),
+            (.line, "l", false),
+            (.circle, "c", false), (.copy, "c", true),
+            (.arc, "a", false), (.array, "a", true),
+            (.rectangle, "r", false), (.rotate, "r", true),
+            (.polyline, "p", false),
+            (.point, "o", false), (.offset, "o", true),
+            (.ellipse, "e", false),
+            (.polygon, "g", false),
+            (.move, "m", false), (.mirror, "m", true),
+            (.spline, "s", false), (.scale, "s", true),
+            (.hatch, "h", false),
+            (.divide, "d", true),
+            (.trim, "t", false),
+            (.extend, "x", false), (.explode, "x", true),
+            (.fillet, "f", false), (.chamfer, "f", true),
+        ]
+        // No two entries share a (key, shift) chord.
+        let chords = keymap.map { "\($0.1)\($0.2 ? "+shift" : "")" }
+        #expect(Set(chords).count == chords.count,
+                "Duplicate tool shortcut chord(s): \(chords)")
+        // No kind appears twice in the keymap.
+        let kinds = keymap.map(\.0)
+        #expect(Set(kinds).count == kinds.count,
+                "A ToolKind is mapped to more than one chord: \(kinds)")
+        // Every wave-A kind has a shortcut.
+        for k in [ToolKind.spline, .array, .divide, .explode, .hatch] {
+            #expect(kinds.contains(k), "wave-A kind \(k) has no keyboard shortcut")
         }
     }
 }

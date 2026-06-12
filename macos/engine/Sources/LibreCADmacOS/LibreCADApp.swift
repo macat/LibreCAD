@@ -144,6 +144,13 @@ struct LibreCADApp: App {
                 Button("Polygon") { activateTool?(.polygon) }
                     .keyboardShortcut("g", modifiers: [])
                     .disabled(activateTool == nil)
+                Button("Spline") { activateTool?(.spline) }
+                    .keyboardShortcut("s", modifiers: [])
+                    .disabled(activateTool == nil)
+                // Hatch fills the region bounded by the current selection.
+                Button("Hatch") { activateTool?(.hatch) }
+                    .keyboardShortcut("h", modifiers: [])
+                    .disabled(activateTool == nil)
 
                 Divider()
                 // Modify tools (act on the current selection).
@@ -164,6 +171,19 @@ struct LibreCADApp: App {
                     .disabled(activateTool == nil)
                 Button("Mirror") { activateTool?(.mirror) }
                     .keyboardShortcut("m", modifiers: .shift)
+                    .disabled(activateTool == nil)
+                // Array / Divide / Explode use the shift convention for their letters
+                // (⇧A vs A Arc, ⇧X vs X Extend; ⇧D is free). Each acts on the current
+                // selection (select in V mode, then activate) using sensible DEFAULTS
+                // (Array: 2×3 grid; Divide: 2 parts) — a config UI is a later wave.
+                Button("Array") { activateTool?(.array) }
+                    .keyboardShortcut("a", modifiers: .shift)
+                    .disabled(activateTool == nil)
+                Button("Divide") { activateTool?(.divide) }
+                    .keyboardShortcut("d", modifiers: .shift)
+                    .disabled(activateTool == nil)
+                Button("Explode") { activateTool?(.explode) }
+                    .keyboardShortcut("x", modifiers: .shift)
                     .disabled(activateTool == nil)
 
                 Divider()

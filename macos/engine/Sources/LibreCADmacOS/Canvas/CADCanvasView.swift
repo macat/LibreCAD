@@ -391,7 +391,9 @@ final class CADCanvasController {
             activateTool(shift ? .copy : .circle)
             return true
         case "a":
-            activateTool(.arc)
+            // Bare A = Arc (draw); ⇧A = Array (modify) — shared-letter shift
+            // convention (like ⇧C/⇧R/⇧M/⇧O).
+            activateTool(shift ? .array : .arc)
             return true
         case "r":
             activateTool(shift ? .rotate : .rectangle)
@@ -414,17 +416,28 @@ final class CADCanvasController {
             activateTool(shift ? .mirror : .move)
             return true
         case "s":
-            // No bare-S draw tool; ⇧S is Scale. A bare S is unassigned (falls
-            // through) so a future draw tool can claim it.
-            if shift { activateTool(.scale); return true }
+            // Bare S = Spline (draw); ⇧S = Scale (modify) — shared-letter shift
+            // convention (like ⇧C/⇧R/⇧M/⇧O).
+            activateTool(shift ? .scale : .spline)
+            return true
+        case "h":
+            // Hatch (draw/fill): fills the region bounded by the selection. No
+            // draw/modify twin → plain H.
+            activateTool(.hatch)
+            return true
+        case "d":
+            // ⇧D = Divide (modify); bare D is unassigned (falls through) so a future
+            // draw tool can claim it.
+            if shift { activateTool(.divide); return true }
             return false
         case "t":
             // Edit tool: Trim (no draw/modify twin → plain T).
             activateTool(.trim)
             return true
         case "x":
-            // Edit tool: Extend (no draw/modify twin → plain X).
-            activateTool(.extend)
+            // Bare X = Extend (edit); ⇧X = Explode (modify) — shared-letter shift
+            // convention (like ⇧C/⇧R/⇧M/⇧O).
+            activateTool(shift ? .explode : .extend)
             return true
         case "f":
             // Edit tools: bare F = Fillet (round), ⇧F = Chamfer (bevel) — the
