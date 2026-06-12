@@ -632,6 +632,10 @@ final class CADCanvasController {
         let shift = event.modifierFlags.contains(.shift)
         // A command-key combo is a menu shortcut (⌘O/⌘Z/⌘0); let it pass through.
         let command = event.modifierFlags.contains(.command)
+        // Option distinguishes Stretch (⌥S) from Spline (S) / Scale (⇧S) — the one
+        // tool with no free mnemonic plain/shift letter (⇧S is Scale). It is the only
+        // option chord in the keymap; any other option combo falls through.
+        let option = event.modifierFlags.contains(.option)
         // Esc is key code 53 (no reliable character).
         let isEscape = event.keyCode == 53
         let isReturn = event.keyCode == 36 || event.keyCode == 76  // Return / keypad Enter
@@ -679,6 +683,16 @@ final class CADCanvasController {
             }
             return false
         }
+        // ⌥S = Stretch (modify). It is the sole option chord — handled before the
+        // bare-letter switch so option+S does NOT fall through to S (Spline). Any
+        // other option combo is left for the responder chain.
+        if option {
+            if !command, chars == "s" {
+                activateTool(.stretch)
+                return true
+            }
+            return false
+        }
         // Bare letter keys (no command modifier) activate tools. Shift selects the
         // modify variant where a draw tool shares the letter (C/R/S/M/O).
         guard !command else { return false }
@@ -687,7 +701,9 @@ final class CADCanvasController {
             activateTool(.select)
             return true
         case "l":
-            activateTool(.line)
+            // Bare L = Line (draw); ⇧L = Lengthen (modify, wire-wave-C) — free shift
+            // chord (bare L has no other shift twin).
+            activateTool(shift ? .lengthen : .line)
             return true
         case "c":
             activateTool(shift ? .copy : .circle)
@@ -732,16 +748,18 @@ final class CADCanvasController {
             activateTool(shift ? .divide : .linearDim)
             return true
         case "i":
-            // Aligned Dimension (wire-wave-B; no draw/modify twin → plain I).
-            activateTool(.alignedDim)
+            // Bare I = Aligned Dimension (wire-wave-B); ⇧I = Insert Block (wire-wave-C)
+            // — free shift chord (bare I has no other shift twin).
+            activateTool(shift ? .insert : .alignedDim)
             return true
         case "u":
             // Radius Dimension (wire-wave-B; no draw/modify twin → plain U).
             activateTool(.radialDim)
             return true
         case "b":
-            // Diameter Dimension (wire-wave-B; no draw/modify twin → plain B).
-            activateTool(.diameterDim)
+            // Bare B = Diameter Dimension (wire-wave-B); ⇧B = Break (modify,
+            // wire-wave-C) — free shift chord (bare B has no other shift twin).
+            activateTool(shift ? .break : .diameterDim)
             return true
         case "n":
             // Angular Dimension (wire-wave-B; no draw/modify twin → plain N).

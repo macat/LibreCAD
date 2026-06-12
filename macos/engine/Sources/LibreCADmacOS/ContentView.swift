@@ -273,6 +273,9 @@ struct ContentView: View {
             // Text authoring: a click sets the insertion point and raises the inline
             // editor; type, then Return commits the text.
             toolButton(.text, symbol: "character.textbox", help: "Add text (⇧T)")
+            // Blocks: place a reference to a named block. With no block chosen the
+            // tool is inert (the block-picker UI is a later task) — it never crashes.
+            toolButton(.insert, symbol: "square.on.square.dashed", help: "Insert block (⇧I)")
 
             Divider()
             // Modify tools (act on the current selection).
@@ -288,6 +291,12 @@ struct ContentView: View {
             toolButton(.array, symbol: "square.grid.3x3", help: "Array selection (⇧A)")
             toolButton(.divide, symbol: "divide", help: "Divide selection (⇧D)")
             toolButton(.explode, symbol: "burst", help: "Explode selection (⇧X)")
+            // Wire-wave-C modify tools.
+            toolButton(.stretch,
+                       symbol: "arrow.left.and.right.righttriangle.left.righttriangle.right",
+                       help: "Stretch selection (⌥S)")
+            toolButton(.lengthen, symbol: "ruler", help: "Lengthen line/arc (⇧L)")
+            toolButton(.break, symbol: "scissors.badge.ellipsis", help: "Break entity (⇧B)")
 
             Divider()
             // Edit tools (pick entities under the cursor; no pre-selection needed).

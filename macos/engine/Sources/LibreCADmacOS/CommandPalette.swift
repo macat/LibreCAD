@@ -114,6 +114,10 @@ enum CommandRegistry {
         case .radialDim:   return ("arrow.left.and.right", "U")
         case .diameterDim: return ("circle.and.line.horizontal", "B")
         case .angularDim:  return ("angle", "N")
+        case .stretch:     return ("arrow.left.and.right.righttriangle.left.righttriangle.right", "⌥S")
+        case .lengthen:    return ("ruler", "⇧L")
+        case .break:       return ("scissors.badge.ellipsis", "⇧B")
+        case .insert:      return ("square.on.square.dashed", "⇧I")
         }
     }
 

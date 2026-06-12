@@ -72,6 +72,8 @@ struct ToolKindWiringTests {
             .spline, .array, .divide, .explode, .hatch,            // wave A
             .text,                                                 // wave B (annotate)
             .linearDim, .alignedDim, .radialDim, .diameterDim, .angularDim, // wave B (dimensions)
+            .stretch, .lengthen, .break,                           // wave C (modify)
+            .insert,                                               // wave C (blocks)
         ]
         #expect(Set(ToolKind.allCases) == expected,
                 "ToolKind.allCases (\(ToolKind.allCases)) != expected roster")
@@ -160,6 +162,36 @@ struct ToolKindWiringTests {
         }
     }
 
+    /// The four wave-C wiring additions: Stretch / Lengthen / Break / Insert Block.
+    /// Each mints a non-nil tool whose own title matches the kind's UI title, so the
+    /// toolbar/menu label and the HUD prompt agree.
+    @Test func waveCKindsAreWiredWithMatchingTitles() {
+        let waveC: [ToolKind: String] = [
+            .stretch:  "Stretch",
+            .lengthen: "Lengthen",
+            .break:    "Break",
+            .insert:   "Insert Block",
+        ]
+        for (kind, title) in waveC {
+            #expect(kind.title == title,
+                    "ToolKind.\(kind).title (\(kind.title)) != \(title)")
+            let tool = kind.makeTool()
+            #expect(tool != nil, "ToolKind.\(kind) minted a nil Tool")
+            #expect(tool?.title == title,
+                    "ToolKind.\(kind) tool.title (\(tool?.title ?? "nil")) != \(title)")
+        }
+    }
+
+    /// `.insert` mints an Insert tool that is SAFE with no block chosen — the
+    /// block-picker UI is a later task, so a wired ⌥/menu activation with no blocks in
+    /// the drawing must never crash. With no block name the tool is inert (a no-op),
+    /// which the title check above already exercises (it constructs the tool); this
+    /// guard documents the "no block ⇒ no crash" contract explicitly.
+    @Test func insertKindIsSafeWithNoBlockChosen() {
+        #expect(ToolKind.insert.makeTool() != nil)
+        #expect(ToolKind.insert.makeTool()?.title == "Insert Block")
+    }
+
     /// The Text kind's title MUST be exactly "Text" — the inline `NSTextView` editor
     /// in `CADCanvasView` activates by matching the active tool's `title == "Text"`,
     /// so a renamed title would silently break text authoring. (A focused guard on the
@@ -174,35 +206,41 @@ struct ToolKindWiringTests {
     /// data mirror of the canvas keymap (`CADCanvasView.handleKey`) / Tools menu /
     /// toolbar tooltips, kept here so a future collision (e.g. assigning an already-
     /// used chord to a new tool) fails loudly in the engine test target. A chord is
-    /// `(key, shift)`; `.select` and the wave-A additions are all included.
+    /// `(key, shift, option)`; `.select` and the wave-A/B/C additions are all included.
+    /// Stretch (⌥S) is the sole OPTION chord, so the model carries an option flag too.
     @Test func toolShortcutsAreUnique() {
-        // (kind, key, shiftHeld) — the single source of truth mirrored from the UI.
-        let keymap: [(ToolKind, Character, Bool)] = [
-            (.select, "v", false),
-            (.line, "l", false),
-            (.circle, "c", false), (.copy, "c", true),
-            (.arc, "a", false), (.array, "a", true),
-            (.rectangle, "r", false), (.rotate, "r", true),
-            (.polyline, "p", false),
-            (.point, "o", false), (.offset, "o", true),
-            (.ellipse, "e", false),
-            (.polygon, "g", false),
-            (.move, "m", false), (.mirror, "m", true),
-            (.spline, "s", false), (.scale, "s", true),
-            (.hatch, "h", false),
-            (.divide, "d", true),
-            (.trim, "t", false), (.text, "t", true),
-            (.extend, "x", false), (.explode, "x", true),
-            (.fillet, "f", false), (.chamfer, "f", true),
+        // (kind, key, shiftHeld, optionHeld) — the single source of truth mirrored
+        // from the UI (CADCanvasView.handleKey / Tools menu / toolbar tooltips).
+        let keymap: [(ToolKind, Character, Bool, Bool)] = [
+            (.select, "v", false, false),
+            (.line, "l", false, false), (.lengthen, "l", true, false),
+            (.circle, "c", false, false), (.copy, "c", true, false),
+            (.arc, "a", false, false), (.array, "a", true, false),
+            (.rectangle, "r", false, false), (.rotate, "r", true, false),
+            (.polyline, "p", false, false),
+            (.point, "o", false, false), (.offset, "o", true, false),
+            (.ellipse, "e", false, false),
+            (.polygon, "g", false, false),
+            (.move, "m", false, false), (.mirror, "m", true, false),
+            (.spline, "s", false, false), (.scale, "s", true, false),
+            (.stretch, "s", false, true),   // ⌥S — ⇧S is Scale, so Stretch takes option.
+            (.hatch, "h", false, false),
+            (.divide, "d", true, false),
+            (.trim, "t", false, false), (.text, "t", true, false),
+            (.extend, "x", false, false), (.explode, "x", true, false),
+            (.fillet, "f", false, false), (.chamfer, "f", true, false),
             // wave B dimensions — bare, collision-free letters.
-            (.linearDim, "d", false),
-            (.alignedDim, "i", false),
-            (.radialDim, "u", false),
-            (.diameterDim, "b", false),
-            (.angularDim, "n", false),
+            (.linearDim, "d", false, false),
+            (.alignedDim, "i", false, false),
+            (.radialDim, "u", false, false),
+            (.diameterDim, "b", false, false),
+            (.angularDim, "n", false, false),
+            // wave C — Insert Block + Break take free shift chords; Stretch is ⌥S above.
+            (.insert, "i", true, false),
+            (.break, "b", true, false),
         ]
-        // No two entries share a (key, shift) chord.
-        let chords = keymap.map { "\($0.1)\($0.2 ? "+shift" : "")" }
+        // No two entries share a (key, shift, option) chord.
+        let chords = keymap.map { "\($0.1)\($0.2 ? "+shift" : "")\($0.3 ? "+option" : "")" }
         #expect(Set(chords).count == chords.count,
                 "Duplicate tool shortcut chord(s): \(chords)")
         // No kind appears twice in the keymap.
@@ -216,6 +254,10 @@ struct ToolKindWiringTests {
         // Every wave-B kind (Text + the five dimensions) has a shortcut.
         for k in [ToolKind.text, .linearDim, .alignedDim, .radialDim, .diameterDim, .angularDim] {
             #expect(kinds.contains(k), "wave-B kind \(k) has no keyboard shortcut")
+        }
+        // Every wave-C kind (Stretch / Lengthen / Break / Insert) has a shortcut.
+        for k in [ToolKind.stretch, .lengthen, .break, .insert] {
+            #expect(kinds.contains(k), "wave-C kind \(k) has no keyboard shortcut")
         }
     }
 }

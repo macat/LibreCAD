@@ -96,6 +96,19 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     case diameterDim
     /// The Angular dimension tool (`AngularDimTool`) — angle between two rays/lines.
     case angularDim
+    // --- Wire-wave-C tools (wired into the UI in this wave) ---
+    /// The Stretch modify tool (`StretchTool`) — drag the in-window endpoints/vertices
+    /// of the selection by a delta, leaving the rest fixed.
+    case stretch
+    /// The Lengthen modify tool (`LengthenTool`) — grow/shrink a line or arc at the
+    /// picked end by a signed delta or to a point.
+    case lengthen
+    /// The Break modify tool (`BreakTool`) — split a line/arc/polyline at a point, or
+    /// remove the span between two points.
+    case `break`
+    /// The Insert (block reference) draw tool (`InsertTool`) — place a reference to a
+    /// named block by clicking an insertion point.
+    case insert
     // Append new draw tools here (one `case` per tool) — see the collision note.
 
     /// A short title for the UI (toolbar button / menu).
@@ -131,6 +144,10 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .radialDim:   return "Radius Dimension"
         case .diameterDim: return "Diameter Dimension"
         case .angularDim:  return "Angular Dimension"
+        case .stretch:     return "Stretch"
+        case .lengthen:    return "Lengthen"
+        case .break:       return "Break"
+        case .insert:      return "Insert Block"
         // Append a title arm per new case.
         }
     }
@@ -170,6 +187,12 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .radialDim:   return RadialDimTool(mode: .radius)
         case .diameterDim: return RadialDimTool(mode: .diameter)
         case .angularDim:  return AngularDimTool()
+        case .stretch:     return StretchTool()
+        case .lengthen:    return LengthenTool()
+        case .break:       return BreakTool()
+        // InsertTool with no block name is inert (a safe no-op) — the block-picker UI
+        // is a later task; activation never crashes even with no blocks in the drawing.
+        case .insert:      return InsertTool()
         // Append a `case <kind>: return <Name>Tool()` arm per new tool.
         }
     }

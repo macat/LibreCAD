@@ -192,6 +192,11 @@ struct LibreCADApp: App {
                 Button("Text") { activateTool?(.text) }
                     .keyboardShortcut("t", modifiers: .shift)
                     .disabled(activateTool == nil)
+                // Insert Block (⇧I): place a reference to a named block. Inert until a
+                // block is chosen (the block-picker UI is a later task) — no crash.
+                Button("Insert Block") { activateTool?(.insert) }
+                    .keyboardShortcut("i", modifiers: .shift)
+                    .disabled(activateTool == nil)
 
                 Divider()
                 // Modify tools (act on the current selection).
@@ -225,6 +230,17 @@ struct LibreCADApp: App {
                     .disabled(activateTool == nil)
                 Button("Explode") { activateTool?(.explode) }
                     .keyboardShortcut("x", modifiers: .shift)
+                    .disabled(activateTool == nil)
+                // Wire-wave-C modify tools. Stretch uses ⌥S (⇧S is Scale); Lengthen ⇧L
+                // and Break ⇧B take free shift chords (bare L/B have no shift twin).
+                Button("Stretch") { activateTool?(.stretch) }
+                    .keyboardShortcut("s", modifiers: .option)
+                    .disabled(activateTool == nil)
+                Button("Lengthen") { activateTool?(.lengthen) }
+                    .keyboardShortcut("l", modifiers: .shift)
+                    .disabled(activateTool == nil)
+                Button("Break") { activateTool?(.break) }
+                    .keyboardShortcut("b", modifiers: .shift)
                     .disabled(activateTool == nil)
 
                 Divider()
