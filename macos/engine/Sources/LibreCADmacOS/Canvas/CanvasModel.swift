@@ -389,6 +389,20 @@ final class CanvasModel {
         modelVersion &+= 1
     }
 
+    /// Applies tool edits produced OUT-OF-BAND (not via the model's internal active
+    /// tool) through the SAME undoable `applyCommit` path — one undoable group,
+    /// quadtree kept in sync, GPU buffer marked dirty. This is NOT a parallel commit
+    /// implementation: it is the single public entry the **inline text editor** uses
+    /// to commit a `TextTool` it ran itself (the typed string is collected by the
+    /// `NSTextView` overlay in `CADCanvasView`, which builds + runs a `TextTool`
+    /// value and hands the resulting edits here). The model's own `handleToolInput`
+    /// path can't carry the editor's string into the private(set) active tool, so the
+    /// overlay needs this one delegating hook; everything downstream is the existing
+    /// `applyCommit` (no behavior fork). No-op on an empty list.
+    func applyToolEdits(_ edits: [ToolEdit]) {
+        applyCommit(edits)
+    }
+
     // MARK: - Undo / redo (rebuild the index, which the undo closures don't touch)
 
     /// Whether an undo is available.
