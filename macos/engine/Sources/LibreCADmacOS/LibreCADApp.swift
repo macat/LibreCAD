@@ -35,6 +35,9 @@ struct LibreCADApp: App {
     /// Save / Save As… actions published by the focused window (⌘S / ⇧⌘S).
     @FocusedValue(\.saveDocument) private var saveDocument
     @FocusedValue(\.saveDocumentAs) private var saveDocumentAs
+    /// Export (PDF/PNG/SVG) and Print actions published by the focused window.
+    @FocusedValue(\.exportDocument) private var exportDocument
+    @FocusedValue(\.printDocument) private var printDocument
     /// The tool-activation action published by the focused window.
     @FocusedValue(\.activateTool) private var activateTool
     /// Undo / redo actions published by the focused window.
@@ -70,6 +73,26 @@ struct LibreCADApp: App {
                 Button("Save As…") { saveDocumentAs?() }
                     .keyboardShortcut("s", modifiers: [.command, .shift])
                     .disabled(saveDocumentAs == nil)
+
+                Divider()
+                // File ▸ Export… — render the drawing to PDF / PNG / SVG via the
+                // shared resolve→CGContext (PDF/PNG) / pure-Swift (SVG) export path.
+                // Each routes to the focused window via the `exportDocument` value;
+                // an NSSavePanel in the window picks the destination. ⇧⌘E exports
+                // to PDF as the common default.
+                Menu("Export…") {
+                    Button("PDF…") { exportDocument?(.pdf) }
+                        .keyboardShortcut("e", modifiers: [.command, .shift])
+                        .disabled(exportDocument == nil)
+                    Button("PNG…") { exportDocument?(.png) }
+                        .disabled(exportDocument == nil)
+                    Button("SVG…") { exportDocument?(.svg) }
+                        .disabled(exportDocument == nil)
+                }
+                // File ▸ Print… (⌘P) — the system print dialog, fitted to paper.
+                Button("Print…") { printDocument?() }
+                    .keyboardShortcut("p", modifiers: .command)
+                    .disabled(printDocument == nil)
             }
             // Undo / redo (replaces the empty default since there's no DocumentGroup).
             CommandGroup(replacing: .undoRedo) {
