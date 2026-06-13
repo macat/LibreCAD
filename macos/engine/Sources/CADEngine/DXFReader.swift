@@ -47,13 +47,24 @@ extension CADEngine {
         /// entity store), so loading is: `drawing.load(entities: records, …,
         /// blocks: blocks)`. Empty when the file has no (non-anonymous) blocks.
         public var blocks: BlockTable
+        /// The parsed HEADER variables — drawing unit (`$INSUNITS`), linear format/
+        /// precision (`$LUNITS`/`$LUPREC`), and the document-default dimension style
+        /// (`$DIMTXT`/`$DIMASZ`/`$DIMSCALE`/`$DIMLUNIT`/`$DIMDEC`). The downstream
+        /// `CADDrawing.makeResolveContext` → `dimStyleProvider` turns these into the
+        /// `ResolvedDimStyle` dimensions inherit, so a file's real dimension size
+        /// reaches the resolve without any Resolve/Tool change. Defaults (empty bag)
+        /// when the file supplied none of them.
+        public var graphicVariables: GraphicVariables
         public var warnings: [String]
 
         public init(records: [EntityRecord], layers: LayerTable,
-                    blocks: BlockTable = BlockTable(), warnings: [String]) {
+                    blocks: BlockTable = BlockTable(),
+                    graphicVariables: GraphicVariables = GraphicVariables(),
+                    warnings: [String]) {
             self.records = records
             self.layers = layers
             self.blocks = blocks
+            self.graphicVariables = graphicVariables
             self.warnings = warnings
         }
     }
@@ -176,7 +187,83 @@ extension CADEngine {
             warnings.append("Skipped \(n) unsupported \(name) entit\(n == 1 ? "y" : "ies") (not yet imported)")
         }
 
-        return DXFReadResult(records: records, layers: layers, blocks: blocks, warnings: warnings)
+        let graphicVariables = Self.mapGraphicVariables(list)
+
+        return DXFReadResult(records: records, layers: layers, blocks: blocks,
+                             graphicVariables: graphicVariables, warnings: warnings)
+    }
+
+    // MARK: - Header / dim-style → graphic-variable mapping
+
+    /// Maps the bridge's captured HEADER vars (`lc_header`) and DIMSTYLE table
+    /// (`lc_dimstyles`) into `GraphicVariables`. Only vars the file actually
+    /// supplied (their `has*` flag set) are written, so an absent var keeps the
+    /// document's built-in default. The active/"Standard" dim style fills in any
+    /// dimension default the header itself didn't carry (header takes precedence
+    /// when both are present, since it is the document-active value). The downstream
+    /// `dimStyleProvider` turns the resulting `$DIM*` vars into the `ResolvedDimStyle`
+    /// dimensions inherit.
+    private static func mapGraphicVariables(_ list: OpaquePointer) -> GraphicVariables {
+        var gv = GraphicVariables()
+
+        // 1) Active/"Standard" dim style first — its values are the lowest-priority
+        //    document default. The header vars (set next) override them when present.
+        if let activeStyle = activeDimStyle(list) {
+            gv.dimTextHeight = activeStyle.dimTxt
+            gv.dimArrowSize = activeStyle.dimAsz
+            if activeStyle.dimScale > 0 { gv.dimScale = activeStyle.dimScale }
+            gv.dimLinearFormat = GraphicVariables.linearFormat(fromDXF: Int(activeStyle.dimLUnit))
+            gv.dimLinearPrecision = Int(activeStyle.dimDec)
+        }
+
+        // 2) HEADER vars — the document-active values; override the style defaults.
+        if let hp = lc_header(list) {
+            let h = hp.pointee
+            if h.hasInsUnits != 0 { gv.unit = DrawingUnit(dxf: Int(h.insUnits)) }
+            if h.hasLuUnits != 0 {
+                gv.linearFormat = GraphicVariables.linearFormat(fromDXF: Int(h.luUnits))
+            }
+            if h.hasLuPrec != 0 { gv.linearPrecision = Int(h.luPrec) }
+            if h.hasAuUnits != 0 {
+                gv.angleFormat = GraphicVariables.angleFormat(fromDXF: Int(h.auUnits))
+            }
+            if h.hasAuPrec != 0 { gv.anglePrecision = Int(h.auPrec) }
+            if h.hasDimTxt != 0, h.dimTxt > 0 { gv.dimTextHeight = h.dimTxt }
+            if h.hasDimAsz != 0, h.dimAsz > 0 { gv.dimArrowSize = h.dimAsz }
+            if h.hasDimScale != 0, h.dimScale > 0 { gv.dimScale = h.dimScale }
+            if h.hasDimLUnit != 0 {
+                gv.dimLinearFormat = GraphicVariables.linearFormat(fromDXF: Int(h.dimLUnit))
+            }
+            if h.hasDimDec != 0 { gv.dimLinearPrecision = Int(h.dimDec) }
+        }
+
+        return gv
+    }
+
+    /// Returns the dim style the header names active (`$DIMSTYLE`), or the
+    /// "Standard"/"STANDARD" style, or the first style — whichever exists — from the
+    /// captured DIMSTYLE table; `nil` if the file had no dim styles.
+    private static func activeDimStyle(_ list: OpaquePointer) -> LCDimStyle? {
+        let count = Int(lc_dimstyle_count(list))
+        guard count > 0, let base = lc_dimstyles(list) else { return nil }
+        let styles = UnsafeBufferPointer(start: base, count: count)
+
+        // Prefer the header's active style name, if any.
+        if let hp = lc_header(list), let activeName = string(hp.pointee.dimStyle),
+           !activeName.isEmpty,
+           let match = styles.first(where: {
+               (string($0.name)?.caseInsensitiveCompare(activeName) == .orderedSame)
+           }) {
+            return match
+        }
+        // Else "Standard".
+        if let std = styles.first(where: {
+            (string($0.name)?.caseInsensitiveCompare("Standard") == .orderedSame)
+        }) {
+            return std
+        }
+        // Else the first defined style.
+        return styles.first
     }
 
     // MARK: - Layer-table mapping
@@ -392,12 +479,25 @@ extension CADEngine {
             resolvedDefPoint = definitionPoint
         }
 
+        // Per-entity text-height / arrow-size override (ACAD:DSTYLE xdata, parsed by
+        // the bridge). When the file carries an override we stamp it onto DimData so
+        // it WINS over the document default (resolve precedence: per-entity > 0 wins,
+        // Resolve.swift:931/940). When absent we pass 0 — the engine's "inherit"
+        // sentinel — so the document's `$DIMTXT`/`$DIMASZ` (via dimStyleProvider)
+        // apply instead of the hard-coded 2.5 DimData.init default that masked them.
+        let textHeight = e.dimHasTextHeightOverride != 0 && e.dimTextHeightOverride > 0
+            ? e.dimTextHeightOverride : 0.0
+        let arrowSize = e.dimHasArrowSizeOverride != 0 && e.dimArrowSizeOverride > 0
+            ? e.dimArrowSizeOverride : 0.0
+
         return .dimension(DimData(
             kind: kind,
             definitionPoint: resolvedDefPoint,
             textOverride: textOverride,
             textMiddle: textMiddle,
             styleName: string(e.styleName),
+            textHeight: textHeight,
+            arrowSize: arrowSize,
             textRotation: textRotation,
             attachmentPoint: attachment,
             lineSpacingStyle: lineSpacingStyle,
@@ -609,8 +709,10 @@ public func loadDrawing(dxfPath: String) async throws -> CADDrawing {
     let result = try await CADEngine.shared.readEntities(dxfPath: dxfPath)
     let drawing = CADDrawing()
     // Load the block table too so any INSERT resolves to its block's geometry
-    // (the block's member records are part of `result.records`).
-    drawing.load(entities: result.records, layers: result.layers, blocks: result.blocks)
+    // (the block's member records are part of `result.records`), plus the parsed
+    // header graphic variables so dimensions resolve at the file's real size/units.
+    drawing.load(entities: result.records, layers: result.layers,
+                 blocks: result.blocks, graphicVariables: result.graphicVariables)
     return drawing
 }
 
@@ -621,6 +723,7 @@ public func loadDrawing(dxfPath: String) async throws -> CADDrawing {
 public func loadDrawing(dwgPath: String) async throws -> CADDrawing {
     let result = try await CADEngine.shared.readEntities(dwgPath: dwgPath)
     let drawing = CADDrawing()
-    drawing.load(entities: result.records, layers: result.layers, blocks: result.blocks)
+    drawing.load(entities: result.records, layers: result.layers,
+                 blocks: result.blocks, graphicVariables: result.graphicVariables)
     return drawing
 }

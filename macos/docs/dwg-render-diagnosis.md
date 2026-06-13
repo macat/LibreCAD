@@ -1,6 +1,11 @@
 # DWG render diagnosis — `mechanical_example-imperial.dwg`
 
-Status: **investigation complete, data-backed**. No production code changed.
+Status: **investigation complete, data-backed** — **FIX LANDED** (ws-dimstyle-header-read, DC.5).
+RC1+RC2+RC3+H2+H3 resolved: the bridge now reads the HEADER vars + DIMSTYLE table (P1+P2+P3 below).
+Real-file re-validation on this DWG after the fix: dim text height **2.5 → 0.125**, units **mm → inch**,
+linear format **architectural** ($LUNITS=4), all 17 dims resolve at 0.125. P4 (DIMEXO/DIMEXE/DIMGAP →
+ResolvedDimStyle) still open (the header/style values are now captured in the PODs but not yet fed to
+the extension-line resolve). P5 (VIEWPORT) remains out of scope.
 File: `/Users/macatt/Downloads/mechanical_example-imperial.dwg`
 (R2010 / AC1024 DWG; 142 KB). Loaded through `CADEngine.shared.readEntities(dwgPath:)`.
 

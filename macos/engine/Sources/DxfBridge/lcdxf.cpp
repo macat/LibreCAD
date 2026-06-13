@@ -58,6 +58,13 @@ struct LCEntityList {
     std::vector<LCBlock>  blocks;
     std::vector<LCEntity> blockEntities;
 
+    // Captured HEADER variables (zero-initialized: every `has*` flag starts 0, so
+    // an unread file leaves Swift's graphic-variable defaults untouched) + the
+    // captured DIMSTYLE table. Both are filled by the FlatteningReader's
+    // addHeader / addDimStyle hooks; both DXF and DWG drive those hooks.
+    LCHeader header{};
+    std::vector<LCDimStyle> dimStyles;
+
     // Stable-address backing pools (deque: pointers survive growth).
     std::deque<std::string>          strings;
     std::deque<std::vector<LCVertex>> vertexPool;
@@ -170,6 +177,10 @@ public:
         e.dimAlign = 5;                   // middle-center default (DRW_Dimension)
         e.dimLineStyle = 1;              // at-least
         e.dimLineFactor = 1.0;
+        e.dimTextHeightOverride = 0.0;
+        e.dimHasTextHeightOverride = 0;
+        e.dimArrowSizeOverride = 0.0;
+        e.dimHasArrowSizeOverride = 0;
         e.insScaleX = 1.0;
         e.insScaleY = 1.0;
         e.insScaleZ = 1.0;
@@ -192,7 +203,33 @@ public:
     }
 
     // ----- header / tables -----------------------------------------------
-    void addHeader(const DRW_Header *data) override { (void)data; }
+    // Capture the small set of HEADER variables the renderer needs (dimension
+    // text/arrow/scale + the unit/linear-format vars). The DXF reader keys
+    // DRW_Header.vars with the `$`-prefixed name ($DIMTXT); the DWG reader keys
+    // them un-prefixed (DIMTXT) — so every lookup tries both spellings. A missing
+    // key leaves the matching `has*` flag at 0 (POD is zero-initialized), and Swift
+    // keeps its built-in default for that graphic variable.
+    void addHeader(const DRW_Header *data) override {
+        if (data == nullptr) return;
+        LCHeader &h = m_out->header;
+        getHdrInt(*data, "INSUNITS", h.insUnits, h.hasInsUnits);
+        getHdrInt(*data, "LUNITS",   h.luUnits,  h.hasLuUnits);
+        getHdrInt(*data, "LUPREC",   h.luPrec,   h.hasLuPrec);
+        getHdrInt(*data, "AUNITS",   h.auUnits,  h.hasAuUnits);
+        getHdrInt(*data, "AUPREC",   h.auPrec,   h.hasAuPrec);
+        getHdrDouble(*data, "DIMTXT",   h.dimTxt,   h.hasDimTxt);
+        getHdrDouble(*data, "DIMASZ",   h.dimAsz,   h.hasDimAsz);
+        getHdrDouble(*data, "DIMSCALE", h.dimScale, h.hasDimScale);
+        getHdrInt(*data, "DIMLUNIT", h.dimLUnit, h.hasDimLUnit);
+        getHdrInt(*data, "DIMDEC",   h.dimDec,   h.hasDimDec);
+        getHdrDouble(*data, "DIMEXO", h.dimExo, h.hasDimExo);
+        getHdrDouble(*data, "DIMEXE", h.dimExe, h.hasDimExe);
+        getHdrDouble(*data, "DIMGAP", h.dimGap, h.hasDimGap);
+        std::string styleName;
+        if (getHdrStr(*data, "DIMSTYLE", styleName)) {
+            h.dimStyle = intern(styleName);
+        }
+    }
     void addLType(const DRW_LType &data) override { (void)data; }
 
     void addLayer(const DRW_Layer &data) override {
@@ -210,7 +247,23 @@ public:
         m_out->layers.push_back(l);
     }
 
-    void addDimStyle(const DRW_Dimstyle &data) override { (void)data; }
+    // Capture one DIMSTYLE table entry. DRW_Dimstyle exposes the values as typed
+    // members (libdxfrw defaults the imperial standard dimtxt=dimasz=0.18 and fills
+    // them from the file); we flatten the subset the renderer needs into an
+    // LCDimStyle POD. Driven by both the DXF and DWG read paths.
+    void addDimStyle(const DRW_Dimstyle &data) override {
+        LCDimStyle s{};
+        s.name = intern(data.name);
+        s.dimTxt = data.dimtxt;
+        s.dimAsz = data.dimasz;
+        s.dimScale = data.dimscale;
+        s.dimDec = data.dimdec;
+        s.dimLUnit = data.dimlunit;
+        s.dimExo = data.dimexo;
+        s.dimExe = data.dimexe;
+        s.dimGap = data.dimgap;
+        m_out->dimStyles.push_back(s);
+    }
     void addVport(const DRW_Vport &data) override { (void)data; }
     void addTextStyle(const DRW_Textstyle &data) override { (void)data; }
     void addAppId(const DRW_AppId &data) override { (void)data; }
@@ -711,6 +764,9 @@ private:
         e.dimLineFactor = d.getTextLineFactor();
         e.dimTextRotation = d.getDir();
         e.dimHasTextRotation = (d.getDir() != 0.0) ? 1 : 0;
+        // Per-entity text-height / arrow-size override from the ACAD:DSTYLE xdata,
+        // if present (else the has* flags stay 0 == inherit the style/doc default).
+        applyDimOverrides(e, d);
         return e;
     }
 
@@ -775,6 +831,96 @@ private:
         e.dimDef5x = l2a.x; e.dimDef5y = l2a.y; e.dimDef5z = l2a.z;
         e.dimArcx  = arc.x; e.dimArcy  = arc.y; e.dimArcz  = arc.z;
         pushEntity(e);
+    }
+
+    // ----- HEADER-var lookup helpers -------------------------------------
+    // DRW_Header.vars is keyed `$`-prefixed by the DXF reader ($DIMTXT) and
+    // un-prefixed by the DWG reader (DIMTXT); look up both spellings. The variant
+    // stores its type tag, so accept INTEGER or DOUBLE interchangeably for a
+    // numeric var (a header var occasionally arrives as the "wrong" numeric type).
+    static const DRW_Variant *findHdrVar(const DRW_Header &h, const char *key) {
+        auto it = h.vars.find(std::string("$") + key);
+        if (it != h.vars.end()) return it->second;
+        it = h.vars.find(std::string(key));
+        if (it != h.vars.end()) return it->second;
+        return nullptr;
+    }
+    static void getHdrInt(const DRW_Header &h, const char *key,
+                          int32_t &out, int32_t &has) {
+        const DRW_Variant *v = findHdrVar(h, key);
+        if (v == nullptr) return;
+        if (v->type() == DRW_Variant::INTEGER) {
+            out = static_cast<int32_t>(v->i_val()); has = 1;
+        } else if (v->type() == DRW_Variant::DOUBLE) {
+            out = static_cast<int32_t>(v->d_val()); has = 1;
+        }
+    }
+    static void getHdrDouble(const DRW_Header &h, const char *key,
+                             double &out, int32_t &has) {
+        const DRW_Variant *v = findHdrVar(h, key);
+        if (v == nullptr) return;
+        if (v->type() == DRW_Variant::DOUBLE) {
+            out = v->d_val(); has = 1;
+        } else if (v->type() == DRW_Variant::INTEGER) {
+            out = static_cast<double>(v->i_val()); has = 1;
+        }
+    }
+    static bool getHdrStr(const DRW_Header &h, const char *key, std::string &out) {
+        const DRW_Variant *v = findHdrVar(h, key);
+        if (v == nullptr || v->type() != DRW_Variant::STRING) return false;
+        out = v->c_str();
+        return !out.empty();
+    }
+
+    // ----- per-dimension DSTYLE override (xdata) -------------------------
+    // A DIMENSION can override its style's text height / arrow size inline via the
+    // `ACAD:DSTYLE` xdata group. In extData it appears as: 1001 "ACAD" (appid),
+    // 1000 "DSTYLE", then a brace-delimited list of (1070 dim-var-code, value)
+    // pairs — text height is dim-var 140, arrow size dim-var 41; the value follows
+    // as a 1040 double. We scan the FIFO extData for this pattern and stamp any
+    // found override (with its `has*` flag) onto the entity; resolve precedence
+    // makes a per-entity override win over the document/style default. Absent =>
+    // flags stay 0 (inherit). Mirrors how AutoCAD/LibreCAD store dim overrides.
+    static void applyDimOverrides(LCEntity &e, const DRW_Entity &d) {
+        bool inDStyle = false;
+        int pendingVar = 0;          // the dim-var code from the last 1070
+        bool havePendingVar = false;
+        for (const auto &vp : d.extData) {
+            if (!vp) continue;
+            const DRW_Variant &v = *vp;
+            switch (v.code()) {
+            case 1001:               // appid: a new xdata group begins
+                inDStyle = false;
+                havePendingVar = false;
+                break;
+            case 1000:               // string control: "DSTYLE" opens the override list
+                if (v.type() == DRW_Variant::STRING && v.c_str() != nullptr) {
+                    inDStyle = (std::string(v.c_str()) == "DSTYLE");
+                }
+                havePendingVar = false;
+                break;
+            case 1070:               // the dim-variable code this override targets
+                if (inDStyle && v.type() == DRW_Variant::INTEGER) {
+                    pendingVar = static_cast<int>(v.i_val());
+                    havePendingVar = true;
+                }
+                break;
+            case 1040:               // the override value for the pending dim-var
+                if (inDStyle && havePendingVar && v.type() == DRW_Variant::DOUBLE) {
+                    if (pendingVar == 140) {       // DIMTXT — text height
+                        e.dimTextHeightOverride = v.d_val();
+                        e.dimHasTextHeightOverride = 1;
+                    } else if (pendingVar == 41) { // DIMASZ — arrow size
+                        e.dimArrowSizeOverride = v.d_val();
+                        e.dimHasArrowSizeOverride = 1;
+                    }
+                    havePendingVar = false;
+                }
+                break;
+            default:
+                break;
+            }
+        }
     }
 
     // Common path for an entity passed by const-ref that we don't flatten.
@@ -1593,6 +1739,19 @@ extern "C" int lc_block_entity_count(const LCEntityList *list) {
 extern "C" const LCEntity *lc_block_entities(const LCEntityList *list) {
     if (list == nullptr || list->blockEntities.empty()) return nullptr;
     return list->blockEntities.data();
+}
+
+extern "C" const LCHeader *lc_header(const LCEntityList *list) {
+    return list ? &list->header : nullptr;
+}
+
+extern "C" int lc_dimstyle_count(const LCEntityList *list) {
+    return list ? static_cast<int>(list->dimStyles.size()) : 0;
+}
+
+extern "C" const LCDimStyle *lc_dimstyles(const LCEntityList *list) {
+    if (list == nullptr || list->dimStyles.empty()) return nullptr;
+    return list->dimStyles.data();
 }
 
 extern "C" void lc_entity_list_free(LCEntityList *list) {

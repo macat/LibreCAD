@@ -117,7 +117,9 @@ let package = Package(
             path: "Tests/CADEngineTests",
             resources: [
                 .copy("Resources/dim_sample.dxf"),
-                .copy("Resources/hatch_sample.dxf")
+                .copy("Resources/hatch_sample.dxf"),
+                .copy("Resources/imperial_dim.dxf"),
+                .copy("Resources/imperial_dim_styleonly.dxf")
             ],
             swiftSettings: swift6
         ),
