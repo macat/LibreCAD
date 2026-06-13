@@ -791,6 +791,111 @@ public final class CADDrawing {
         mutateBlocks { $0.activate(name) }
     }
 
+    // MARK: - Create block from a selection (CreateBlockTool's model op)
+
+    /// The outcome of a `makeBlockFromEntities` call: the (possibly de-duplicated)
+    /// name the block was registered under, and the id of the `.insert` entity that
+    /// replaced the originals.
+    public struct BlockCreation: Sendable, Hashable {
+        /// The name the new block was registered under (may differ from the request
+        /// if a clash forced `BlockTable.newName`).
+        public let blockName: String
+        /// The id of the `.insert` entity now standing in for the selection.
+        public let insertID: EntityID
+    }
+
+    /// Creates a named block from a set of existing entities and replaces those
+    /// entities with a single `.insert` that references the new block — the engine
+    /// op behind `CreateBlockTool` (feature-catalog F9). Mirrors LibreCAD's
+    /// "create block" command (`RS_ActionBlocksCreate` / `RS_Graphic::addBlock`):
+    /// the selection's records become the block's members (re-authored RELATIVE to
+    /// the chosen `basePoint`, so the block's local frame has its base at the
+    /// origin), and one INSERT placed AT `basePoint` re-draws them in their original
+    /// world positions.
+    ///
+    /// ## Why this is a direct model op (NOT a `ToolEdit`)
+    /// `ToolEdit` only expresses entity-level `.add`/`.replace`/`.remove`; it cannot
+    /// touch the `BlockTable`. Block creation must register a `Block` AND re-author
+    /// the member records AND drop an INSERT, so `CreateBlockTool` calls this
+    /// undoable mutator directly (decision documented in the tool's header). Every
+    /// step is registered against `undoManager`, so the whole creation is undoable
+    /// (the `UndoManager` groups the calls made within one event loop turn, matching
+    /// how `applyCommit` groups a tool's edits).
+    ///
+    /// Behavior:
+    ///   - `ids` not present in the drawing are skipped; an EMPTY effective set
+    ///     (no valid ids) is a no-op returning `nil` (nothing to block).
+    ///   - the block name is de-duplicated via `BlockTable.newName(suggestion:)` so a
+    ///     clash never silently fails; the actual name is returned.
+    ///   - each member is RE-AUTHORED relative to `basePoint` (its geometry is
+    ///     translated by `-basePoint`) and re-minted a fresh id, so the block owns
+    ///     private member records (the `.selected` flag is stripped — members are not
+    ///     top-level selectable). The originals are removed.
+    ///   - one INSERT (`blockName` at `basePoint`, unit scale, no rotation) is added,
+    ///     inheriting the layer/pen of the FIRST selected entity (LibreCAD places the
+    ///     block reference on the active layer; we keep it coherent with the source).
+    ///
+    /// - Returns: the registered name + the new insert's id, or `nil` for an empty
+    ///   effective selection / blank name.
+    @discardableResult
+    public func makeBlockFromEntities(
+        name requestedName: String,
+        basePoint: Vector,
+        ids: [EntityID]
+    ) -> BlockCreation? {
+        // Resolve the requested ids to live records, preserving order + dropping
+        // any that are no longer in the drawing (and de-duplicating repeats).
+        var seen = Set<EntityID>()
+        let sources: [EntityRecord] = ids.compactMap { id in
+            guard seen.insert(id).inserted, let rec = entity(id) else { return nil }
+            return rec
+        }
+        guard !sources.isEmpty else { return nil }
+
+        let trimmed = requestedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let blockName = blocks.newName(suggestion: trimmed)
+
+        // The translation that re-authors world geometry into the block's local
+        // frame (base point → origin). The placing INSERT undoes it (insertionPoint
+        // == basePoint) so the geometry re-draws exactly where it was.
+        let toLocal = Affine2D.translation(Vector(-basePoint.x, -basePoint.y))
+
+        // Mint the member ids up front so the Block record and the added records
+        // agree (add() honors a non-placeholder id; these are freshly minted so they
+        // cannot collide).
+        var memberIDs: [EntityID] = []
+        memberIDs.reserveCapacity(sources.count)
+        var memberRecords: [EntityRecord] = []
+        memberRecords.reserveCapacity(sources.count)
+        for src in sources {
+            let mid = mintID()
+            memberIDs.append(mid)
+            var member = src
+            member.id = mid
+            member.kind = src.kind.transformed(by: toLocal)
+            member.isSelected = false            // members are not top-level selectable
+            memberRecords.append(member)
+        }
+
+        // Remove the originals, add the re-authored members, register the block, and
+        // drop the INSERT — each call is undoable, so the whole op reverses as a unit.
+        for src in sources { remove(src.id) }
+        for member in memberRecords { _ = add(member) }
+        addBlock(Block(name: blockName, basePoint: Vector(0, 0), entityIDs: memberIDs))
+
+        let template = sources[0]
+        let insertRecord = EntityRecord(
+            id: .placeholder,
+            layer: template.layer,
+            pen: template.pen,
+            flags: .default,
+            kind: .insert(InsertData(blockName: blockName, insertionPoint: basePoint))
+        )
+        let insertID = add(insertRecord)
+        return BlockCreation(blockName: blockName, insertID: insertID)
+    }
+
     // MARK: - Graphic-variable mutations (value-snapshot undo of the whole bag)
 
     /// Whole-bag graphic-variable mutation with undo — the same value-snapshot
