@@ -509,6 +509,33 @@ public enum DimKind: Sendable, Hashable, Codable {
     /// degrees) subtended at the lines' intersection.
     case angular(line1Start: Vector, line1End: Vector,
                  line2Start: Vector, line2End: Vector)
+
+    /// An **ordinate** dimension: the X- or Y-distance from a datum `origin` to a
+    /// `feature` point, shown as a leader running from the feature to `leaderEnd`
+    /// (where the value text sits) (`LC_DimOrdinate`, DXF `DIMORDINATE`, type-70
+    /// low nibble 6). `measuringX == true` is an **X-datum** ordinate (measures the
+    /// horizontal distance, the X coordinate relative to the origin; DXF code 70
+    /// bit 0x40 set); `false` is a **Y-datum** ordinate (vertical distance). The
+    /// measured value is `|feature.x − origin.x|` (X) or `|feature.y − origin.y|`
+    /// (Y). `DimData.definitionPoint` is the datum origin (code 10).
+    case ordinate(origin: Vector, feature: Vector, leaderEnd: Vector, measuringX: Bool)
+
+    /// An **arc-length** dimension: the length of a circular arc measured *along*
+    /// the arc (`LC_DimArc`, AutoCAD ARC_DIMENSION). The feature arc is
+    /// `center`/`radius` swept from `startAngle` to `endAngle` (radians; `reversed`
+    /// == clockwise sweep, matching `ArcData`). The dimension arc is drawn
+    /// concentric at the radius of `DimData.definitionPoint`, with an arc-length
+    /// symbol (⌒) prefixed to the value. The measured value is `radius · |sweep|`.
+    case arcLength(center: Vector, radius: Double,
+                   startAngle: Double, endAngle: Double, reversed: Bool)
+
+    /// A **3-point angular** dimension: the angle at `vertex` between the rays
+    /// `vertex`→`point1` and `vertex`→`point2` (`RS_DimAngular` 3-point form, DXF
+    /// `DIMANGULAR3P`, type-70 low nibble 5). The dimension arc passes through
+    /// `DimData.definitionPoint` (which also SELECTS which of the two sectors is
+    /// measured, like the 2-line angular dim). The measured value is the angle (in
+    /// degrees) subtended at `vertex`.
+    case angular3p(vertex: Vector, point1: Vector, point2: Vector)
 }
 
 // MARK: - Block reference (Insert) defining data (RS_InsertData / DRW_Insert)

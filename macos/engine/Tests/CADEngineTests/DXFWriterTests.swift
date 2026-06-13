@@ -114,9 +114,10 @@ struct DXFWriterTests {
         // (-> .solid, written), so both should round-trip.
         #expect(firstTally.mtext >= 1)
         #expect(firstTally.solid >= 1)
-        // …and the 14 DimKind-modelled DIMENSION entities (-> .dimension, now
-        // WRITTEN as DRW_Dim*).
-        #expect(firstTally.dimension == 14)
+        // …and all 20 DIMENSION entities (-> .dimension, now WRITTEN as DRW_Dim*).
+        // The dim-subtype wave added DimKind.ordinate, so the 6 ordinate dims import
+        // (14 prior + 6 ordinate == 20) and round-trip as DRW_DimOrdinate.
+        #expect(firstTally.dimension == 20)
 
         let outPath = tempDXFPath()
         defer { removeFile(outPath) }
@@ -548,6 +549,17 @@ struct DXFWriterTests {
         case let .angular(l1s, l1e, l2s, l2e):
             let a1 = (l1e - l1s).angle
             let a2 = (l2e - l2s).angle
+            return abs(Vector.correctAngle(a2 - a1))
+        case let .ordinate(origin, feature, _, measuringX):
+            return measuringX ? abs(feature.x - origin.x) : abs(feature.y - origin.y)
+        case let .arcLength(_, radius, startAngle, endAngle, reversed):
+            var sweep = reversed ? (startAngle - endAngle) : (endAngle - startAngle)
+            sweep = sweep.truncatingRemainder(dividingBy: 2 * Double.pi)
+            if sweep <= 0 { sweep += 2 * Double.pi }
+            return abs(radius) * sweep
+        case let .angular3p(vertex, p1, p2):
+            let a1 = (p1 - vertex).angle
+            let a2 = (p2 - vertex).angle
             return abs(Vector.correctAngle(a2 - a1))
         }
     }

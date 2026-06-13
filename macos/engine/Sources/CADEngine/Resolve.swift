@@ -952,6 +952,19 @@ extension EntityKind {
             return dimDiameter(d, point1: p1, point2: p2, pen: pen, ctx: ctx)
         case let .angular(l1s, l1e, l2s, l2e):
             return dimAngular(d, line1: (l1s, l1e), line2: (l2s, l2e), pen: pen, ctx: ctx)
+        case let .ordinate(origin, feature, leaderEnd, measuringX):
+            return dimOrdinate(d, origin: origin, feature: feature,
+                               leaderEnd: leaderEnd, measuringX: measuringX, pen: pen, ctx: ctx)
+        case let .arcLength(center, radius, startAngle, endAngle, reversed):
+            return dimArcLength(d, center: center, radius: radius,
+                                startAngle: startAngle, endAngle: endAngle,
+                                reversed: reversed, pen: pen, ctx: ctx)
+        case let .angular3p(vertex, p1, p2):
+            // Reuse the 2-line angular resolve by modelling each ray as
+            // (vertex → point): line1 = (vertex, p1), line2 = (vertex, p2). The
+            // lines' intersection is the vertex, so the same sector-selection +
+            // arc geometry applies.
+            return dimAngular(d, line1: (vertex, p1), line2: (vertex, p2), pen: pen, ctx: ctx)
         }
     }
 
@@ -1364,6 +1377,131 @@ extension EntityKind {
         return ResolvedGeometry(polylines: polylines, fills: fills).merged(with: textGeo)
     }
 
+    /// The arc-length dimension symbol (⌒, U+2312 ARC) prefixed to the measured
+    /// length, mirroring AutoCAD's DIMARCSYM "preceding" placement.
+    static let dimArcSymbol = "\u{2312}"
+
+    /// Ordinate dimension: an orthogonal leader from the `feature` point to
+    /// `leaderEnd` with a single right-angle dogleg, and the X- (or Y-) coordinate
+    /// value text at the leader end. The measured value is the feature's distance
+    /// from the datum `origin` along the measured axis. Mirrors `LC_DimOrdinate`.
+    static func dimOrdinate(_ d: DimData, origin: Vector, feature: Vector,
+                            leaderEnd: Vector, measuringX: Bool,
+                            pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        guard origin.valid, feature.valid, leaderEnd.valid else { return ResolvedGeometry() }
+        let textH = dimTextHeight(d, ctx: ctx)
+
+        // Measured ordinate: the X coordinate (horizontal distance) for an X-datum
+        // ordinate, the Y coordinate (vertical distance) for a Y-datum ordinate.
+        let measured = measuringX ? abs(feature.x - origin.x) : abs(feature.y - origin.y)
+
+        // Orthogonal leader with a dogleg. An X-datum ordinate's leader runs
+        // vertically off the feature (the measuring direction is X, so the leader
+        // extends in Y); a Y-datum ordinate's leader runs horizontally. The dogleg
+        // turns toward the leader-end's free axis so the run reaches `leaderEnd`.
+        var polylines: [ResolvedPolyline] = []
+        let knee: Vector
+        if measuringX {
+            // Leader extends in Y from the feature, then turns in X to the end.
+            knee = Vector(feature.x, leaderEnd.y, feature.z)
+        } else {
+            // Leader extends in X from the feature, then turns in Y to the end.
+            knee = Vector(leaderEnd.x, feature.y, feature.z)
+        }
+        // Drop a degenerate dogleg vertex (feature/knee/leaderEnd collinear-equal).
+        var pts: [Vector] = [feature]
+        if knee.distance(to: feature) > Tolerance.distance { pts.append(knee) }
+        if leaderEnd.distance(to: pts.last!) > Tolerance.distance { pts.append(leaderEnd) }
+        if pts.count >= 2 {
+            polylines.append(ResolvedPolyline(points: pts, closed: false, pen: pen))
+        }
+
+        // The value text sits just past the leader end, baseline horizontal
+        // (ordinate text is conventionally upright/horizontal).
+        let label = dimLabel(d, measured: measured, ctx: ctx)
+        // Offset the text along the leader's final run direction so it does not
+        // overlap the leader endpoint.
+        let runDir: Vector = pts.count >= 2 ? {
+            let last = pts[pts.count - 1] - pts[pts.count - 2]
+            let len = last.magnitude
+            return len > Tolerance.distance ? last / len : Vector(1, 0)
+        }() : Vector(1, 0)
+        let gap = dimTextGap(d, ctx: ctx)
+        let textCenter = (d.textMiddle.flatMap { $0.valid ? $0 : nil })
+            ?? leaderEnd + runDir * (gap + textH * 0.5)
+        let textAngle = d.textRotation ?? 0
+        let textGeo = dimText(label, center: textCenter, rotation: textAngle,
+                              height: textH, pen: pen, ctx: ctx)
+
+        return ResolvedGeometry(polylines: polylines, fills: []).merged(with: textGeo)
+    }
+
+    /// Arc-length dimension: a dimension arc concentric with the feature arc at the
+    /// radius of `definitionPoint`, extension lines from the feature-arc endpoints
+    /// out to the dimension arc, arrowheads at each end, and the arc length text
+    /// (prefixed with the arc symbol ⌒). The measured value is `radius · |sweep|`.
+    /// Mirrors `LC_DimArc`.
+    static func dimArcLength(_ d: DimData, center: Vector, radius featureR: Double,
+                            startAngle: Double, endAngle: Double, reversed: Bool,
+                            pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        guard center.valid, d.definitionPoint.valid, featureR > Tolerance.distance else {
+            return ResolvedGeometry()
+        }
+        let arrow = dimArrowSize(d, ctx: ctx)
+        let textH = dimTextHeight(d, ctx: ctx)
+
+        // Signed sweep in the travel direction, normalized to (0, 2π] (mirrors
+        // Tessellation.arcPoints / arcBoundingBox).
+        let twoPi = 2 * Double.pi
+        var sweepMag = reversed ? (startAngle - endAngle) : (endAngle - startAngle)
+        sweepMag = sweepMag.truncatingRemainder(dividingBy: twoPi)
+        if sweepMag <= Tolerance.angle { sweepMag += twoPi }
+        let signedSweep = reversed ? -sweepMag : sweepMag
+
+        // Arc length = radius × |sweep|.
+        let measured = featureR * sweepMag
+
+        // The dimension arc is concentric, at the radius of the definition point.
+        let dimR = (d.definitionPoint - center).magnitude
+        guard dimR > Tolerance.distance else { return ResolvedGeometry() }
+
+        var polylines: [ResolvedPolyline] = []
+        var fills: [ResolvedFill] = []
+
+        // The dimension arc (center-relative, from startAngle along the signed sweep).
+        let arcPts = Tessellation.arcPointsBySweep(
+            center: center, radius: dimR, startAngle: startAngle, sweep: signedSweep,
+            tolerance: ctx.tessellationTolerance)
+        polylines.append(ResolvedPolyline(points: arcPts, closed: false, pen: pen))
+
+        // Extension lines from each feature-arc endpoint out to the dimension arc.
+        let featStart = center + Vector.polar(radius: featureR, angle: startAngle)
+        let featEnd = center + Vector.polar(radius: featureR, angle: endAngle)
+        let dimStart = center + Vector.polar(radius: dimR, angle: startAngle)
+        let dimEnd = center + Vector.polar(radius: dimR, angle: endAngle)
+        polylines.append(ResolvedPolyline(points: [featStart, dimStart], closed: false, pen: pen))
+        polylines.append(ResolvedPolyline(points: [featEnd, dimEnd], closed: false, pen: pen))
+
+        // Arrowheads tangent to the dimension arc at each end, pointing along the
+        // (CW or CCW) arc per the sweep sign.
+        let dir = signedSweep >= 0 ? 1.0 : -1.0
+        let tanStart = Vector(angle: startAngle + dir * Double.pi / 2)
+        let tanEnd = Vector(angle: endAngle + dir * Double.pi / 2)
+        fills.append(dimArrowhead(tip: dimStart, direction: -tanStart, size: arrow, color: pen.color))
+        fills.append(dimArrowhead(tip: dimEnd, direction: tanEnd, size: arrow, color: pen.color))
+
+        // The length label (arc symbol prefix) at the dimension-arc midpoint.
+        let label = dimLabel(d, measured: measured, suffix: dimArcSymbol, ctx: ctx)
+        let midA = startAngle + signedSweep / 2
+        let textCenter = (d.textMiddle.flatMap { $0.valid ? $0 : nil })
+            ?? center + Vector.polar(radius: dimR + dimTextGap(d, ctx: ctx), angle: midA)
+        let textAngle = d.textRotation ?? dimTextAngle(midA + dir * Double.pi / 2)
+        let textGeo = dimText(label, center: textCenter, rotation: textAngle,
+                              height: textH, pen: pen, ctx: ctx)
+
+        return ResolvedGeometry(polylines: polylines, fills: fills).merged(with: textGeo)
+    }
+
     /// Intersection of two infinite lines, or `nil` if parallel.
     static func lineLineIntersection(_ l1: (Vector, Vector), _ l2: (Vector, Vector)) -> Vector? {
         let p = l1.0, r = l1.1 - l1.0
@@ -1744,6 +1882,18 @@ extension EntityKind {
             // which angular sector is measured, so value + arc + label agree.
             let (_, _, sweep) = dimAngularGeometry(d, line1: (l1s, l1e), line2: (l2s, l2e))
             return (abs(sweep) * 180 / Double.pi, "")
+        case let .ordinate(origin, feature, _, measuringX):
+            return (measuringX ? abs(feature.x - origin.x) : abs(feature.y - origin.y), "")
+        case let .arcLength(_, radius, startAngle, endAngle, reversed):
+            let twoPi = 2 * Double.pi
+            var sweep = reversed ? (startAngle - endAngle) : (endAngle - startAngle)
+            sweep = sweep.truncatingRemainder(dividingBy: twoPi)
+            if sweep <= Tolerance.angle { sweep += twoPi }
+            return (abs(radius) * sweep, dimArcSymbol)
+        case let .angular3p(vertex, p1, p2):
+            // Same sector selection as the 2-line angular (M1) via vertex→point rays.
+            let (_, _, sweep) = dimAngularGeometry(d, line1: (vertex, p1), line2: (vertex, p2))
+            return (abs(sweep) * 180 / Double.pi, "")
         }
     }
 
@@ -1787,6 +1937,27 @@ extension EntityKind {
             let (vertex, a1, sweep) = dimAngularGeometry(d, line1: (l1s, l1e), line2: (l2s, l2e))
             let radius = (d.definitionPoint - vertex).magnitude
             return vertex + Vector.polar(radius: radius + h * 0.7, angle: a1 + sweep / 2)
+        case let .ordinate(_, feature, leaderEnd, measuringX):
+            // The value text sits just past the leader end, along the final run.
+            let knee = measuringX
+                ? Vector(feature.x, leaderEnd.y, feature.z)
+                : Vector(leaderEnd.x, feature.y, feature.z)
+            let last = leaderEnd - knee
+            let len = last.magnitude
+            let runDir = len > Tolerance.distance ? last / len : Vector(1, 0)
+            return leaderEnd + runDir * (h * 0.7 + h * 0.5)
+        case let .arcLength(center, _, startAngle, endAngle, reversed):
+            let twoPi = 2 * Double.pi
+            var sweep = reversed ? (startAngle - endAngle) : (endAngle - startAngle)
+            sweep = sweep.truncatingRemainder(dividingBy: twoPi)
+            if sweep <= Tolerance.angle { sweep += twoPi }
+            let signed = reversed ? -sweep : sweep
+            let dimR = (d.definitionPoint - center).magnitude
+            return center + Vector.polar(radius: dimR + h * 0.7, angle: startAngle + signed / 2)
+        case let .angular3p(vertex, p1, p2):
+            let (v, a1, sweep) = dimAngularGeometry(d, line1: (vertex, p1), line2: (vertex, p2))
+            let radius = (d.definitionPoint - v).magnitude
+            return v + Vector.polar(radius: radius + h * 0.7, angle: a1 + sweep / 2)
         }
     }
 

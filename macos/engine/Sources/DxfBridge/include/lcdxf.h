@@ -119,14 +119,22 @@ typedef enum LCEntityKind {
 
 /** Discriminator for `LCEntity::dimType` (which DRW_Dim* subtype). The values
  *  mirror the DXF type-70 low-nibble codes libdxfrw dispatches on
- *  (processDimension: `dim.type & 0x0F`). ORDINATE is not in the frozen DimKind
- *  model, so the reader maps it to LC_ENT_UNSUPPORTED rather than this enum. */
+ *  (processDimension: `dim.type & 0x0F`): linear 0, aligned 1, 2-line angular 2,
+ *  diametric 3, radial 4, 3-point angular 5, ordinate 6. ARC-LENGTH has no DXF
+ *  DIMENSION subtype in libdxfrw (AutoCAD ARC_DIMENSION is unsupported by
+ *  libdxfrw and is not written by upstream LibreCAD either); it is given a
+ *  bridge-internal discriminator so the engine value model round-trips, and on
+ *  DXF write it is persisted via the 3-point-angular geometry (graceful — its
+ *  full fidelity round-trips through the engine's Codable value model). */
 typedef enum LCDimType {
-    LC_DIM_LINEAR    = 0,   /**< DRW_DimLinear  — def1/def2 (codes 13/14) + dimAngle (50). */
-    LC_DIM_ALIGNED   = 1,   /**< DRW_DimAligned — def1/def2 (codes 13/14). */
-    LC_DIM_ANGULAR   = 2,   /**< DRW_DimAngular (2-line) — def1/def2/def5 + defPoint + arc (16). */
-    LC_DIM_DIAMETRIC = 3,   /**< DRW_DimDiametric — def5 (code 15) + defPoint (code 10). */
-    LC_DIM_RADIAL    = 4     /**< DRW_DimRadial — defPoint (center, 10) + def5 (radius point, 15). */
+    LC_DIM_LINEAR     = 0,  /**< DRW_DimLinear  — def1/def2 (codes 13/14) + dimAngle (50). */
+    LC_DIM_ALIGNED    = 1,  /**< DRW_DimAligned — def1/def2 (codes 13/14). */
+    LC_DIM_ANGULAR    = 2,  /**< DRW_DimAngular (2-line) — def1/def2/def5 + defPoint + arc (16). */
+    LC_DIM_DIAMETRIC  = 3,  /**< DRW_DimDiametric — def5 (code 15) + defPoint (code 10). */
+    LC_DIM_RADIAL     = 4,  /**< DRW_DimRadial — defPoint (center, 10) + def5 (radius point, 15). */
+    LC_DIM_ANGULAR3P  = 5,  /**< DRW_DimAngular3p — def1 (13), def2 (14), def5 (vertex, 15), defPoint (arc, 10). */
+    LC_DIM_ORDINATE   = 6,  /**< DRW_DimOrdinate — defPoint (origin, 10), def1 (feature, 13), def2 (leader end, 14); dimOrdinateX bit selects X- vs Y-datum (type-70 bit 0x40). */
+    LC_DIM_ARC_LENGTH = 7   /**< arc-length (no DXF subtype) — center (p1), radius, startAngle/endAngle, dimArc* (def point at the dim-arc radius), dimReversed sweep flag. */
 } LCDimType;
 
 /** One flattened polyline vertex: a 2D point plus a DXF bulge. */
@@ -247,6 +255,13 @@ typedef struct LCEntity {
     int32_t dimHasTextHeightOverride;
     double dimArrowSizeOverride;
     int32_t dimHasArrowSizeOverride;
+    /** ORDINATE (dimType == LC_DIM_ORDINATE) X- vs Y-datum: 1 == X-datum (measures
+     *  the horizontal distance; DXF type-70 bit 0x40 set), 0 == Y-datum. */
+    int32_t dimOrdinateX;
+    /** ARC-LENGTH (dimType == LC_DIM_ARC_LENGTH) feature-arc sweep orientation:
+     *  1 == clockwise (reversed), 0 == counter-clockwise. The feature arc's
+     *  center is p1, its radius is `radius`, its sweep is startAngle→endAngle. */
+    int32_t dimReversed;
 
     /* INSERT-only fields (meaningful when kind == LC_ENT_INSERT). The block name
      * is in `textValue`; the insertion point in p1; the rotation (radians) in

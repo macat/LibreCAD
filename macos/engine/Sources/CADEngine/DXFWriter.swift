@@ -775,6 +775,45 @@ private final class PODBuilder {
             e.dimArcx = d.definitionPoint.x
             e.dimArcy = d.definitionPoint.y
             e.dimArcz = d.definitionPoint.z
+
+        case let .ordinate(origin, feature, leaderEnd, measuringX):
+            e.dimType = Int32(LC_DIM_ORDINATE.rawValue)
+            // origin == code 10 (defPoint); feature == def1 (code 13); leaderEnd ==
+            // def2 (code 14); the X/Y datum is the dimOrdinateX flag (type-70 0x40).
+            setP1(&e, origin)
+            setDef1(&e, feature)
+            setDef2(&e, leaderEnd)
+            e.dimOrdinateX = measuringX ? 1 : 0
+
+        case let .arcLength(center, radius, startAngle, endAngle, reversed):
+            e.dimType = Int32(LC_DIM_ARC_LENGTH.rawValue)
+            // The feature arc: center (p1/cx), radius, sweep startAngle→endAngle.
+            // The dim-arc location is DimData.definitionPoint (written as the arc
+            // point, code 16). def1/def2 carry the feature-arc endpoints so the C
+            // side can persist the geometry via the 3p-angular carrier.
+            setP1(&e, center)
+            e.cx = center.x; e.cy = center.y; e.cz = center.z
+            e.radius = radius
+            e.startAngle = startAngle
+            e.endAngle = endAngle
+            e.dimReversed = reversed ? 1 : 0
+            let featStart = center + Vector.polar(radius: abs(radius), angle: startAngle)
+            let featEnd = center + Vector.polar(radius: abs(radius), angle: endAngle)
+            setDef1(&e, featStart)
+            setDef2(&e, featEnd)
+            e.dimArcx = d.definitionPoint.x
+            e.dimArcy = d.definitionPoint.y
+            e.dimArcz = d.definitionPoint.z
+
+        case let .angular3p(vertex, point1, point2):
+            e.dimType = Int32(LC_DIM_ANGULAR3P.rawValue)
+            // point1 == def1 (code 13); point2 == def2 (code 14); vertex == def5
+            // (code 15); the dim arc passes through DimData.definitionPoint, written
+            // as the def point (code 10).
+            setP1(&e, d.definitionPoint)
+            setDef1(&e, point1)
+            setDef2(&e, point2)
+            setDef5(&e, vertex)
         }
 
         if let mid = d.textMiddle {

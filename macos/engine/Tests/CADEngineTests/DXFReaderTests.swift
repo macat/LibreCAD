@@ -97,10 +97,10 @@ struct DXFReaderTests {
         #expect(t.solid == 4)
 
         // Dimension-import wave: dim_sample's 20 DIMENSION entities are 6 linear,
-        // 1 aligned, 2 angular, 2 diametric, 3 radial (= 14 modelled by DimKind)
-        // plus 6 ordinate (not in DimKind). The 14 import as `.dimension`; the 6
-        // ordinate stay warnings.
-        #expect(t.dimension == 14)
+        // 1 aligned, 2 angular, 2 diametric, 3 radial (= 14) PLUS 6 ordinate — the
+        // dim-subtype wave (w2-dimsub) added DimKind.ordinate, so all 20 now import
+        // as `.dimension` (the 6 ordinate dims no longer warn).
+        #expect(t.dimension == 20)
     }
 
     @Test("imports MTEXT as .mtext and SOLID as .solid from dim_sample.dxf")
@@ -148,16 +148,17 @@ struct DXFReaderTests {
         #expect(result.records.allSatisfy { !$0.layer.name.isEmpty })
     }
 
-    @Test("collects warnings for unsupported entities (ordinate dims/leaders)")
+    @Test("collects warnings for unsupported entities (leaders)")
     func collectsWarnings() async throws {
         let result = try await readSample()
-        // dim_sample.dxf carries 6 ORDINATE dimensions (not in the frozen DimKind)
-        // plus LEADERs; those are not imported, so the reader must surface a
-        // non-empty warning list rather than failing the read. The 14 modelled
-        // dimensions are imported (see parsesSupportedGeometry); the remaining
-        // ordinate ones still surface as a "DIMENSION" warning.
+        // dim_sample.dxf carries 2 LEADER entities (not yet imported), so the reader
+        // must surface a non-empty warning list rather than failing the read.
         #expect(!result.warnings.isEmpty)
-        #expect(result.warnings.contains { $0.contains("DIMENSION") })
+        #expect(result.warnings.contains { $0.contains("LEADER") })
+
+        // The dim-subtype wave (w2-dimsub) imports the 6 ORDINATE dimensions, so
+        // DIMENSION no longer appears as a skipped warning.
+        #expect(!result.warnings.contains { $0.contains("DIMENSION") })
 
         // The reader-import wave moves MTEXT and SOLID OUT of the warning list:
         // they are imported now, so they must NOT appear as skipped warnings.

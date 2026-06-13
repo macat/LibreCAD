@@ -455,6 +455,33 @@ extension CADEngine {
                 line1End: Vector(e.dimDef2x, e.dimDef2y, e.dimDef2z),
                 line2Start: Vector(e.dimDef5x, e.dimDef5y, e.dimDef5z),
                 line2End: definitionPoint)
+        case Int32(LC_DIM_ANGULAR3P.rawValue):
+            // point1 == def1 (code 13); point2 == def2 (code 14); vertex == def5
+            // (code 15); the dimension arc passes through `definitionPoint` (the
+            // dim point, code 10) which selects the sector + arc radius.
+            kind = .angular3p(
+                vertex: Vector(e.dimDef5x, e.dimDef5y, e.dimDef5z),
+                point1: Vector(e.dimDef1x, e.dimDef1y, e.dimDef1z),
+                point2: Vector(e.dimDef2x, e.dimDef2y, e.dimDef2z))
+        case Int32(LC_DIM_ORDINATE.rawValue):
+            // origin == def point (code 10); feature == def1 (code 13); leader end
+            // == def2 (code 14); the X- vs Y-datum is the dimOrdinateX flag.
+            kind = .ordinate(
+                origin: definitionPoint,
+                feature: Vector(e.dimDef1x, e.dimDef1y, e.dimDef1z),
+                leaderEnd: Vector(e.dimDef2x, e.dimDef2y, e.dimDef2z),
+                measuringX: e.dimOrdinateX != 0)
+        case Int32(LC_DIM_ARC_LENGTH.rawValue):
+            // The feature arc: center (p1/cx), radius, sweep startAngle→endAngle.
+            // The dim-arc location is the arc point (code 16, dimArc*). (Only our
+            // own writer emits this discriminator — see lcdxf.h LC_DIM_ARC_LENGTH;
+            // a file authored elsewhere round-trips arc-length as 3p-angular.)
+            kind = .arcLength(
+                center: Vector(e.cx, e.cy, e.cz),
+                radius: e.radius,
+                startAngle: e.startAngle,
+                endAngle: e.endAngle,
+                reversed: e.dimReversed != 0)
         default:
             return nil
         }
@@ -467,13 +494,16 @@ extension CADEngine {
         let lineSpacingFactor = e.dimLineFactor > 0 ? e.dimLineFactor : 1.0
         let textRotation: Double? = e.dimHasTextRotation != 0 ? e.dimTextRotation : nil
 
-        // For an angular dimension the DXF def point (code 10) is the second
+        // For a 2-line angular dimension the DXF def point (code 10) is the second
         // line's endpoint; the arc-through point (code 16) is the dimension-line
-        // location. Use the arc point as `definitionPoint` so the resolve draws
-        // the arc where the file specifies; for all other variants code 10 IS the
-        // definition point.
+        // location. For an arc-length dim the code-10 point is the feature-arc
+        // center (in p1), while the dim-arc location is the arc point (code 16).
+        // In both cases use the arc point (code 16) as `definitionPoint` so the
+        // resolve draws the arc where the file specifies; for all other variants
+        // code 10 IS the definition point.
         let resolvedDefPoint: Vector
-        if e.dimType == Int32(LC_DIM_ANGULAR.rawValue) {
+        if e.dimType == Int32(LC_DIM_ANGULAR.rawValue)
+            || e.dimType == Int32(LC_DIM_ARC_LENGTH.rawValue) {
             resolvedDefPoint = Vector(e.dimArcx, e.dimArcy, e.dimArcz)
         } else {
             resolvedDefPoint = definitionPoint

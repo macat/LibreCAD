@@ -479,6 +479,27 @@ public enum EntityTransform {
         case let .angular(l1s, l1e, l2s, l2e):
             newKind = .angular(line1Start: t.apply(l1s), line1End: t.apply(l1e),
                                line2Start: t.apply(l2s), line2End: t.apply(l2e))
+        case let .ordinate(origin, feature, leaderEnd, measuringX):
+            // The X/Y datum axis is preserved under translation/scale; a rotation
+            // or mirror would swap which axis the leader runs along, but the DXF
+            // ordinate model has no rotated form, so we keep the flag and let the
+            // transformed points carry the new positions (matching RS_DimOrdinate,
+            // which only supports axis-aligned ordinates).
+            newKind = .ordinate(origin: t.apply(origin), feature: t.apply(feature),
+                                leaderEnd: t.apply(leaderEnd), measuringX: measuringX)
+        case let .arcLength(center, radius, startAngle, endAngle, reversed):
+            // The feature arc transforms like RS_Arc: center maps, radius scales by
+            // the uniform factor, the sweep angles re-derive under the angle map,
+            // and a mirror flips the sweep orientation (matching RS_Arc::mirror).
+            newKind = .arcLength(
+                center: t.apply(center),
+                radius: abs(radius * t.uniformScale),
+                startAngle: mappedAngle(startAngle),
+                endAngle: mappedAngle(endAngle),
+                reversed: t.isMirror ? !reversed : reversed)
+        case let .angular3p(vertex, point1, point2):
+            newKind = .angular3p(vertex: t.apply(vertex),
+                                 point1: t.apply(point1), point2: t.apply(point2))
         }
 
         // An unset (nil/invalid) text-middle stays nil; a real one transforms.
