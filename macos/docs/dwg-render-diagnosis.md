@@ -1,5 +1,46 @@
 # DWG render diagnosis — `mechanical_example-imperial.dwg`
 
+## 2026-06-12 UPDATE — the text was STILL huge on screen: SECOND root cause found + fixed (dim-textheight-fix-wt)
+
+The DC.5 fix below made the ENGINE read `$DIMTXT=0.125` correctly — confirmed again here:
+`CADEngine.shared.readEntities(dwgPath:)` returns `graphicVariables.dimTextHeight == 0.125`,
+`$DIMSCALE == 1.0`, unit `inch`, and `loadDrawing(dwgPath:)` resolves every dim glyph at
+~0.13–0.16 world units (cap height 0.125 + ascender/descender margin). The `Resolve.swift`
+multiplication chain is **correct**: `base 0.125 * scale 1.0 = 0.125`. The "prime suspect"
+`textHeight × $DIMSCALE` was a **red herring** — this file's `$DIMSCALE` is 1.0, so the
+multiply is a no-op. (Kept `× DIMSCALE`: it is AutoCAD-faithful and only matters for files
+that set a large DIMSCALE; the existing `dimScaleMultiplies` test still encodes it correctly.)
+
+**The actual on-screen bug was in the macOS APP's document-open path, NOT the engine:**
+`DXFDocumentCodec.payload(from:format:)` (`Sources/LibreCADmacOS/LibreCADDocument.swift`)
+constructed its `DXFPayload` with `blocks: BlockTable()` **and** `graphicVariables:
+GraphicVariables()` — i.e. it **discarded** the engine's parsed `result.blocks` and
+`result.graphicVariables`. `CADDrawing.make(from:)` then loaded the drawing with the DEFAULT
+`GraphicVariables()` whose `$DIMTXT` is **2.5**. So the `dimStyleProvider` served 2.5 and every
+constraint dim rendered ~20× too big. `loadDrawing(dwgPath:)` (a separate helper used only by
+tests) DID pass the parsed vars through, which is why the prior throwaway dump looked fine while
+the real app window did not.
+
+**Measured before/after through the EXACT app codec path (real `mech.dwg`):**
+- BEFORE (codec drops header): `drawing.$DIMTXT = 2.5` → resolved dimStyle.textHeight = 2.5 →
+  **measured glyph-fill height = 2.62 world units** (≈ the owner's "~2.5+ tall" report; bigger
+  than the ~1″ features in a 94×68 drawing).
+- AFTER (codec carries `result.graphicVariables`/`result.blocks` through): `$DIMTXT = 0.125` →
+  resolved textHeight = 0.125 → **measured glyph-fill height = 0.13** (dim[0]) / 0.16 (linear
+  dims) — small relative to the features, matching AutoCAD/LibreCAD.
+
+**Fix:** `LibreCADDocument.swift` — pass `result.blocks` + `result.graphicVariables` into the
+`DXFPayload` instead of empty placeholders. One-file change in the bridge/app codec; no change
+to `Resolve.swift`. Regression pinned by `ConstraintDimHeaderTests.swift` +
+`Resources/dim_constraint_header.dxf` (a shippable DXF: $DIMTXT=0.125, $DIMSCALE=1.0, a
+formula `textOverride`; asserts the open codec carries $DIMTXT and the constraint glyphs
+resolve at ~0.125 through the full bytes→codec→`make(from:)` app path). All 1188 tests green;
+imperial_dim (0.18) + dimScaleMultiplies unchanged. (NOTE: the DXF/DWG **write** path still
+drops blocks + graphicVariables — `data(from:)` writes only entities+layers — a separate
+round-trip gap, out of scope for this fix.)
+
+---
+
 Status: **investigation complete, data-backed** — **FIX LANDED** (ws-dimstyle-header-read, DC.5).
 RC1+RC2+RC3+H2+H3 resolved: the bridge now reads the HEADER vars + DIMSTYLE table (P1+P2+P3 below).
 Real-file re-validation on this DWG after the fix: dim text height **2.5 → 0.125**, units **mm → inch**,

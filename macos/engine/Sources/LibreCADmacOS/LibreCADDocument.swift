@@ -166,11 +166,18 @@ enum DXFDocumentCodec {
                 case .dwg: return try await CADEngine.shared.readEntities(dwgPath: tmp.path)
                 }
             }
+            // Carry the parsed BLOCKS and HEADER graphic variables through to the
+            // drawing — NOT empty placeholders. Dropping `result.graphicVariables`
+            // here made every opened file fall back to the `GraphicVariables()`
+            // default `$DIMTXT` (2.5), so a file whose real `$DIMTXT` is e.g. 0.125
+            // rendered its dimension/constraint text ~20× too big (the resolve reads
+            // the document `$DIMTXT` via `dimStyleProvider`). Dropping `result.blocks`
+            // likewise left INSERTs with no geometry to expand.
             return DXFPayload(
                 entities: result.records,
                 layers: result.layers,
-                blocks: BlockTable(),
-                graphicVariables: GraphicVariables()
+                blocks: result.blocks,
+                graphicVariables: result.graphicVariables
             )
         } catch {
             throw CodecError.engine(error)
