@@ -215,6 +215,49 @@ public struct Viewport: Sendable, Equatable {
         return Viewport(scale: chosen, center: targetCenter, size: size)
     }
 
+    // MARK: - Zoom window (drag-box zoom, F23)
+
+    /// Builds the viewport for a **zoom-window** gesture: frame the WORLD rectangle
+    /// `worldRect` so it fills the current view, keeping the SAME view `size`
+    /// (only `scale` + `center` change). The rectangle is the inverse image of the
+    /// user's drag box (two corners → `screenToWorld` → an `AABB`); this re-scales so
+    /// that box maps to (nearly) the whole view.
+    ///
+    /// Unlike `fit(_:in:)` this:
+    ///   - keeps the *receiver's* `size` (a zoom-window never resizes the view), and
+    ///   - centers on the rectangle's CENTER at a scale that makes the rect fill the
+    ///     view minus `padding` on each edge (the tighter of the two axes, so the
+    ///     whole box is visible — never cropped),
+    ///   - is a pure copy (the receiver is unchanged); the caller assigns the result.
+    ///
+    /// A degenerate (zero-area, or sub-tolerance) `worldRect` — e.g. a click rather
+    /// than a drag — returns the receiver UNCHANGED (no zoom), so a stray click in
+    /// zoom-window mode is a harmless no-op rather than an infinite zoom.
+    public func zoomedToWorldRect(_ worldRect: AABB, padding: Double = 8) -> Viewport {
+        guard !worldRect.isEmpty else { return self }
+        let w = Double(size.width)
+        let h = Double(size.height)
+        guard w > 0, h > 0 else { return self }
+
+        let bw = worldRect.size.x
+        let bh = worldRect.size.y
+        // A sub-tolerance box (a click) is not a real window → no zoom.
+        guard bw > Tolerance.distance || bh > Tolerance.distance else { return self }
+
+        let availW = Swift.max(w - 2 * padding, 1.0)
+        let availH = Swift.max(h - 2 * padding, 1.0)
+
+        let scaleX = bw > Tolerance.distance ? availW / bw : Double.greatestFiniteMagnitude
+        let scaleY = bh > Tolerance.distance ? availH / bh : Double.greatestFiniteMagnitude
+        // Take the TIGHTER axis so the whole box fits (the other axis shows extra).
+        let fitted = Swift.min(scaleX, scaleY)
+        let chosen = (fitted.isFinite && fitted > 0) ? fitted : Viewport.defaultScale
+
+        let c = worldRect.center
+        let newCenter = c.valid ? Vector(c.x, c.y) : center
+        return Viewport(scale: chosen, center: newCenter, size: size)
+    }
+
     // MARK: - Visible world rectangle (for quadtree culling)
 
     /// The world-space AABB currently visible in the view — the inverse image of
