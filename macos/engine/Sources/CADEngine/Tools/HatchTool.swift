@@ -231,7 +231,7 @@ public struct HatchTool: Tool {
             // / spline boundaries are a backlog widening; text / hatch / solid /
             // dimension / insert / point can't bound a fill.
             case .ellipse, .spline, .splinePoints, .text, .mtext,
-                 .hatch, .solid, .dimension, .point, .insert:
+                 .hatch, .solid, .dimension, .point, .insert, .xline, .ray:
                 continue
             }
         }

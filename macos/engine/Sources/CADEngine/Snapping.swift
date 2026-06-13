@@ -380,6 +380,15 @@ public enum Snapping {
             // reference (block-interior geometry snapping is backlog — the members
             // aren't expanded here without a block provider).
             return d.insertionPoint.valid ? [d.insertionPoint] : []
+
+        case .xline(let d):
+            // The base point is the canonical snap target for an infinite line
+            // (it has no finite endpoints).
+            return d.base.valid ? [d.base] : []
+
+        case .ray(let d):
+            // The ray's start (base) is its one real endpoint.
+            return d.base.valid ? [d.base] : []
         }
     }
 
@@ -476,6 +485,11 @@ public enum Snapping {
             // A block reference has no canonical middle (its insertion point is the
             // endpoint snap); block-interior middles are backlog.
             return []
+
+        case .xline, .ray:
+            // An infinite/semi-infinite construction line has no canonical middle
+            // (its base is the endpoint snap); leave to onEntity/perpendicular.
+            return []
         }
     }
 
@@ -535,6 +549,22 @@ public enum Snapping {
             return SnapGeometry.perpendicularFeetOnArc(from: from, center: d.center, radius: d.radius,
                                                        startAngle: d.startAngle, endAngle: d.endAngle,
                                                        reversed: d.reversed)
+
+        case .xline(let d):
+            // Perpendicular foot onto the infinite carrier line — always valid for
+            // an xline (it has no segment bounds).
+            let foot = SnapGeometry.perpendicularFootOnLine(
+                from: from, a: d.base, b: d.base + d.direction)
+            return foot.valid ? [foot] : []
+
+        case .ray(let d):
+            // Foot onto the carrier line, kept only if it lies on the +direction
+            // half-line (the drawn part of the ray).
+            let foot = SnapGeometry.perpendicularFootOnLine(
+                from: from, a: d.base, b: d.base + d.direction)
+            guard foot.valid, (foot - d.base).dot(d.direction) >= -Tolerance.distance else { return [] }
+            return [foot]
+
         default:
             return []
         }
@@ -576,6 +606,12 @@ public enum Snapping {
         switch entity.kind {
         case .line(let d):
             let p = SnapGeometry.parallelProjection(from: from, cursor: cursor, refDir: d.end - d.start)
+            return p.valid ? p : nil
+        case .xline(let d):
+            let p = SnapGeometry.parallelProjection(from: from, cursor: cursor, refDir: d.direction)
+            return p.valid ? p : nil
+        case .ray(let d):
+            let p = SnapGeometry.parallelProjection(from: from, cursor: cursor, refDir: d.direction)
             return p.valid ? p : nil
         default:
             return nil

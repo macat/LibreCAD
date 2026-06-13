@@ -239,7 +239,31 @@ public enum EntityTransform {
         case .solid(let s):           return .solid(transformSolid(s, t))
         case .dimension(let dm):      return .dimension(transformDimension(dm, t))
         case .insert(let ins):        return .insert(transformInsert(ins, t))
+        case .xline(let x):           return .xline(transformXLine(x, t))
+        case .ray(let r):             return .ray(transformRay(r, t))
         }
+    }
+
+    // MARK: xline — the base point transforms (full affine); the direction is a
+    //       FREE vector, so it gets the LINEAR part only (rotate + scale, no
+    //       translation). Mirrors RS_ConstructionLine: a construction line's two
+    //       defining points map and the line through them re-derives. We store
+    //       base+direction directly, so the direction reflects/rotates with the
+    //       linear part (a mirror reverses the line, but an infinite line is
+    //       symmetric so the resulting line is identical either way).
+
+    static func transformXLine(_ x: XLineData, _ t: Affine2D) -> XLineData {
+        XLineData(base: t.apply(x.base), direction: t.applyLinear(x.direction))
+    }
+
+    // MARK: ray — like xline, but the direction's SENSE matters (a ray is
+    //       one-way). The linear part already preserves the +direction sense under
+    //       rotation/uniform-scale; under a mirror the linear part reflects the
+    //       direction across the axis, which is the correct reflected ray (the
+    //       reflected ray points the reflected way).
+
+    static func transformRay(_ r: RayData, _ t: Affine2D) -> RayData {
+        RayData(base: t.apply(r.base), direction: t.applyLinear(r.direction))
     }
 
     // MARK: point — transform the position.

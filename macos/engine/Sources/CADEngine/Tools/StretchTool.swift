@@ -361,6 +361,17 @@ public struct StretchTool: Tool {
             guard inside(d.position) else { return nil }
             return EntityKind.mtext(d).transformed(by: t)
 
+        case .xline(let d):
+            // A construction line's only movable reference point is its base; an
+            // infinite line can't have one end stretched, so move it whole iff the
+            // base is in-window.
+            guard inside(d.base) else { return nil }
+            return EntityKind.xline(d).transformed(by: t)
+
+        case .ray(let d):
+            guard inside(d.base) else { return nil }
+            return EntityKind.ray(d).transformed(by: t)
+
         case .hatch, .dimension, .insert:
             // Best-effort whole-translate if ANY defining point is in-window; the
             // per-point stretch of these composite kinds is backlog. We translate

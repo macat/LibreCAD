@@ -391,6 +391,19 @@ extension CADEngine {
             // A block reference (DXF INSERT/MINSERT) → `.insert`.
             return mapInsert(e)
 
+        case Int32(LC_ENT_XLINE.rawValue):
+            // DXF XLINE → `.xline`. base ← p1 (code 10); direction ← p2 (code 11,
+            // a unit direction vector). A degenerate (zero) direction is dropped.
+            let dir = Vector(e.p2x, e.p2y, e.p2z)
+            guard dir.magnitude > Tolerance.distance else { return nil }
+            return .xline(XLineData(base: Vector(e.p1x, e.p1y, e.p1z), direction: dir))
+
+        case Int32(LC_ENT_RAY.rawValue):
+            // DXF RAY → `.ray`. base ← p1 (code 10); direction ← p2 (code 11).
+            let dir = Vector(e.p2x, e.p2y, e.p2z)
+            guard dir.magnitude > Tolerance.distance else { return nil }
+            return .ray(RayData(base: Vector(e.p1x, e.p1y, e.p1z), direction: dir))
+
         default: // LC_ENT_UNSUPPORTED (incl. ordinate/3p DIMENSION) and anything else
             return nil
         }

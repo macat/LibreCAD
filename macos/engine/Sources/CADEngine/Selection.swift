@@ -552,8 +552,10 @@ public enum SelectionTraversal {
             }
             pts = [f, l]
 
-        case .point, .circle, .text, .mtext, .hatch, .solid, .dimension, .insert:
-            // No free ends to chain from (closed/areal/annotative). Terminal.
+        case .point, .circle, .text, .mtext, .hatch, .solid, .dimension, .insert,
+             .xline, .ray:
+            // No free ends to chain from (closed/areal/annotative, or infinite —
+            // a construction line has no FINITE end to chain to). Terminal.
             return []
         }
         return pts.filter(\.valid)

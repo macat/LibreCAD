@@ -626,6 +626,22 @@ private final class PODBuilder {
             e.insRowSpacing = d.rowSpacing
             e.insColSpacing = d.colSpacing
             e.textValue = intern(d.blockName)
+
+        case .xline(let d):
+            // Emitted as a DXF XLINE (the C side writes DRW_Xline). Base point
+            // (code 10) -> p1; direction vector (code 11) -> p2. DXF XLINE/RAY
+            // store the direction as a vector, not a second point, so it maps
+            // straight from XLineData.direction.
+            e.kind = Int32(LC_ENT_XLINE.rawValue)
+            e.p1x = d.base.x;      e.p1y = d.base.y;      e.p1z = d.base.z
+            e.p2x = d.direction.x; e.p2y = d.direction.y; e.p2z = d.direction.z
+
+        case .ray(let d):
+            // Emitted as a DXF RAY (the C side writes DRW_Ray). Start (base) point
+            // (code 10) -> p1; direction (code 11) -> p2.
+            e.kind = Int32(LC_ENT_RAY.rawValue)
+            e.p1x = d.base.x;      e.p1y = d.base.y;      e.p1z = d.base.z
+            e.p2x = d.direction.x; e.p2y = d.direction.y; e.p2z = d.direction.z
         }
         return e
     }

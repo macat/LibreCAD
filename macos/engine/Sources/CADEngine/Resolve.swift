@@ -247,6 +247,28 @@ public struct ResolveContext: Sendable {
     /// this is the safety bound that makes a cyclic reference terminate.
     public static let maxBlockRecursionDepth = 32
 
+    /// Optional world-space clip box for **infinite** construction lines (`.xline`
+    /// / `.ray`). When set, the `.xline`/`.ray` resolve arms clip their infinite
+    /// geometry to this box so they draw exactly across the supplied bounds
+    /// (conventionally the live viewport, padded). When `nil` (the default), the
+    /// arms fall back to a LARGE finite segment (±`xlineFallbackHalfLength` along
+    /// the direction from the base) so the line still renders across any
+    /// reasonable view WITHOUT any render-path wiring. Additive — every existing
+    /// caller leaves this `nil` and is unaffected.
+    ///
+    /// FOLLOW-UP (documented, NOT done here): the render path should pass the live
+    /// viewport AABB (padded) as `clipBounds` so construction lines clip to the
+    /// actual on-screen extent at any zoom. That wiring lives in the renderer /
+    /// `CanvasModel` (owned by a parallel agent); until it lands the large-segment
+    /// fallback keeps construction lines looking correct.
+    public var clipBounds: AABB? = nil
+
+    /// Half-length (world units) of the finite fallback segment an infinite
+    /// construction line (`.xline`/`.ray`) resolves to when no `clipBounds` is
+    /// supplied. 1e6 is large enough to span any realistic drawing/view while
+    /// staying a FINITE value (so the bbox never goes to infinity, ADR-001).
+    public static let xlineFallbackHalfLength: Double = 1e6
+
     public init(
         tessellationTolerance: Double = 0.05,
         layerAttributes: @escaping @Sendable (LayerID) -> ResolvedPen = { _ in
@@ -262,7 +284,8 @@ public struct ResolveContext: Sendable {
         dimStyleProvider: (@Sendable () -> ResolvedDimStyle)? = nil,
         namedDimStyleProvider: (@Sendable (String) -> ResolvedDimStyle?)? = nil,
         blockProvider: (@Sendable (String) -> [EntityRecord]?)? = nil,
-        blockRecursionDepth: Int = ResolveContext.maxBlockRecursionDepth
+        blockRecursionDepth: Int = ResolveContext.maxBlockRecursionDepth,
+        clipBounds: AABB? = nil
     ) {
         self.tessellationTolerance = tessellationTolerance
         self.layerAttributes = layerAttributes
@@ -275,6 +298,7 @@ public struct ResolveContext: Sendable {
         self.namedDimStyleProvider = namedDimStyleProvider
         self.blockProvider = blockProvider
         self.blockRecursionDepth = blockRecursionDepth
+        self.clipBounds = clipBounds
     }
 
     /// A sensible default context for tests/previews.
@@ -848,7 +872,98 @@ extension EntityKind {
             // insert's own pen is threaded as the `currentBlockPen` so nested
             // `.byBlock` member pens inherit from the placing insert (ADR-001).
             return Self.resolveInsert(d, pen: pen, ctx: ctx)
+
+        case .xline(let d):
+            // Infinite construction line → a finite segment: clipped to
+            // `ctx.clipBounds` when supplied (the viewport, padded), else a LARGE
+            // finite segment spanning ±xlineFallbackHalfLength along the direction
+            // so it renders across any view without render-path wiring (ADR-001:
+            // derived geometry, never stored).
+            let seg = Self.constructionSegment(
+                base: d.base, direction: d.direction, oneWay: false, clip: ctx.clipBounds)
+            guard let seg else { return ResolvedGeometry() }
+            return ResolvedGeometry(polylines: [
+                ResolvedPolyline(points: [seg.0, seg.1], closed: false, pen: pen)
+            ])
+
+        case .ray(let d):
+            // Semi-infinite ray → a finite segment from `base` toward +direction:
+            // clipped to `ctx.clipBounds` when supplied, else base → base +
+            // xlineFallbackHalfLength·direction.
+            let seg = Self.constructionSegment(
+                base: d.base, direction: d.direction, oneWay: true, clip: ctx.clipBounds)
+            guard let seg else { return ResolvedGeometry() }
+            return ResolvedGeometry(polylines: [
+                ResolvedPolyline(points: [seg.0, seg.1], closed: false, pen: pen)
+            ])
         }
+    }
+
+    // MARK: - Construction line (xline/ray) resolve — RS_ConstructionLine geometry
+
+    /// The two endpoints of the finite segment a construction line draws as.
+    ///
+    /// - For an **xline** (`oneWay == false`) the parametric extent is the full
+    ///   real line `base + t·dir`, `t ∈ (−∞, +∞)`.
+    /// - For a **ray** (`oneWay == true`) it is the half-line `t ∈ [0, +∞)`.
+    ///
+    /// When `clip` is supplied the segment is the portion of that (half-)line
+    /// inside the box (Liang–Barsky parametric clip); when `clip` is `nil` it is a
+    /// large FINITE segment ±`xlineFallbackHalfLength` (xline) or
+    /// `[0, fallback]` (ray) along the normalized direction. Returns `nil` for a
+    /// degenerate direction, or when a clip box excludes the whole (half-)line.
+    static func constructionSegment(
+        base: Vector, direction: Vector, oneWay: Bool, clip: AABB?
+    ) -> (Vector, Vector)? {
+        let len = direction.magnitude
+        guard base.valid, direction.valid, len > Tolerance.distance else { return nil }
+        let dir = direction / len  // normalized
+
+        let tMin = oneWay ? 0.0 : -ResolveContext.xlineFallbackHalfLength
+        let tMax = ResolveContext.xlineFallbackHalfLength
+
+        guard let clip, !clip.isEmpty else {
+            // No clip box: large finite fallback segment.
+            return (base + dir * tMin, base + dir * tMax)
+        }
+
+        // Liang–Barsky: clip the parametric (half-)line to the box's x/y slabs.
+        var t0 = oneWay ? 0.0 : -Double.greatestFiniteMagnitude
+        var t1 = Double.greatestFiniteMagnitude
+
+        func clipSlab(_ p: Double, _ q: Double) -> Bool {
+            // p·t <= q for the slab edge. Returns false if the line is rejected.
+            if abs(p) < Tolerance.distance {
+                // Parallel to this slab edge: inside only if origin is inside.
+                return q >= 0
+            }
+            let r = q / p
+            if p < 0 {
+                if r > t1 { return false }
+                if r > t0 { t0 = r }
+            } else {
+                if r < t0 { return false }
+                if r < t1 { t1 = r }
+            }
+            return true
+        }
+
+        let dx = dir.x, dy = dir.y
+        guard clipSlab(-dx, base.x - clip.min.x),  // x >= min.x
+              clipSlab(dx, clip.max.x - base.x),    // x <= max.x
+              clipSlab(-dy, base.y - clip.min.y),   // y >= min.y
+              clipSlab(dy, clip.max.y - base.y)     // y <= max.y
+        else {
+            // The (half-)line misses the clip box entirely.
+            return nil
+        }
+
+        // Guard against an unbounded result (a fully-parallel-inside case): clamp
+        // to the fallback extent so the segment is always finite.
+        if t0 < tMin { t0 = tMin }
+        if t1 > tMax { t1 = tMax }
+        guard t1 >= t0 else { return nil }
+        return (base + dir * t0, base + dir * t1)
     }
 
     // MARK: - Insert (block reference) resolve — RS_Insert::update as a PURE function
@@ -1724,6 +1839,16 @@ extension EntityKind {
             // insertion point (the no-arg path returns the same).
             return Self.insertBoundingBox(d, ctx: ctx)
         }
+        if case .xline(let d) = self {
+            // With a clip box wired the box is the clipped segment's extent; else
+            // the large finite fallback (same as the no-arg path).
+            return Self.constructionBoundingBox(
+                base: d.base, direction: d.direction, oneWay: false, clip: ctx.clipBounds)
+        }
+        if case .ray(let d) = self {
+            return Self.constructionBoundingBox(
+                base: d.base, direction: d.direction, oneWay: true, clip: ctx.clipBounds)
+        }
         return boundingBox()
     }
 
@@ -1791,7 +1916,32 @@ extension EntityKind {
             // unavailable — collapse to the insertion point (a valid, if degenerate,
             // box). The ctx-carrying `boundingBox(ctx:)` returns the real union.
             return Self.insertBoundingBox(d, ctx: nil)
+
+        case .xline(let d):
+            // No clip box on the no-arg path → the LARGE finite fallback segment's
+            // box (a big but FINITE AABB, never infinity per the brief). The
+            // ctx-carrying `boundingBox(ctx:)` returns the clip box when one is set.
+            return Self.constructionBoundingBox(
+                base: d.base, direction: d.direction, oneWay: false, clip: nil)
+
+        case .ray(let d):
+            return Self.constructionBoundingBox(
+                base: d.base, direction: d.direction, oneWay: true, clip: nil)
         }
+    }
+
+    /// World-space bounding box of a construction line (`.xline`/`.ray`): the box
+    /// of its resolved finite segment — the clip box's intersection with the line
+    /// when `clip` is supplied, else the LARGE finite fallback segment. Always a
+    /// FINITE box (never ±infinity), so culling/snapping stay well-defined.
+    static func constructionBoundingBox(
+        base: Vector, direction: Vector, oneWay: Bool, clip: AABB?
+    ) -> AABB {
+        if let seg = constructionSegment(base: base, direction: direction, oneWay: oneWay, clip: clip) {
+            return AABB(points: [seg.0, seg.1])
+        }
+        // Degenerate direction / fully clipped out: collapse to the base point.
+        return AABB(point: base.valid ? base : Vector(0, 0))
     }
 
     /// World-space bounding box of an `.insert`: the union of every member's
