@@ -44,6 +44,8 @@ struct LibreCADApp: App {
     @FocusedValue(\.focusCommandLine) private var focusCommandLine
     /// The "open Document Settings" (⌥⌘,) action published by the focused window (D8).
     @FocusedValue(\.openDocumentSettings) private var openDocumentSettings
+    /// The "New from Template…" chooser action published by the focused window (F24).
+    @FocusedValue(\.newFromTemplate) private var newFromTemplate
     /// The Zoom-to-Fit action published by the focused window.
     @FocusedValue(\.zoomToFit) private var zoomToFit
     /// Export (PDF/PNG/SVG) and Print actions published by the focused window.
@@ -70,6 +72,17 @@ struct LibreCADApp: App {
             ContentView(document: configuration.document)
         }
         .commands {
+            // File ▸ New from Template… — added right after the native New item
+            // (DocumentGroup owns plain New / Open / Open Recent). It raises the
+            // template chooser on the focused window (F24); picking a template seeds
+            // that window's drawing from a bundled `.dxf` template (entities + layers
+            // + units), giving a pre-populated drawing. ⇧⌘N is the conventional
+            // "new from template" chord (plain ⌘N stays the native blank New).
+            CommandGroup(after: .newItem) {
+                Button("New from Template…") { newFromTemplate?() }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
+                    .disabled(newFromTemplate == nil)
+            }
             // File ▸ Export… / Print… — added AFTER the native Save items (Save /
             // Save As / Revert come from DocumentGroup). Export renders the drawing
             // to PDF / PNG / SVG (not the document type); Print drives the system

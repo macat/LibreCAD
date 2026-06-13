@@ -1,0 +1,230 @@
+999
+LibreCAD macOS template — A4 landscape (mm) with a simple titleblock. GPLv2-or-later.
+  0
+SECTION
+  2
+HEADER
+  9
+$ACADVER
+  1
+AC1015
+  9
+$INSUNITS
+ 70
+     4
+  9
+$LUNITS
+ 70
+     2
+  9
+$LUPREC
+ 70
+     4
+  9
+$LIMMIN
+ 10
+0.0
+ 20
+0.0
+  9
+$LIMMAX
+ 10
+297.0
+ 20
+210.0
+  9
+$DIMTXT
+ 40
+2.5
+  9
+$DIMASZ
+ 40
+2.5
+  9
+$DIMSCALE
+ 40
+1.0
+  9
+$DIMLUNIT
+ 70
+     2
+  9
+$DIMDEC
+ 70
+     4
+  0
+ENDSEC
+  0
+SECTION
+  2
+TABLES
+  0
+TABLE
+  2
+LAYER
+ 70
+     2
+  0
+LAYER
+  2
+0
+ 70
+     0
+ 62
+     7
+  6
+CONTINUOUS
+  0
+LAYER
+  2
+TITLEBLOCK
+ 70
+     0
+ 62
+     7
+  6
+CONTINUOUS
+  0
+ENDTAB
+  0
+ENDSEC
+  0
+SECTION
+  2
+ENTITIES
+  0
+LINE
+  8
+TITLEBLOCK
+ 10
+10.0
+ 20
+10.0
+ 11
+287.0
+ 21
+10.0
+  0
+LINE
+  8
+TITLEBLOCK
+ 10
+287.0
+ 20
+10.0
+ 11
+287.0
+ 21
+200.0
+  0
+LINE
+  8
+TITLEBLOCK
+ 10
+287.0
+ 20
+200.0
+ 11
+10.0
+ 21
+200.0
+  0
+LINE
+  8
+TITLEBLOCK
+ 10
+10.0
+ 20
+200.0
+ 11
+10.0
+ 21
+10.0
+  0
+LINE
+  8
+TITLEBLOCK
+ 10
+167.0
+ 20
+10.0
+ 11
+167.0
+ 21
+40.0
+  0
+LINE
+  8
+TITLEBLOCK
+ 10
+167.0
+ 20
+40.0
+ 11
+287.0
+ 21
+40.0
+  0
+LINE
+  8
+TITLEBLOCK
+ 10
+167.0
+ 20
+25.0
+ 11
+287.0
+ 21
+25.0
+  0
+LINE
+  8
+TITLEBLOCK
+ 10
+227.0
+ 20
+10.0
+ 11
+227.0
+ 21
+25.0
+  0
+TEXT
+  8
+TITLEBLOCK
+ 10
+171.0
+ 20
+30.0
+ 40
+4.0
+  1
+TITLE
+  0
+TEXT
+  8
+TITLEBLOCK
+ 10
+171.0
+ 20
+17.0
+ 40
+2.5
+  1
+DRAWN BY
+  0
+TEXT
+  8
+TITLEBLOCK
+ 10
+231.0
+ 20
+17.0
+ 40
+2.5
+  1
+SCALE
+  0
+ENDSEC
+  0
+EOF

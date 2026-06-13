@@ -73,6 +73,13 @@ struct ContentView: View {
     /// File ▸ Document Settings… (⌥⌘, — decision D8) via a focused scene value.
     @State private var showSettings = false
 
+    /// Whether the "New from Template…" chooser sheet is presented. Raised by
+    /// File ▸ New from Template… via a focused scene value (F24). Picking a template
+    /// seeds THIS window's live drawing from the chosen bundled `.dxf` template's
+    /// entities / layers / units (reusing the same off-main DXF read path the
+    /// document Open flow uses), so the user gets a pre-populated drawing to edit.
+    @State private var showTemplateChooser = false
+
     /// The live text of the bottom command / coordinate input line (UX-plan U1).
     /// Cleared after each successful submit; the field echoes parse errors via the
     /// model's `lastCommandError`.
@@ -171,7 +178,22 @@ struct ContentView: View {
             .sheet(isPresented: $showSettings) {
                 DocumentSettingsView(model: model, controllerBox: controllerBox)
             }
+            // The "New from Template…" chooser (File ▸ New from Template…, F24). Lists
+            // the bundled `.dxf` templates; picking one seeds THIS window's drawing
+            // from the template (entities + layers + units), reusing the document Open
+            // read path. Presented as a sheet so it is modal to the window.
+            .sheet(isPresented: $showTemplateChooser) {
+                TemplateChooserView(
+                    templates: DrawingTemplate.bundled,
+                    onChoose: { template in
+                        showTemplateChooser = false
+                        Task { await seedFromTemplate(template) }
+                    },
+                    onCancel: { showTemplateChooser = false }
+                )
+            }
             .focusedSceneValue(\.openDocumentSettings) { showSettings = true }
+            .focusedSceneValue(\.newFromTemplate) { showTemplateChooser = true }
             .focusedSceneValue(\.commandPalette) { showPalette = true }
             .focusedSceneValue(\.zoomToFit) { controllerBox.controller?.zoomToFit() }
             // Export… (PDF/PNG/SVG): present a save panel whose format follows the
@@ -222,6 +244,45 @@ struct ContentView: View {
         controllerBox.controller?.zoomToFit()
         let n = model.entityCount
         status = n == 0 ? "New drawing" : "\(n) entities"
+    }
+
+    /// Seeds THIS window's drawing from a bundled `.dxf` template (File ▸ New from
+    /// Template…, F24). The template bytes are parsed OFF the main actor via the SAME
+    /// `DXFDocumentCodec` read path the document Open flow uses (so a template is just
+    /// a normal DXF — its entities, layers, and header units come through unchanged);
+    /// the resulting `Sendable` payload is then turned into the live `@MainActor`
+    /// drawing ON the main actor (the launch-safe boundary), framed, and pushed into
+    /// the document so a subsequent Save / Save As writes the seeded geometry. The
+    /// seeded drawing replaces whatever was in this window (a fresh File ▸ New is the
+    /// usual starting point), giving the user a pre-populated drawing to edit.
+    @MainActor
+    private func seedFromTemplate(_ template: DrawingTemplate) async {
+        guard let url = template.fileURL else {
+            status = "Template not found: \(template.displayName)"
+            return
+        }
+        do {
+            // Read the template bytes, then parse them off-main on a detached task
+            // (the codec blocks a background thread — never the main actor — exactly
+            // like the document Open path). The returned payload is Sendable.
+            let data = try Data(contentsOf: url)
+            let payload = try await Task.detached {
+                try DXFDocumentCodec.payload(from: data, format: .dxf)
+            }.value
+            // Build the live drawing from the payload ON the main actor (this view is
+            // main-actor; no MainActor.assumeIsolated, so the launch-crash boundary is
+            // respected), frame it, and keep the document payload in sync for Save.
+            let drawing = CADDrawing.make(from: payload)
+            model.setDrawing(drawing, viewSize: model.viewport.size)
+            adoptEnvironmentUndo()
+            controllerBox.controller?.zoomToFit()
+            syncPayloadToDocument()
+            let n = model.entityCount
+            status = "New from \(template.displayName) — \(n) " + (n == 1 ? "entity" : "entities")
+        } catch {
+            status = "Template load failed: \(error.localizedDescription)"
+            NSLog("CADCanvas: template load failed: \(error)")
+        }
     }
 
     /// Adopts SwiftUI's environment `UndoManager` (from `DocumentGroup`) into the
@@ -593,6 +654,13 @@ extension FocusedValues {
         set { self[OpenDocumentSettingsKey.self] = newValue }
     }
 
+    /// Raise the "New from Template…" chooser on the focused window
+    /// (File ▸ New from Template… — F24).
+    var newFromTemplate: (() -> Void)? {
+        get { self[NewFromTemplateKey.self] }
+        set { self[NewFromTemplateKey.self] = newValue }
+    }
+
     /// Focus the bottom command/coordinate line on the focused window
     /// (View ▸ Show Command Line, ⇧⌘L) — U1.
     var focusCommandLine: (() -> Void)? {
@@ -657,6 +725,10 @@ private struct OpenDocumentSettingsKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 
+private struct NewFromTemplateKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
 private struct FocusCommandLineKey: FocusedValueKey {
     typealias Value = () -> Void
 }
@@ -695,4 +767,165 @@ private struct DeleteSelectionKey: FocusedValueKey {
 /// `false` (no tool active ⇒ Delete enablement is governed only by the selection).
 private struct IsToolActiveKey: FocusedValueKey {
     typealias Value = Bool
+}
+
+// MARK: - New-from-template catalog (F24)
+
+/// A bundled drawing template the user can start a new document from (File ▸ New
+/// from Template…). Each template is a plain `.dxf` file shipped in the app — a
+/// "blank" template is just a DXF carrying the right header units (no entities);
+/// a "titleblock" template additionally carries a border + titleblock drawn as
+/// lines/text. Because a template is an ordinary DXF, seeding from one reuses the
+/// SAME read path the document Open flow uses — there is no template-specific
+/// parse code, only file discovery here.
+///
+/// File discovery follows the SAME bundle-then-repo fallback `HatchPatternLibrary`
+/// and `CADFonts` use for their bundled resources:
+///   • The bundled app — `LibreCADmacOS.app/Contents/Resources/templates/<file>`
+///     (copied by `macos/scripts/make-app.sh`), found via `Bundle.main`.
+///   • The bare SwiftPM binary / dev — the in-repo `macos/assets/templates/`,
+///     derived from this file's `#filePath`.
+struct DrawingTemplate: Identifiable, Hashable, Sendable {
+    /// Stable id (the resource base name, e.g. `Blank_Metric_A3`).
+    var id: String { resourceName }
+    /// The `.dxf` resource base name (no extension), used for bundle/file lookup.
+    let resourceName: String
+    /// The human-readable name shown in the chooser.
+    let displayName: String
+    /// A one-line description (units / sheet) shown under the name.
+    let summary: String
+    /// An SF Symbol for the chooser row.
+    let symbol: String
+
+    /// The catalog of bundled templates, in chooser order. Keep this list in sync
+    /// with the `.dxf` files in `macos/assets/templates/` (and the make-app.sh copy).
+    static let bundled: [DrawingTemplate] = [
+        DrawingTemplate(
+            resourceName: "Blank_Metric_A3",
+            displayName: "Blank — Metric (A3)",
+            summary: "Millimeters · A3 sheet limits · empty",
+            symbol: "doc"),
+        DrawingTemplate(
+            resourceName: "Blank_Imperial",
+            displayName: "Blank — Imperial",
+            summary: "Inches · ANSI A limits · empty",
+            symbol: "doc"),
+        DrawingTemplate(
+            resourceName: "Titleblock_A4_Metric",
+            displayName: "Title Block — Metric (A4)",
+            summary: "Millimeters · A4 landscape · border + title block",
+            symbol: "doc.text"),
+    ]
+
+    /// The on-disk URL of this template's `.dxf`, searching the app bundle's
+    /// `Resources/templates` first, then the in-repo `macos/assets/templates`.
+    /// `nil` if the file is found in neither (the caller surfaces a status error
+    /// rather than crashing).
+    var fileURL: URL? {
+        for dir in Self.searchDirectories() {
+            let url = dir.appendingPathComponent("\(resourceName).dxf")
+            if FileManager.default.fileExists(atPath: url.path) { return url }
+        }
+        return nil
+    }
+
+    /// Directories searched for `<name>.dxf`, in priority order: the app bundle's
+    /// `Resources/templates`, then the in-repo `macos/assets/templates`.
+    static func searchDirectories() -> [URL] {
+        var dirs: [URL] = []
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("templates"),
+           FileManager.default.fileExists(atPath: bundled.path) {
+            dirs.append(bundled)
+        }
+        if let repo = repoTemplatesDirectory() {
+            dirs.append(repo)
+        }
+        return dirs
+    }
+
+    /// The in-repo `macos/assets/templates` directory, derived from this file's
+    /// source path (dev fallback for the bare binary). Mirrors
+    /// `HatchPatternLibrary.repoPatternsDirectory()`.
+    static func repoTemplatesDirectory() -> URL? {
+        // <repo>/macos/engine/Sources/LibreCADmacOS/ContentView.swift
+        //   -> drop the filename + 3 dirs (LibreCADmacOS, Sources, engine) -> macos
+        let thisFile = URL(fileURLWithPath: #filePath)
+        let macosDir = thisFile
+            .deletingLastPathComponent()   // .../LibreCADmacOS
+            .deletingLastPathComponent()   // .../Sources
+            .deletingLastPathComponent()   // .../engine
+            .deletingLastPathComponent()   // .../macos
+        let dir = macosDir.appendingPathComponent("assets/templates")
+        return FileManager.default.fileExists(atPath: dir.path) ? dir : nil
+    }
+}
+
+/// The "New from Template…" chooser sheet (F24): a small list of bundled templates
+/// with Cancel / Create. Picking a template (double-click or Create) calls
+/// `onChoose`; the host view then seeds the window's drawing from it. A pure
+/// presentation view — all the loading lives in `ContentView.seedFromTemplate`.
+struct TemplateChooserView: View {
+    let templates: [DrawingTemplate]
+    let onChoose: (DrawingTemplate) -> Void
+    let onCancel: () -> Void
+
+    /// The currently highlighted template (defaults to the first).
+    @State private var selection: DrawingTemplate.ID?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("New from Template")
+                .font(.headline)
+                .padding([.top, .horizontal])
+                .padding(.bottom, 4)
+            Text("Start a new drawing pre-populated from a template.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+
+            List(templates, selection: $selection) { template in
+                HStack(spacing: 12) {
+                    Image(systemName: template.symbol)
+                        .font(.title2)
+                        .foregroundStyle(.tint)
+                        .frame(width: 28)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(template.displayName)
+                            .font(.body.weight(.medium))
+                        Text(template.summary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+                .tag(template.id)
+                // Double-click a row to create immediately.
+                .onTapGesture(count: 2) { onChoose(template) }
+            }
+            .frame(minHeight: 180)
+
+            Divider()
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { onCancel() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Create") {
+                    if let chosen = chosenTemplate { onChoose(chosen) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(chosenTemplate == nil)
+            }
+            .padding()
+        }
+        .frame(minWidth: 380, minHeight: 320)
+        .onAppear { if selection == nil { selection = templates.first?.id } }
+    }
+
+    /// The template matching the current selection (defaults to the first row).
+    private var chosenTemplate: DrawingTemplate? {
+        if let id = selection, let t = templates.first(where: { $0.id == id }) { return t }
+        return templates.first
+    }
 }
