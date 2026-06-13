@@ -159,6 +159,8 @@ public:
         e.hAlign = 0;
         e.vAlign = 0;
         e.solidFill = 0;
+        e.hatchScale = 1.0;
+        e.hatchAngle = 0.0;
         e.mtextRectWidth = 0.0;
         e.mtextAttachment = 1;            // TopLeft default
         e.mtextLineSpacingStyle = 1;      // at-least
@@ -621,6 +623,10 @@ private:
             return;
         }
         e.solidFill = data->solid ? 1 : 0;
+        // Pattern scale (code 41) + angle (code 52, DXF degrees -> radians). Only a
+        // PATTERN hatch carries them; a solid hatch leaves the defaults (1 / 0).
+        e.hatchScale = (data->scale != 0.0) ? data->scale : 1.0;
+        e.hatchAngle = data->angle * M_PI / 180.0;
         e.textValue = intern(data->name);   // pattern name (e.g. "SOLID", "ANSI31")
 
         // One flat vertex array for ALL loops; loops index into it via windows.
@@ -1634,17 +1640,66 @@ private:
         emitSolid(&s);
     }
 
+    // Append a single ARC edge to a hatch boundary loop for a bulged segment
+    // a->b. DXF bulge = tan(includedAngle/4): positive bulges LEFT of the
+    // directed chord (CCW), negative RIGHT (CW). We recover the arc center,
+    // radius and start/end angles from the chord + bulge (the inverse of the
+    // bulge expansion in Resolve.expandPolyline) and emit a DRW_Arc edge so the
+    // curved boundary round-trips as a true arc rather than a chord. `isccw` is
+    // set from the bulge sign so the read-back sweep matches.
+    static void appendBulgeArcEdge(DRW_HatchLoop &hl,
+                                   double ax, double ay, double bx, double by,
+                                   double bulge) {
+        const double included = 4.0 * std::atan(bulge);   // signed sweep
+        const double cdx = bx - ax, cdy = by - ay;
+        const double chordLen = std::sqrt(cdx * cdx + cdy * cdy);
+        if (chordLen < 1e-12) {
+            auto edge = std::make_shared<DRW_Line>();
+            edge->basePoint.x = ax; edge->basePoint.y = ay; edge->basePoint.z = 0.0;
+            edge->secPoint.x  = bx; edge->secPoint.y  = by; edge->secPoint.z  = 0.0;
+            hl.objlist.push_back(edge);
+            return;
+        }
+        const double radius = std::fabs(chordLen / (2.0 * std::sin(included / 2.0)));
+        const double mx = (ax + bx) * 0.5, my = (ay + by) * 0.5;
+        const double half = chordLen * 0.5;
+        const double apothem = std::sqrt(std::max(0.0, radius * radius - half * half));
+        const double dirx = cdx / chordLen, diry = cdy / chordLen;
+        const double lnx = -diry, lny = dirx;                 // left normal
+        const double apexSide = (bulge >= 0.0) ? 1.0 : -1.0;
+        const double centerSign = -std::copysign(1.0, std::cos(included / 2.0));
+        const double off = apexSide * centerSign * apothem;
+        const double ccx = mx + lnx * off, ccy = my + lny * off;
+        const double staang = std::atan2(ay - ccy, ax - ccx);
+        const double endang = std::atan2(by - ccy, bx - ccx);
+
+        auto arc = std::make_shared<DRW_Arc>();
+        arc->basePoint.x = ccx; arc->basePoint.y = ccy; arc->basePoint.z = 0.0;
+        arc->radious = radius;
+        // The read-back tessellation walks staangle -> endangle in the `isccw`
+        // direction, so keep staangle at a's angle and endangle at b's angle (the
+        // a->b traversal order of the loop). The signed angular sweep around the
+        // center is -included (matches Resolve.expandPolyline); a non-negative
+        // sweep is CCW. included shares bulge's sign, so isccw == (bulge <= 0).
+        arc->staangle = staang;
+        arc->endangle = endang;
+        arc->isccw = (bulge <= 0.0) ? 1 : 0;
+        hl.objlist.push_back(arc);
+    }
+
     // ----- HATCH ---------------------------------------------------------
     // Emit a DXF HATCH (the inverse of FlatteningReader::emitHatch). Each POD
-    // loop is a ring of vertices; we emit it as an EDGE boundary of DRW_Line
-    // segments (libdxfrw's writeHatch only supports edge boundaries — its
-    // polyline-boundary branch is an unimplemented stub). Each ring of N vertices
-    // becomes N closing line edges (vertex[i] -> vertex[(i+1)%N]); on read,
-    // readHatchLoop picks up each edge's basePoint, recovering exactly the N ring
-    // vertices. solidFill and the pattern name round-trip. Boundary-arc fidelity
-    // (bulges) is not preserved across this edge-line tessellation — noted in the
-    // backlog. HATCH only exists for R2000+; for R12 writeHatch is a no-op in
-    // libdxfrw, so the entity is silently dropped at that version (rare export).
+    // loop is a ring of vertices; we emit it as an EDGE boundary: a straight
+    // DRW_Line for a zero-bulge segment, a DRW_Arc for a bulged one (so a curved
+    // boundary round-trips as a true arc). libdxfrw's writeHatch only supports
+    // edge boundaries (its polyline-boundary branch is an unimplemented stub).
+    // On read, readHatchLoop picks up each LINE edge's basePoint and tessellates
+    // each ARC edge, recovering the ring (arcs come back as sample points, not a
+    // single bulge — the GEOMETRY round-trips; the exact bulge encoding is a
+    // documented follow-up). solidFill, the pattern name and the pattern
+    // scale/angle (codes 41/52) round-trip. HATCH only exists for R2000+; for
+    // R12 writeHatch is a no-op in libdxfrw, so the entity is silently dropped at
+    // that version (rare export).
     void writeHatch(const LCEntity &e) {
         DRW_Hatch h;
         fillCommon(h, e);
@@ -1652,6 +1707,10 @@ private:
         h.hpattern = h.solid;   // pattern-fill flag follows solid (1 solid, 0 pattern)
         h.name = (e.textValue && e.textValue[0]) ? std::string(e.textValue)
                                                  : std::string(h.solid ? "SOLID" : "ANSI31");
+        // Pattern scale (code 41) + angle (code 52). libdxfrw writes these only for a
+        // PATTERN hatch (!solid); angle is emitted in DXF degrees, so convert back.
+        h.scale = (e.hatchScale != 0.0) ? e.hatchScale : 1.0;
+        h.angle = e.hatchAngle * 180.0 / M_PI;
 
         if (e.loopCount > 0 && e.loops != nullptr &&
             e.vertexCount > 0 && e.vertices != nullptr) {
@@ -1660,16 +1719,23 @@ private:
                 const int start = loop.offset;
                 const int count = loop.count;
                 if (start < 0 || count < 2 || start + count > e.vertexCount) continue;
-                // Edge boundary (type 0, not the polyline bit 2): a chain of LINE
-                // edges closing back to the first vertex.
+                // Edge boundary (type 0, not the polyline bit 2): a chain of edges
+                // closing back to the first vertex. A vertex with a nonzero bulge
+                // (DXF tan(includedAngle/4) of the edge that FOLLOWS it) becomes an
+                // ARC edge so a curved boundary round-trips as a real arc, not a
+                // chord; a zero-bulge vertex becomes a straight LINE edge.
                 auto hl = std::make_shared<DRW_HatchLoop>(0);
                 for (int j = 0; j < count; ++j) {
                     const LCVertex &a = e.vertices[start + j];
                     const LCVertex &b = e.vertices[start + ((j + 1) % count)];
-                    auto edge = std::make_shared<DRW_Line>();
-                    edge->basePoint.x = a.x; edge->basePoint.y = a.y; edge->basePoint.z = 0.0;
-                    edge->secPoint.x  = b.x; edge->secPoint.y  = b.y; edge->secPoint.z  = 0.0;
-                    hl->objlist.push_back(edge);
+                    if (std::fabs(a.bulge) > 1e-12) {
+                        appendBulgeArcEdge(*hl, a.x, a.y, b.x, b.y, a.bulge);
+                    } else {
+                        auto edge = std::make_shared<DRW_Line>();
+                        edge->basePoint.x = a.x; edge->basePoint.y = a.y; edge->basePoint.z = 0.0;
+                        edge->secPoint.x  = b.x; edge->secPoint.y  = b.y; edge->secPoint.z  = 0.0;
+                        hl->objlist.push_back(edge);
+                    }
                 }
                 hl->update();
                 h.appendLoop(hl);

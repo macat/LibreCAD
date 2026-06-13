@@ -19,6 +19,7 @@ ENGINE_DIR="${MACOS_DIR}/engine"
 INFO_PLIST_SRC="${MACOS_DIR}/App/Info.plist"
 SAMPLE_DXF_SRC="${REPO_DIR}/librecad/res/dxf/dim_sample.dxf"
 FONTS_SRC_DIR="${REPO_DIR}/librecad/support/fonts"
+HATCHPAT_SRC_DIR="${MACOS_DIR}/assets/hatchpatterns"   # bundled .pat hatch patterns (F6)
 ICON_DIR="${MACOS_DIR}/assets/AppIcon"
 ICON_GEN="${ICON_DIR}/make-icon.swift"      # programmatic, offline icon generator
 ICON_ICNS="${ICON_DIR}/AppIcon.icns"        # committed fallback (regenerated below)
@@ -71,6 +72,21 @@ if [[ -d "${FONTS_SRC_DIR}" ]]; then
     fi
 else
     echo "warning: fonts dir not found at ${FONTS_SRC_DIR}; bundled app will fall back to the repo path for text" >&2
+fi
+
+# Bundle the `.pat` hatch-pattern library (F6) so non-solid hatches render as real
+# pattern lines in the bundled app. HatchPatternLibrary looks them up under
+# Contents/Resources/hatchpatterns (Bundle.main), falling back to the in-repo
+# macos/assets/hatchpatterns for the bare binary. An unknown/missing pattern
+# resolves to a solid fill, so the app still works if this dir is absent.
+HATCHPAT_DST_DIR="${APP_DIR}/Contents/Resources/hatchpatterns"
+if [[ -d "${HATCHPAT_SRC_DIR}" ]]; then
+    mkdir -p "${HATCHPAT_DST_DIR}"
+    cp "${HATCHPAT_SRC_DIR}"/*.pat "${HATCHPAT_DST_DIR}/" 2>/dev/null || true
+    pat_count=$(find "${HATCHPAT_DST_DIR}" -name '*.pat' | wc -l | tr -d ' ')
+    echo "    bundled ${pat_count} .pat hatch-pattern file(s): Contents/Resources/hatchpatterns/"
+else
+    echo "warning: hatch-pattern dir not found at ${HATCHPAT_SRC_DIR}; bundled app will fall back to the repo path for patterns" >&2
 fi
 
 # App icon (Info.plist sets CFBundleIconFile = AppIcon, so the bundle needs

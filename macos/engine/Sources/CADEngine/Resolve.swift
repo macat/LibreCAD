@@ -840,15 +840,13 @@ extension EntityKind {
             return MTextShaper.resolve(d, pen: pen, ctx: ctx)
 
         case .hatch(let d):
-            // Solid fill of the boundary loops. Pattern lines are backlog, so a
-            // pattern hatch still fills its boundary for visibility. Bulged
-            // boundary edges are treated as straight for now (the vertex point is
-            // taken); boundary-arc tessellation is backlog.
-            let loops = d.loops.map { ring in ring.map(\.point) }
-            // Drop degenerate (<3 point) loops so the triangulator gets real rings.
-            let valid = loops.filter { $0.count >= 3 }
-            guard !valid.isEmpty else { return ResolvedGeometry() }
-            return ResolvedGeometry(fills: [ResolvedFill(loops: valid, color: pen.color)])
+            // A non-solid hatch with a KNOWN bundled `.pat` pattern resolves to
+            // the pattern's parallel/dashed LINES, clipped to the (bulge-aware,
+            // tessellated) boundary loops. A solid hatch — or an unknown/missing
+            // pattern — falls back to a solid FILL of those loops (the prior
+            // behavior; "unknown pattern → solid"). Bulged boundary edges are
+            // tessellated into arc samples so curved boundaries fill/clip right.
+            return Self.resolveHatch(d, pen: pen, ctx: ctx)
 
         case .solid(let d):
             // A filled triangle/quad: a single fill loop of its corners.
@@ -897,6 +895,49 @@ extension EntityKind {
                 ResolvedPolyline(points: [seg.0, seg.1], closed: false, pen: pen)
             ])
         }
+    }
+
+    // MARK: - Hatch resolve (solid fill OR generated pattern lines)
+
+    /// Resolve a hatch (`RS_Hatch`). The boundary loops are first tessellated so
+    /// any bulged edge becomes arc samples (boundary-arc fidelity). Then:
+    ///
+    /// - **Solid** (`solidFill == true`, or `nil`/`"SOLID"` pattern name): a
+    ///   single `ResolvedFill` of the tessellated loops (loops[0] outer,
+    ///   loops[1...] holes), in the entity's pen color — unchanged from before.
+    /// - **Pattern** (`solidFill == false`) with a KNOWN bundled `.pat` pattern:
+    ///   the pattern's line families, clipped to the loops, emitted as 2-point
+    ///   `ResolvedPolyline`s in the entity's pen. The per-hatch `patternScale`
+    ///   (code 41) and `patternAngle` (code 52) are honored.
+    /// - **Pattern with an unknown/missing name, or whose generation yields no
+    ///   lines**: falls back to the solid fill (so the region stays visible —
+    ///   the brief's "unknown pattern → solid").
+    static func resolveHatch(_ d: HatchData, pen: ResolvedPen, ctx: ResolveContext)
+        -> ResolvedGeometry
+    {
+        // Tessellate every boundary loop (bulge-aware) and keep real rings.
+        let rings = d.loops
+            .map { HatchBoundary.tessellate($0, tolerance: ctx.tessellationTolerance) }
+            .filter { $0.count >= 3 }
+        guard !rings.isEmpty else { return ResolvedGeometry() }
+
+        let solidFill: () -> ResolvedGeometry = {
+            ResolvedGeometry(fills: [ResolvedFill(loops: rings, color: pen.color)])
+        }
+
+        // Solid hatch ⇒ fill. Pattern hatch ⇒ try the bundled `.pat` library.
+        guard !d.solidFill, let pattern = HatchPatternLibrary.pattern(named: d.patternName)
+        else { return solidFill() }
+
+        let segs = HatchPatternGenerator.segments(
+            loops: rings, pattern: pattern,
+            scale: d.patternScale, angleOffset: d.patternAngle)
+        guard !segs.isEmpty else { return solidFill() }   // generation bailed ⇒ solid
+
+        let polylines = segs.map { seg in
+            ResolvedPolyline(points: [seg.0, seg.1], closed: false, pen: pen)
+        }
+        return ResolvedGeometry(polylines: polylines)
     }
 
     // MARK: - Construction line (xline/ray) resolve — RS_ConstructionLine geometry
@@ -1900,10 +1941,13 @@ extension EntityKind {
             return Self.mtextBoundingBox(d)
 
         case .hatch(let d):
-            // Union of every boundary loop's vertices (bulge-arc bow is ignored —
-            // boundary-arc tessellation is backlog; the vertex hull is a cheap
-            // conservative box that contains the straight-edge fill we render).
-            return AABB(points: d.loops.flatMap { $0.map(\.point) })
+            // Union of every boundary loop's TESSELLATED points, so a bulged edge's
+            // arc bow is included (a chord-only hull under-reports a boundary that
+            // bulges outward). Falls back to the raw vertices for a degenerate loop.
+            let tess = d.loops.flatMap {
+                HatchBoundary.tessellate($0, tolerance: 0.05)
+            }
+            return AABB(points: tess.isEmpty ? d.loops.flatMap { $0.map(\.point) } : tess)
 
         case .solid(let d):
             return AABB(points: d.corners)

@@ -228,6 +228,8 @@ typedef struct LCEntity {
     int32_t hAlign;        /**< text horizontal align (code 72): 0 left, 1 center, 2 right. */
     int32_t vAlign;        /**< text vertical align (code 73): 0 baseline, 1 bottom, 2 middle, 3 top. */
     int32_t solidFill;     /**< HATCH solid-fill flag (0 pattern, 1 solid). */
+    double  hatchScale;    /**< HATCH pattern scale, code 41 (1 == native). */
+    double  hatchAngle;    /**< HATCH pattern angle, code 52 (radians). */
 
     /* MTEXT-only layout (meaningful when kind == LC_ENT_MTEXT). */
     double mtextRectWidth;        /**< MTEXT reference / wrap width (code 41); 0 == no wrap. */

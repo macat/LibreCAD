@@ -369,7 +369,9 @@ extension CADEngine {
             return .hatch(HatchData(
                 loops: hatchLoops(e),
                 solidFill: e.solidFill != 0,
-                patternName: string(e.textValue)
+                patternName: string(e.textValue),
+                patternScale: e.hatchScale > 0 ? e.hatchScale : 1,
+                patternAngle: e.hatchAngle      // radians (bridge converted code 52)
             ))
 
         case Int32(LC_ENT_SOLID.rawValue):
