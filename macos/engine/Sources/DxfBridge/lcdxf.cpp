@@ -318,10 +318,26 @@ public:
         pushEntity(e);
     }
 
-    // RAY / XLINE: infinite-length construction lines. Not in the frozen entity
-    // model; collect as unsupported so Swift warns rather than silently drops.
-    void addRay(const DRW_Ray &data) override { addUnsupportedEntity(data, "RAY"); }
-    void addXline(const DRW_Xline &data) override { addUnsupportedEntity(data, "XLINE"); }
+    // RAY / XLINE: semi-infinite / infinite construction lines (DRW_Ray /
+    // DRW_Xline, both DRW_Line subclasses). basePoint (code 10) -> p1; secPoint
+    // (code 11) is the DIRECTION vector -> p2. Flattened to real PODs so the Swift
+    // reader maps them to `.ray` / `.xline` (was previously dropped as unsupported).
+    void addRay(const DRW_Ray &data) override {
+        ++m_out->geometryCount;
+        LCEntity e = makeEntity(LC_ENT_RAY);
+        fillCommon(e, data);
+        e.p1x = data.basePoint.x; e.p1y = data.basePoint.y; e.p1z = data.basePoint.z;
+        e.p2x = data.secPoint.x;  e.p2y = data.secPoint.y;  e.p2z = data.secPoint.z;
+        pushEntity(e);
+    }
+    void addXline(const DRW_Xline &data) override {
+        ++m_out->geometryCount;
+        LCEntity e = makeEntity(LC_ENT_XLINE);
+        fillCommon(e, data);
+        e.p1x = data.basePoint.x; e.p1y = data.basePoint.y; e.p1z = data.basePoint.z;
+        e.p2x = data.secPoint.x;  e.p2y = data.secPoint.y;  e.p2z = data.secPoint.z;
+        pushEntity(e);
+    }
 
     void addArc(const DRW_Arc &data) override {
         ++m_out->geometryCount;
@@ -1055,6 +1071,8 @@ public:
     void emitHatch(DRW_Hatch *e)        { if (m_dwg) m_dwg->writeHatch(e);     else m_dxf->writeHatch(e); }
     void emitDimension(DRW_Dimension *e){ if (m_dwg) m_dwg->writeDimension(e); else m_dxf->writeDimension(e); }
     void emitInsert(DRW_Insert *e)      { if (m_dwg) m_dwg->writeInsert(e);    else m_dxf->writeInsert(e); }
+    void emitRay(DRW_Ray *e)            { if (m_dwg) m_dwg->writeRay(e);       else m_dxf->writeRay(e); }
+    void emitXline(DRW_Xline *e)        { if (m_dwg) m_dwg->writeXline(e);     else m_dxf->writeXline(e); }
 
     // ----- attribute mapping (inverse of FlatteningReader::fillCommon) -----
     void fillCommon(DRW_Entity &ent, const LCEntity &src) {
@@ -1339,8 +1357,31 @@ private:
         case LC_ENT_HATCH:      writeHatch(e);      break;
         case LC_ENT_DIMENSION:  writeDimension(e);  break;
         case LC_ENT_INSERT:     writeInsert(e);     break;
+        case LC_ENT_XLINE:      writeXline(e);      break;
+        case LC_ENT_RAY:        writeRay(e);        break;
         default:                ++m_skipped;        break; // UNSUPPORTED / ...
         }
+    }
+
+    // ----- XLINE / RAY (construction lines) ------------------------------
+    // Emit a DXF XLINE / RAY (the inverse of FlatteningReader::addXline/addRay).
+    // p1 -> basePoint (code 10); p2 -> secPoint (code 11), the direction. libdxfrw
+    // unitizes the direction on write, so a re-read yields a unit direction (the
+    // engine's resolve normalizes regardless).
+    void writeXline(const LCEntity &e) {
+        DRW_Xline x;
+        fillCommon(x, e);
+        x.basePoint.x = e.p1x; x.basePoint.y = e.p1y; x.basePoint.z = e.p1z;
+        x.secPoint.x  = e.p2x; x.secPoint.y  = e.p2y; x.secPoint.z  = e.p2z;
+        emitXline(&x);
+    }
+
+    void writeRay(const LCEntity &e) {
+        DRW_Ray r;
+        fillCommon(r, e);
+        r.basePoint.x = e.p1x; r.basePoint.y = e.p1y; r.basePoint.z = e.p1z;
+        r.secPoint.x  = e.p2x; r.secPoint.y  = e.p2y; r.secPoint.z  = e.p2z;
+        emitRay(&r);
     }
 
     // ----- INSERT (block reference) --------------------------------------

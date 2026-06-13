@@ -37,9 +37,10 @@ struct DXFReaderTests {
         var line = 0, point = 0, circle = 0, arc = 0
         var ellipse = 0, polyline = 0, spline = 0, splinePoints = 0
         var text = 0, mtext = 0, hatch = 0, solid = 0, dimension = 0, insert = 0
+        var xline = 0, ray = 0
         var total: Int {
             line + point + circle + arc + ellipse + polyline + spline + splinePoints
-                + text + mtext + hatch + solid + dimension + insert
+                + text + mtext + hatch + solid + dimension + insert + xline + ray
         }
     }
 
@@ -68,6 +69,9 @@ struct DXFReaderTests {
             case .dimension:    t.dimension += 1
             // Block references (INSERT) are now imported as `.insert` (block wave).
             case .insert:       t.insert += 1
+            // Construction lines (XLINE/RAY) are now imported (was unsupported).
+            case .xline:        t.xline += 1
+            case .ray:          t.ray += 1
             }
         }
         return t

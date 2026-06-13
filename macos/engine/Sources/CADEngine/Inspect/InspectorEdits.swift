@@ -96,6 +96,56 @@ public enum InspectorEdits {
         return .point(PointData(position: position))
     }
 
+    // MARK: - Construction-line field edits (xline / ray, RS_ConstructionLine)
+
+    /// Replaces an `.xline`'s base point, keeping its direction. No-op otherwise.
+    public static func setXLineBase(_ kind: EntityKind, _ base: Vector) -> EntityKind {
+        guard case .xline(var d) = kind else { return kind }
+        d.base = base
+        return .xline(d)
+    }
+
+    /// Replaces an `.xline`'s direction vector, keeping its base. A zero/invalid
+    /// direction is ignored (the line would have no orientation).
+    public static func setXLineDirection(_ kind: EntityKind, _ direction: Vector) -> EntityKind {
+        guard case .xline(var d) = kind else { return kind }
+        guard direction.valid, direction.magnitude > Tolerance.distance else { return kind }
+        d.direction = direction
+        return .xline(d)
+    }
+
+    /// Replaces an `.xline`'s direction by ANGLE (radians), keeping its base. The
+    /// direction is rebuilt as a unit vector at `angle` (the Inspector's common
+    /// "set the construction-line angle" affordance).
+    public static func setXLineAngle(_ kind: EntityKind, _ angle: Double) -> EntityKind {
+        guard case .xline(var d) = kind else { return kind }
+        d.direction = Vector(angle: angle)
+        return .xline(d)
+    }
+
+    /// Replaces a `.ray`'s base (start) point, keeping its direction.
+    public static func setRayBase(_ kind: EntityKind, _ base: Vector) -> EntityKind {
+        guard case .ray(var d) = kind else { return kind }
+        d.base = base
+        return .ray(d)
+    }
+
+    /// Replaces a `.ray`'s direction vector, keeping its base. A zero/invalid
+    /// direction is ignored.
+    public static func setRayDirection(_ kind: EntityKind, _ direction: Vector) -> EntityKind {
+        guard case .ray(var d) = kind else { return kind }
+        guard direction.valid, direction.magnitude > Tolerance.distance else { return kind }
+        d.direction = direction
+        return .ray(d)
+    }
+
+    /// Replaces a `.ray`'s direction by ANGLE (radians), keeping its base.
+    public static func setRayAngle(_ kind: EntityKind, _ angle: Double) -> EntityKind {
+        guard case .ray(var d) = kind else { return kind }
+        d.direction = Vector(angle: angle)
+        return .ray(d)
+    }
+
     // MARK: - Text field edits (TEXT / single-line, RS_TextData)
 
     /// Replaces a `.text`'s insertion point.

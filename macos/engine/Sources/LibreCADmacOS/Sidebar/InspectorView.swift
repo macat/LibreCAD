@@ -322,6 +322,8 @@ struct InspectorView: View {
         case .solid:        return "Solid"
         case .dimension:    return "Dimension"
         case .insert:       return "Block reference"
+        case .xline:        return "Construction line"
+        case .ray:          return "Ray"
         }
     }
 }

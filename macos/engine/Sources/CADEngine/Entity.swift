@@ -366,6 +366,55 @@ public struct SplinePointsData: Sendable, Hashable, Codable {
     }
 }
 
+// MARK: - Construction-line defining data (RS_Construction* / DXF XLINE & RAY)
+
+/// `RS_ConstructionLineData` (infinite form) — an **infinite construction line**
+/// (DXF `XLINE`, libdxfrw `DRW_Xline`). Defined by a `base` point and a
+/// `direction` vector; the line extends to infinity in **both** directions along
+/// `direction`. Per ADR-001 a value type holding only the defining data; the
+/// drawn segment (a finite segment clipped to the view, or a large fallback
+/// segment) is produced on demand by `resolve()` — never stored.
+///
+/// ## Field grounding (DXF `XLINE` / libdxfrw `DRW_Xline`)
+/// - `base`      — DXF code 10: the first point the line passes through
+///                 (`DRW_Xline::basePoint`).
+/// - `direction` — DXF code 11: the unit direction vector
+///                 (`DRW_Xline::secPoint`, stored as a direction). Need not be
+///                 normalized; `resolve()` normalizes it.
+public struct XLineData: Sendable, Hashable, Codable {
+    /// DXF code 10 — a point the infinite line passes through.
+    public var base: Vector
+    /// DXF code 11 — the line's direction (both ways). Need not be normalized.
+    public var direction: Vector
+    public init(base: Vector, direction: Vector) {
+        self.base = base
+        self.direction = direction
+    }
+}
+
+/// `RS_ConstructionLineData` (semi-infinite form) — a **ray** (DXF `RAY`,
+/// libdxfrw `DRW_Ray`). Defined by a `base` point and a `direction`; the ray
+/// extends from `base` to infinity in the **`+direction`** sense only. Per
+/// ADR-001 a value type holding only the defining data; the drawn segment is
+/// produced on demand by `resolve()` — never stored.
+///
+/// ## Field grounding (DXF `RAY` / libdxfrw `DRW_Ray`)
+/// - `base`      — DXF code 10: the ray's start point (`DRW_Ray::basePoint`).
+/// - `direction` — DXF code 11: the direction the ray travels
+///                 (`DRW_Ray::secPoint`, stored as a direction). Need not be
+///                 normalized; `resolve()` normalizes it.
+public struct RayData: Sendable, Hashable, Codable {
+    /// DXF code 10 — the ray's start point.
+    public var base: Vector
+    /// DXF code 11 — the direction the ray travels (one way only). Need not be
+    /// normalized.
+    public var direction: Vector
+    public init(base: Vector, direction: Vector) {
+        self.base = base
+        self.direction = direction
+    }
+}
+
 // MARK: - Dimension defining data (RS_Dimension* / DRW_Dimension family)
 
 /// An associative CAD dimension (`RS_Dimension` family / DXF `DIMENSION`).
@@ -667,6 +716,16 @@ public enum EntityKind: Sendable, Hashable, Codable {
     /// is computed in `resolve()` via `ResolveContext.blockProvider`, never stored
     /// (ADR-001).
     case insert(InsertData)
+    /// An **infinite construction line** (`RS_ConstructionLine`, DXF `XLINE`).
+    /// Extends to infinity both ways along its direction. Its drawn segment
+    /// (clipped to the view via `ResolveContext.clipBounds`, or a large finite
+    /// fallback segment) is computed in `resolve()`, never stored (ADR-001).
+    case xline(XLineData)
+    /// A **ray** — a semi-infinite construction line (`RS_ConstructionLine`
+    /// one-way form, DXF `RAY`). Extends from its base to infinity in the
+    /// `+direction` sense only. Its drawn segment is computed in `resolve()`,
+    /// never stored (ADR-001).
+    case ray(RayData)
 }
 
 // MARK: - Per-entity flags

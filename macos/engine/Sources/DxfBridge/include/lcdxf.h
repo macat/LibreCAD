@@ -111,6 +111,16 @@ typedef enum LCEntityKind {
      *  (default 1×1, zero spacing == a plain single insert). Distinct from
      *  LC_ENT_UNSUPPORTED so the reader maps it to `.insert`. */
     LC_ENT_INSERT = 13,
+    /** An INFINITE construction line (DXF XLINE / DRW_Xline). Its base point
+     *  (code 10) is in p1; its unit direction (code 11) is in p2 (stored as a
+     *  direction vector, NOT a second point). Distinct from LC_ENT_UNSUPPORTED so
+     *  the reader maps it to `.xline`. */
+    LC_ENT_XLINE = 14,
+    /** A RAY — a semi-infinite construction line (DXF RAY / DRW_Ray). Its start
+     *  (base) point (code 10) is in p1; its direction (code 11) is in p2. The ray
+     *  extends from p1 toward +p2 only. Distinct from LC_ENT_UNSUPPORTED so the
+     *  reader maps it to `.ray`. */
+    LC_ENT_RAY = 15,
     /** An entity libdxfrw delivered but the reader does not flatten
      *  (IMAGE/ordinate-DIMENSION/...). Carries only its `typeName` so Swift
      *  can collect a warning; geometry fields are unset. */
