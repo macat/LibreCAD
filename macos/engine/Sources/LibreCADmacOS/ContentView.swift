@@ -305,6 +305,11 @@ struct ContentView: View {
             toolButton(.polylineEdit,
                        symbol: "point.topleft.down.to.point.bottomright.curvepath.fill",
                        help: "Edit polyline vertices (⇧P)")
+            // Wire-wave-1 modify tools: Join fuses touching lines/arcs into one
+            // polyline; Explode Text converts a text/mtext entity to stroke polylines.
+            toolButton(.join, symbol: "link", help: "Join lines/arcs into a polyline (⇧J)")
+            toolButton(.explodeText, symbol: "character.cursor.ibeam",
+                       help: "Explode text to geometry (⇧E)")
 
             Divider()
             // Edit tools (pick entities under the cursor; no pre-selection needed).
@@ -327,6 +332,15 @@ struct ContentView: View {
             toolButton(.diameterDim, symbol: "circle.and.line.horizontal",
                        help: "Diameter dimension (B)")
             toolButton(.angularDim, symbol: "angle", help: "Angular dimension (N)")
+
+            Divider()
+            // Measure / info tools (read-only): report a value in the status HUD
+            // without mutating the drawing. Distance is keyed ⇧K; the other modes
+            // are reachable from the toolbar, the Tools ▸ Measure menu, and ⌘K.
+            toolButton(.measureDistance, symbol: "ruler", help: "Measure distance (⇧K)")
+            toolButton(.measureAngle, symbol: "angle", help: "Measure angle")
+            toolButton(.measureArea, symbol: "square.dashed", help: "Measure area + perimeter")
+            toolButton(.measureLength, symbol: "sum", help: "Total length of selection")
         }
     }
 

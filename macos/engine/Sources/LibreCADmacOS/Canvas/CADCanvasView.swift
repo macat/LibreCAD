@@ -1163,11 +1163,30 @@ final class CADCanvasController {
             activateTool(shift ? .offset : .point)
             return true
         case "e":
-            activateTool(.ellipse)
+            // Bare E = Ellipse (draw); ⇧E = Explode Text (modify, wire-wave-1) —
+            // free shift chord (bare E has no other shift twin).
+            activateTool(shift ? .explodeText : .ellipse)
             return true
         case "g":
             activateTool(.polygon)
             return true
+        case "j":
+            // ⇧J = Join (modify, wire-wave-1) — fuse touching lines/arcs into a
+            // polyline. Bare J is unassigned (no draw/edit twin); claim only ⇧J.
+            if shift {
+                activateTool(.join)
+                return true
+            }
+            return false
+        case "k":
+            // ⇧K = Measure Distance (read-only info tool, wire-wave-1). The other
+            // measure modes (angle/area/total-length) are menu/⌘K only — no key.
+            // Bare K is unassigned; claim only ⇧K.
+            if shift {
+                activateTool(.measureDistance)
+                return true
+            }
+            return false
         case "m":
             activateTool(shift ? .mirror : .move)
             return true

@@ -113,6 +113,25 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     /// The Polyline-Edit modify tool (`PolylineEditTool`) — pick a polyline, then
     /// move / add / remove a vertex, or toggle a segment straight↔arc.
     case polylineEdit
+    // --- Wire-wave-1 tools (wired into the UI in this wave) ---
+    /// Measure Distance (`MeasureTool` in `.distance` mode) — pick 2 points → the
+    /// distance, Δx, Δy, and connecting angle, reported in the status HUD. Read-only.
+    case measureDistance
+    /// Measure Angle (`MeasureTool` in `.angle` mode) — pick a vertex + two rays →
+    /// the interior angle at the vertex. Read-only.
+    case measureAngle
+    /// Measure Area (`MeasureTool` in `.areaPerimeter` mode) — pick a closed point
+    /// loop → polygon area + perimeter (shoelace). Read-only.
+    case measureArea
+    /// Total Length (`MeasureTool` in `.totalLength` mode) — sum the resolved length
+    /// of every entity in the current selection. Read-only.
+    case measureLength
+    /// The Join modify tool (`JoinTool`) — fuse touching/collinear lines and arcs
+    /// into a single polyline (bulges preserved).
+    case join
+    /// The Explode-Text modify tool (`ExplodeTextTool`) — convert a `.text`/`.mtext`
+    /// entity into its stroke `.polyline`s (via the font provider).
+    case explodeText
     // Append new draw tools here (one `case` per tool) — see the collision note.
 
     /// A short title for the UI (toolbar button / menu).
@@ -153,6 +172,12 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .break:       return "Break"
         case .insert:      return "Insert Block"
         case .polylineEdit: return "Edit Polyline"
+        case .measureDistance: return "Measure Distance"
+        case .measureAngle:    return "Measure Angle"
+        case .measureArea:     return "Measure Area"
+        case .measureLength:   return "Total Length"
+        case .join:            return "Join"
+        case .explodeText:     return "Explode Text"
         // Append a title arm per new case.
         }
     }
@@ -199,6 +224,14 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         // is a later task; activation never crashes even with no blocks in the drawing.
         case .insert:      return InsertTool()
         case .polylineEdit: return PolylineEditTool()
+        // Measure variants: ONE ToolKind per MeasureTool.Mode (menu clarity), each
+        // minting MeasureTool(mode:). All four are read-only (never commit).
+        case .measureDistance: return MeasureTool(mode: .distance)
+        case .measureAngle:    return MeasureTool(mode: .angle)
+        case .measureArea:     return MeasureTool(mode: .areaPerimeter)
+        case .measureLength:   return MeasureTool(mode: .totalLength)
+        case .join:            return JoinTool()
+        case .explodeText:     return ExplodeTextTool()
         // Append a `case <kind>: return <Name>Tool()` arm per new tool.
         }
     }
