@@ -372,11 +372,12 @@ public struct StretchTool: Tool {
             guard inside(d.base) else { return nil }
             return EntityKind.ray(d).transformed(by: t)
 
-        case .hatch, .dimension, .insert:
+        case .hatch, .dimension, .insert, .leader:
             // Best-effort whole-translate if ANY defining point is in-window; the
             // per-point stretch of these composite kinds is backlog. We translate
             // the whole entity (its boundary moves with the geometry it bounds). For
-            // an `.insert` the defining point is its insertion point.
+            // an `.insert` the defining point is its insertion point; for a `.leader`
+            // any path vertex.
             guard anyDefiningPointInside(kind, window: window) else { return nil }
             return kind.transformed(by: t)
         }
@@ -430,6 +431,9 @@ public struct StretchTool: Tool {
         case .insert(let ins):
             // A block reference's only stretch reference point is its insertion point.
             return inside(ins.insertionPoint)
+        case .leader(let ld):
+            // A leader's path vertices are its stretch reference points.
+            return ld.vertices.contains { inside($0) }
         default:
             return false
         }

@@ -389,6 +389,11 @@ public enum Snapping {
         case .ray(let d):
             // The ray's start (base) is its one real endpoint.
             return d.base.valid ? [d.base] : []
+
+        case .leader(let d):
+            // The leader's path vertices (the arrow tip + each knee + the
+            // annotation anchor) are the snappable points.
+            return d.vertices.filter(\.valid)
         }
     }
 
@@ -490,6 +495,16 @@ public enum Snapping {
             // An infinite/semi-infinite construction line has no canonical middle
             // (its base is the endpoint snap); leave to onEntity/perpendicular.
             return []
+
+        case .leader(let d):
+            // The midpoint of each straight path segment (the chord midpoint), so
+            // a leader's legs snap like a polyline's.
+            guard d.vertices.count >= 2 else { return [] }
+            var mids: [Vector] = []
+            for i in 0..<(d.vertices.count - 1) {
+                mids.append((d.vertices[i] + d.vertices[i + 1]) * 0.5)
+            }
+            return mids.filter(\.valid)
         }
     }
 

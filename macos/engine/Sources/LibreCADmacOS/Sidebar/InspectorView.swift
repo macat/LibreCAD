@@ -363,6 +363,7 @@ struct InspectorView: View {
         case .insert:       return "Block reference"
         case .xline:        return "Construction line"
         case .ray:          return "Ray"
+        case .leader:       return "Leader"
         }
     }
 }

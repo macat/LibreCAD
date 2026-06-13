@@ -37,10 +37,10 @@ struct DXFReaderTests {
         var line = 0, point = 0, circle = 0, arc = 0
         var ellipse = 0, polyline = 0, spline = 0, splinePoints = 0
         var text = 0, mtext = 0, hatch = 0, solid = 0, dimension = 0, insert = 0
-        var xline = 0, ray = 0
+        var xline = 0, ray = 0, leader = 0
         var total: Int {
             line + point + circle + arc + ellipse + polyline + spline + splinePoints
-                + text + mtext + hatch + solid + dimension + insert + xline + ray
+                + text + mtext + hatch + solid + dimension + insert + xline + ray + leader
         }
     }
 
@@ -72,6 +72,8 @@ struct DXFReaderTests {
             // Construction lines (XLINE/RAY) are now imported (was unsupported).
             case .xline:        t.xline += 1
             case .ray:          t.ray += 1
+            // Leaders (DXF LEADER) are now imported (was an unsupported warning).
+            case .leader:       t.leader += 1
             }
         }
         return t
@@ -105,6 +107,10 @@ struct DXFReaderTests {
         // dim-subtype wave (w2-dimsub) added DimKind.ordinate, so all 20 now import
         // as `.dimension` (the 6 ordinate dims no longer warn).
         #expect(t.dimension == 20)
+
+        // Leader wave (w4b-leader): dim_sample's 2 LEADER entities now import as
+        // `.leader` (previously the file's last skipped-entity warning).
+        #expect(t.leader == 2)
     }
 
     @Test("imports MTEXT as .mtext and SOLID as .solid from dim_sample.dxf")
@@ -152,13 +158,14 @@ struct DXFReaderTests {
         #expect(result.records.allSatisfy { !$0.layer.name.isEmpty })
     }
 
-    @Test("collects warnings for unsupported entities (leaders)")
+    @Test("dim_sample.dxf imports cleanly with no remaining skipped-entity warnings")
     func collectsWarnings() async throws {
         let result = try await readSample()
-        // dim_sample.dxf carries 2 LEADER entities (not yet imported), so the reader
-        // must surface a non-empty warning list rather than failing the read.
-        #expect(!result.warnings.isEmpty)
-        #expect(result.warnings.contains { $0.contains("LEADER") })
+
+        // The leader wave (w4b-leader) imports dim_sample.dxf's 2 LEADER entities,
+        // so LEADER no longer appears as a skipped warning (closing dim_sample's
+        // last read warning).
+        #expect(!result.warnings.contains { $0.contains("LEADER") })
 
         // The dim-subtype wave (w2-dimsub) imports the 6 ORDINATE dimensions, so
         // DIMENSION no longer appears as a skipped warning.
@@ -168,6 +175,10 @@ struct DXFReaderTests {
         // they are imported now, so they must NOT appear as skipped warnings.
         #expect(!result.warnings.contains { $0.contains("MTEXT") })
         #expect(!result.warnings.contains { $0.contains("SOLID") })
+
+        // dim_sample.dxf's every entity kind is now modelled — the read leaves NO
+        // skipped-entity warnings at all.
+        #expect(result.warnings.isEmpty)
     }
 
     @Test("entity pens carry resolved or sentinel colors")

@@ -894,7 +894,75 @@ extension EntityKind {
             return ResolvedGeometry(polylines: [
                 ResolvedPolyline(points: [seg.0, seg.1], closed: false, pen: pen)
             ])
+
+        case .leader(let d):
+            // Annotation callout → the polyline PATH + an arrowhead FILL at the
+            // first vertex (reusing the shared dimension-arrowhead helper) + the
+            // attached text/mtext annotation resolved through the SAME `.text`/
+            // `.mtext` resolve arm (no second text path; honors ctx.fontProvider).
+            return Self.resolveLeader(d, pen: pen, ctx: ctx)
         }
+    }
+
+    // MARK: - Leader resolve (path + arrowhead + attached annotation)
+
+    /// Resolves a leader's full graphic (ADR-001: PURE — no mutation):
+    /// - the path as a single open `ResolvedPolyline` over its `vertices` (≥ 2);
+    /// - an arrowhead FILL at the FIRST vertex pointing back along the first
+    ///   segment, via the shared `dimArrowhead` helper (so leader + dimension
+    ///   arrowheads are identical), when `hasArrow` and the path has a real first
+    ///   segment;
+    /// - the attached `.text`/`.mtext` annotation resolved through the SAME text
+    ///   resolve arm as a standalone text entity (no second text path), inheriting
+    ///   the leader's resolved pen so it renders in the leader's color.
+    ///
+    /// A degenerate leader (< 2 vertices) resolves to JUST its annotation (if any)
+    /// — matching the two zero-vertex LEADERs in `dim_sample.dxf`, which import and
+    /// round-trip without drawing a path/arrow.
+    static func resolveLeader(_ d: LeaderData, pen: ResolvedPen, ctx: ResolveContext)
+        -> ResolvedGeometry
+    {
+        var polylines: [ResolvedPolyline] = []
+        var fills: [ResolvedFill] = []
+
+        let verts = d.vertices.filter(\.valid)
+        if verts.count >= 2 {
+            // The leader path.
+            polylines.append(ResolvedPolyline(points: verts, closed: false, pen: pen))
+
+            // Arrowhead at the first vertex, pointing FROM the tip back along the
+            // first segment (the same convention as a dimension arrowhead).
+            if d.hasArrow {
+                let tip = verts[0]
+                let back = verts[1]
+                let dir = back - tip
+                let len = dir.magnitude
+                if len > Tolerance.distance {
+                    let unit = dir / len
+                    let arrow = d.arrowSize > 0 ? d.arrowSize : leaderDefaultArrowSize(ctx)
+                    fills.append(dimArrowhead(tip: tip, direction: unit, size: arrow, color: pen.color))
+                }
+            }
+        }
+
+        // The attached annotation — resolved through the shared `.text`/`.mtext`
+        // resolve arm (no second text path), inheriting the leader's pen.
+        if let annotation = d.annotation {
+            let geo = annotation.resolve(pen: pen, ctx: ctx)
+            polylines.append(contentsOf: geo.polylines)
+            fills.append(contentsOf: geo.fills)
+        }
+
+        return ResolvedGeometry(polylines: polylines, fills: fills)
+    }
+
+    /// The default arrowhead size a leader uses when it carries a non-positive
+    /// `arrowSize`: the document dimension style's arrow size (`$DIMASZ` via the
+    /// wired `dimStyleProvider`), else the engine's default arrow size.
+    static func leaderDefaultArrowSize(_ ctx: ResolveContext) -> Double {
+        let style = ctx.dimStyleProvider?() ?? .default
+        let base = style.arrowSize > 0 ? style.arrowSize : dimDefaultArrowSize
+        return base * (style.scale > 0 ? style.scale : 1.0)
     }
 
     // MARK: - Hatch resolve (solid fill OR generated pattern lines)
@@ -1890,6 +1958,10 @@ extension EntityKind {
             return Self.constructionBoundingBox(
                 base: d.base, direction: d.direction, oneWay: true, clip: ctx.clipBounds)
         }
+        if case .leader(let d) = self {
+            // Pass the ctx so the attached annotation uses its tight font-aware box.
+            return Self.leaderBoundingBox(d, ctx: ctx)
+        }
         return boundingBox()
     }
 
@@ -1971,7 +2043,31 @@ extension EntityKind {
         case .ray(let d):
             return Self.constructionBoundingBox(
                 base: d.base, direction: d.direction, oneWay: true, clip: nil)
+
+        case .leader(let d):
+            // Union of the path vertices + the (font-less, estimated) annotation
+            // box. The ctx-carrying `boundingBox(ctx:)` returns the tight text box.
+            return Self.leaderBoundingBox(d, ctx: nil)
         }
+    }
+
+    /// World-space bounding box of a leader: the union of its path vertices and its
+    /// attached annotation's box. With a `ctx` (and font provider) the annotation
+    /// box is the tight font-aware one; without it, the loose metric estimate.
+    /// Collapses to the first vertex (or origin) for a degenerate, annotation-less
+    /// leader so the box is always valid (never empty/infinite).
+    static func leaderBoundingBox(_ d: LeaderData, ctx: ResolveContext?) -> AABB {
+        var box = AABB.empty
+        for v in d.vertices where v.valid { box.expand(toInclude: v) }
+        if let annotation = d.annotation {
+            let aBox = ctx.map { annotation.boundingBox(ctx: $0) } ?? annotation.boundingBox()
+            if !aBox.isEmpty { box = box.union(aBox) }
+        }
+        if box.isEmpty {
+            let anchor = d.vertices.first(where: \.valid) ?? Vector(0, 0)
+            return AABB(point: anchor)
+        }
+        return box
     }
 
     /// World-space bounding box of a construction line (`.xline`/`.ray`): the box

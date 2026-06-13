@@ -543,7 +543,7 @@ public:
     void addDimAngular(const DRW_DimAngular *data) override { emitDimAngular(data); }
     void addDimAngular3P(const DRW_DimAngular3p *data) override { emitDimAngular3P(data); }
     void addDimOrdinate(const DRW_DimOrdinate *data) override { emitDimOrdinate(data); }
-    void addLeader(const DRW_Leader *data) override { addUnsupportedDim(data, "LEADER"); }
+    void addLeader(const DRW_Leader *data) override { emitLeader(data); }
     void addHatch(const DRW_Hatch *data) override { emitHatch(data); }
     void addViewport(const DRW_Viewport &data) override { addUnsupportedEntity(data, "VIEWPORT"); }
     void addImage(const DRW_Image *data) override { addUnsupportedDim(data, "IMAGE"); }
@@ -650,6 +650,42 @@ private:
         e.vertexCount = static_cast<int32_t>(verts.size());
         e.loops = loops.empty() ? nullptr : loops.data();
         e.loopCount = static_cast<int32_t>(loops.size());
+        pushEntity(e);
+    }
+
+    // ----- LEADER (annotation callout) -----------------------------------
+    // Flatten a DRW_Leader into LC_ENT_LEADER: the path vertices (codes 10/20/30,
+    // bulge unused) into the flat vertex pool; the arrow flag (code 71), the text
+    // annotation height (code 40) and the referenced dim-style name (code 3) into
+    // the dedicated fields. A zero-vertex leader (as in dim_sample.dxf) flattens to
+    // a real LC_ENT_LEADER with an empty vertex array — so it imports (no warning)
+    // and round-trips, even though it draws nothing. The attached annotation entity
+    // (hard-ref code 340) is NOT collected — the engine's inline annotation
+    // round-trips via Codable, not DXF (mirrors libdxfrw's own writeLeader, which
+    // emits only the path + arrow + text height).
+    void emitLeader(const DRW_Leader *data) {
+        ++m_out->geometryCount;
+        LCEntity e = makeEntity(LC_ENT_LEADER);
+        if (data) {
+            fillCommon(e, *data);
+        } else {
+            e.layer = intern("0"); e.lineType = intern("BYLAYER");
+            pushEntity(e);
+            return;
+        }
+        e.leaderHasArrow = (data->arrow != 0) ? 1 : 0;
+        e.height = data->textheight;            // code 40 — annotation height
+        e.leaderArrowSize = data->textheight;   // default arrow size to the text height
+        if (!data->style.empty()) e.styleName = intern(data->style);
+
+        m_out->vertexPool.emplace_back();
+        std::vector<LCVertex> &verts = m_out->vertexPool.back();
+        verts.reserve(data->vertexlist.size());
+        for (const auto &v : data->vertexlist) {
+            if (v) verts.push_back(LCVertex{v->x, v->y, 0.0});
+        }
+        e.vertices = verts.empty() ? nullptr : verts.data();
+        e.vertexCount = static_cast<int32_t>(verts.size());
         pushEntity(e);
     }
 
@@ -1079,6 +1115,9 @@ public:
     void emitInsert(DRW_Insert *e)      { if (m_dwg) m_dwg->writeInsert(e);    else m_dxf->writeInsert(e); }
     void emitRay(DRW_Ray *e)            { if (m_dwg) m_dwg->writeRay(e);       else m_dxf->writeRay(e); }
     void emitXline(DRW_Xline *e)        { if (m_dwg) m_dwg->writeXline(e);     else m_dxf->writeXline(e); }
+    // libdxfrw's DWG writer (dwgWriter15) has no writeLeader path; DWG leaders are
+    // skipped (returns false here so the caller counts the skip), DXF emits them.
+    bool emitLeader(DRW_Leader *e)      { if (m_dwg) return false; m_dxf->writeLeader(e); return true; }
 
     // ----- attribute mapping (inverse of FlatteningReader::fillCommon) -----
     void fillCommon(DRW_Entity &ent, const LCEntity &src) {
@@ -1365,6 +1404,7 @@ private:
         case LC_ENT_INSERT:     writeInsert(e);     break;
         case LC_ENT_XLINE:      writeXline(e);      break;
         case LC_ENT_RAY:        writeRay(e);        break;
+        case LC_ENT_LEADER:     writeLeader(e);     break;
         default:                ++m_skipped;        break; // UNSUPPORTED / ...
         }
     }
@@ -1388,6 +1428,29 @@ private:
         r.basePoint.x = e.p1x; r.basePoint.y = e.p1y; r.basePoint.z = e.p1z;
         r.secPoint.x  = e.p2x; r.secPoint.y  = e.p2y; r.secPoint.z  = e.p2z;
         emitRay(&r);
+    }
+
+    // ----- LEADER (annotation callout) -----------------------------------
+    // Emit a DXF LEADER (the inverse of FlatteningReader::emitLeader). The path
+    // vertices, the arrow flag (code 71), and the annotation text height (code 40)
+    // map onto DRW_Leader; the dim-style name (code 3) round-trips. The engine's
+    // inline annotation entity is NOT emitted here (it round-trips via Codable, and
+    // libdxfrw's writeLeader itself writes only path+arrow+height). DXF LEADER needs
+    // R2000+; the DWG writer has no leader path, so on DWG it is skipped + counted
+    // (emitLeader returns false). The path's vertices come from the flat array.
+    void writeLeader(const LCEntity &e) {
+        DRW_Leader ld;
+        fillCommon(ld, e);
+        ld.arrow = e.leaderHasArrow ? 1 : 0;
+        ld.textheight = e.height;
+        if (e.styleName && e.styleName[0]) ld.style = std::string(e.styleName);
+        else ld.style = std::string("Standard");
+        for (int i = 0; i < e.vertexCount; ++i) {
+            ld.vertexlist.push_back(
+                std::make_shared<DRW_Coord>(e.vertices[i].x, e.vertices[i].y, 0.0));
+        }
+        ld.vertnum = static_cast<int>(ld.vertexlist.size());
+        if (!emitLeader(&ld)) ++m_skipped;   // DWG has no leader writer
     }
 
     // ----- INSERT (block reference) --------------------------------------

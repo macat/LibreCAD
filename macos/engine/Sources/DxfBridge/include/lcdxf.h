@@ -121,6 +121,17 @@ typedef enum LCEntityKind {
      *  extends from p1 toward +p2 only. Distinct from LC_ENT_UNSUPPORTED so the
      *  reader maps it to `.ray`. */
     LC_ENT_RAY = 15,
+    /** A LEADER — an annotation callout (DXF LEADER / DRW_Leader). Its path
+     *  vertices (codes 10/20/30) are in the flat `vertices` array; `leaderHasArrow`
+     *  (code 71) flags the arrowhead at the first vertex; `leaderArrowSize` (the
+     *  dim style arrow size) is the arrowhead length; `height` carries the text
+     *  annotation height (code 40); `styleName` the referenced dim style (code 3).
+     *  The leader may carry ZERO vertices (a degenerate callout that round-trips
+     *  but draws nothing). The attached annotation entity (DXF hard-ref code 340)
+     *  is NOT flattened here — a leader's inline annotation in the engine value
+     *  model round-trips via Codable, not DXF. Distinct from LC_ENT_UNSUPPORTED so
+     *  the reader maps it to `.leader` (was previously dropped as unsupported). */
+    LC_ENT_LEADER = 16,
     /** An entity libdxfrw delivered but the reader does not flatten
      *  (IMAGE/ordinate-DIMENSION/...). Carries only its `typeName` so Swift
      *  can collect a warning; geometry fields are unset. */
@@ -285,6 +296,12 @@ typedef struct LCEntity {
     int32_t insCols;             /**< MINSERT column count (code 70); default 1. */
     double insRowSpacing;        /**< MINSERT row spacing (code 45); default 0. */
     double insColSpacing;        /**< MINSERT column spacing (code 44); default 0. */
+
+    /* LEADER-only fields (meaningful when kind == LC_ENT_LEADER). The path
+     * vertices live in the flat `vertices` array (bulge unused); the text
+     * annotation height is in `height` (code 40); `styleName` the dim style. */
+    int32_t leaderHasArrow;      /**< code 71 — 1 if an arrowhead is drawn, else 0. */
+    double leaderArrowSize;      /**< arrowhead length (dim style arrow size). */
 
     /* Variable-length data — borrowed pointers into the owning list's pools. */
     const LCVertex *vertices;   /**< polyline vertices, spline control points, hatch

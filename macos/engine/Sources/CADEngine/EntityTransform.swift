@@ -241,7 +241,24 @@ public enum EntityTransform {
         case .insert(let ins):        return .insert(transformInsert(ins, t))
         case .xline(let x):           return .xline(transformXLine(x, t))
         case .ray(let r):             return .ray(transformRay(r, t))
+        case .leader(let ld):         return .leader(transformLeader(ld, t))
         }
+    }
+
+    // MARK: leader — every path vertex transforms (full affine); the arrow size
+    //       scales by the uniform factor; the attached annotation transforms
+    //       through the SAME `EntityKind.transformed(by:)` path as a standalone
+    //       text/mtext (so it rotates/scales/mirrors identically — no second text
+    //       transform path). The style name + arrow flag are size-independent.
+
+    static func transformLeader(_ ld: LeaderData, _ t: Affine2D) -> LeaderData {
+        LeaderData(
+            vertices: ld.vertices.map { t.apply($0) },
+            hasArrow: ld.hasArrow,
+            arrowSize: abs(ld.arrowSize * t.uniformScale),
+            annotation: ld.annotation.map { $0.transformed(by: t) },
+            styleName: ld.styleName
+        )
     }
 
     // MARK: xline — the base point transforms (full affine); the direction is a

@@ -406,6 +406,23 @@ extension CADEngine {
             guard dir.magnitude > Tolerance.distance else { return nil }
             return .ray(RayData(base: Vector(e.p1x, e.p1y, e.p1z), direction: dir))
 
+        case Int32(LC_ENT_LEADER.rawValue):
+            // DXF LEADER → `.leader`. The path vertices come from the flat array
+            // (bulge unused); the arrow flag (code 71) + arrow size (carried from
+            // code 40) round-trip. The DXF annotation is a SEPARATE hard-referenced
+            // entity the bridge does not collect, so the imported leader has no
+            // inline annotation. A zero-vertex leader (as in dim_sample.dxf) still
+            // imports — a valid, drawn-nothing callout — closing the LEADER warning.
+            let pathVerts = vertices(e).map(\.point)
+            let arrowSize = e.leaderArrowSize > 0 ? e.leaderArrowSize : 2.5
+            return .leader(LeaderData(
+                vertices: pathVerts,
+                hasArrow: e.leaderHasArrow != 0,
+                arrowSize: arrowSize,
+                annotation: nil,
+                styleName: string(e.styleName)
+            ))
+
         default: // LC_ENT_UNSUPPORTED (incl. ordinate/3p DIMENSION) and anything else
             return nil
         }

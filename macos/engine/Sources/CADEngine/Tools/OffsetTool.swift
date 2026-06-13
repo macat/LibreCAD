@@ -207,7 +207,7 @@ public struct OffsetTool: Tool {
         // For now they are SKIPPED — no edit is emitted, matching the brief's
         // scope (line/circle/arc only).
         case .polyline, .ellipse, .spline, .splinePoints, .point,
-             .text, .mtext, .hatch, .solid, .dimension, .insert, .xline, .ray:
+             .text, .mtext, .hatch, .solid, .dimension, .insert, .xline, .ray, .leader:
             return nil
         }
     }
