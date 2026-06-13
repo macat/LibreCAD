@@ -1,0 +1,202 @@
+999
+LibreCAD macOS — crafted imperial dimension fixture (header + dimstyle read test)
+  0
+SECTION
+  2
+HEADER
+  9
+$ACADVER
+  1
+AC1015
+  9
+$INSUNITS
+ 70
+     1
+  9
+$LUNITS
+ 70
+     2
+  9
+$LUPREC
+ 70
+     3
+  9
+$DIMSTYLE
+  2
+Standard
+  9
+$DIMTXT
+ 40
+0.18
+  9
+$DIMASZ
+ 40
+0.18
+  9
+$DIMSCALE
+ 40
+1.0
+  9
+$DIMLUNIT
+ 70
+     2
+  9
+$DIMDEC
+ 70
+     3
+  0
+ENDSEC
+  0
+SECTION
+  2
+TABLES
+  0
+TABLE
+  2
+LAYER
+ 70
+     1
+  0
+LAYER
+  2
+0
+ 70
+     0
+ 62
+     7
+  6
+CONTINUOUS
+  0
+ENDTAB
+  0
+TABLE
+  2
+DIMSTYLE
+ 70
+     1
+  0
+DIMSTYLE
+  2
+Standard
+ 70
+     0
+ 40
+1.0
+ 41
+0.18
+ 42
+0.0625
+ 44
+0.18
+140
+0.18
+147
+0.09
+271
+     3
+277
+     2
+  0
+ENDTAB
+  0
+ENDSEC
+  0
+SECTION
+  2
+ENTITIES
+  0
+DIMENSION
+  8
+0
+100
+AcDbEntity
+100
+AcDbDimension
+  2
+*D1
+ 10
+3.0
+ 20
+1.0
+ 11
+1.5
+ 21
+1.5
+ 70
+    32
+ 71
+     5
+ 72
+     0
+  3
+Standard
+100
+AcDbAlignedDimension
+ 13
+0.0
+ 23
+0.0
+ 14
+3.0
+ 24
+0.0
+ 50
+0.0
+  0
+DIMENSION
+  8
+0
+100
+AcDbEntity
+100
+AcDbDimension
+  2
+*D2
+ 10
+3.0
+ 20
+2.0
+ 11
+1.5
+ 21
+2.5
+ 70
+    32
+ 71
+     5
+ 72
+     0
+  3
+Standard
+100
+AcDbAlignedDimension
+ 13
+0.0
+ 23
+2.0
+ 14
+3.0
+ 24
+2.0
+ 50
+0.0
+1001
+ACAD
+1000
+DSTYLE
+1002
+{
+1070
+   140
+1040
+0.5
+1070
+    41
+1040
+0.5
+1002
+}
+  0
+ENDSEC
+  0
+EOF
