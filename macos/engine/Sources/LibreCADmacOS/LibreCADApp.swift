@@ -182,6 +182,22 @@ struct LibreCADApp: App {
                 Button("Zoom to Fit") { zoomToFit?() }
                     .keyboardShortcut("0", modifiers: .command)
                     .disabled(zoomToFit == nil)
+                // View ▸ Zoom Window (⇧⌘Z is taken by Redo; use ⌥⌘Z) — arm the
+                // transient drag-box zoom: the next drag draws a box, releasing zooms
+                // to fit it (F23). Routed through the responder chain to the focused
+                // canvas (which also drives the menu checkmark via
+                // `validateUserInterfaceItem`).
+                Button("Zoom Window") {
+                    NSApp.sendAction(Selector(("zoomWindowAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("z", modifiers: [.command, .option])
+                // View ▸ Zoom Previous (⌥⌘[) — return to the most recent prior
+                // viewport (F23). Disabled (via the canvas validator) when the zoom
+                // history is empty.
+                Button("Zoom Previous") {
+                    NSApp.sendAction(Selector(("zoomPreviousAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("[", modifiers: [.command, .option])
 
                 Divider()
                 // View ▸ Ortho (F8) — toggles the persistent ortho restriction
@@ -406,6 +422,38 @@ struct LibreCADApp: App {
                     Button("Explode Block Reference") { activateTool?(.explodeInsert) }
                         .keyboardShortcut("x", modifiers: .option)
                         .disabled(activateTool == nil)
+                }
+            }
+            // The Arrange menu (F16) — draw-order (Z-stack) ops + Revert Direction on
+            // the current selection. Routed through the responder chain to the focused
+            // canvas (like the Edit/View selection items), which acts on its
+            // CanvasModel + drives each item's enabled state via
+            // `validateUserInterfaceItem`. Shortcuts follow the common app convention
+            // (⌘⇧] / ⌘] front/forward, ⌘[ / ⌘⇧[ backward/back).
+            CommandMenu("Arrange") {
+                Button("Bring to Front") {
+                    NSApp.sendAction(Selector(("bringToFrontAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("]", modifiers: [.command, .shift])
+                Button("Bring Forward") {
+                    NSApp.sendAction(Selector(("bringForwardAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("]", modifiers: .command)
+                Button("Send Backward") {
+                    NSApp.sendAction(Selector(("sendBackwardAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("[", modifiers: .command)
+                Button("Send to Back") {
+                    NSApp.sendAction(Selector(("sendToBackAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("[", modifiers: [.command, .shift])
+
+                Divider()
+                // Revert Direction — flip the selection's defining direction (line
+                // endpoints swap, polyline vertex order reverses, arc/spline sweep
+                // flips). The drawn shape is unchanged.
+                Button("Revert Direction") {
+                    NSApp.sendAction(Selector(("revertDirectionAction:")), to: nil, from: nil)
                 }
             }
         }

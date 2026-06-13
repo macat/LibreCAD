@@ -668,6 +668,128 @@ public final class CADDrawing {
         }
     }
 
+    // MARK: - Draw order (F16 — raise / lower / to-front / to-back)
+    //
+    // The renderer draws entities in `entities` storage order (front-most last),
+    // so the draw-order Z-stack IS the order of the `entities` array: later index
+    // == painted on top. Re-ordering is therefore a permutation of `entities` +
+    // an `indexByID` rebuild, registered as ONE value-snapshot undo (ADR-002) so a
+    // single ⌘Z restores the prior order. We snapshot the WHOLE order (a cheap
+    // `[EntityID]` array) rather than the records, because only the sequence
+    // changes — the records themselves are untouched (`Arrange` never edits
+    // geometry/pen/layer).
+
+    /// The storage (draw-order) index of an entity, or `nil` if it is not present.
+    /// Front-most == the highest index (drawn last → on top). The renderer reads
+    /// this to honor draw order when it iterates the spatially-culled set, which is
+    /// not otherwise in storage order. O(1).
+    public func storageIndex(of id: EntityID) -> Int? { indexByID[id] }
+
+    /// Re-applies a full draw-order permutation (a `[EntityID]` listing every
+    /// current entity exactly once, front-most last) as ONE undoable step. The
+    /// `Arrange` ops below all funnel through this so each is a single ⌘Z. A request
+    /// that is not a valid permutation of the current id set (missing/extra/dup ids)
+    /// is rejected as a no-op (returns `false`) so a stale caller can never corrupt
+    /// the store. A no-op permutation (already in this order) registers no undo.
+    @discardableResult
+    public func reorderEntities(_ order: [EntityID]) -> Bool {
+        guard order.count == entities.count,
+              Set(order).count == order.count,
+              Set(order) == Set(indexByID.keys) else { return false }
+        let prior = entities.map(\.id)
+        guard order != prior else { return true }   // no-op order: nothing to do
+        applyOrder(order)
+        registerUndo { drawing in
+            drawing.reorderEntities(prior)           // undo restores the prior order
+        }
+        return true
+    }
+
+    /// Permutes `entities` to match `order` and rebuilds `indexByID`. No undo here —
+    /// the public `reorderEntities` owns the undo registration.
+    private func applyOrder(_ order: [EntityID]) {
+        let byID = Dictionary(uniqueKeysWithValues: entities.map { ($0.id, $0) })
+        entities = order.compactMap { byID[$0] }
+        indexByID.removeAll(keepingCapacity: true)
+        for (i, e) in entities.enumerated() { indexByID[e.id] = i }
+    }
+
+    /// Brings `ids` to the FRONT of the draw order (painted last → on top), keeping
+    /// their relative order, as ONE undoable step. Ids not in the drawing are
+    /// ignored. Used by Arrange ▸ Bring to Front. Returns whether the order changed.
+    @discardableResult
+    public func bringToFront(_ ids: [EntityID]) -> Bool {
+        let moving = orderedSubset(ids)
+        guard !moving.isEmpty else { return false }
+        let movingSet = Set(moving)
+        let rest = entities.map(\.id).filter { !movingSet.contains($0) }
+        return reorderEntities(rest + moving)
+    }
+
+    /// Sends `ids` to the BACK of the draw order (painted first → underneath),
+    /// keeping their relative order, as ONE undoable step. Arrange ▸ Send to Back.
+    @discardableResult
+    public func sendToBack(_ ids: [EntityID]) -> Bool {
+        let moving = orderedSubset(ids)
+        guard !moving.isEmpty else { return false }
+        let movingSet = Set(moving)
+        let rest = entities.map(\.id).filter { !movingSet.contains($0) }
+        return reorderEntities(moving + rest)
+    }
+
+    /// Raises `ids` one step toward the front (each swaps with the next non-moving
+    /// entity above it), as ONE undoable step. Arrange ▸ Bring Forward. The set
+    /// moves as a block: contiguous runs slide up by one past the first entity above
+    /// them that is not itself moving. Returns whether the order ACTUALLY changed
+    /// (already-frontmost / empty set → `false`, no undo step).
+    @discardableResult
+    public func raise(_ ids: [EntityID]) -> Bool {
+        stepReorder(DrawOrder.raised(entities.map(\.id), moving: Set(ids)))
+    }
+
+    /// Lowers `ids` one step toward the back (mirror of `raise`), as ONE undoable
+    /// step. Arrange ▸ Send Backward. Returns whether the order actually changed.
+    @discardableResult
+    public func lower(_ ids: [EntityID]) -> Bool {
+        stepReorder(DrawOrder.lowered(entities.map(\.id), moving: Set(ids)))
+    }
+
+    /// Applies a one-step (raise/lower) order ONLY if it differs from the current
+    /// order, returning whether it changed — so a no-effect step (empty set, or the
+    /// selection already at the extreme) reports `false` and registers no undo.
+    @discardableResult
+    private func stepReorder(_ order: [EntityID]) -> Bool {
+        guard order != entities.map(\.id) else { return false }
+        return reorderEntities(order)
+    }
+
+    /// The subset of `ids` that are present in the drawing, returned in the CURRENT
+    /// draw order (so a Bring-to-Front of a multi-selection keeps the visible
+    /// stacking among the moved entities). Drops absent/duplicate ids.
+    private func orderedSubset(_ ids: [EntityID]) -> [EntityID] {
+        let want = Set(ids)
+        return entities.map(\.id).filter { want.contains($0) }
+    }
+
+    // MARK: - Revert direction (F16 — flip an entity's start/end / vertex order)
+
+    /// Flips the geometric direction of the entity with `id` (its start/end swap,
+    /// or its vertex/control-point order reverses) as ONE undoable `replace`
+    /// (ADR-002). The DRAWN shape is unchanged — only the entity's *direction* (the
+    /// order it is defined / traversed) flips — which matters for offset side,
+    /// arrow/leader orientation, hatch boundary winding, and trim/extend "from"
+    /// ends (LibreCAD's "Revert direction"). Kinds with no meaningful direction
+    /// (point/circle/text/insert/…) are a no-op (returns `false`). Returns whether
+    /// anything changed.
+    @discardableResult
+    public func revertDirection(of id: EntityID) -> Bool {
+        guard var record = entity(id),
+              let flipped = EntityDirection.reversed(record.kind) else { return false }
+        record.kind = flipped
+        replace(record)             // undoable; preserves id/layer/pen/flags
+        return true
+    }
+
     // MARK: - Layer mutations (value-snapshot undo of the whole LayerTable)
 
     /// Whole-table layer mutation with undo. Because `LayerTable` is a value type,

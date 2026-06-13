@@ -367,8 +367,17 @@ final class LineRenderer: NSObject, MTKViewDelegate {
                 packEntity(e, ctx: ctx, origin: origin, layers: layers)
             }
         } else {
+            // Honor DRAW ORDER (F16): the spatial query returns ids in quadtree-
+            // traversal order, NOT the model's storage order, so pack the culled set
+            // sorted by each entity's storage index (front-most == highest index ==
+            // painted last → on top). This makes the Arrange (raise/lower/front/back)
+            // ops actually change the visible stacking. The sort is over the small
+            // CULLED set (not the whole drawing), and `storageIndex` is O(1).
             instanceScratch.reserveCapacity(visibleIDs.count * 2)
-            for id in visibleIDs {
+            let ordered = visibleIDs.sorted {
+                (model.drawing.storageIndex(of: $0) ?? 0) < (model.drawing.storageIndex(of: $1) ?? 0)
+            }
+            for id in ordered {
                 guard let e = model.drawing.entity(id) else { continue }
                 packEntity(e, ctx: ctx, origin: origin, layers: layers)
             }

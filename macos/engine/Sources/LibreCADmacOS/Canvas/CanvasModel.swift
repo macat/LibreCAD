@@ -349,6 +349,45 @@ final class CanvasModel {
         }
     }
 
+    // MARK: - Viewport history (F23 — Zoom Previous)
+
+    /// A bounded back-stack of prior viewports for View ▸ Zoom Previous. A view
+    /// change that the user can step BACK from (zoom-to-fit, zoom-window) pushes the
+    /// PRIOR viewport here first; Zoom Previous pops the most recent. Bounded so a
+    /// long session never grows it without limit (LibreCAD keeps a small zoom
+    /// history). `@ObservationIgnored` — it is interaction state, not rendered.
+    @ObservationIgnored
+    private var viewportHistory: [Viewport] = []
+
+    /// The most viewports the back-stack keeps (oldest dropped past this).
+    private static let maxViewportHistory = 32
+
+    /// Whether a previous viewport is available to restore (drives the View ▸ Zoom
+    /// Previous menu item's enabled state). Observed via `modelVersion` bumps the
+    /// zoom ops perform, so the menu refreshes.
+    var canZoomPrevious: Bool { !viewportHistory.isEmpty }
+
+    /// Pushes the CURRENT viewport onto the history back-stack (oldest dropped once
+    /// the bound is reached), so a subsequent view change can be undone by Zoom
+    /// Previous. Called by the steppable zoom ops BEFORE they change the viewport.
+    private func pushViewportHistory() {
+        viewportHistory.append(viewport)
+        if viewportHistory.count > Self.maxViewportHistory {
+            viewportHistory.removeFirst(viewportHistory.count - Self.maxViewportHistory)
+        }
+    }
+
+    /// Restores the most recently saved viewport (View ▸ Zoom Previous). No-op
+    /// (returns `false`) when the history is empty. A pure view change (matrix-only,
+    /// no model dirty); bumps `modelVersion` so the menu/canvas refresh.
+    @discardableResult
+    func zoomPrevious() -> Bool {
+        guard let prev = viewportHistory.popLast() else { return false }
+        viewport = prev
+        modelVersion &+= 1
+        return true
+    }
+
     // MARK: - View changes (matrix-only)
 
     /// Updates the stored view size (on resize). Keeps the same world center/scale.
@@ -357,9 +396,76 @@ final class CanvasModel {
         viewport.size = size
     }
 
-    /// Frames the whole drawing in the current view (Zoom to Fit).
+    /// Frames the whole drawing in the current view (Zoom to Fit). Pushes the prior
+    /// viewport onto the Zoom-Previous history first so the framing can be stepped
+    /// back from.
     func zoomToFit() {
+        pushViewportHistory()
         viewport = Viewport.fit(drawing.boundingBox(), in: viewport.size)
+        modelVersion &+= 1
+    }
+
+    // MARK: - Zoom window (F23 — drag a box → fit it)
+
+    /// Whether the canvas is in transient Zoom-Window mode: the next drag draws a
+    /// box and, on release, the view zooms to fit that box (then mode auto-exits).
+    /// Entered from View ▸ Zoom Window; the canvas reads this to route a drag to the
+    /// zoom-box gesture instead of a marquee/pan. Observed so the menu checkmark +
+    /// status chip track it. Purely interaction policy (not document state).
+    var zoomWindowArmed: Bool = false
+
+    /// The live zoom-window drag rectangle in WORLD coordinates while the user is
+    /// dragging the box, or `nil` when no box is in progress. The marquee/zoom
+    /// overlay reads it to draw the box; the canvas sets it on drag, clears on up.
+    @ObservationIgnored
+    private(set) var zoomWindowRect: AABB?
+
+    /// Arms (or disarms) Zoom-Window mode. Entering it leaves any active draw tool
+    /// alone (zoom is a transient view gesture); the canvas only routes the NEXT
+    /// empty-style drag to the box. Bumps `modelVersion` for the menu/status chip.
+    func setZoomWindowArmed(_ armed: Bool) {
+        zoomWindowArmed = armed
+        if !armed { zoomWindowRect = nil }
+        modelVersion &+= 1
+    }
+
+    /// Begins a zoom-window box anchored at a world point (degenerate box).
+    func beginZoomWindow(at world: Vector) {
+        zoomWindowRect = AABB(point: world)
+        modelVersion &+= 1
+    }
+
+    /// Updates the live zoom-window box to span from its anchor to the cursor world
+    /// point. Bumps `modelVersion` so the overlay repaints.
+    func updateZoomWindow(from anchor: Vector, to cursor: Vector) {
+        zoomWindowRect = AABB(points: [anchor, cursor])
+        modelVersion &+= 1
+    }
+
+    /// Commits the in-progress zoom-window box: pushes the prior viewport (so Zoom
+    /// Previous can step back), zooms the viewport to fit the box (matrix-only via
+    /// the pure `Viewport.zoomedToWorldRect`), clears the box, and auto-exits
+    /// Zoom-Window mode (a one-shot gesture, matching LibreCAD). A degenerate box
+    /// (a click, not a drag) is treated as "no window" — it just cancels the mode
+    /// without zooming. Returns whether the view actually zoomed.
+    @discardableResult
+    func commitZoomWindow() -> Bool {
+        defer { zoomWindowRect = nil; zoomWindowArmed = false; modelVersion &+= 1 }
+        guard let rect = zoomWindowRect, !rect.isEmpty else { return false }
+        let zoomed = viewport.zoomedToWorldRect(rect)
+        guard zoomed != viewport else { return false }   // sub-tolerance box → no-op
+        pushViewportHistory()
+        viewport = zoomed
+        return true
+    }
+
+    /// Cancels an in-progress zoom-window box WITHOUT zooming, and exits the mode
+    /// (Esc / mouse-exit). Bumps `modelVersion` so the box overlay erases.
+    func cancelZoomWindow() {
+        guard zoomWindowArmed || zoomWindowRect != nil else { return }
+        zoomWindowRect = nil
+        zoomWindowArmed = false
+        modelVersion &+= 1
     }
 
     /// Pans by a screen-space delta (AppKit points, Y-down).
@@ -1323,6 +1429,95 @@ final class CanvasModel {
         return abs(t.a - 1) < e && abs(t.b) < e && abs(t.c) < e && abs(t.d - 1) < e
             && abs(t.tx) < e && abs(t.ty) < e
     }
+
+    // MARK: - Draw order (F16 — Arrange: raise / lower / front / back)
+    //
+    // Each routes the current selection through the matching undoable `CADDrawing`
+    // reorder op (one ⌘Z reverts the whole arrange), then rebuilds the spatial index
+    // (the op permutes `entities`, which the quadtree mirrors only by id, but a
+    // rebuild keeps the index trivially consistent) and marks the GPU buffer dirty so
+    // the renderer re-packs in the new order. No-op (returns `false`) for an empty
+    // selection, so the caller can skip a redraw + the menu item can disable.
+
+    /// Brings the current selection to the FRONT of the draw order (Arrange ▸ Bring
+    /// to Front). Returns whether the order changed.
+    @discardableResult
+    func bringSelectionToFront() -> Bool { arrange { $0.bringToFront($1) } }
+
+    /// Sends the current selection to the BACK (Arrange ▸ Send to Back).
+    @discardableResult
+    func sendSelectionToBack() -> Bool { arrange { $0.sendToBack($1) } }
+
+    /// Raises the current selection one step toward the front (Arrange ▸ Bring
+    /// Forward).
+    @discardableResult
+    func raiseSelection() -> Bool { arrange { $0.raise($1) } }
+
+    /// Lowers the current selection one step toward the back (Arrange ▸ Send
+    /// Backward).
+    @discardableResult
+    func lowerSelection() -> Bool { arrange { $0.lower($1) } }
+
+    /// Shared driver for the four Arrange ops: runs `op` (one of the undoable
+    /// `CADDrawing` reorder methods) on the current selection's ids, and — if it
+    /// changed the order — re-syncs the spatial index + marks the model dirty so the
+    /// renderer re-packs in the new draw order. No-op for an empty selection.
+    @discardableResult
+    private func arrange(_ op: (CADDrawing, [EntityID]) -> Bool) -> Bool {
+        guard !selection.isEmpty else { return false }
+        let ids = Array(selection.ids)
+        guard op(drawing, ids) else { return false }
+        rebuildIndex()
+        modelDirty = true
+        modelVersion &+= 1
+        return true
+    }
+
+    // MARK: - Revert direction (F16 — flip an entity's start/end / vertex order)
+
+    /// Reverts the direction of every entity in the current selection as ONE
+    /// undoable group (Arrange ▸ Revert Direction / context menu): each line swaps
+    /// its endpoints, each polyline reverses its vertex order, each arc/ellipse/
+    /// spline flips its sweep. The drawn shapes are unchanged; only the defining
+    /// direction flips (matters for offset side, arrow orientation, trim ends).
+    /// Kinds with no direction are skipped. Routes through the undoable
+    /// `CADDrawing.revertDirection` (a `.replace` per entity) and re-syncs the index.
+    /// No-op (returns `false`) when nothing in the selection had a reversible
+    /// direction. Returns whether anything changed.
+    @discardableResult
+    func revertSelectionDirection() -> Bool {
+        guard !selection.isEmpty else { return false }
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+
+        var changed = false
+        for id in selection.ids {
+            if drawing.revertDirection(of: id) {
+                changed = true
+                if let box = drawing.entity(id)?.boundingBox(), !box.isEmpty {
+                    quadtree.update(id, bounds: box)
+                }
+            }
+        }
+        guard changed else { return false }
+        modelDirty = true
+        modelVersion &+= 1
+        return true
+    }
+
+    /// Whether the current selection has at least one entity whose direction can be
+    /// reverted (drives the Arrange ▸ Revert Direction menu item's enabled state).
+    var canRevertSelectionDirection: Bool {
+        selection.ids.contains { id in
+            guard let r = drawing.entity(id) else { return false }
+            return EntityDirection.reversed(r.kind) != nil
+        }
+    }
+
+    /// Whether the current selection can be arranged (any non-empty selection;
+    /// drives the Arrange ▸ raise/lower/front/back menu items' enabled state).
+    var canArrangeSelection: Bool { !selection.isEmpty }
 
     // MARK: - Snap modes (Inspector toggles)
 

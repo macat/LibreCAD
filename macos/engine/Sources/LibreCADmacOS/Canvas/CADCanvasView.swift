@@ -113,6 +113,11 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
     /// (decision D2: empty-space drag selects, Space/middle-drag pans). Reset on up.
     private var leftDragIsMarquee = false
 
+    /// Whether the LEFT-button drag currently in progress is a ZOOM-WINDOW box (F23):
+    /// the canvas was armed for Zoom Window when the drag started. Takes precedence
+    /// over the marquee/pan classification. Reset on up.
+    private var leftDragIsZoomWindow = false
+
     /// Whether the Space key is currently held — the pan modifier in SELECT mode
     /// (D2: Space-drag pans, so a plain select-mode drag is free for the marquee).
     /// Tracked via `keyDown`/`keyUp` (Space is a key, not an `NSEvent` modifier).
@@ -143,6 +148,16 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
         }
         mouseDownLocation = loc
         lastDragLocation = loc
+        // Zoom-Window (F23) takes precedence: when armed, ANY left drag draws the
+        // zoom box (regardless of tool/entity/Space), released to zoom-to-fit it.
+        // The box itself starts on the first past-threshold drag step (so a click in
+        // zoom-window mode is a harmless no-op, not an infinite zoom).
+        leftDragIsZoomWindow = false
+        leftDragIsMarquee = false
+        if controller?.isZoomWindowArmed == true {
+            leftDragIsZoomWindow = true
+            return
+        }
         // Decide up-front whether this LEFT drag will be a marquee or a pan (D2):
         //   • Space held  → pan (the explicit pan modifier in select mode), OR
         //   • draw/edit tool active → pan (draw mode never marquees), OR
@@ -150,7 +165,6 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
         // Otherwise (select mode, empty space, no Space) → a marquee. We arm it only
         // once the drag passes the click threshold (in `mouseDragged`) so a plain
         // click on empty space still deselects via `mouseClick`.
-        leftDragIsMarquee = false
         if !spaceHeld, controller?.beginMarqueeIfEmptySpaceEligible(at: loc) == true {
             // Eligible (select mode + empty space) — the marquee actually STARTS on
             // first drag past threshold; mark intent here.
@@ -162,6 +176,18 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
         let loc = locationInView(event)
         let prev = lastDragLocation ?? loc
         lastDragLocation = loc
+
+        if leftDragIsZoomWindow {
+            // Start the zoom box on the first past-threshold step (a tiny jitter that
+            // still counts as a click does not flash a box), then span it.
+            if controller?.isZoomWindowDragActive != true, let down = mouseDownLocation {
+                let dx = loc.x - down.x, dy = loc.y - down.y
+                guard (dx * dx + dy * dy) > Self.clickThreshold * Self.clickThreshold else { return }
+                controller?.beginZoomWindowDrag(at: down)
+            }
+            controller?.updateZoomWindowDrag(to: loc)
+            return
+        }
 
         if leftDragIsMarquee {
             // Start the box on the first past-threshold step (so a tiny jitter that
@@ -184,8 +210,23 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
 
     override func mouseUp(with event: NSEvent) {
         let up = locationInView(event)
-        defer { mouseDownLocation = nil; lastDragLocation = nil; leftDragIsMarquee = false }
+        defer {
+            mouseDownLocation = nil; lastDragLocation = nil
+            leftDragIsMarquee = false; leftDragIsZoomWindow = false
+        }
 
+        // A zoom-window box in progress → commit it (zoom-to-fit the box + exit mode).
+        if controller?.isZoomWindowDragActive == true {
+            controller?.endZoomWindowDrag()
+            return
+        }
+        // The drag was armed for zoom-window but never passed the click threshold (a
+        // click, not a box): cancel the mode without zooming, so the click is a
+        // harmless no-op rather than leaving the canvas stuck armed.
+        if leftDragIsZoomWindow {
+            controller?.cancelZoomWindow()
+            return
+        }
         // A marquee in progress → commit it (window/crossing by direction; ⇧ adds).
         if controller?.isMarqueeActive == true {
             controller?.endMarquee(additive: event.modifierFlags.contains(.shift))
@@ -252,6 +293,19 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
             menu.addItem(item("Copy", #selector(ctxCopy(_:))))
             menu.addItem(item("Duplicate", #selector(ctxDuplicate(_:))))
             menu.addItem(item("Delete", #selector(ctxDelete(_:))))
+            menu.addItem(.separator())
+            // Arrange (draw order) + Revert direction (F16) — act on the selection.
+            let arrange = NSMenu()
+            arrange.autoenablesItems = false
+            arrange.addItem(item("Bring to Front", #selector(bringToFrontAction(_:))))
+            arrange.addItem(item("Bring Forward", #selector(bringForwardAction(_:))))
+            arrange.addItem(item("Send Backward", #selector(sendBackwardAction(_:))))
+            arrange.addItem(item("Send to Back", #selector(sendToBackAction(_:))))
+            let arrangeItem = NSMenuItem(title: "Arrange", action: nil, keyEquivalent: "")
+            arrangeItem.submenu = arrange
+            menu.addItem(arrangeItem)
+            menu.addItem(item("Revert Direction", #selector(revertDirectionAction(_:)),
+                              enabled: controller.canRevertSelectionDirection))
             menu.addItem(.separator())
             menu.addItem(item("Properties…", #selector(ctxProperties(_:))))
             menu.addItem(.separator())
@@ -368,6 +422,41 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
         controller?.toggleOrtho()
     }
 
+    /// View ▸ Zoom Window (F23) — arm the transient drag-box zoom.
+    @objc func zoomWindowAction(_ sender: Any?) {
+        controller?.enterZoomWindow()
+    }
+
+    /// View ▸ Zoom Previous (F23) — restore the most recent prior viewport.
+    @objc func zoomPreviousAction(_ sender: Any?) {
+        controller?.zoomPrevious()
+    }
+
+    /// Arrange ▸ Bring to Front (F16).
+    @objc func bringToFrontAction(_ sender: Any?) {
+        controller?.bringSelectionToFront()
+    }
+
+    /// Arrange ▸ Send to Back (F16).
+    @objc func sendToBackAction(_ sender: Any?) {
+        controller?.sendSelectionToBack()
+    }
+
+    /// Arrange ▸ Bring Forward — one step toward the front (F16).
+    @objc func bringForwardAction(_ sender: Any?) {
+        controller?.raiseSelection()
+    }
+
+    /// Arrange ▸ Send Backward — one step toward the back (F16).
+    @objc func sendBackwardAction(_ sender: Any?) {
+        controller?.lowerSelection()
+    }
+
+    /// Arrange ▸ Revert Direction — flip the selection's defining direction (F16).
+    @objc func revertDirectionAction(_ sender: Any?) {
+        controller?.revertSelectionDirection()
+    }
+
     /// Enables the canvas actions when appropriate so the menu items don't gray out
     /// while the canvas is focused, and drives the Ortho item's checkmark.
     /// `NSView` is not itself `NSUserInterfaceValidations` (the protocol the menu uses
@@ -393,6 +482,22 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
                 menuItem.state = controller.model.orthoEnabled ? .on : .off
             }
             return true
+        case #selector(zoomWindowAction(_:)):
+            // Reflect the armed state as the menu checkmark (it auto-disarms on use).
+            if let menuItem = item as? NSMenuItem {
+                menuItem.state = controller.isZoomWindowArmed ? .on : .off
+            }
+            return true
+        case #selector(zoomPreviousAction(_:)):
+            // Enabled only when there is a prior viewport to return to.
+            return controller.model.canZoomPrevious
+        case #selector(bringToFrontAction(_:)), #selector(sendToBackAction(_:)),
+             #selector(bringForwardAction(_:)), #selector(sendBackwardAction(_:)):
+            // Enabled only with a non-empty selection to reorder.
+            return controller.canArrangeSelection
+        case #selector(revertDirectionAction(_:)):
+            // Enabled only when something in the selection has a revertible direction.
+            return controller.canRevertSelectionDirection
         default:
             return true
         }
@@ -1093,6 +1198,107 @@ final class CADCanvasController {
         redraw()
     }
 
+    // MARK: - Zoom window + Zoom previous (F23, View menu)
+
+    /// World anchor of an in-progress zoom-window drag (the box's first corner), or
+    /// `nil` when no zoom-window box is being dragged. Set on a zoom-window-armed
+    /// mouse-down, spanned on each drag, cleared on commit/cancel.
+    private var zoomWindowAnchorWorld: Vector?
+
+    /// Whether a zoom-window box drag is currently in progress (so the view's
+    /// mouse-up commits the zoom instead of the click/marquee/pan classification).
+    var isZoomWindowDragActive: Bool { zoomWindowAnchorWorld != nil }
+
+    /// Whether the canvas is armed for a zoom-window drag (the next empty drag draws
+    /// the zoom box). Read by the view to route a drag to the zoom-box gesture.
+    var isZoomWindowArmed: Bool { model.zoomWindowArmed }
+
+    /// View ▸ Zoom Window — arm the transient drag-box zoom. The NEXT drag draws a
+    /// box; releasing zooms the view to fit it, then auto-exits the mode. Repaints so
+    /// a status chip / cursor change can reflect the armed state.
+    func enterZoomWindow() {
+        // Leaving any in-progress marquee + clearing hover keeps the gesture clean.
+        cancelMarquee()
+        model.setZoomWindowArmed(true)
+        refreshCrosshair()
+        redraw()
+    }
+
+    /// Starts the zoom-window box at a screen anchor (called by the view on a
+    /// zoom-window-armed mouse-down). Records the world anchor + seeds the model box.
+    func beginZoomWindowDrag(at screenPoint: CGPoint) {
+        syncViewSizeFromView()
+        let world = model.viewport.screenToWorld(screenPoint)
+        zoomWindowAnchorWorld = world
+        model.beginZoomWindow(at: world)
+    }
+
+    /// Updates the in-progress zoom-window box to span anchor→cursor, repainting the
+    /// overlay. No-op if no zoom-window drag is active.
+    func updateZoomWindowDrag(to screenPoint: CGPoint) {
+        guard let anchor = zoomWindowAnchorWorld else { return }
+        syncViewSizeFromView()
+        let world = model.viewport.screenToWorld(screenPoint)
+        model.updateZoomWindow(from: anchor, to: world)
+        refreshMarquee()
+        redraw()
+    }
+
+    /// Commits the in-progress zoom-window box: zooms the view to fit it and exits
+    /// the mode (a one-shot gesture). A degenerate box (a click) just exits without
+    /// zooming. Repaints. Returns whether a zoom-window drag was committed (so the
+    /// view skips the click classification).
+    @discardableResult
+    func endZoomWindowDrag() -> Bool {
+        guard zoomWindowAnchorWorld != nil else { return false }
+        zoomWindowAnchorWorld = nil
+        _ = model.commitZoomWindow()
+        refreshGizmo()
+        refreshCrosshair()
+        refreshMarquee()
+        redraw()
+        return true
+    }
+
+    /// Cancels an in-progress zoom-window drag AND exits the mode without zooming
+    /// (Esc / mouse-exit), repainting to erase the box.
+    func cancelZoomWindow() {
+        let wasActive = zoomWindowAnchorWorld != nil || model.zoomWindowArmed
+        zoomWindowAnchorWorld = nil
+        model.cancelZoomWindow()
+        if wasActive {
+            refreshCrosshair()
+            refreshMarquee()
+            redraw()
+        }
+    }
+
+    /// View ▸ Zoom Previous — restore the most recent prior viewport, repainting.
+    func zoomPrevious() {
+        if model.zoomPrevious() { redraw() }
+    }
+
+    // MARK: - Arrange / revert direction (F16, Arrange menu + context menu)
+
+    /// Arrange ▸ Bring to Front — raises the selection to the top of the draw order.
+    func bringSelectionToFront() { if model.bringSelectionToFront() { redraw() } }
+    /// Arrange ▸ Send to Back.
+    func sendSelectionToBack() { if model.sendSelectionToBack() { redraw() } }
+    /// Arrange ▸ Bring Forward (one step).
+    func raiseSelection() { if model.raiseSelection() { redraw() } }
+    /// Arrange ▸ Send Backward (one step).
+    func lowerSelection() { if model.lowerSelection() { redraw() } }
+    /// Arrange ▸ Revert Direction — flips the selection's defining direction.
+    func revertSelectionDirection() {
+        if model.revertSelectionDirection() { refreshGizmo(); redraw() }
+    }
+
+    /// Whether the selection can be arranged (drives the Arrange menu items' enabled
+    /// state via the view's `validateUserInterfaceItem`).
+    var canArrangeSelection: Bool { model.canArrangeSelection }
+    /// Whether the selection has a revertible-direction entity.
+    var canRevertSelectionDirection: Bool { model.canRevertSelectionDirection }
+
     /// Makes the Metal canvas the first responder again (called when the command
     /// line yields focus on Esc/submit, U1) so bare-letter tool shortcuts route to
     /// the canvas `keyDown` instead of the text field.
@@ -1153,6 +1359,12 @@ final class CADCanvasController {
         }
 
         if isEscape {
+            // Esc in zoom-window mode cancels the box + exits the mode (the gesture
+            // is transient; nothing else changes).
+            if isZoomWindowArmed || isZoomWindowDragActive {
+                cancelZoomWindow()
+                return true
+            }
             // Esc on an in-progress marquee just cancels the box (keeps the mode +
             // selection), matching the cancel-the-gesture convention.
             if isMarqueeActive {

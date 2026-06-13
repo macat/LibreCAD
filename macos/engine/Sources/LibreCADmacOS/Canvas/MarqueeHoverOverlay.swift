@@ -73,6 +73,11 @@ final class MarqueeHoverOverlayView: NSView {
     /// HOVER highlight — a soft accent, distinct from the amber selection color.
     private static let hoverColor = NSColor.controlAccentColor.withAlphaComponent(0.85)
     private static let hoverLineWidth: CGFloat = 2.5
+    /// ZOOM-WINDOW box (F23) — a dashed accent outline with a very faint fill, kept
+    /// visually distinct from the blue/green select marquee so the user can tell a
+    /// zoom-box drag from a selection drag.
+    private static let zoomWindowStroke = NSColor.systemOrange.withAlphaComponent(0.95)
+    private static let zoomWindowFill   = NSColor.systemOrange.withAlphaComponent(0.10)
 
     // MARK: Click-through
 
@@ -97,6 +102,7 @@ final class MarqueeHoverOverlayView: NSView {
         super.draw(dirtyRect)
         drawHover()        // under the box, so a marquee outline reads on top
         drawMarquee()
+        drawZoomWindow()   // the F23 zoom-box, when in zoom-window mode
     }
 
     /// Strokes the hover highlight over the entity under the cursor (select mode), in
@@ -159,6 +165,26 @@ final class MarqueeHoverOverlayView: NSView {
         ctx.setLineWidth(1)
         if crossing { ctx.setLineDash(phase: 0, lengths: [5, 3]) }
         ctx.stroke(r.insetBy(dx: 0.5, dy: 0.5))   // crisp 1pt outline
+        ctx.restoreGState()
+    }
+
+    /// Strokes the live zoom-window box (F23) — a dashed orange outline with a faint
+    /// fill, distinct from the select marquee — while the user drags the zoom box.
+    /// Skipped when no zoom-window box is in progress.
+    private func drawZoomWindow() {
+        guard let rect = model.zoomWindowRect, !rect.isEmpty,
+              let ctx = NSGraphicsContext.current?.cgContext else { return }
+        let a = screen(rect.min)
+        let b = screen(rect.max)
+        let r = CGRect(x: Swift.min(a.x, b.x), y: Swift.min(a.y, b.y),
+                       width: abs(a.x - b.x), height: abs(a.y - b.y))
+        ctx.saveGState()
+        ctx.setFillColor(Self.zoomWindowFill.cgColor)
+        ctx.fill(r)
+        ctx.setStrokeColor(Self.zoomWindowStroke.cgColor)
+        ctx.setLineWidth(1)
+        ctx.setLineDash(phase: 0, lengths: [6, 4])
+        ctx.stroke(r.insetBy(dx: 0.5, dy: 0.5))
         ctx.restoreGState()
     }
 }
