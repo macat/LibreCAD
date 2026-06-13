@@ -536,6 +536,15 @@ LCStatus lc_dxf_count_entities(const char *path, int *out_count);
  * @param blockEntityCount Number of block-member entities (>= 0).
  * @param out_skipped   If non-NULL, receives the count of entities whose kind is
  *                      not yet supported by the writer (skipped). 0 on error.
+ * @param header        Optional pointer to the drawing HEADER variables to emit
+ *                      ($INSUNITS/$LUNITS/... + the $DIM* dimension defaults incl.
+ *                      $DIMEXO/$DIMEXE/$DIMGAP). Only fields whose `has*` flag is
+ *                      set are written; NULL ⇒ libdxfrw's default header is kept.
+ * @param dimStyles     Optional pointer to `dimStyleCount` LCDimStyle PODs to emit
+ *                      as the DIMSTYLE table (so named styles + their ext-line
+ *                      offsets round-trip). NULL / 0 ⇒ only the default "Standard"
+ *                      style libdxfrw always writes.
+ * @param dimStyleCount Number of dimension styles (>= 0).
  * @return LC_OK on success; LC_ERR_INVALID_PATH for a null/empty path or a
  *         negative count with a NULL array; LC_ERR_WRITE_FAILED if libdxfrw
  *         fails to write (also covers any exception escaping the export).
@@ -546,7 +555,9 @@ LCStatus lc_dxf_write(const char *path,
                       const LCBlock *blocks, int blockCount,
                       const LCEntity *blockEntities, int blockEntityCount,
                       int version,
-                      int *out_skipped);
+                      int *out_skipped,
+                      const LCHeader *header,
+                      const LCDimStyle *dimStyles, int dimStyleCount);
 
 /**
  * Write a DWG file from flat POD entity + layer arrays. The DWG counterpart of
@@ -590,6 +601,16 @@ LCStatus lc_dxf_write(const char *path,
  * @param version       An LCDxfVersion. IGNORED — DWG write is R2000-only.
  * @param out_skipped   If non-NULL, receives the count of entities whose kind is
  *                      not supported by the writer (skipped). 0 on error.
+ * @param header        Optional pointer to the drawing HEADER variables to emit
+ *                      (see `lc_dxf_write`). NULL ⇒ libdxfrw's default header.
+ * @param dimStyles     Optional pointer to `dimStyleCount` LCDimStyle PODs. NOTE:
+ *                      libdxfrw's DWG writer (dwgWriter15) emits the standard
+ *                      DIMSTYLE table internally and exposes no per-style write
+ *                      path, so these are accepted for ABI symmetry but NOT
+ *                      written to DWG (the documented DWG table gap, like layers).
+ *                      The header `$DIM*` vars ARE applied where the DWG writer
+ *                      honors them.
+ * @param dimStyleCount Number of dimension styles (>= 0).
  * @return LC_OK on success; LC_ERR_INVALID_PATH for a null/empty path or a
  *         negative count with a NULL array; LC_ERR_WRITE_FAILED if libdxfrw
  *         fails to write (also covers any exception escaping the export).
@@ -600,7 +621,9 @@ LCStatus lc_dwg_write(const char *path,
                       const LCBlock *blocks, int blockCount,
                       const LCEntity *blockEntities, int blockEntityCount,
                       int version,
-                      int *out_skipped);
+                      int *out_skipped,
+                      const LCHeader *header,
+                      const LCDimStyle *dimStyles, int dimStyleCount);
 
 #ifdef __cplusplus
 }

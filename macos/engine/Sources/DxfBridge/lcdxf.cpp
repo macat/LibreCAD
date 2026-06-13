@@ -968,13 +968,18 @@ public:
                      const LCEntity *entities, int entityCount,
                      const LCLayer *layers, int layerCount,
                      const LCBlock *blocks, int blockCount,
-                     const LCEntity *blockEntities, int blockEntityCount)
+                     const LCEntity *blockEntities, int blockEntityCount,
+                     const LCHeader *header,
+                     const LCDimStyle *dimStyles, int dimStyleCount)
         : m_dxf(dxf),
           m_entities(entities), m_entityCount(entityCount < 0 ? 0 : entityCount),
           m_layers(layers), m_layerCount(layerCount < 0 ? 0 : layerCount),
           m_blocks(blocks), m_blockCount(blockCount < 0 ? 0 : blockCount),
           m_blockEntities(blockEntities),
-          m_blockEntityCount(blockEntityCount < 0 ? 0 : blockEntityCount) {}
+          m_blockEntityCount(blockEntityCount < 0 ? 0 : blockEntityCount),
+          m_header(header),
+          m_dimStyles(dimStyles),
+          m_dimStyleCount(dimStyleCount < 0 ? 0 : dimStyleCount) {}
 
     // DWG mode: drive the DWG writer (`dwgRW`). The SAME per-kind geometry
     // mapping runs; the only differences are routed through the `emit*` helpers
@@ -985,13 +990,18 @@ public:
                      const LCEntity *entities, int entityCount,
                      const LCLayer *layers, int layerCount,
                      const LCBlock *blocks, int blockCount,
-                     const LCEntity *blockEntities, int blockEntityCount)
+                     const LCEntity *blockEntities, int blockEntityCount,
+                     const LCHeader *header,
+                     const LCDimStyle *dimStyles, int dimStyleCount)
         : m_dwg(dwg),
           m_entities(entities), m_entityCount(entityCount < 0 ? 0 : entityCount),
           m_layers(layers), m_layerCount(layerCount < 0 ? 0 : layerCount),
           m_blocks(blocks), m_blockCount(blockCount < 0 ? 0 : blockCount),
           m_blockEntities(blockEntities),
-          m_blockEntityCount(blockEntityCount < 0 ? 0 : blockEntityCount) {}
+          m_blockEntityCount(blockEntityCount < 0 ? 0 : blockEntityCount),
+          m_header(header),
+          m_dimStyles(dimStyles),
+          m_dimStyleCount(dimStyleCount < 0 ? 0 : dimStyleCount) {}
 
     int skipped() const { return m_skipped; }
 
@@ -1084,8 +1094,34 @@ public:
         m_dxf->writeTextstyle(&ts);
     }
 
-    // ----- header: leave libdxfrw's defaults (it fills $ACADVER etc.) -------
-    void writeHeader(DRW_Header &data) override { (void)data; }
+    // ----- header: emit the captured drawing vars on top of libdxfrw's --------
+    // libdxfrw constructs a default DRW_Header and hands it here before writing the
+    // HEADER section ($ACADVER etc. are filled by DRW_Header::write itself). We add
+    // the drawing's unit / linear-format / dimension vars (incl. the ext-line
+    // offsets $DIMEXO/$DIMEXE/$DIMGAP) so a Save preserves them. Only fields whose
+    // `has*` flag is set are written; an absent field leaves libdxfrw's default.
+    // Codes: doubles=40, ints=70, strings=2 (the value is what DRW_Header::write
+    // reads — the per-key DXF group code is hardcoded there, so the code arg here
+    // only tags the variant's type).
+    void writeHeader(DRW_Header &data) override {
+        if (m_header == nullptr) return;
+        const LCHeader &h = *m_header;
+        if (h.hasInsUnits)  data.addInt("$INSUNITS", h.insUnits, 70);
+        if (h.hasLuUnits)   data.addInt("$LUNITS",   h.luUnits,  70);
+        if (h.hasLuPrec)    data.addInt("$LUPREC",   h.luPrec,   70);
+        if (h.hasAuUnits)   data.addInt("$AUNITS",   h.auUnits,  70);
+        if (h.hasAuPrec)    data.addInt("$AUPREC",   h.auPrec,   70);
+        if (h.hasDimTxt)    data.addDouble("$DIMTXT",   h.dimTxt,   40);
+        if (h.hasDimAsz)    data.addDouble("$DIMASZ",   h.dimAsz,   40);
+        if (h.hasDimScale)  data.addDouble("$DIMSCALE", h.dimScale, 40);
+        if (h.hasDimLUnit)  data.addInt("$DIMLUNIT", h.dimLUnit, 70);
+        if (h.hasDimDec)    data.addInt("$DIMDEC",   h.dimDec,   70);
+        if (h.hasDimExo)    data.addDouble("$DIMEXO", h.dimExo, 40);
+        if (h.hasDimExe)    data.addDouble("$DIMEXE", h.dimExe, 40);
+        if (h.hasDimGap)    data.addDouble("$DIMGAP", h.dimGap, 40);
+        if (h.dimStyle != nullptr && h.dimStyle[0] != '\0')
+            data.addStr("$DIMSTYLE", std::string(h.dimStyle), 2);
+    }
 
     // ----- block records + block definitions --------------------------------
     // libdxfrw drives writeBlockRecords() during the TABLES section (it populates
@@ -1142,9 +1178,37 @@ public:
         }
     }
 
+    // ----- DIMSTYLE table ---------------------------------------------------
+    // libdxfrw drives writeDimstyles() inside the TABLES section; we emit one
+    // DRW_Dimstyle per caller style (mapping the renderer subset back onto the
+    // DRW_Dimstyle fields — the inverse of FlatteningReader::addDimStyle). If a
+    // "Standard" entry is among them, libdxfrw sees `dimstyleStd` set and does not
+    // append its own default; otherwise it adds a Standard for us. DWG: dwgWriter15
+    // emits the standard DIMSTYLE table internally and has no per-style write path,
+    // so this is a no-op for DWG (the documented DWG table gap, like writeLayers).
+    void writeDimstyles() override {
+        if (m_dwg) return;
+        if (m_dimStyles == nullptr) return;
+        for (int i = 0; i < m_dimStyleCount; ++i) {
+            const LCDimStyle &s = m_dimStyles[i];
+            DRW_Dimstyle dsty;          // ctor seeds the imperial-standard defaults
+            dsty.name    = (s.name && s.name[0]) ? std::string(s.name) : std::string("Standard");
+            if (s.dimTxt   > 0) dsty.dimtxt   = s.dimTxt;
+            if (s.dimAsz   > 0) dsty.dimasz   = s.dimAsz;
+            if (s.dimScale > 0) dsty.dimscale = s.dimScale;
+            dsty.dimdec   = s.dimDec;
+            if (s.dimLUnit > 0) dsty.dimlunit = s.dimLUnit;
+            // Ext-line offsets: write whatever the style carries (0 is a legal
+            // "snug" value, so do not gate these on > 0).
+            dsty.dimexo = s.dimExo;
+            dsty.dimexe = s.dimExe;
+            dsty.dimgap = s.dimGap;
+            m_dxf->writeDimstyle(&dsty);
+        }
+    }
+
     // ----- required no-ops --------------------------------------------------
     void writeVports() override {}
-    void writeDimstyles() override {}
     void writeObjects() override {}
     void writeAppId() override {}
 
@@ -1204,6 +1268,10 @@ private:
     int m_blockCount;
     const LCEntity *m_blockEntities;
     int m_blockEntityCount;
+    // The drawing HEADER vars + DIMSTYLE table to emit (both optional / NULL).
+    const LCHeader *m_header = nullptr;
+    const LCDimStyle *m_dimStyles = nullptr;
+    int m_dimStyleCount = 0;
     int m_skipped = 0;
 
     // DWG-only: block name -> block_record handle from `dwgRW::defineBlock`, so a
@@ -1789,7 +1857,9 @@ extern "C" LCStatus lc_dxf_write(const char *path,
                                  const LCBlock *blocks, int blockCount,
                                  const LCEntity *blockEntities, int blockEntityCount,
                                  int version,
-                                 int *out_skipped) {
+                                 int *out_skipped,
+                                 const LCHeader *header,
+                                 const LCDimStyle *dimStyles, int dimStyleCount) {
     if (out_skipped != nullptr) {
         *out_skipped = 0;
     }
@@ -1801,7 +1871,8 @@ extern "C" LCStatus lc_dxf_write(const char *path,
     if ((entityCount > 0 && entities == nullptr) ||
         (layerCount  > 0 && layers   == nullptr) ||
         (blockCount  > 0 && blocks   == nullptr) ||
-        (blockEntityCount > 0 && blockEntities == nullptr)) {
+        (blockEntityCount > 0 && blockEntities == nullptr) ||
+        (dimStyleCount > 0 && dimStyles == nullptr)) {
         return LC_ERR_INVALID_PATH;
     }
     // try/catch keeps any libdxfrw exception (or std::bad_alloc) from crossing
@@ -1810,7 +1881,8 @@ extern "C" LCStatus lc_dxf_write(const char *path,
     try {
         dxfRW dxf(path);
         WritingInterface iface(&dxf, entities, entityCount, layers, layerCount,
-                               blocks, blockCount, blockEntities, blockEntityCount);
+                               blocks, blockCount, blockEntities, blockEntityCount,
+                               header, dimStyles, dimStyleCount);
         // bin=false -> ASCII DXF (matches the reader and rs_filterdxfrw).
         const bool ok = dxf.write(&iface, toDrwVersion(version), /*bin=*/false);
         if (!ok) {
@@ -1831,7 +1903,9 @@ extern "C" LCStatus lc_dwg_write(const char *path,
                                  const LCBlock *blocks, int blockCount,
                                  const LCEntity *blockEntities, int blockEntityCount,
                                  int version,
-                                 int *out_skipped) {
+                                 int *out_skipped,
+                                 const LCHeader *header,
+                                 const LCDimStyle *dimStyles, int dimStyleCount) {
     (void)version;   // DWG write is R2000-only; the arg is accepted for ABI symmetry.
     if (out_skipped != nullptr) {
         *out_skipped = 0;
@@ -1842,7 +1916,8 @@ extern "C" LCStatus lc_dwg_write(const char *path,
     if ((entityCount > 0 && entities == nullptr) ||
         (layerCount  > 0 && layers   == nullptr) ||
         (blockCount  > 0 && blocks   == nullptr) ||
-        (blockEntityCount > 0 && blockEntities == nullptr)) {
+        (blockEntityCount > 0 && blockEntities == nullptr) ||
+        (dimStyleCount > 0 && dimStyles == nullptr)) {
         return LC_ERR_INVALID_PATH;
     }
     // The DWG counterpart of lc_dxf_write: same PODs, same WritingInterface, but
@@ -1851,7 +1926,8 @@ extern "C" LCStatus lc_dwg_write(const char *path,
     try {
         dwgRW dwg(path);
         WritingInterface iface(&dwg, entities, entityCount, layers, layerCount,
-                               blocks, blockCount, blockEntities, blockEntityCount);
+                               blocks, blockCount, blockEntities, blockEntityCount,
+                               header, dimStyles, dimStyleCount);
         // bin is ignored by dwgRW (DWG is always binary); pass false for symmetry.
         const bool ok = dwg.write(&iface, DRW::AC1015, /*bin=*/false);
         if (!ok) {

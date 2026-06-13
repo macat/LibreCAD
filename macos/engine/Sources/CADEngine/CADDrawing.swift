@@ -336,6 +336,29 @@ public struct GraphicVariables: Sendable, Hashable, Codable {
         set { setInt("$DIMDEC", newValue) }
     }
 
+    /// `$DIMEXO` — the extension-line ORIGIN offset (gap between the measured
+    /// feature and where the drawn extension line starts), world units. `0`
+    /// (unset) ⇒ the resolve uses its arrow-fraction default. Round-trips through
+    /// the header bridge.
+    public var dimExtensionOffset: Double {
+        get { double("$DIMEXO", default: 0) }
+        set { setDouble("$DIMEXO", newValue) }
+    }
+
+    /// `$DIMEXE` — how far an extension line runs PAST the dimension line, world
+    /// units. `0` (unset) ⇒ the arrow-fraction default.
+    public var dimExtensionBeyond: Double {
+        get { double("$DIMEXE", default: 0) }
+        set { setDouble("$DIMEXE", newValue) }
+    }
+
+    /// `$DIMGAP` — the gap between the dimension line and the measurement text,
+    /// world units. `0` (unset) ⇒ the text-height-fraction default.
+    public var dimTextGap: Double {
+        get { double("$DIMGAP", default: 0) }
+        set { setDouble("$DIMGAP", newValue) }
+    }
+
     /// `$LC_SNAPMODE` — a LibreCAD-PRIVATE header var persisting the app's enabled
     /// snap-mode set (`SnapMode.rawValue`, decision D5). It has no standard DXF
     /// header var; we store it as a custom `$`-var so it travels with the document
@@ -382,6 +405,93 @@ public struct GraphicVariables: Sendable, Hashable, Codable {
     }
 }
 
+// MARK: - Named dimension styles (the DXF DIMSTYLE table)
+
+/// One named dimension style — the value-type port of a `DRW_Dimstyle` table
+/// entry (the renderer-relevant subset). A `DimData.styleName` (DXF code 3)
+/// references one of these by name; the resolve step looks it up via
+/// `ResolveContext.namedDimStyleProvider` so a dimension inherits its named
+/// style's text height / arrow size / scale / format / ext-line offsets.
+///
+/// The carried values mirror `ResolvedDimStyle` (the resolved form a dimension
+/// inherits) plus the style's `name`. `style` is the `ResolvedDimStyle` a
+/// referencing dimension falls back to (per-entity override still wins, ADR
+/// decision D4). Pure value type (ADR-001) — round-trips through the DIMSTYLE
+/// reader/writer.
+public struct NamedDimStyle: Sendable, Hashable, Codable {
+    /// The style's name (DXF code 2), e.g. "Standard" / "ISO-25". Case-insensitive
+    /// match on lookup (AutoCAD style names are case-insensitive).
+    public var name: String
+    /// The resolved values dimensions referencing this style inherit
+    /// ($DIMTXT/$DIMASZ/$DIMSCALE/$DIMLUNIT/$DIMDEC + $DIMEXO/$DIMEXE/$DIMGAP).
+    public var style: ResolvedDimStyle
+
+    public init(name: String, style: ResolvedDimStyle) {
+        self.name = name
+        self.style = style
+    }
+}
+
+/// The drawing's DIMSTYLE table — the value-type port of the DXF DIMSTYLE table
+/// (`RS_BlockList`-style registry but for dim styles). Named styles a dimension
+/// references by `styleName` (DXF code 3) plus the document-active style name
+/// ($DIMSTYLE, usually "Standard"). The resolve precedence (decision D4,
+/// extended) is: per-entity field override > the referenced named style > the
+/// document header default (`$DIM*` graphic vars via `dimensionStyle`).
+///
+/// Lookup is case-insensitive (AutoCAD table names). Pure value type so the whole
+/// table snapshots cheaply for `makeResolveContext`'s `@Sendable` closure and for
+/// value-snapshot undo (ADR-002), and round-trips through the DIMSTYLE
+/// reader/writer.
+public struct DimStyleTable: Sendable, Hashable, Codable {
+    /// The named styles, in stable insertion order.
+    public private(set) var styles: [NamedDimStyle]
+    /// The document-active style name ($DIMSTYLE). `nil` ⇒ "Standard"/first.
+    public var activeName: String?
+
+    public init(styles: [NamedDimStyle] = [], activeName: String? = nil) {
+        self.styles = styles
+        self.activeName = activeName
+    }
+
+    public var count: Int { styles.count }
+    public var isEmpty: Bool { styles.isEmpty }
+
+    /// The named style matching `name` (case-insensitive), or `nil`.
+    public func style(named name: String) -> NamedDimStyle? {
+        styles.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+    }
+
+    /// Whether a style with `name` (case-insensitive) is present.
+    public func contains(_ name: String) -> Bool { style(named: name) != nil }
+
+    /// Adds (or replaces, on a case-insensitive name clash) a named style.
+    public mutating func upsert(_ s: NamedDimStyle) {
+        if let i = styles.firstIndex(where: {
+            $0.name.caseInsensitiveCompare(s.name) == .orderedSame
+        }) {
+            styles[i] = s
+        } else {
+            styles.append(s)
+        }
+    }
+
+    /// Removes a named style by name (case-insensitive). "Standard" is kept (the
+    /// table always retains a fallback style, matching the DXF requirement).
+    public mutating func remove(named name: String) {
+        guard name.caseInsensitiveCompare("Standard") != .orderedSame else { return }
+        styles.removeAll { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+    }
+
+    /// The active (document) named style — the one `activeName` names, else
+    /// "Standard", else the first defined — or `nil` when the table is empty.
+    public func active() -> NamedDimStyle? {
+        if let n = activeName, let s = style(named: n) { return s }
+        if let std = style(named: "Standard") { return std }
+        return styles.first
+    }
+}
+
 // MARK: - The drawing
 
 /// The drawing — entities, layers, blocks, graphic variables, units, and the
@@ -425,6 +535,14 @@ public final class CADDrawing {
     /// Use the typed accessors (`graphicVariables.unit`, `.linearFormat`, ...) or
     /// `convenience` `drawingUnit` below.
     public var graphicVariables = GraphicVariables()
+
+    /// The named DIMSTYLE table (the DXF DIMSTYLE table). A dimension references a
+    /// style by `styleName` (DXF code 3); `makeResolveContext` wires this into the
+    /// `namedDimStyleProvider` so the referenced style fills any value the
+    /// dimension does not carry per-entity (precedence D4: per-entity > named style
+    /// > header default). Populated on load (from the bridge's `lc_dimstyles`) and
+    /// emitted on write so save preserves named styles + their ext-line offsets.
+    public var dimStyles = DimStyleTable()
 
     /// The `UndoManager` mutations register with. Injected by the document layer
     /// (SwiftUI hands one in from `DocumentGroup`); nil == undo disabled.
@@ -691,6 +809,27 @@ public final class CADDrawing {
         }
     }
 
+    // MARK: - DIMSTYLE-table mutations (value-snapshot undo of the whole table)
+
+    /// Whole-table DIMSTYLE mutation with undo — the same value-snapshot scheme as
+    /// `mutateLayers`/`mutateBlocks` (`DimStyleTable` is a value type, so the undo
+    /// snapshot is one struct copy, ADR-002). No-op edits don't pollute undo.
+    public func mutateDimStyles(_ body: (inout DimStyleTable) -> Void) {
+        let prior = dimStyles
+        body(&dimStyles)
+        guard dimStyles != prior else { return }
+        registerUndo { drawing in
+            drawing.mutateDimStyles { $0 = prior }
+        }
+    }
+
+    /// Adds or replaces a named dimension style (undoable). Returns the name added.
+    @discardableResult
+    public func upsertDimStyle(_ style: NamedDimStyle) -> String {
+        mutateDimStyles { $0.upsert(style) }
+        return style.name
+    }
+
     // MARK: - Undo plumbing
 
     /// Registers a value-snapshot undo closure. The closure captures the prior
@@ -716,12 +855,14 @@ public final class CADDrawing {
         entities newEntities: [EntityRecord],
         layers newLayers: LayerTable,
         blocks newBlocks: BlockTable = BlockTable(),
-        graphicVariables newVariables: GraphicVariables = GraphicVariables()
+        graphicVariables newVariables: GraphicVariables = GraphicVariables(),
+        dimStyles newDimStyles: DimStyleTable = DimStyleTable()
     ) {
         entities = newEntities
         layers = newLayers
         blocks = newBlocks
         graphicVariables = newVariables
+        dimStyles = newDimStyles
         indexByID.removeAll(keepingCapacity: true)
         for (i, e) in entities.enumerated() { indexByID[e.id] = i }
         // Advance the id counter past the highest loaded id.
@@ -754,6 +895,10 @@ public final class CADDrawing {
         // the resolve hook fills document defaults for dims without per-entity
         // overrides (decision D4). These are the Document Settings sheet's `$DIM*`.
         let docDimStyle = dimensionStyle
+        // Snapshot the named DIMSTYLE table (value copy) so a dimension that
+        // references a style by name resolves through it (the D4 middle rung,
+        // per-entity > named style > header default).
+        let dimStyleTable = dimStyles
         // Snapshot the block table → member records map (value copies) so an
         // `.insert` can resolve a referenced block's geometry. Building the
         // name→[EntityRecord] map once here keeps the per-insert lookup O(1) and
@@ -769,6 +914,7 @@ public final class CADDrawing {
             textStyleProvider: { name in styleTable.style(named: name) },
             annotationScale: annotationScale,
             dimStyleProvider: { docDimStyle },
+            namedDimStyleProvider: { name in dimStyleTable.style(named: name)?.style },
             blockProvider: { name in blockMembers[name] }
         )
     }
@@ -797,7 +943,10 @@ public final class CADDrawing {
             arrowSize: graphicVariables.dimArrowSize,
             scale: graphicVariables.dimScale,
             linearFormat: graphicVariables.dimLinearFormat,
-            linearPrecision: graphicVariables.dimLinearPrecision
+            linearPrecision: graphicVariables.dimLinearPrecision,
+            extensionOffset: graphicVariables.dimExtensionOffset,
+            extensionBeyond: graphicVariables.dimExtensionBeyond,
+            textGap: graphicVariables.dimTextGap
         )
     }
 
