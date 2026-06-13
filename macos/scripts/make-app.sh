@@ -20,6 +20,7 @@ INFO_PLIST_SRC="${MACOS_DIR}/App/Info.plist"
 SAMPLE_DXF_SRC="${REPO_DIR}/librecad/res/dxf/dim_sample.dxf"
 FONTS_SRC_DIR="${REPO_DIR}/librecad/support/fonts"
 HATCHPAT_SRC_DIR="${MACOS_DIR}/assets/hatchpatterns"   # bundled .pat hatch patterns (F6)
+TEMPLATES_SRC_DIR="${MACOS_DIR}/assets/templates"      # bundled .dxf new-doc templates (F24)
 ICON_DIR="${MACOS_DIR}/assets/AppIcon"
 ICON_GEN="${ICON_DIR}/make-icon.swift"      # programmatic, offline icon generator
 ICON_ICNS="${ICON_DIR}/AppIcon.icns"        # committed fallback (regenerated below)
@@ -87,6 +88,21 @@ if [[ -d "${HATCHPAT_SRC_DIR}" ]]; then
     echo "    bundled ${pat_count} .pat hatch-pattern file(s): Contents/Resources/hatchpatterns/"
 else
     echo "warning: hatch-pattern dir not found at ${HATCHPAT_SRC_DIR}; bundled app will fall back to the repo path for patterns" >&2
+fi
+
+# Bundle the `.dxf` new-document templates (F24) so File ▸ New from Template…
+# works in the shipped app. DrawingTemplate looks them up under
+# Contents/Resources/templates (Bundle.main), falling back to the in-repo
+# macos/assets/templates for the bare binary. A missing dir just means the
+# chooser surfaces a "template not found" status (no crash).
+TEMPLATES_DST_DIR="${APP_DIR}/Contents/Resources/templates"
+if [[ -d "${TEMPLATES_SRC_DIR}" ]]; then
+    mkdir -p "${TEMPLATES_DST_DIR}"
+    cp "${TEMPLATES_SRC_DIR}"/*.dxf "${TEMPLATES_DST_DIR}/" 2>/dev/null || true
+    tpl_count=$(find "${TEMPLATES_DST_DIR}" -name '*.dxf' | wc -l | tr -d ' ')
+    echo "    bundled ${tpl_count} .dxf template(s): Contents/Resources/templates/"
+else
+    echo "warning: templates dir not found at ${TEMPLATES_SRC_DIR}; New from Template will fall back to the repo path" >&2
 fi
 
 # App icon (Info.plist sets CFBundleIconFile = AppIcon, so the bundle needs
