@@ -149,6 +149,24 @@ struct LibreCADApp: App {
                 Button("Invert Selection") {
                     NSApp.sendAction(Selector(("invertSelectionAction:")), to: nil, from: nil)
                 }
+
+                Divider()
+                // Edit ▸ Select Connected / Select Contour (wire-wave-2). Both grow the
+                // selection from a SEED (the single selected entity, else the entity
+                // under the cursor) via the pure engine `SelectionTraversal`:
+                //   • Connected — the whole connected component (chain/network) sharing
+                //     endpoints with the seed (`SelectionTraversal.connected`).
+                //   • Contour — the single closed loop the seed belongs to
+                //     (`SelectionTraversal.contour`); a no-op if the seed is not part of
+                //     a closed loop. Routed through the responder chain to the focused
+                //     canvas (like Invert), which resolves the seed + applies the result
+                //     to its CanvasModel. No standard shortcut (matches most CAD apps).
+                Button("Select Connected") {
+                    NSApp.sendAction(Selector(("selectConnectedAction:")), to: nil, from: nil)
+                }
+                Button("Select Contour") {
+                    NSApp.sendAction(Selector(("selectContourAction:")), to: nil, from: nil)
+                }
             }
             CommandGroup(after: .toolbar) {
                 // ⌘K — the command palette: fuzzy-find and run any tool/app action.
@@ -338,6 +356,23 @@ struct LibreCADApp: App {
                     Button("Angular Dimension") { activateTool?(.angularDim) }
                         .keyboardShortcut("n", modifiers: [])
                         .disabled(activateTool == nil)
+
+                    Divider()
+                    // Wire-wave-2 dimension subtypes. They take free OPTION chords
+                    // (⌥O / ⌥G / ⌥N) — the bare/⇧ twins of O/G/N are taken (O Point /
+                    // ⇧O Offset, G Polygon, N Angular). ⌥ is the third tier (like ⌥S
+                    // Stretch). Ordinate measures a feature's X/Y from a datum; Arc
+                    // Length dimensions a swept arc; Angular (3-point) uses a vertex +
+                    // two endpoints.
+                    Button("Ordinate Dimension") { activateTool?(.ordinateDim) }
+                        .keyboardShortcut("o", modifiers: .option)
+                        .disabled(activateTool == nil)
+                    Button("Arc Length Dimension") { activateTool?(.arcLengthDim) }
+                        .keyboardShortcut("g", modifiers: .option)
+                        .disabled(activateTool == nil)
+                    Button("Angular Dimension (3-point)") { activateTool?(.angular3pDim) }
+                        .keyboardShortcut("n", modifiers: .option)
+                        .disabled(activateTool == nil)
                 }
 
                 Divider()
@@ -354,6 +389,22 @@ struct LibreCADApp: App {
                     Button("Measure Area") { activateTool?(.measureArea) }
                         .disabled(activateTool == nil)
                     Button("Total Length") { activateTool?(.measureLength) }
+                        .disabled(activateTool == nil)
+                }
+
+                Divider()
+                // Blocks (wire-wave-2): Create Block groups the current selection into
+                // a named block and replaces it with one INSERT (applied via the
+                // undoable `CADDrawing.makeBlockFromEntities`); Explode Block replaces
+                // a selected INSERT with its member entities. Free option chords
+                // (⌥B / ⌥X) — the bare/⇧ twins of B/X are taken (B Diameter / ⇧B Break,
+                // X Extend / ⇧X Explode).
+                Menu("Blocks") {
+                    Button("Create Block from Selection") { activateTool?(.createBlock) }
+                        .keyboardShortcut("b", modifiers: .option)
+                        .disabled(activateTool == nil)
+                    Button("Explode Block Reference") { activateTool?(.explodeInsert) }
+                        .keyboardShortcut("x", modifiers: .option)
                         .disabled(activateTool == nil)
                 }
             }

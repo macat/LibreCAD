@@ -310,6 +310,13 @@ struct ContentView: View {
             toolButton(.join, symbol: "link", help: "Join lines/arcs into a polyline (⇧J)")
             toolButton(.explodeText, symbol: "character.cursor.ibeam",
                        help: "Explode text to geometry (⇧E)")
+            // Wire-wave-2 block tools: Create Block groups the selection into a named
+            // block (replaced by one INSERT); Explode Block replaces a selected INSERT
+            // with its member entities. Free option chords (⌥B / ⌥X).
+            toolButton(.createBlock, symbol: "square.on.square.dashed",
+                       help: "Create block from selection (⌥B)")
+            toolButton(.explodeInsert, symbol: "square.split.2x2",
+                       help: "Explode block reference (⌥X)")
 
             Divider()
             // Edit tools (pick entities under the cursor; no pre-selection needed).
@@ -332,6 +339,15 @@ struct ContentView: View {
             toolButton(.diameterDim, symbol: "circle.and.line.horizontal",
                        help: "Diameter dimension (B)")
             toolButton(.angularDim, symbol: "angle", help: "Angular dimension (N)")
+            // Wire-wave-2 dimension subtypes: Ordinate measures a feature's X/Y from a
+            // datum; Arc Length dimensions a swept arc; Angular (3-point) uses a vertex
+            // + two endpoints. Free option chords (⌥O / ⌥G / ⌥N).
+            toolButton(.ordinateDim, symbol: "arrow.down.to.line",
+                       help: "Ordinate dimension (⌥O)")
+            toolButton(.arcLengthDim, symbol: "arrow.up.and.down.and.sparkles",
+                       help: "Arc length dimension (⌥G)")
+            toolButton(.angular3pDim, symbol: "angle",
+                       help: "Angular dimension, 3-point (⌥N)")
 
             Divider()
             // Measure / info tools (read-only): report a value in the status HUD

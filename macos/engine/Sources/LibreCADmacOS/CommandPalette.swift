@@ -128,6 +128,13 @@ enum CommandRegistry {
         case .measureLength:   return ("sum", nil)
         case .join:            return ("link", "⇧J")
         case .explodeText:     return ("character.cursor.ibeam", "⇧E")
+        // Wire-wave-2: three dimension subtypes (ordinate ⌥O, arc-length ⌥G,
+        // angular-3p ⌥N) + Create Block (⌥B) + Explode Block (⌥X).
+        case .ordinateDim:     return ("arrow.down.to.line", "⌥O")
+        case .arcLengthDim:    return ("arrow.up.and.down.and.sparkles", "⌥G")
+        case .angular3pDim:    return ("angle", "⌥N")
+        case .createBlock:     return ("square.on.square.dashed", "⌥B")
+        case .explodeInsert:   return ("square.split.2x2", "⌥X")
         }
     }
 

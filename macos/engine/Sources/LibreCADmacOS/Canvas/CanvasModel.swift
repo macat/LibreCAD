@@ -503,6 +503,20 @@ final class CanvasModel {
         case var t as TextTool:
             t.height = Swift.max(InspectorEdits.minTextHeight, textHeight)
             tool = t
+
+        // MARK: Block-members injection (wire-wave-2)
+
+        case is ExplodeInsertTool:
+            // ExplodeInsertTool is PURE and `ToolContext` carries no block provider,
+            // so the block's member records are supplied at construction (mirroring how
+            // InsertTool receives `previewMembers`). Re-mint with a `@Sendable` provider
+            // backed by a value-snapshot of the drawing's block table, so a selected
+            // `.insert` explodes into its real member geometry. The snapshot is taken
+            // each time the tool is (re-)minted (activate / post-commit), so a block
+            // edited between runs explodes correctly on the next run.
+            let members = blockMembersSnapshot()
+            tool = ExplodeInsertTool(blockMembers: { name in members[name] })
+
         default:
             break
         }
@@ -555,6 +569,14 @@ final class CanvasModel {
             applyCommit(edits)
             return true
         case .finished:
+            // CreateBlockTool does NOT emit `.commit` edits — block creation touches
+            // the BlockTable, which a `ToolEdit` cannot express. Instead it records a
+            // `CreateBlockRequest` in `pendingCreation`, which the app applies here via
+            // the undoable model op (`CADDrawing.makeBlockFromEntities`, ONE undoable
+            // group). We read it from the just-finished tool BEFORE re-minting below
+            // (the re-mint discards the request). A `.cancel` clears `pendingCreation`,
+            // so a cancelled run applies nothing.
+            applyPendingBlockCreationIfAny()
             // The run ended (commit/cancel). Mint a fresh tool of the same kind so
             // the user can immediately start the next run (LibreCAD keeps the tool
             // active after each line). To leave the tool entirely, the app calls
@@ -567,6 +589,55 @@ final class CanvasModel {
             relativeZero = nil
             return true
         }
+    }
+
+    /// If the just-finished tool is a `CreateBlockTool` carrying a `pendingCreation`
+    /// request, applies it via the undoable model op `CADDrawing.makeBlockFromEntities`
+    /// (which removes the originals, registers the block, and drops one `.insert`, all
+    /// as ONE undoable group — the `UndoManager` coalesces the inner calls made in this
+    /// event). The new `.insert` becomes the selection so the user sees the result.
+    /// Re-syncs the spatial index (the model op mutates `entities` directly, outside the
+    /// quadtree-aware `applyCommit` path) and marks the GPU buffer dirty. No-op for any
+    /// other tool / a cancelled run (`pendingCreation == nil`).
+    ///
+    /// This mirrors `applyCommit`'s "one undoable group" discipline but routes through
+    /// the model op rather than `ToolEdit`s, because creating a block is a table
+    /// mutation, not an entity-level edit (see CreateBlockTool's header).
+    private func applyPendingBlockCreationIfAny() {
+        guard let blockTool = tool as? CreateBlockTool,
+              let request = blockTool.pendingCreation else { return }
+
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+
+        let result = CreateBlockTool.apply(request, to: drawing)
+        // The model op mutated `entities` directly (remove originals + add members +
+        // add the insert); rebuild the quadtree so the result is immediately
+        // snappable/selectable (the op doesn't touch the separate index).
+        rebuildIndex()
+        // Select the new INSERT so the user sees what replaced their selection.
+        if let insertID = result?.insertID {
+            selection = Selection(ids: [insertID])
+        } else {
+            selection.clear()
+        }
+        modelDirty = true
+        modelVersion &+= 1
+    }
+
+    /// Builds a `blockName → [member EntityRecord]` snapshot (value copies) from the
+    /// drawing's public block table, for injecting into `ExplodeInsertTool` (which is
+    /// PURE and cannot reach the drawing). Mirrors the engine's internal
+    /// `CADDrawing.blockMembersSnapshot()` (not part of the public API) using only
+    /// public accessors: each non-frozen block's `entityIDs` resolved against the live
+    /// entities. A member id no longer present is skipped.
+    private func blockMembersSnapshot() -> [String: [EntityRecord]] {
+        var map: [String: [EntityRecord]] = [:]
+        for block in drawing.blocks.blocks where !block.isFrozen {
+            map[block.name] = block.entityIDs.compactMap { drawing.entity($0) }
+        }
+        return map
     }
 
     // MARK: - Status bar readouts (UX-plan U3) — derived, formatted via the engine
@@ -1182,6 +1253,19 @@ final class CanvasModel {
     func deselectAll() -> Bool {
         guard !selection.isEmpty else { return false }
         selection.clear()
+        modelVersion &+= 1
+        return true
+    }
+
+    /// Replaces the whole selection with `ids` (the Select Connected / Select Contour
+    /// traversal results, wire-wave-2). Bumps `modelVersion` so the highlight overlay
+    /// repaints; selection is view-side state, so this registers NO undo (it is not a
+    /// document mutation, like the other Select verbs). Returns whether the selection
+    /// changed (so the caller can skip a redraw).
+    @discardableResult
+    func setSelection(_ ids: Set<EntityID>) -> Bool {
+        guard ids != selection.ids else { return false }
+        selection = Selection(ids: ids)
         modelVersion &+= 1
         return true
     }
