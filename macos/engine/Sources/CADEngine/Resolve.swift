@@ -99,7 +99,7 @@ public struct ResolvedGeometry: Sendable, Equatable {
 /// real text height keeps it; one born with `0` picks up `textHeight` here. The
 /// `scale` multiplies the effective text height + arrow size at draw time
 /// (`$DIMSCALE`), and `linearFormat`/`linearPrecision` format the measurement text.
-public struct ResolvedDimStyle: Sendable, Hashable {
+public struct ResolvedDimStyle: Sendable, Hashable, Codable {
     /// Document-default measurement-text cap height (world units, `$DIMTXT`).
     public var textHeight: Double
     /// Document-default arrowhead length (world units, `$DIMASZ`).
@@ -110,17 +110,36 @@ public struct ResolvedDimStyle: Sendable, Hashable {
     public var linearFormat: LinearFormat
     /// Measurement-text linear precision (decimal places, `$DIMDEC`).
     public var linearPrecision: Int
+    /// `$DIMEXO` — the gap between an extension-line ORIGIN (the measured feature)
+    /// and where the drawn extension line starts, in **world units**. `<= 0` ⇒ the
+    /// resolve falls back to its arrow-fraction default (`dimExtensionOffsetFactor`).
+    /// (`DRW_Dimstyle::dimexo` / AutoCAD's imperial default ~0.0625".)
+    public var extensionOffset: Double
+    /// `$DIMEXE` — how far an extension line runs PAST the dimension line, in
+    /// **world units**. `<= 0` ⇒ the arrow-fraction default (`dimExtensionBeyondFactor`).
+    /// (`DRW_Dimstyle::dimexe` / imperial default ~0.18".)
+    public var extensionBeyond: Double
+    /// `$DIMGAP` — the gap between the dimension line and the measurement text, in
+    /// **world units**. `<= 0` ⇒ the text-height-fraction default. (`DRW_Dimstyle::
+    /// dimgap` / imperial default ~0.09".)
+    public var textGap: Double
 
     public init(textHeight: Double = 2.5,
                 arrowSize: Double = 2.5,
                 scale: Double = 1.0,
                 linearFormat: LinearFormat = .decimal,
-                linearPrecision: Int = 4) {
+                linearPrecision: Int = 4,
+                extensionOffset: Double = 0,
+                extensionBeyond: Double = 0,
+                textGap: Double = 0) {
         self.textHeight = textHeight
         self.arrowSize = arrowSize
         self.scale = scale
         self.linearFormat = linearFormat
         self.linearPrecision = linearPrecision
+        self.extensionOffset = extensionOffset
+        self.extensionBeyond = extensionBeyond
+        self.textGap = textGap
     }
 
     /// The built-in defaults (used when no provider is wired) — matches the
@@ -178,6 +197,20 @@ public struct ResolveContext: Sendable {
     /// Document Settings sheet writes those). Previously the reserved hook.
     public var dimStyleProvider: (@Sendable () -> ResolvedDimStyle)? = nil
 
+    /// Resolves a NAMED dimension style (a `DimData.styleName`, DXF code 3) to its
+    /// concrete `ResolvedDimStyle` from the drawing's `DimStyleTable`. This is the
+    /// MIDDLE rung of the dimension-style precedence (decision D4, extended):
+    ///
+    ///   per-entity override  >  this named style  >  `dimStyleProvider` (header default)
+    ///
+    /// A dimension that names a style (e.g. "ISO-25") resolves through this; one
+    /// with no style name (or a name absent from the table, ⇒ a `nil` return) falls
+    /// back to the document `dimStyleProvider`. `nil` (the default) ⇒ no named table
+    /// is wired, so dimensions resolve against the header default exactly as before
+    /// (existing callers/tests unchanged). Wired by `CADDrawing.makeResolveContext`
+    /// from the drawing's `DimStyleTable`. Parallel to `textStyleProvider`.
+    public var namedDimStyleProvider: (@Sendable (String) -> ResolvedDimStyle?)? = nil
+
     /// Resolves a text-style NAME (DXF code 7, e.g. "Standard") to a concrete
     /// `TextStyle` (font source, height, width factor, oblique, annotative …),
     /// defaulting to "Standard". `nil` (or a `nil` return) makes the resolve arm
@@ -227,6 +260,7 @@ public struct ResolveContext: Sendable {
         textStyleProvider: (@Sendable (String) -> TextStyle?)? = nil,
         annotationScale: Double = 1.0,
         dimStyleProvider: (@Sendable () -> ResolvedDimStyle)? = nil,
+        namedDimStyleProvider: (@Sendable (String) -> ResolvedDimStyle?)? = nil,
         blockProvider: (@Sendable (String) -> [EntityRecord]?)? = nil,
         blockRecursionDepth: Int = ResolveContext.maxBlockRecursionDepth
     ) {
@@ -238,6 +272,7 @@ public struct ResolveContext: Sendable {
         self.textStyleProvider = textStyleProvider
         self.annotationScale = annotationScale
         self.dimStyleProvider = dimStyleProvider
+        self.namedDimStyleProvider = namedDimStyleProvider
         self.blockProvider = blockProvider
         self.blockRecursionDepth = blockRecursionDepth
     }
@@ -893,6 +928,11 @@ extension EntityKind {
     /// How far an extension line runs past the dimension line, as a fraction of
     /// the arrow size (DIMEXE).
     static let dimExtensionBeyondFactor = 0.5
+    /// Gap between the dimension line and the measurement text, as a fraction of
+    /// the text height (DIMGAP). The historical default text offset was `0.7`
+    /// times the text height; kept here as the fallback when no explicit `$DIMGAP`
+    /// is supplied so existing dimension geometry/tests are unchanged.
+    static let dimTextGapFactor = 0.7
 
     /// Resolves a dimension's full graphic (ADR-001: PURE — no `clear()/addEntity`
     /// mutation, unlike `RS_Dimension::update`). Dispatches per variant; each
@@ -915,31 +955,83 @@ extension EntityKind {
         }
     }
 
-    /// The document dimension style for this resolve (the wired provider, or the
-    /// engine's built-in defaults when none is supplied).
+    /// The document dimension style for this resolve (the wired `dimStyleProvider`,
+    /// or the engine's built-in defaults when none is supplied). This is the
+    /// LOWEST-precedence rung — the document header default.
     static func dimStyle(_ ctx: ResolveContext) -> ResolvedDimStyle {
         ctx.dimStyleProvider?() ?? .default
     }
 
+    /// The effective `ResolvedDimStyle` for a dimension, resolving the NAMED-style
+    /// middle rung of the precedence (decision D4, extended):
+    ///
+    ///   per-entity field override (handled in the field accessors below)
+    ///     > the dimension's NAMED style (`d.styleName` via `namedDimStyleProvider`)
+    ///       > the document header default (`dimStyleProvider`)
+    ///
+    /// A dimension whose `styleName` resolves in the wired `DimStyleTable` uses that
+    /// named style as its base; otherwise it falls back to the document default. So
+    /// `textHeight`/`arrowSize`/`scale`/format/precision AND the DIMEXO/DIMEXE/DIMGAP
+    /// ext-line offsets all come from the named style when one is referenced.
+    static func effectiveDimStyle(_ d: DimData, _ ctx: ResolveContext) -> ResolvedDimStyle {
+        if let name = d.styleName, !name.isEmpty,
+           let named = ctx.namedDimStyleProvider?(name) {
+            return named
+        }
+        return dimStyle(ctx)
+    }
+
     /// Effective measurement-text height (decision D4): the per-entity value WINS
-    /// when set (`> 0`); otherwise the DOCUMENT default fills in (`$DIMTXT` via the
-    /// `dimStyleProvider`). The result is multiplied by the document's overall
+    /// when set (`> 0`); otherwise the named/document style fills in (`$DIMTXT` via
+    /// the resolved style). The result is multiplied by the style's overall
     /// dimension scale (`$DIMSCALE`). Falls back to the engine default when no
     /// provider is wired.
     static func dimTextHeight(_ d: DimData, ctx: ResolveContext = .default) -> Double {
-        let style = dimStyle(ctx)
+        let style = effectiveDimStyle(d, ctx)
         let base = d.textHeight > 0 ? d.textHeight
             : (style.textHeight > 0 ? style.textHeight : dimDefaultTextHeight)
         return base * (style.scale > 0 ? style.scale : 1.0)
     }
 
-    /// Effective arrow size (decision D4): per-entity wins when set; document
-    /// default (`$DIMASZ`) fills in otherwise, then scaled by `$DIMSCALE`.
+    /// Effective arrow size (decision D4): per-entity wins when set; named/document
+    /// style (`$DIMASZ`) fills in otherwise, then scaled by `$DIMSCALE`.
     static func dimArrowSize(_ d: DimData, ctx: ResolveContext = .default) -> Double {
-        let style = dimStyle(ctx)
+        let style = effectiveDimStyle(d, ctx)
         let base = d.arrowSize > 0 ? d.arrowSize
             : (style.arrowSize > 0 ? style.arrowSize : dimDefaultArrowSize)
         return base * (style.scale > 0 ? style.scale : 1.0)
+    }
+
+    /// Effective extension-line ORIGIN offset (`$DIMEXO`) in world units: the
+    /// resolved style's explicit value (scaled by `$DIMSCALE`) when positive,
+    /// else the historical arrow-fraction default. The gap between the measured
+    /// feature and where the drawn extension line starts.
+    static func dimExtensionOffset(_ d: DimData, ctx: ResolveContext = .default) -> Double {
+        let style = effectiveDimStyle(d, ctx)
+        let scale = style.scale > 0 ? style.scale : 1.0
+        if style.extensionOffset > 0 { return style.extensionOffset * scale }
+        return dimArrowSize(d, ctx: ctx) * dimExtensionOffsetFactor
+    }
+
+    /// Effective extension-line EXTEND-BEYOND (`$DIMEXE`) in world units: the
+    /// resolved style's explicit value (scaled) when positive, else the arrow-
+    /// fraction default. How far the extension line runs past the dimension line.
+    static func dimExtensionBeyond(_ d: DimData, ctx: ResolveContext = .default) -> Double {
+        let style = effectiveDimStyle(d, ctx)
+        let scale = style.scale > 0 ? style.scale : 1.0
+        if style.extensionBeyond > 0 { return style.extensionBeyond * scale }
+        return dimArrowSize(d, ctx: ctx) * dimExtensionBeyondFactor
+    }
+
+    /// Effective text gap (`$DIMGAP`) in world units: the resolved style's explicit
+    /// value (scaled) when positive, else the historical text-height fraction
+    /// default (`textH * dimTextGapFactor`). The clearance between the dimension
+    /// line and the measurement text.
+    static func dimTextGap(_ d: DimData, ctx: ResolveContext = .default) -> Double {
+        let style = effectiveDimStyle(d, ctx)
+        let scale = style.scale > 0 ? style.scale : 1.0
+        if style.textGap > 0 { return style.textGap * scale }
+        return dimTextHeight(d, ctx: ctx) * dimTextGapFactor
     }
 
     /// Formats a measured length/diameter/radius for the label at `precision`
@@ -969,7 +1061,7 @@ extension EntityKind {
             if override == " " { return "" }
             if !override.isEmpty { return override }
         }
-        return suffix + dimFormat(measured, precision: dimStyle(ctx).linearPrecision)
+        return suffix + dimFormat(measured, precision: effectiveDimStyle(d, ctx).linearPrecision)
     }
 
     /// A filled arrowhead triangle (as a `ResolvedFill`) whose tip is at `tip`
@@ -1011,6 +1103,11 @@ extension EntityKind {
         guard p1.valid, p2.valid, d.definitionPoint.valid else { return ResolvedGeometry() }
         let arrow = dimArrowSize(d, ctx: ctx)
         let textH = dimTextHeight(d, ctx: ctx)
+        // Ext-line offsets from the resolved style ($DIMEXO/$DIMEXE/$DIMGAP), each
+        // falling back to its historical arrow/text fraction when not supplied.
+        let extOffset = dimExtensionOffset(d, ctx: ctx)
+        let extBeyond = dimExtensionBeyond(d, ctx: ctx)
+        let textGap = dimTextGap(d, ctx: ctx)
 
         // Dimension-line direction (unit). Aligned: along p1→p2. Linear: the
         // fixed angle (the perpendicular distance between the points is measured
@@ -1065,8 +1162,8 @@ extension EntityKind {
                 let sign = side >= 0 ? 1.0 : -1.0
                 u = normal * sign
             }
-            let start = measuredPt + u * (arrow * dimExtensionOffsetFactor)
-            let end = dimPt + u * (arrow * dimExtensionBeyondFactor)
+            let start = measuredPt + u * extOffset
+            let end = dimPt + u * extBeyond
             return ResolvedPolyline(points: [start, end], closed: false, pen: pen)
         }
         polylines.append(extLine(p1, dimP1))
@@ -1085,7 +1182,7 @@ extension EntityKind {
         // Measurement text centered above the dimension line.
         let label = dimLabel(d, measured: measured, ctx: ctx)
         let textCenter = (d.textMiddle.flatMap { $0.valid ? $0 : nil })
-            ?? (dimP1 + dimP2) * 0.5 + normal * (textH * 0.7)
+            ?? (dimP1 + dimP2) * 0.5 + normal * textGap
         // Keep text upright-ish: normalize the baseline angle to [-90°, 90°].
         // An explicit textRotation (DXF 53) overrides the derived angle.
         let textAngle = d.textRotation ?? dimTextAngle(dirAngle)
@@ -1129,7 +1226,7 @@ extension EntityKind {
         let label = dimLabel(d, measured: radius, suffix: "R", ctx: ctx)
         let normal = Vector(-outward.y, outward.x)
         let textCenter = (d.textMiddle.flatMap { $0.valid ? $0 : nil })
-            ?? center + outward * (radius * 0.5) + normal * (textH * 0.7)
+            ?? center + outward * (radius * 0.5) + normal * dimTextGap(d, ctx: ctx)
         let textAngle = d.textRotation ?? dimTextAngle(outward.angle)
         let textGeo = dimText(label, center: textCenter, rotation: textAngle,
                               height: textH, pen: pen, ctx: ctx)
@@ -1162,7 +1259,7 @@ extension EntityKind {
         let label = dimLabel(d, measured: diameter, suffix: "\u{2300}", ctx: ctx)
         let normal = Vector(-along.y, along.x)
         let textCenter = (d.textMiddle.flatMap { $0.valid ? $0 : nil })
-            ?? (point1 + point2) * 0.5 + normal * (textH * 0.7)
+            ?? (point1 + point2) * 0.5 + normal * dimTextGap(d, ctx: ctx)
         let textAngle = d.textRotation ?? dimTextAngle(along.angle)
         let textGeo = dimText(label, center: textCenter, rotation: textAngle,
                               height: textH, pen: pen, ctx: ctx)
@@ -1258,7 +1355,7 @@ extension EntityKind {
         }
         let midA = a1 + sweep / 2
         let textCenter = (d.textMiddle.flatMap { $0.valid ? $0 : nil })
-            ?? vertex + Vector.polar(radius: radius + textH * 0.7, angle: midA)
+            ?? vertex + Vector.polar(radius: radius + dimTextGap(d, ctx: ctx), angle: midA)
         // Baseline tangent to the arc, in the sweep direction, kept upright.
         let textAngle = d.textRotation ?? dimTextAngle(midA + dir * Double.pi / 2)
         let textGeo = dimText(label, center: textCenter, rotation: textAngle,

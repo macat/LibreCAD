@@ -83,6 +83,56 @@ extension CADEngine {
         public var skipped: Int
     }
 
+    /// Reads JUST the named DIMSTYLE table from a DXF/DWG file into a
+    /// `DimStyleTable` (the bridge's `lc_dimstyles` flattened into `NamedDimStyle`s,
+    /// plus the header's active-style name as `activeName`). The full geometry read
+    /// path (`readEntities`) collapses only the ACTIVE style into the `$DIM*`
+    /// graphic vars; this accessor preserves EVERY named style so a save→reopen
+    /// round-trips the whole table. Runs on the shared engine actor (libdxfrw is
+    /// non-reentrant). `format` selects the DXF vs DWG parser.
+    ///
+    /// - Throws: `CADEngineError.invalidPath` / `.readFailed`, like `readEntities`.
+    public func readDimStyles(path: String, dwg: Bool = false) throws -> DimStyleTable {
+        var handle: OpaquePointer?
+        let reader = dwg ? lc_dwg_read : lc_dxf_read
+        let status = path.withCString { reader($0, &handle) }
+        switch status {
+        case LC_OK: break
+        case LC_ERR_INVALID_PATH: throw CADEngineError.invalidPath
+        default: throw CADEngineError.readFailed
+        }
+        guard let list = handle else { return DimStyleTable() }
+        defer { lc_entity_list_free(list) }
+
+        func str(_ p: UnsafePointer<CChar>?) -> String? {
+            guard let p else { return nil }
+            let s = String(cString: p)
+            return s.isEmpty ? nil : s
+        }
+
+        var table = DimStyleTable()
+        let count = Int(lc_dimstyle_count(list))
+        if count > 0, let base = lc_dimstyles(list) {
+            let styles = UnsafeBufferPointer(start: base, count: count)
+            for s in styles {
+                let name = str(s.name) ?? "Standard"
+                let resolved = ResolvedDimStyle(
+                    textHeight: s.dimTxt,
+                    arrowSize: s.dimAsz,
+                    scale: s.dimScale > 0 ? s.dimScale : 1.0,
+                    linearFormat: GraphicVariables.linearFormat(fromDXF: Int(s.dimLUnit)),
+                    linearPrecision: Int(s.dimDec),
+                    extensionOffset: s.dimExo,
+                    extensionBeyond: s.dimExe,
+                    textGap: s.dimGap
+                )
+                table.upsert(NamedDimStyle(name: name, style: resolved))
+            }
+        }
+        if let hp = lc_header(list) { table.activeName = str(hp.pointee.dimStyle) }
+        return table
+    }
+
     /// Writes `entities` + `layers` to the DXF at `path` (overwriting it). Runs
     /// on the shared engine actor so the non-reentrant libdxfrw call is
     /// serialized with reads. All POD memory is built and kept valid for the
@@ -95,12 +145,15 @@ extension CADEngine {
         layers: LayerTable,
         blocks: BlockTable = BlockTable(),
         blockMembers: [String: [EntityRecord]] = [:],
+        graphicVariables: GraphicVariables = GraphicVariables(),
+        dimStyles: DimStyleTable = DimStyleTable(),
         toPath path: String,
         version: DXFVersion = .r2000
     ) throws -> DXFWriteResult {
         try writeEntities(entities, layers: layers, blocks: blocks,
-                          blockMembers: blockMembers, toPath: path,
-                          version: version, writer: lc_dxf_write)
+                          blockMembers: blockMembers,
+                          graphicVariables: graphicVariables, dimStyles: dimStyles,
+                          toPath: path, version: version, writer: lc_dxf_write)
     }
 
     /// Writes `entities` + `layers` to a DWG file at `path` (overwriting it). The
@@ -122,11 +175,14 @@ extension CADEngine {
         layers: LayerTable,
         blocks: BlockTable = BlockTable(),
         blockMembers: [String: [EntityRecord]] = [:],
+        graphicVariables: GraphicVariables = GraphicVariables(),
+        dimStyles: DimStyleTable = DimStyleTable(),
         toDWGPath path: String
     ) throws -> DXFWriteResult {
         try writeEntities(entities, layers: layers, blocks: blocks,
-                          blockMembers: blockMembers, toPath: path,
-                          version: .r2000, writer: lc_dwg_write)
+                          blockMembers: blockMembers,
+                          graphicVariables: graphicVariables, dimStyles: dimStyles,
+                          toPath: path, version: .r2000, writer: lc_dwg_write)
     }
 
     /// Shared write core for the DXF and DWG entry points. Builds the flat POD
@@ -137,6 +193,8 @@ extension CADEngine {
         layers: LayerTable,
         blocks: BlockTable,
         blockMembers: [String: [EntityRecord]],
+        graphicVariables: GraphicVariables,
+        dimStyles: DimStyleTable,
         toPath path: String,
         version: DXFVersion,
         writer: (
@@ -146,7 +204,9 @@ extension CADEngine {
             UnsafePointer<LCBlock>?, Int32,
             UnsafePointer<LCEntity>?, Int32,
             Int32,
-            UnsafeMutablePointer<Int32>?
+            UnsafeMutablePointer<Int32>?,
+            UnsafePointer<LCHeader>?,
+            UnsafePointer<LCDimStyle>?, Int32
         ) -> LCStatus
     ) throws -> DXFWriteResult {
         guard !path.isEmpty else { throw CADWriteError.invalidPath }
@@ -156,6 +216,10 @@ extension CADEngine {
         let builder = PODBuilder()
         let entityPODs = entities.map { builder.makeEntity($0) }
         let layerPODs = layers.layers.map { builder.makeLayer($0) }
+        // The HEADER var POD (units + $DIM* incl. ext-line offsets) + the DIMSTYLE
+        // table PODs, so a Save preserves units / dim styles / ext offsets.
+        let headerPOD = builder.makeHeader(graphicVariables, dimStyles: dimStyles)
+        let dimStylePODs = dimStyles.styles.map { builder.makeDimStyle($0) }
 
         // Build the block definitions + a flat array of their member PODs. Each
         // block windows into `blockEntityPODs`; only non-anonymous user blocks are
@@ -172,20 +236,27 @@ extension CADEngine {
         }
 
         var skipped: Int32 = 0
+        var headerPODVar = headerPOD
         let status = path.withCString { cpath -> LCStatus in
             entityPODs.withUnsafeBufferPointer { ents -> LCStatus in
                 layerPODs.withUnsafeBufferPointer { lays -> LCStatus in
                     blockPODs.withUnsafeBufferPointer { blks -> LCStatus in
                         blockEntityPODs.withUnsafeBufferPointer { blkEnts -> LCStatus in
-                            writer(
-                                cpath,
-                                ents.baseAddress, Int32(ents.count),
-                                lays.baseAddress, Int32(lays.count),
-                                blks.baseAddress, Int32(blks.count),
-                                blkEnts.baseAddress, Int32(blkEnts.count),
-                                version.rawValue,
-                                &skipped
-                            )
+                            dimStylePODs.withUnsafeBufferPointer { dsty -> LCStatus in
+                                withUnsafePointer(to: &headerPODVar) { hdr -> LCStatus in
+                                    writer(
+                                        cpath,
+                                        ents.baseAddress, Int32(ents.count),
+                                        lays.baseAddress, Int32(lays.count),
+                                        blks.baseAddress, Int32(blks.count),
+                                        blkEnts.baseAddress, Int32(blkEnts.count),
+                                        version.rawValue,
+                                        &skipped,
+                                        hdr,
+                                        dsty.baseAddress, Int32(dsty.count)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -227,8 +298,13 @@ public func writeDrawing(
     // Resolve each block's member ids to records so the writer can author the block
     // definitions (the same name → [EntityRecord] snapshot the resolve context uses).
     let blockMembers = drawing.blockMembersSnapshot()
+    // The header vars + named DIMSTYLE table so units / dim styles / ext-line
+    // offsets are preserved on save (symmetric to the read path).
+    let graphicVariables = drawing.graphicVariables
+    let dimStyles = drawing.dimStyles
     return try await CADEngine.shared.writeEntities(
         entities, layers: layers, blocks: blocks, blockMembers: blockMembers,
+        graphicVariables: graphicVariables, dimStyles: dimStyles,
         toPath: path, version: version
     )
 }
@@ -566,6 +642,57 @@ private final class PODBuilder {
         b.memberOffset = Int32(memberOffset)
         b.memberCount = Int32(memberCount)
         return b
+    }
+
+    // MARK: Header + DIMSTYLE mapping (inverse of DXFReader.mapGraphicVariables)
+
+    /// Builds the `LCHeader` POD from the drawing's `GraphicVariables`, setting each
+    /// `has*` flag ONLY when the bag actually carries that var (so an absent var is
+    /// left to libdxfrw's default rather than forced to a synthesized one). The
+    /// active dim-style name comes from the DIMSTYLE table's `activeName` (or the
+    /// `$DIMSTYLE` var). Mirrors the reader's header → graphic-var mapping in
+    /// reverse so units / dim defaults / ext-line offsets ($DIMEXO/$DIMEXE/$DIMGAP)
+    /// round-trip.
+    func makeHeader(_ gv: GraphicVariables, dimStyles: DimStyleTable) -> LCHeader {
+        var h = LCHeader()
+        if gv.has("$INSUNITS") { h.insUnits = Int32(gv.unit.dxfCode); h.hasInsUnits = 1 }
+        if gv.has("$LUNITS") {
+            h.luUnits = Int32(GraphicVariables.dxfLUNITS(for: gv.linearFormat)); h.hasLuUnits = 1
+        }
+        if gv.has("$LUPREC") { h.luPrec = Int32(gv.linearPrecision); h.hasLuPrec = 1 }
+        if gv.has("$AUNITS") { h.auUnits = Int32(gv.angleFormat.rawValue); h.hasAuUnits = 1 }
+        if gv.has("$AUPREC") { h.auPrec = Int32(gv.anglePrecision); h.hasAuPrec = 1 }
+        if gv.has("$DIMTXT") { h.dimTxt = gv.dimTextHeight; h.hasDimTxt = 1 }
+        if gv.has("$DIMASZ") { h.dimAsz = gv.dimArrowSize; h.hasDimAsz = 1 }
+        if gv.has("$DIMSCALE") { h.dimScale = gv.dimScale; h.hasDimScale = 1 }
+        if gv.has("$DIMLUNIT") {
+            h.dimLUnit = Int32(GraphicVariables.dxfLUNITS(for: gv.dimLinearFormat)); h.hasDimLUnit = 1
+        }
+        if gv.has("$DIMDEC") { h.dimDec = Int32(gv.dimLinearPrecision); h.hasDimDec = 1 }
+        if gv.has("$DIMEXO") { h.dimExo = gv.dimExtensionOffset; h.hasDimExo = 1 }
+        if gv.has("$DIMEXE") { h.dimExe = gv.dimExtensionBeyond; h.hasDimExe = 1 }
+        if gv.has("$DIMGAP") { h.dimGap = gv.dimTextGap; h.hasDimGap = 1 }
+        let activeName = dimStyles.activeName ?? gv.string("$DIMSTYLE", default: "")
+        if !activeName.isEmpty { h.dimStyle = intern(activeName) }
+        return h
+    }
+
+    /// Builds an `LCDimStyle` POD from a `NamedDimStyle` (the inverse of
+    /// DXFReader's DIMSTYLE → `NamedDimStyle` mapping). The renderer-relevant
+    /// subset (text height / arrow / scale / format / precision + the ext-line
+    /// offsets) maps straight onto the POD; the C writer emits a DRW_Dimstyle.
+    func makeDimStyle(_ s: NamedDimStyle) -> LCDimStyle {
+        var d = LCDimStyle()
+        d.name = intern(s.name.isEmpty ? "Standard" : s.name)
+        d.dimTxt = s.style.textHeight
+        d.dimAsz = s.style.arrowSize
+        d.dimScale = s.style.scale
+        d.dimDec = Int32(s.style.linearPrecision)
+        d.dimLUnit = Int32(GraphicVariables.dxfLUNITS(for: s.style.linearFormat))
+        d.dimExo = s.style.extensionOffset
+        d.dimExe = s.style.extensionBeyond
+        d.dimGap = s.style.textGap
+        return d
     }
 
     // MARK: Layer mapping (inverse of DXFReader.mapLayers)

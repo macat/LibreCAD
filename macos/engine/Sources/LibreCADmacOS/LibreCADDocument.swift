@@ -58,17 +58,22 @@ struct DXFPayload: Sendable, Equatable {
     var blocks: BlockTable
     /// Header graphic variables ($INSUNITS et al.).
     var graphicVariables: GraphicVariables
+    /// The named DIMSTYLE table (named dim styles + ext-line offsets). Carried so a
+    /// save preserves named styles — symmetric to `graphicVariables`/`blocks`.
+    var dimStyles: DimStyleTable
 
     init(
         entities: [EntityRecord] = [],
         layers: LayerTable = LayerTable(),
         blocks: BlockTable = BlockTable(),
-        graphicVariables: GraphicVariables = GraphicVariables()
+        graphicVariables: GraphicVariables = GraphicVariables(),
+        dimStyles: DimStyleTable = DimStyleTable()
     ) {
         self.entities = entities
         self.layers = layers
         self.blocks = blocks
         self.graphicVariables = graphicVariables
+        self.dimStyles = dimStyles
     }
 
     /// An empty drawing for File ▸ New: no entities, the default layer table
@@ -93,7 +98,8 @@ extension CADDrawing {
             entities: payload.entities,
             layers: payload.layers,
             blocks: payload.blocks,
-            graphicVariables: payload.graphicVariables
+            graphicVariables: payload.graphicVariables,
+            dimStyles: payload.dimStyles
         )
         return drawing
     }
@@ -107,7 +113,8 @@ extension CADDrawing {
             entities: entities,
             layers: layers,
             blocks: blocks,
-            graphicVariables: graphicVariables
+            graphicVariables: graphicVariables,
+            dimStyles: dimStyles
         )
     }
 }
@@ -160,11 +167,18 @@ enum DXFDocumentCodec {
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         do {
+            let isDWG = (format == .dwg)
             let result = try runBlocking {
                 switch format {
                 case .dxf: return try await CADEngine.shared.readEntities(dxfPath: tmp.path)
                 case .dwg: return try await CADEngine.shared.readEntities(dwgPath: tmp.path)
                 }
+            }
+            // The full named DIMSTYLE table (`readEntities` collapses only the active
+            // style into the `$DIM*` graphic vars; this preserves EVERY named style
+            // + its ext-line offsets so a save→reopen round-trips the whole table).
+            let dimStyles = try runBlocking {
+                try await CADEngine.shared.readDimStyles(path: tmp.path, dwg: isDWG)
             }
             // Carry the parsed BLOCKS and HEADER graphic variables through to the
             // drawing — NOT empty placeholders. Dropping `result.graphicVariables`
@@ -173,11 +187,30 @@ enum DXFDocumentCodec {
             // rendered its dimension/constraint text ~20× too big (the resolve reads
             // the document `$DIMTXT` via `dimStyleProvider`). Dropping `result.blocks`
             // likewise left INSERTs with no geometry to expand.
+            var gv = result.graphicVariables
+            // The header-var → graphic-var mapping in the engine reader does not
+            // surface the ext-line offsets ($DIMEXO/$DIMEXE/$DIMGAP); backfill the
+            // document-default ext offsets from the ACTIVE DIMSTYLE so they reach the
+            // resolve (the named-style middle rung still wins for styled dims). Only
+            // set when the bag doesn't already carry the var (don't clobber a value
+            // the reader did supply).
+            if let active = dimStyles.active()?.style {
+                if !gv.has("$DIMEXO"), active.extensionOffset > 0 {
+                    gv.dimExtensionOffset = active.extensionOffset
+                }
+                if !gv.has("$DIMEXE"), active.extensionBeyond > 0 {
+                    gv.dimExtensionBeyond = active.extensionBeyond
+                }
+                if !gv.has("$DIMGAP"), active.textGap > 0 {
+                    gv.dimTextGap = active.textGap
+                }
+            }
             return DXFPayload(
                 entities: result.records,
                 layers: result.layers,
                 blocks: result.blocks,
-                graphicVariables: result.graphicVariables
+                graphicVariables: gv,
+                dimStyles: dimStyles
             )
         } catch {
             throw CodecError.engine(error)
@@ -194,16 +227,33 @@ enum DXFDocumentCodec {
             .appendingPathComponent("librecad-save-\(UUID().uuidString).\(format.ext)")
         defer { try? FileManager.default.removeItem(at: tmp) }
 
+        // Pass the BLOCKS + HEADER graphic variables + named DIMSTYLE table through
+        // to the writer — symmetric to the read path. Dropping them on write was the
+        // save-side twin of the read bug: a Save discarded the drawing's units / dim
+        // styles / ext-line offsets / block member geometry, so a reopen fell back to
+        // the engine defaults (e.g. $DIMTXT reset to 2.5). Resolve each block's member
+        // ids to records (the writer authors the BLOCK definitions from these).
+        let entitiesByID = Dictionary(
+            payload.entities.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let blockMembers: [String: [EntityRecord]] = payload.blocks.blocks.reduce(into: [:]) {
+            $0[$1.name] = $1.entityIDs.compactMap { entitiesByID[$0] }
+        }
         do {
             _ = try runBlocking {
                 switch format {
                 case .dxf:
                     return try await CADEngine.shared.writeEntities(
-                        payload.entities, layers: payload.layers, toPath: tmp.path
+                        payload.entities, layers: payload.layers,
+                        blocks: payload.blocks, blockMembers: blockMembers,
+                        graphicVariables: payload.graphicVariables,
+                        dimStyles: payload.dimStyles, toPath: tmp.path
                     )
                 case .dwg:
                     return try await CADEngine.shared.writeEntities(
-                        payload.entities, layers: payload.layers, toDWGPath: tmp.path
+                        payload.entities, layers: payload.layers,
+                        blocks: payload.blocks, blockMembers: blockMembers,
+                        graphicVariables: payload.graphicVariables,
+                        dimStyles: payload.dimStyles, toDWGPath: tmp.path
                     )
                 }
             }
