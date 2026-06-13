@@ -119,7 +119,8 @@ let package = Package(
                 .copy("Resources/dim_sample.dxf"),
                 .copy("Resources/hatch_sample.dxf"),
                 .copy("Resources/imperial_dim.dxf"),
-                .copy("Resources/imperial_dim_styleonly.dxf")
+                .copy("Resources/imperial_dim_styleonly.dxf"),
+                .copy("Resources/dim_constraint_header.dxf")
             ],
             swiftSettings: swift6
         ),

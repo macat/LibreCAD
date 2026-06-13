@@ -1,0 +1,156 @@
+999
+LibreCAD macOS — crafted fixture: small $DIMTXT (0.125) + $DIMSCALE 1.0 + formula textOverride.
+999
+Pins that an opened drawing's parsed $DIMTXT reaches the dimension resolve (the document
+999
+codec must NOT discard the header), so a constraint dim with a formula textOverride lays out
+999
+its glyphs at ~$DIMTXT (0.125) — small vs the geometry — not the GraphicVariables() default 2.5.
+  0
+SECTION
+  2
+HEADER
+  9
+$ACADVER
+  1
+AC1015
+  9
+$INSUNITS
+ 70
+     1
+  9
+$LUNITS
+ 70
+     2
+  9
+$LUPREC
+ 70
+     3
+  9
+$DIMSTYLE
+  2
+Standard
+  9
+$DIMTXT
+ 40
+0.125
+  9
+$DIMASZ
+ 40
+0.125
+  9
+$DIMSCALE
+ 40
+1.0
+  9
+$DIMLUNIT
+ 70
+     2
+  9
+$DIMDEC
+ 70
+     3
+  0
+ENDSEC
+  0
+SECTION
+  2
+TABLES
+  0
+TABLE
+  2
+LAYER
+ 70
+     1
+  0
+LAYER
+  2
+0
+ 70
+     0
+ 62
+     7
+  6
+CONTINUOUS
+  0
+ENDTAB
+  0
+TABLE
+  2
+DIMSTYLE
+ 70
+     1
+  0
+DIMSTYLE
+  2
+Standard
+ 70
+     0
+ 40
+1.0
+ 41
+0.125
+ 42
+0.0625
+ 44
+0.125
+140
+0.125
+147
+0.09
+271
+     3
+277
+     2
+  0
+ENDTAB
+  0
+ENDSEC
+  0
+SECTION
+  2
+ENTITIES
+  0
+DIMENSION
+  8
+0
+100
+AcDbEntity
+100
+AcDbDimension
+  2
+*D1
+ 10
+3.0
+ 20
+1.0
+ 11
+1.5
+ 21
+1.5
+  1
+KEYheight=.25+(SHAFTid/2)
+ 70
+    32
+ 71
+     5
+ 72
+     0
+  3
+Standard
+100
+AcDbAlignedDimension
+ 13
+0.0
+ 23
+0.0
+ 14
+3.0
+ 24
+0.0
+ 50
+0.0
+  0
+ENDSEC
+  0
+EOF
