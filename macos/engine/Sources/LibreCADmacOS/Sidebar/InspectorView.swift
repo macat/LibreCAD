@@ -46,6 +46,7 @@ struct InspectorView: View {
     var body: some View {
         Form {
             selectionSection
+            propertyPainterSection
             snapGridSection
             toolOptionsSection
         }
@@ -120,13 +121,51 @@ struct InspectorView: View {
         Section("Selection") {
             LabeledContent("Entities", value: "\(records.count) selected")
         }
-        // Common fields that apply to ALL: layer + pen color/width. Each picker
-        // writes the chosen value onto every selected record in one undo step.
+        // Common fields that apply to ALL: layer + pen color/mode/type/width. Each
+        // picker writes the chosen value onto every selected record in one undo step;
+        // a "Reset Pen to Layer" action routes through the painter path.
         MultiCommonEditor(
             records: records,
             layerNames: model.drawing.layers.layers.map(\.name),
-            onCommitAll: commit
+            onCommitAll: commit,
+            onResetPenToLayer: {
+                if model.resetSelectionPenToLayer() { requestRedraw() }
+            }
         )
+    }
+
+    // MARK: Property painter (F20 — match properties / eyedropper)
+
+    /// The property-painter controls: pick up pen + layer from the current single
+    /// selection (the brush), then apply it to a later selection. Always visible so
+    /// the affordance is discoverable; the buttons enable/disable on context (one
+    /// entity to pick up; a brush loaded + a selection to apply). Routes entirely
+    /// through `CanvasModel`'s undoable painter ops.
+    @ViewBuilder
+    private var propertyPainterSection: some View {
+        Section("Property Painter") {
+            LabeledContent("Brush") {
+                Text(model.hasPaintBrush ? "Loaded" : "Empty")
+                    .foregroundStyle(model.hasPaintBrush ? .primary : .secondary)
+            }
+            Button("Pick Up Properties") {
+                _ = model.loadPaintBrushFromSelection()
+            }
+            .disabled(model.selection.ids.count != 1)
+            .help("Copy the selected entity's pen + layer into the brush")
+
+            Button("Apply to Selection") {
+                if model.applyPaintBrushToSelection() { requestRedraw() }
+            }
+            .disabled(!model.hasPaintBrush || model.selection.isEmpty)
+            .help("Stamp the brush's pen + layer onto every selected entity")
+
+            Button("Reset Pen to Layer") {
+                if model.resetSelectionPenToLayer() { requestRedraw() }
+            }
+            .disabled(model.selection.isEmpty)
+            .help("Make the selection inherit each layer's pen again")
+        }
     }
 
     // MARK: Snap & grid

@@ -413,17 +413,47 @@ struct TextStyleEditor: View {
 
 // MARK: - Multi-selection common editor
 
-/// Edits the fields shared by ALL selected entities: layer, pen color, line width.
-/// Each change writes the chosen value onto every selected record, committed as one
-/// undoable group.
+/// Edits the fields shared by ALL selected entities: layer, pen color (+ color
+/// mode), line type, and line width. Each change writes the chosen value onto every
+/// selected record, committed as one undoable group. The "—" sentinel marks a field
+/// whose values DIFFER across the selection ("mixed"); leaving a picker on "—"
+/// commits nothing, so a multi-edit only changes the fields the user explicitly
+/// sets — F21's multi-edit UX, extended beyond the v4 layer/color/width set.
 struct MultiCommonEditor: View {
     let records: [EntityRecord]
     let layerNames: [String]
     let onCommitAll: ([EntityRecord]) -> Void
+    /// Resets every selected entity's pen to `.byLayer` (one undo step). Supplied by
+    /// the Inspector (routes through `CanvasModel.resetSelectionPenToLayer`).
+    var onResetPenToLayer: (() -> Void)?
 
     @State private var layer: String = ""
     @State private var color: Color = .green
     @State private var widthMM: Double = 0.25
+    @State private var colorMode: PenColorMode = .mixed
+    @State private var lineType: LineTypeChoice = .mixed
+
+    /// The pen-color modes a multi-edit can set (plus a "mixed" sentinel so a
+    /// heterogeneous selection shows "—" until the user picks one).
+    private enum PenColorMode: Hashable { case mixed, byLayer, byBlock, explicit }
+
+    /// A line-type choice for the multi-edit (plus "mixed"). Mirrors the common
+    /// `PenLineType` cases the inspector lets a multi-selection set in bulk.
+    private enum LineTypeChoice: Hashable {
+        case mixed, byLayer, solid, dashed, dotted, dashDot, center
+
+        var penLineType: PenLineType? {
+            switch self {
+            case .mixed:   return nil
+            case .byLayer: return .byLayer
+            case .solid:   return .solid
+            case .dashed:  return .dashed
+            case .dotted:  return .dotted
+            case .dashDot: return .dashDot
+            case .center:  return .center
+            }
+        }
+    }
 
     var body: some View {
         Section("Common (applies to all)") {
@@ -438,26 +468,109 @@ struct MultiCommonEditor: View {
                 })
             }
 
+            Picker("Pen color mode", selection: $colorMode) {
+                Text("—").tag(PenColorMode.mixed)
+                Text("By Layer").tag(PenColorMode.byLayer)
+                Text("By Block").tag(PenColorMode.byBlock)
+                Text("Explicit").tag(PenColorMode.explicit)
+            }
+            .onChange(of: colorMode) { _, newMode in
+                switch newMode {
+                case .mixed:    break
+                case .byLayer:  commit { $0.pen.lineColor = .byLayer }
+                case .byBlock:  commit { $0.pen.lineColor = .byBlock }
+                case .explicit: commit { $0.pen.lineColor = .explicit(color.rgbaColor) }
+                }
+            }
+
             ColorPicker("Pen color", selection: $color, supportsOpacity: false)
                 .onChange(of: color) { _, newColor in
                     let rgba = newColor.rgbaColor
-                    onCommitAll(records.map { r in
-                        var copy = r; copy.pen.lineColor = .explicit(rgba); return copy
-                    })
+                    colorMode = .explicit
+                    commit { $0.pen.lineColor = .explicit(rgba) }
                 }
+
+            Picker("Line type", selection: $lineType) {
+                Text("—").tag(LineTypeChoice.mixed)
+                Text("By Layer").tag(LineTypeChoice.byLayer)
+                Text("Solid").tag(LineTypeChoice.solid)
+                Text("Dashed").tag(LineTypeChoice.dashed)
+                Text("Dotted").tag(LineTypeChoice.dotted)
+                Text("Dash-Dot").tag(LineTypeChoice.dashDot)
+                Text("Center").tag(LineTypeChoice.center)
+            }
+            .onChange(of: lineType) { _, newType in
+                guard let lt = newType.penLineType else { return }
+                commit { $0.pen.lineType = lt }
+            }
 
             LabeledContent("Line width (mm)") {
                 TextField("Width", value: $widthMM, format: .number)
                     .frame(width: 90).multilineTextAlignment(.trailing)
                     .onSubmit(commitWidth)
             }
+
+            if let reset = onResetPenToLayer {
+                Button("Reset Pen to Layer", action: reset)
+            }
         }
+        .onAppear(perform: seed)
+        .onChange(of: records.map(\.id)) { _, _ in seed() }
+    }
+
+    /// Commits a per-record edit to EVERY selected record as one undoable group.
+    private func commit(_ edit: (inout EntityRecord) -> Void) {
+        onCommitAll(records.map { r in var copy = r; edit(&copy); return copy })
     }
 
     private func commitWidth() {
-        onCommitAll(records.map { r in
-            var copy = r; copy.pen.lineWidth = .millimeters(max(0, widthMM)); return copy
+        commit { $0.pen.lineWidth = .millimeters(max(0, widthMM)) }
+    }
+
+    /// Seeds the pickers from the selection: a field shared by ALL records shows that
+    /// shared value; a heterogeneous field shows "—" (mixed). So the inspector tells
+    /// the user at a glance which fields already agree across the selection.
+    private func seed() {
+        // Layer (shared name ⇒ that name, else "—").
+        let layers = Set(records.map(\.layer.name))
+        layer = layers.count == 1 ? (layers.first ?? "") : ""
+
+        // Color mode (shared ⇒ that mode, else "mixed"). Also seed the swatch from a
+        // shared explicit color so the ColorPicker shows the right starting color.
+        let modes = Set(records.map { r -> PenColorMode in
+            switch r.pen.lineColor {
+            case .byLayer:  return .byLayer
+            case .byBlock:  return .byBlock
+            case .explicit: return .explicit
+            }
         })
+        colorMode = modes.count == 1 ? (modes.first ?? .mixed) : .mixed
+        if colorMode == .explicit,
+           case .explicit(let rgba)? = records.first?.pen.lineColor {
+            color = Color(rgba: rgba)
+        }
+
+        // Line type (shared ⇒ that type, else "mixed").
+        let types = Set(records.map(\.pen.lineType))
+        if types.count == 1, let only = types.first {
+            switch only {
+            case .byLayer: lineType = .byLayer
+            case .solid:   lineType = .solid
+            case .dashed:  lineType = .dashed
+            case .dotted:  lineType = .dotted
+            case .dashDot: lineType = .dashDot
+            case .center:  lineType = .center
+            default:       lineType = .mixed
+            }
+        } else {
+            lineType = .mixed
+        }
+
+        // Width (shared explicit mm ⇒ that value).
+        let widths = Set(records.map(\.pen.lineWidth))
+        if widths.count == 1, case .millimeters(let mm)? = widths.first {
+            widthMM = mm
+        }
     }
 }
 

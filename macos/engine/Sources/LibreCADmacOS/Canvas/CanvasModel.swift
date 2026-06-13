@@ -967,6 +967,276 @@ final class CanvasModel {
         }
     }
 
+    // MARK: - Live blocks panel ops (F9 sidebar — insert / rename / delete)
+
+    /// Inserts a reference (`.insert`) to the named block at a WORLD point, as ONE
+    /// undoable `.add` (the same path tools use). The new INSERT inherits the active
+    /// layer + a `.byLayer` pen and becomes the selection so the user sees the
+    /// placement. No-op (returns `false`) if the block is unknown. The Blocks sidebar
+    /// calls this for click-to-insert / drag-to-place (the drop point is the world
+    /// location). Re-syncs the spatial index via `applyCommit`'s `.add` arm so the
+    /// insert is immediately selectable / snappable.
+    @discardableResult
+    func insertBlock(named name: String, at point: Vector) -> Bool {
+        guard drawing.blocks.contains(name) else { return false }
+        let record = EntityRecord(
+            id: .placeholder,
+            layer: LayerID(drawing.layers.activeLayerName),
+            pen: .byLayer,
+            flags: .default,
+            kind: .insert(InsertData(blockName: name, insertionPoint: point))
+        )
+        // Add through the undoable group + capture the minted id for selection.
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        let id = drawing.add(record)             // undoable; mints a real id
+        let box = drawing.entity(id)?.boundingBox() ?? record.boundingBox()
+        if !box.isEmpty { quadtree.insert(id, bounds: box) }
+        selection = Selection(ids: [id])
+        modelDirty = true
+        modelVersion &+= 1
+        return true
+    }
+
+    /// Inserts a reference to the named block at the current view CENTER (world), the
+    /// menu/sidebar "Insert" action's default placement when there is no drop point.
+    @discardableResult
+    func insertBlockAtViewCenter(named name: String) -> Bool {
+        let centerScreen = CGPoint(x: viewport.size.width / 2, y: viewport.size.height / 2)
+        return insertBlock(named: name, at: viewport.screenToWorld(centerScreen))
+    }
+
+    /// Renames a block definition (undoable). Existing `.insert`s referencing the old
+    /// name are re-pointed so they keep resolving. Returns `true` on success. The
+    /// sidebar calls this from the inline-rename field.
+    @discardableResult
+    func renameBlock(_ oldName: String, to newName: String) -> Bool {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != oldName,
+              drawing.blocks.contains(oldName), !drawing.blocks.contains(trimmed) else { return false }
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        // Re-point every INSERT that referenced the old name (each undoable).
+        for e in drawing.entities {
+            guard case .insert(var data) = e.kind, data.blockName == oldName else { continue }
+            data.blockName = trimmed
+            var moved = e
+            moved.kind = .insert(data)
+            drawing.replace(moved)
+            let box = moved.boundingBox()
+            if box.isEmpty { quadtree.remove(moved.id) } else { quadtree.update(moved.id, bounds: box) }
+        }
+        let ok = drawing.renameBlock(oldName, to: trimmed)
+        modelDirty = true
+        modelVersion &+= 1
+        return ok
+    }
+
+    /// Deletes a block definition (undoable). Any `.insert` referencing it is removed
+    /// too (a dangling insert would resolve to nothing), so the deletion is coherent;
+    /// the block's MEMBER entities are also removed (they exist only to back the
+    /// definition). The whole op is one undo group. Returns `true` if the block
+    /// existed. The sidebar calls this from the remove button.
+    @discardableResult
+    func deleteBlock(named name: String) -> Bool {
+        guard drawing.blocks.contains(name) else { return false }
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        // Remove every INSERT that referenced this block (each undoable + index-synced).
+        let referencing = drawing.entities.filter {
+            if case .insert(let d) = $0.kind { return d.blockName == name }
+            return false
+        }
+        for e in referencing {
+            drawing.remove(e.id)
+            quadtree.remove(e.id)
+            selection.remove(e.id)
+        }
+        // Drop the definition AND its backing member entities (deletingContents).
+        let members = drawing.blocks.block(named: name)?.entityIDs ?? []
+        drawing.removeBlock(name, deletingContents: true)
+        for id in members { quadtree.remove(id); selection.remove(id) }
+        modelDirty = true
+        modelVersion &+= 1
+        return true
+    }
+
+    // MARK: - Layer ops (F17 — freeze/lock all, per-entity layer ops, layer states)
+
+    /// Freezes / thaws every layer in one undoable step (sidebar "freeze all").
+    func freezeAllLayers(_ frozen: Bool) {
+        drawing.freezeAllLayers(frozen)
+        modelDirty = true
+        modelVersion &+= 1
+    }
+
+    /// Locks / unlocks every layer in one undoable step (sidebar "lock all").
+    func lockAllLayers(_ locked: Bool) {
+        drawing.lockAllLayers(locked)
+        modelDirty = true
+        modelVersion &+= 1
+    }
+
+    /// Sets a layer's printable flag (undoable). Surfaced as a per-layer toggle.
+    func setLayerPrintable(_ name: String, _ printable: Bool) {
+        drawing.setLayerPrintable(name, printable)
+        modelDirty = true
+        modelVersion &+= 1
+    }
+
+    /// Sets a layer's construction flag (undoable). Surfaced as a per-layer toggle.
+    func setLayerConstruction(_ name: String, _ construction: Bool) {
+        drawing.setLayerConstruction(name, construction)
+        modelDirty = true
+        modelVersion &+= 1
+    }
+
+    /// Moves the current selection onto `layer` as ONE undoable group (the "move to
+    /// layer" per-entity layer op). Routes through the inspector-edit path so it is
+    /// undoable + index-synced. No-op for an empty selection / unknown layer.
+    /// Returns whether anything moved.
+    @discardableResult
+    func moveSelectionToLayer(_ layer: String) -> Bool {
+        guard drawing.layers.contains(layer), !selection.isEmpty else { return false }
+        let records = selection.ids.compactMap { id -> EntityRecord? in
+            guard var r = drawing.entity(id), r.layer.name != layer else { return nil }
+            r.layer = LayerID(layer)
+            return r
+        }
+        guard !records.isEmpty else { return false }
+        applyInspectorEdits(records)
+        return true
+    }
+
+    /// "Hide other layers" — freezes every layer EXCEPT the named one, in one
+    /// undoable step (a focus affordance: isolate a layer). The named layer is
+    /// thawed so it is definitely visible. No-op if `layer` is unknown.
+    func isolateLayer(_ layer: String) {
+        guard drawing.layers.contains(layer) else { return }
+        drawing.mutateLayers { table in
+            for l in table.layers {
+                table.setVisible(l.name, l.name == layer)
+            }
+        }
+        modelDirty = true
+        modelVersion &+= 1
+    }
+
+    /// Saves the current layer flags as a named state (undoable). Returns the name
+    /// it was saved under. The sidebar's "save state" action calls this.
+    @discardableResult
+    func saveLayerState(named name: String) -> String {
+        let saved = drawing.saveLayerState(named: name)
+        modelVersion &+= 1
+        return saved
+    }
+
+    /// Restores a named layer state onto the live layers (undoable). Returns whether
+    /// a state was found + applied; nudges the renderer (layer flags affect render).
+    @discardableResult
+    func restoreLayerState(named name: String) -> Bool {
+        let ok = drawing.restoreLayerState(named: name)
+        if ok {
+            modelDirty = true
+            modelVersion &+= 1
+        }
+        return ok
+    }
+
+    /// Removes a named layer state (undoable).
+    func removeLayerState(named name: String) {
+        drawing.removeLayerState(named: name)
+        modelVersion &+= 1
+    }
+
+    // MARK: - Property painter (F20 — match properties / eyedropper)
+
+    /// The "loaded brush" the property painter holds — the pen + layer picked from a
+    /// source entity, applied to subsequent picks. `nil` when no source has been
+    /// picked yet. Observed so the inspector / a status chip can reflect "brush
+    /// loaded". Cleared when the painter is turned off.
+    private(set) var paintBrush: PaintAttributes?
+
+    /// Whether the property-painter mode is armed (the canvas affordance / inspector
+    /// toggle). When ON, a single-selection pick LOADS the brush, and a multi-pick or
+    /// the "apply to selection" action stamps it. Purely interaction policy (not
+    /// document state). Observed so the toolbar/inspector reflect it.
+    var painterArmed: Bool = false
+
+    /// Whether a brush is currently loaded (drives the "apply" affordance's enabled
+    /// state).
+    var hasPaintBrush: Bool { paintBrush != nil }
+
+    /// Loads the property-painter brush from a single source entity (the eyedropper
+    /// pick): captures its pen + layer. No-op (returns `false`) if the id is unknown.
+    /// The inspector / canvas calls this to "pick up" properties.
+    @discardableResult
+    func loadPaintBrush(from id: EntityID) -> Bool {
+        guard let record = drawing.entity(id) else { return false }
+        paintBrush = PaintAttributes(from: record)
+        return true
+    }
+
+    /// Loads the brush from the single selected entity (the inspector's "Pick up
+    /// properties" button when exactly one entity is selected). Returns whether a
+    /// brush was loaded.
+    @discardableResult
+    func loadPaintBrushFromSelection() -> Bool {
+        guard selection.ids.count == 1, let id = selection.ids.first else { return false }
+        return loadPaintBrush(from: id)
+    }
+
+    /// Applies the loaded brush to a target entity id as ONE undoable edit (a paint
+    /// click while armed). No-op if no brush is loaded, the target is unknown, the
+    /// target IS the source (painting onto itself), or the paint would be a no-op.
+    /// Returns whether anything changed.
+    @discardableResult
+    func applyPaintBrush(to id: EntityID,
+                         options: PropertyPainter.Options = .all) -> Bool {
+        guard let brush = paintBrush, let target = drawing.entity(id) else { return false }
+        let painted = PropertyPainter.apply(brush, to: target, options: options)
+        guard painted != target else { return false }
+        applyInspectorEdits([painted])
+        return true
+    }
+
+    /// Applies the loaded brush to the WHOLE current selection as ONE undoable group
+    /// (the inspector's "Apply to selection" button). Only the records that actually
+    /// change are committed. Returns whether anything changed.
+    @discardableResult
+    func applyPaintBrushToSelection(options: PropertyPainter.Options = .all) -> Bool {
+        guard let brush = paintBrush, !selection.isEmpty else { return false }
+        let targets = selection.ids.compactMap { drawing.entity($0) }
+        let changed = PropertyPainter.apply(brush, to: targets, options: options)
+        guard !changed.isEmpty else { return false }
+        applyInspectorEdits(changed)
+        return true
+    }
+
+    /// Resets the pen of the whole current selection back to `.byLayer` (the
+    /// inspector's "Reset pen to layer" — entities inherit their layer's pen again),
+    /// one undoable group. Returns whether anything changed.
+    @discardableResult
+    func resetSelectionPenToLayer() -> Bool {
+        guard !selection.isEmpty else { return false }
+        let targets = selection.ids.compactMap { drawing.entity($0) }
+        let changed = PropertyPainter.resetPenToLayer(targets)
+        guard !changed.isEmpty else { return false }
+        applyInspectorEdits(changed)
+        return true
+    }
+
+    /// Toggles the property-painter armed state. Turning it OFF clears the brush so a
+    /// re-arm starts fresh.
+    func togglePainterArmed() {
+        painterArmed.toggle()
+        if !painterArmed { paintBrush = nil }
+        modelVersion &+= 1
+    }
+
     // MARK: - Selection gizmo (on-canvas transform handles)
 
     /// The world-space (Y-up) axis-aligned bounding box that ENCLOSES the current
