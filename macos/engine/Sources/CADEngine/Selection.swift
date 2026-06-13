@@ -473,3 +473,285 @@ extension Selection {
         return rect.contains(bb.min) && rect.contains(bb.max)
     }
 }
+
+// MARK: - SelectionTraversal — select connected / contour (graph walk by endpoints)
+
+/// Pure, value-only selection-traversal helpers: **Select Connected** (all
+/// entities transitively touching a seed at shared endpoints) and **Select
+/// Contour** (the closed loop a seed belongs to, if one exists).
+///
+/// These mirror LibreCAD's `RS_Selection::selectContour` (the "select contour"
+/// action: walk endpoint-to-endpoint following a chain of touching entities).
+/// They are **additive** — they compute id sets and never mutate the drawing or
+/// the existing `Selection`/`hitTest`/`windowSelect` behavior. The interaction /
+/// menu layer (a later wave) wires them to a ⌘K action; here they are the engine
+/// API + algorithm the UI will call.
+///
+/// ## Connection model (what "touching" means)
+/// Two entities are *connected* iff a free **endpoint** of one lies within
+/// `tolerance` of a free endpoint of the other. Endpoints are the chain-joining
+/// points: line ends, arc / elliptic-arc ends, an OPEN polyline's first+last
+/// vertex, and an open spline / spline-points' first+last control point. CLOSED
+/// shapes (circle, full ellipse, closed polyline, closed spline) and shapes with
+/// no endpoints (point, text, hatch, solid, dimension, insert) are *terminal*:
+/// they are never traversed INTO and never pulled in as neighbors, exactly as a
+/// closed loop has no free end to chain from. A seed that is itself a closed
+/// shape selects only itself (it forms its own trivial contour).
+///
+/// `static` members of a namespaced `enum` (CONVENTIONS §7: no module-scope free
+/// functions in a fan-out target). `@MainActor` because they read `CADDrawing`
+/// (its main-actor-isolated `entities`), like `SelectionPolicy` / `windowSelect`.
+public enum SelectionTraversal {
+
+    // MARK: Endpoints (chain-joining points)
+
+    /// The **free endpoints** of an entity — the points at which it can chain to a
+    /// neighbor. Open chainable kinds (line / arc / open polyline / elliptic arc /
+    /// open spline / open spline-points) return their two free ends; closed or
+    /// endpoint-less kinds (circle, full ellipse, closed polyline/spline, point,
+    /// text, mtext, hatch, solid, dimension, insert) return `[]` and so act as
+    /// chain terminators. Only `.valid` points are returned.
+    ///
+    /// (Independent of `Snapping.endpoints(of:)` so `Selection.swift` stays
+    /// self-contained; the connection semantics here are deliberately "free ends
+    /// only", not "every snappable vertex".)
+    public static func endpoints(of entity: EntityRecord) -> [Vector] {
+        let pts: [Vector]
+        switch entity.kind {
+        case .line(let d):
+            pts = [d.start, d.end]
+
+        case .arc(let d):
+            let r = abs(d.radius)
+            pts = [
+                d.center + Vector.polar(radius: r, angle: d.startAngle),
+                d.center + Vector.polar(radius: r, angle: d.endAngle),
+            ]
+
+        case .polyline(let d):
+            // Only an OPEN polyline has free ends (a closed one chains to nothing).
+            guard !d.closed,
+                  let f = d.vertices.first?.point,
+                  let l = d.vertices.last?.point else { return [] }
+            pts = [f, l]
+
+        case .ellipse(let d):
+            // Only an elliptic ARC has free ends (a whole ellipse is closed).
+            guard d.isArc else { return [] }
+            pts = [d.ellipsePoint(d.startAngle), d.ellipsePoint(d.endAngle)]
+
+        case .spline(let d):
+            guard !d.closed, let f = d.controlPoints.first, let l = d.controlPoints.last else {
+                return []
+            }
+            pts = [f, l]
+
+        case .splinePoints(let d):
+            guard !d.closed, let f = d.controlPoints.first, let l = d.controlPoints.last else {
+                return []
+            }
+            pts = [f, l]
+
+        case .point, .circle, .text, .mtext, .hatch, .solid, .dimension, .insert:
+            // No free ends to chain from (closed/areal/annotative). Terminal.
+            return []
+        }
+        return pts.filter(\.valid)
+    }
+
+    /// Whether `a` and `b` are connected: some free endpoint of `a` is within
+    /// `tolerance` of some free endpoint of `b`. Symmetric. Entities with no free
+    /// endpoints (closed/terminal kinds) are never connected to anything.
+    public static func areConnected(_ a: EntityRecord, _ b: EntityRecord,
+                                    tolerance: Double = Tolerance.distance) -> Bool {
+        let tolSq = Swift.max(tolerance, 0) * Swift.max(tolerance, 0)
+        let ea = endpoints(of: a)
+        guard !ea.isEmpty else { return false }
+        let eb = endpoints(of: b)
+        guard !eb.isEmpty else { return false }
+        for pa in ea {
+            for pb in eb where (pa - pb).squared <= tolSq {
+                return true
+            }
+        }
+        return false
+    }
+
+    // MARK: Select Connected (transitive closure over shared endpoints)
+
+    /// Every entity transitively connected to `seed` by shared endpoints — the
+    /// connected component (a chain or a network) the seed belongs to, INCLUDING
+    /// the seed itself. A disjoint group that does not touch the component is NOT
+    /// included.
+    ///
+    /// BFS over the touch graph: from each frontier entity, pull in every visible
+    /// entity whose free endpoint coincides (within `tolerance`) with one of the
+    /// frontier's. Candidates are quadtree-prefiltered per frontier endpoint
+    /// (AABB-near), so the cost is ~O(component · localCandidates), not O(n²).
+    ///
+    /// Returns just `{seed}` when the seed has no free endpoints (a closed shape,
+    /// point, text, etc.) or has no touching neighbors. Returns `[]` if `seed`
+    /// is missing/hidden from the drawing.
+    ///
+    /// - Parameters:
+    ///   - seed: the entity the walk starts from.
+    ///   - drawing: the document (entity lookup by id).
+    ///   - quadtree: the shared spatial index (AABB candidate prefilter).
+    ///   - tolerance: endpoint-coincidence tolerance in world units
+    ///     (defaults to the engine `Tolerance.distance`; a UI may pass a larger
+    ///     pick-aperture-scaled value for "looks touching").
+    @MainActor
+    public static func connected(seed: EntityID,
+                                 in drawing: CADDrawing,
+                                 using quadtree: Quadtree,
+                                 tolerance: Double = Tolerance.distance) -> Set<EntityID> {
+        guard let seedEntity = drawing.entity(seed),
+              seedEntity.flags.contains(.visible) else { return [] }
+
+        let tol = Swift.max(tolerance, 0)
+        var visited: Set<EntityID> = [seed]
+        var frontier: [EntityRecord] = [seedEntity]
+
+        while let current = frontier.popLast() {
+            for p in endpoints(of: current) {
+                // AABB-near candidates around this endpoint (a tiny query box).
+                let box = queryBox(around: p, tolerance: tol)
+                for candidateID in quadtree.query(region: box) {
+                    guard !visited.contains(candidateID),
+                          let cand = drawing.entity(candidateID),
+                          cand.flags.contains(.visible),
+                          areConnected(current, cand, tolerance: tol) else { continue }
+                    visited.insert(candidateID)
+                    frontier.append(cand)
+                }
+            }
+        }
+        return visited
+    }
+
+    // MARK: Select Contour (follow a single closed loop from a seed)
+
+    /// The closed contour `seed` belongs to, as an ordered set of entity ids, or
+    /// `nil` if the seed is NOT part of a closed loop.
+    ///
+    /// Walks the chain endpoint-to-endpoint in ONE direction from the seed: at each
+    /// step the current entity's far endpoint must coincide (within `tolerance`)
+    /// with **exactly one** unvisited neighbor's endpoint — a clean, unambiguous
+    /// continuation. The walk succeeds (returns the loop) only when it arrives back
+    /// at the seed's starting endpoint, closing the ring. It returns `nil` on a
+    /// dead end (open chain), an ambiguous branch (a junction where the contour is
+    /// not well-defined), or a seed with no free endpoints.
+    ///
+    /// A self-closed single entity (a closed polyline / circle / full ellipse /
+    /// closed spline) is its own trivial contour: `{seed}`.
+    ///
+    /// - Parameters:
+    ///   - seed: the entity the contour walk starts from.
+    ///   - drawing / quadtree: document + spatial index (as `connected`).
+    ///   - tolerance: endpoint-coincidence tolerance in world units.
+    @MainActor
+    public static func contour(seed: EntityID,
+                               in drawing: CADDrawing,
+                               using quadtree: Quadtree,
+                               tolerance: Double = Tolerance.distance) -> Set<EntityID>? {
+        guard let seedEntity = drawing.entity(seed),
+              seedEntity.flags.contains(.visible) else { return nil }
+
+        let seedEnds = endpoints(of: seedEntity)
+        // A self-closed single entity is its own trivial contour.
+        if seedEnds.isEmpty {
+            return isSelfClosed(seedEntity) ? [seed] : nil
+        }
+        // Need two distinct free ends to walk a loop (a degenerate one-end entity
+        // can't form a contour by itself).
+        guard seedEnds.count >= 2 else { return nil }
+
+        let tol = Swift.max(tolerance, 0)
+        let tolSq = tol * tol
+
+        // We start at seedEnds[0] and try to return to it, leaving via seedEnds[1].
+        let loopClose = seedEnds[0]
+        var openEnd = seedEnds[1]          // the end we must continue from next
+        var visited: Set<EntityID> = [seed]
+
+        // Bound the walk by entity count to guard against pathological cycles.
+        let maxSteps = drawing.count + 1
+        var steps = 0
+
+        while steps <= maxSteps {
+            steps += 1
+
+            // Closed the loop back to the seed's start endpoint?
+            if visited.count > 1, (openEnd - loopClose).squared <= tolSq {
+                return visited
+            }
+
+            // Find the UNIQUE unvisited neighbor touching `openEnd`.
+            guard let (nextEntity, nextFarEnd) = uniqueNeighbor(
+                from: openEnd, excluding: visited,
+                in: drawing, using: quadtree, tolerance: tol
+            ) else {
+                return nil   // dead end or ambiguous branch ⇒ no clean contour
+            }
+
+            visited.insert(nextEntity.id)
+            openEnd = nextFarEnd
+        }
+        return nil   // exceeded the step bound without closing
+    }
+
+    /// The single unvisited entity whose free endpoint coincides with `point`,
+    /// together with that entity's OTHER (far) free endpoint to continue from.
+    /// Returns `nil` if there is no such entity OR more than one (an ambiguous
+    /// branch the contour walk must not cross).
+    @MainActor
+    static func uniqueNeighbor(from point: Vector,
+                               excluding visited: Set<EntityID>,
+                               in drawing: CADDrawing,
+                               using quadtree: Quadtree,
+                               tolerance: Double) -> (EntityRecord, Vector)? {
+        let tol = Swift.max(tolerance, 0)
+        let tolSq = tol * tol
+        let box = queryBox(around: point, tolerance: tol)
+
+        var match: (EntityRecord, Vector)? = nil
+        for candidateID in quadtree.query(region: box) {
+            guard !visited.contains(candidateID),
+                  let cand = drawing.entity(candidateID),
+                  cand.flags.contains(.visible) else { continue }
+            let ends = endpoints(of: cand)
+            guard ends.count >= 2 else { continue }
+            // Which end touches `point`? The other is where we continue.
+            let touches0 = (ends[0] - point).squared <= tolSq
+            let touches1 = (ends[1] - point).squared <= tolSq
+            guard touches0 || touches1 else { continue }
+            let farEnd = touches0 ? ends[1] : ends[0]
+            if match != nil { return nil }   // >1 candidate ⇒ ambiguous branch
+            match = (cand, farEnd)
+        }
+        return match
+    }
+
+    /// Whether `entity` is a single self-closed loop (closed polyline / circle /
+    /// full ellipse / closed spline / closed spline-points) — its own contour.
+    static func isSelfClosed(_ entity: EntityRecord) -> Bool {
+        switch entity.kind {
+        case .circle:                return true
+        case .ellipse(let d):        return !d.isArc
+        case .polyline(let d):       return d.closed
+        case .spline(let d):         return d.closed
+        case .splinePoints(let d):   return d.closed
+        default:                     return false
+        }
+    }
+
+    /// A small AABB centered on `point`, padded by `tolerance` (clamped to at
+    /// least `Tolerance.distance` so a zero tolerance still yields a non-degenerate
+    /// query region for the quadtree AABB prefilter).
+    @inline(__always)
+    static func queryBox(around point: Vector, tolerance: Double) -> AABB {
+        let pad = Swift.max(tolerance, Tolerance.distance)
+        let off = Vector(pad, pad)
+        return AABB(min: point - off, max: point + off)
+    }
+}
