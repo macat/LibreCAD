@@ -56,6 +56,8 @@ struct DocumentSettingsView: View {
                     .tabItem { Label("Grid & Snap", systemImage: "grid") }
                 DimensionsSettingsTab(model: model, controllerBox: controllerBox)
                     .tabItem { Label("Dimensions", systemImage: "arrow.left.and.right") }
+                PointsSettingsTab(model: model, controllerBox: controllerBox)
+                    .tabItem { Label("Points", systemImage: "smallcircle.filled.circle") }
                 LayersSettingsTab(model: model)
                     .tabItem { Label("Layers", systemImage: "square.3.layers.3d") }
                 PaperSettingsTab(model: model)
@@ -248,6 +250,105 @@ private struct DimensionsSettingsTab: View {
             .frame(width: 90)
             .multilineTextAlignment(.trailing)
         }
+    }
+}
+
+// MARK: - Points tab (point display styles — $PDMODE / $PDSIZE)
+
+/// Document-default point display style: the marker glyph (`$PDMODE` base —
+/// dot / none / plus / cross / tick), the circle/square enclosure bits, and the
+/// marker size (`$PDSIZE`). These feed the `ResolveContext.pointStyleProvider`
+/// hook so a point WITHOUT an explicit per-entity style picks them up (the D4
+/// inherit pattern), and they round-trip via the `$PDMODE`/`$PDSIZE` header vars.
+///
+/// Each edit live-applies through the same undoable header-var funnel the other
+/// tabs use (`CADDrawing.mutateGraphicVariables`), bumping the model version so the
+/// renderer re-resolves every point, then requests a redraw.
+private struct PointsSettingsTab: View {
+    let model: CanvasModel
+    let controllerBox: CADCanvasView.ControllerBox
+
+    var body: some View {
+        Form {
+            Section("Default point style") {
+                Picker("Marker", selection: Binding(
+                    get: { model.drawing.graphicVariables.pointDisplayMode.glyph },
+                    set: { setGlyph($0) }
+                )) {
+                    ForEach(PointDisplayMode.Glyph.allCases, id: \.self) { g in
+                        Text(g.settingsLabel).tag(g)
+                    }
+                }
+                Toggle("Enclose in circle", isOn: Binding(
+                    get: { model.drawing.graphicVariables.pointDisplayMode.hasCircle },
+                    set: { setCircle($0) }
+                ))
+                Toggle("Enclose in square", isOn: Binding(
+                    get: { model.drawing.graphicVariables.pointDisplayMode.hasSquare },
+                    set: { setSquare($0) }
+                ))
+            }
+
+            Section("Marker size") {
+                LabeledContent("Size") {
+                    TextField("world units (0 = auto)", value: Binding(
+                        get: { model.drawing.graphicVariables.pointSize },
+                        set: { setSize($0) }
+                    ), format: .number)
+                    .frame(width: 110)
+                    .multilineTextAlignment(.trailing)
+                }
+                Text("A size of 0 uses the built-in default marker size.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        // A point's drawn marker depends on these defaults, so redraw on change.
+        .onDisappear { controllerBox.controller?.requestRedraw() }
+    }
+
+    // MARK: Live-apply funnel (mirrors CanvasModel.applySetting, kept in this file)
+
+    /// Applies one `$PDMODE`/`$PDSIZE` edit through the undoable engine mutator,
+    /// bumps the model version (so the renderer re-resolves points) + marks the
+    /// document dirty, and requests a canvas redraw. Mirrors `CanvasModel`'s private
+    /// `applySetting`; kept here so the Points tab needs no CanvasModel surface.
+    private func apply(_ body: (inout GraphicVariables) -> Void) {
+        model.drawing.mutateGraphicVariables(body)
+        model.modelDirty = true
+        model.modelVersion &+= 1
+        controllerBox.controller?.requestRedraw()
+    }
+
+    private func setGlyph(_ g: PointDisplayMode.Glyph) {
+        apply {
+            let cur = $0.pointDisplayMode
+            $0.pointDisplayMode = PointDisplayMode(
+                glyph: g, circle: cur.hasCircle, square: cur.hasSquare)
+        }
+    }
+
+    private func setCircle(_ on: Bool) {
+        apply {
+            let cur = $0.pointDisplayMode
+            $0.pointDisplayMode = PointDisplayMode(
+                glyph: cur.glyph, circle: on, square: cur.hasSquare)
+        }
+    }
+
+    private func setSquare(_ on: Bool) {
+        apply {
+            let cur = $0.pointDisplayMode
+            $0.pointDisplayMode = PointDisplayMode(
+                glyph: cur.glyph, circle: cur.hasCircle, square: on)
+        }
+    }
+
+    private func setSize(_ s: Double) {
+        // A negative size is meaningless for the resolve fallback; clamp to 0
+        // ("auto") so a stray value can't make markers invisible.
+        apply { $0.pointSize = Swift.max(0, s) }
     }
 }
 
@@ -483,6 +584,19 @@ private extension LinearFormat {
         case .architectural: return "Architectural"
         case .fractional: return "Fractional"
         case .architecturalMetric: return "Architectural (metric)"
+        }
+    }
+}
+
+private extension PointDisplayMode.Glyph {
+    /// A friendly settings label for the point-marker picker.
+    var settingsLabel: String {
+        switch self {
+        case .dot:   return "Dot"
+        case .none:  return "None"
+        case .plus:  return "Plus (+)"
+        case .cross: return "Cross (×)"
+        case .tick:  return "Tick"
         }
     }
 }

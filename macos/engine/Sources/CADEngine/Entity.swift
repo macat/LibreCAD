@@ -20,10 +20,109 @@ import Foundation
 
 // MARK: - Per-entity defining data (the RS_*Data equivalents)
 
-/// `RS_PointData` — a single position.
+/// The on-screen display style for a point entity — the value-type port of
+/// AutoCAD's `$PDMODE` point-marker encoding (`RS_Point` honors the document
+/// `$PDMODE`/`$PDSIZE`). A `PointDisplayMode` wraps the raw DXF `$PDMODE` integer
+/// so it round-trips losslessly, and decodes that integer into a **base glyph**
+/// (the low bits) plus two independent **enclosure bits** (a circle and/or a
+/// square drawn AROUND the glyph). The resolve step (`Resolve.swift` `.point`
+/// arm) reads these to emit the marker geometry.
+///
+/// ## `$PDMODE` encoding (AutoCAD)
+/// - Low value (bits 0–2, i.e. `value & 0b111`) selects the base glyph:
+///   `0` dot · `1` none (empty) · `2` plus (+) · `3` cross (×) · `4` tick (↑).
+/// - Bit 5 (`+32`) draws a **circle** around the glyph.
+/// - Bit 6 (`+64`) draws a **square** around the glyph.
+///
+/// So e.g. `$PDMODE = 35` is `3` (cross) `+ 32` (circle); `$PDMODE = 66` is
+/// `2` (plus) `+ 64` (square). The full combination space is supported (any base
+/// glyph with either / both enclosures), not just a fixed subset.
+public struct PointDisplayMode: Sendable, Hashable, Codable {
+    /// The base marker glyph (`$PDMODE` low bits).
+    public enum Glyph: Int, Sendable, Hashable, Codable, CaseIterable {
+        /// A single dot — `$PDMODE` base `0` (the default).
+        case dot = 0
+        /// Nothing drawn for the glyph itself (an empty marker; only the
+        /// enclosure bits, if any, draw) — `$PDMODE` base `1`.
+        case none = 1
+        /// A plus sign `+` (axis-aligned) — `$PDMODE` base `2`.
+        case plus = 2
+        /// An X (diagonal cross) — `$PDMODE` base `3`.
+        case cross = 3
+        /// A vertical tick running UP from the point — `$PDMODE` base `4`.
+        case tick = 4
+    }
+
+    /// The raw DXF `$PDMODE` integer (round-trips losslessly). Decoded into the
+    /// `glyph` + `hasCircle`/`hasSquare` accessors below.
+    public var rawMode: Int
+
+    public init(rawMode: Int) { self.rawMode = rawMode }
+
+    /// Builds a mode from a base glyph + the two enclosure flags.
+    public init(glyph: Glyph, circle: Bool = false, square: Bool = false) {
+        self.rawMode = glyph.rawValue | (circle ? 32 : 0) | (square ? 64 : 0)
+    }
+
+    /// The base glyph (`rawMode & 0b111`). An unknown low value falls back to a
+    /// dot so an exotic `$PDMODE` still renders something.
+    public var glyph: Glyph { Glyph(rawValue: rawMode & 0b111) ?? .dot }
+
+    /// Whether a circle is drawn around the glyph (`$PDMODE` bit 5, `+32`).
+    public var hasCircle: Bool { (rawMode & 32) != 0 }
+
+    /// Whether a square is drawn around the glyph (`$PDMODE` bit 6, `+64`).
+    public var hasSquare: Bool { (rawMode & 64) != 0 }
+
+    // Named convenience values (the common AutoCAD point styles).
+    /// `$PDMODE 0` — a single dot (the engine default).
+    public static let dot = PointDisplayMode(rawMode: 0)
+    /// `$PDMODE 1` — nothing drawn.
+    public static let none = PointDisplayMode(glyph: .none)
+    /// `$PDMODE 2` — a plus sign.
+    public static let plus = PointDisplayMode(glyph: .plus)
+    /// `$PDMODE 3` — an X.
+    public static let cross = PointDisplayMode(glyph: .cross)
+    /// `$PDMODE 4` — a vertical tick.
+    public static let tick = PointDisplayMode(glyph: .tick)
+    /// `$PDMODE 32` — a circle around a dot.
+    public static let circle = PointDisplayMode(glyph: .dot, circle: true)
+    /// `$PDMODE 64` — a square around a dot.
+    public static let square = PointDisplayMode(glyph: .dot, square: true)
+}
+
+/// `RS_PointData` — a single position, plus its on-screen display style.
+///
+/// `style` is ADDITIVE (decision §7): it defaults to `.dot` so existing data and
+/// every existing caller is unchanged, and it decodes back-compatibly (a point
+/// serialized before this field decodes to `.dot`). A point with the default
+/// `.dot` style resolves to the historical single-point marker (so the existing
+/// point/render tests are unaffected); any other style resolves to its marker
+/// glyph geometry. A point whose style is left at `.dot` (the inherit sentinel —
+/// see the resolve arm) picks up the document `$PDMODE`/`$PDSIZE` default.
 public struct PointData: Sendable, Hashable, Codable {
     public var position: Vector
-    public init(position: Vector) { self.position = position }
+    /// The point's display style (`$PDMODE` encoding). Defaults to `.dot`. When
+    /// left at `.dot`, the resolve step substitutes the document `$PDMODE`
+    /// default so a drawing-wide point style applies to points with no explicit
+    /// per-entity style.
+    public var style: PointDisplayMode
+    public init(position: Vector, style: PointDisplayMode = .dot) {
+        self.position = position
+        self.style = style
+    }
+}
+
+// MARK: - Decodable (back-compat: tolerate a missing point style → `.dot`)
+
+extension PointData {
+    private enum CodingKeys: String, CodingKey { case position, style }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        position = try c.decode(Vector.self, forKey: .position)
+        style = try c.decodeIfPresent(PointDisplayMode.self, forKey: .style) ?? .dot
+    }
 }
 
 /// `RS_LineData` — two endpoints.
