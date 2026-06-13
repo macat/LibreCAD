@@ -53,7 +53,8 @@ struct LayersSidebar: View {
     var body: some View {
         List(selection: $selectedLayer) {
             layersSection
-            blocksSection
+            layerStatesSection
+            BlocksSection(model: model, controllerBox: controllerBox)
         }
         .listStyle(.sidebar)
         .frame(minWidth: 220, idealWidth: 260)
@@ -75,39 +76,109 @@ struct LayersSidebar: View {
 
     @ViewBuilder
     private var layersSection: some View {
-        Section("Layers") {
+        Section {
             ForEach(model.drawing.layers.layers) { layer in
                 LayerRow(
                     layer: layer,
                     isActive: layer.name == model.drawing.layers.activeLayerName,
                     onToggleVisible: { setVisible(layer.name, $0) },
                     onToggleLocked: { setLocked(layer.name, $0) },
+                    onTogglePrintable: { setPrintable(layer.name, $0) },
+                    onToggleConstruction: { setConstruction(layer.name, $0) },
                     onColorChange: { setColor(layer.name, $0) },
                     onRename: { rename(layer.name, to: $0) }
                 )
                 .tag(layer.name)
+                // Per-entity / per-layer ops (F17): right-click a layer row.
+                .contextMenu { layerRowMenu(layer) }
+            }
+        } header: {
+            // Section header with the bulk freeze/lock-all affordances (F17).
+            HStack {
+                Text("Layers")
+                Spacer()
+                Button {
+                    freezeAll(true)
+                } label: { Image(systemName: "snowflake") }
+                    .buttonStyle(.borderless)
+                    .help("Freeze all layers")
+                Button {
+                    freezeAll(false)
+                } label: { Image(systemName: "sun.max") }
+                    .buttonStyle(.borderless)
+                    .help("Thaw all layers")
+                Button {
+                    lockAll(true)
+                } label: { Image(systemName: "lock") }
+                    .buttonStyle(.borderless)
+                    .help("Lock all layers")
+                Button {
+                    lockAll(false)
+                } label: { Image(systemName: "lock.open") }
+                    .buttonStyle(.borderless)
+                    .help("Unlock all layers")
             }
         }
     }
 
-    // MARK: Blocks / Views stub (read-only)
+    /// The right-click menu on a layer row: activate it, move the current selection
+    /// onto it, or isolate it (hide every other layer). Per-entity layer ops (F17).
+    @ViewBuilder
+    private func layerRowMenu(_ layer: Layer) -> some View {
+        Button("Set Active") {
+            model.drawing.setActiveLayer(layer.name)
+            selectedLayer = layer.name
+            syncRenderAfterLayerEdit()
+        }
+        Button("Move Selection Here") {
+            if model.moveSelectionToLayer(layer.name) { syncRenderAfterLayerEdit() }
+        }
+        .disabled(model.selection.isEmpty)
+        Divider()
+        Button("Isolate (Hide Others)") {
+            model.isolateLayer(layer.name)
+            syncRenderAfterLayerEdit()
+        }
+    }
+
+    // MARK: Layer states (F17 — named snapshots of all layer flags)
 
     @ViewBuilder
-    private var blocksSection: some View {
-        Section("Blocks") {
-            let blocks = model.drawing.blocks.blocks
-            if blocks.isEmpty {
-                Text("No blocks")
+    private var layerStatesSection: some View {
+        let states = model.drawing.layerStates.states
+        Section {
+            if states.isEmpty {
+                Text("No saved states")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(blocks) { block in
-                    // TODO(backlog): block ops (insert / edit / explode / activate)
-                    // and a Views section. Read-only listing for now so the sidebar
-                    // shows the document's full structure.
-                    Label(block.name, systemImage: "square.on.square")
-                        .foregroundStyle(.secondary)
+                ForEach(states) { state in
+                    HStack(spacing: 8) {
+                        Image(systemName: "rectangle.stack")
+                            .foregroundStyle(.secondary)
+                        Text(state.name)
+                        Spacer(minLength: 0)
+                        Button {
+                            restoreLayerState(state.name)
+                        } label: { Image(systemName: "arrow.uturn.backward.circle") }
+                            .buttonStyle(.borderless)
+                            .help("Restore this layer state")
+                        Button {
+                            model.removeLayerState(named: state.name)
+                        } label: { Image(systemName: "trash") }
+                            .buttonStyle(.borderless)
+                            .help("Delete this layer state")
+                    }
+                    .padding(.vertical, 2)
                 }
+            }
+        } header: {
+            HStack {
+                Text("Layer States")
+                Spacer()
+                Button { saveCurrentLayerState() } label: { Image(systemName: "plus") }
+                    .buttonStyle(.borderless)
+                    .help("Save the current layer flags as a new state")
             }
         }
     }
@@ -155,6 +226,37 @@ struct LayersSidebar: View {
         // Lock affects editability only, not pixels — still bump so any future
         // lock-aware overlay stays consistent; cheap.
         syncRenderAfterLayerEdit()
+    }
+
+    private func setPrintable(_ name: String, _ printable: Bool) {
+        model.setLayerPrintable(name, printable)
+        syncRenderAfterLayerEdit()
+    }
+
+    private func setConstruction(_ name: String, _ construction: Bool) {
+        model.setLayerConstruction(name, construction)
+        syncRenderAfterLayerEdit()
+    }
+
+    private func freezeAll(_ frozen: Bool) {
+        model.freezeAllLayers(frozen)
+        syncRenderAfterLayerEdit()
+    }
+
+    private func lockAll(_ locked: Bool) {
+        model.lockAllLayers(locked)
+        syncRenderAfterLayerEdit()
+    }
+
+    /// Saves the current layer flags under a fresh auto-generated state name. (A
+    /// rename field on the row lets the user retitle it; this keeps the affordance a
+    /// single click.)
+    private func saveCurrentLayerState() {
+        _ = model.saveLayerState(named: model.drawing.layerStates.newName())
+    }
+
+    private func restoreLayerState(_ name: String) {
+        if model.restoreLayerState(named: name) { syncRenderAfterLayerEdit() }
     }
 
     private func setColor(_ name: String, _ color: RGBAColor) {
@@ -231,6 +333,8 @@ private struct LayerRow: View {
     let isActive: Bool
     let onToggleVisible: (Bool) -> Void
     let onToggleLocked: (Bool) -> Void
+    let onTogglePrintable: (Bool) -> Void
+    let onToggleConstruction: (Bool) -> Void
     let onColorChange: (RGBAColor) -> Void
     let onRename: (String) -> Void
 
@@ -261,6 +365,28 @@ private struct LayerRow: View {
             }
             .buttonStyle(.borderless)
             .help(layer.isLocked ? "Unlock layer" : "Lock layer")
+
+            // Printable (printer / printer.dotmatrix → setLayerPrintable). A
+            // non-printable layer draws on screen but is excluded from plotted output.
+            Button {
+                onTogglePrintable(!layer.isPrintable)
+            } label: {
+                Image(systemName: layer.isPrintable ? "printer" : "printer.slash")
+                    .foregroundStyle(layer.isPrintable ? Color.primary : .secondary)
+            }
+            .buttonStyle(.borderless)
+            .help(layer.isPrintable ? "Exclude from print" : "Include in print")
+
+            // Construction (ruler → setLayerConstruction). A construction layer holds
+            // helper geometry and is never printed; the toggle marks the intent.
+            Button {
+                onToggleConstruction(!layer.isConstruction)
+            } label: {
+                Image(systemName: layer.isConstruction ? "ruler.fill" : "ruler")
+                    .foregroundStyle(layer.isConstruction ? Color.orange : .secondary)
+            }
+            .buttonStyle(.borderless)
+            .help(layer.isConstruction ? "Clear construction flag" : "Mark as construction layer")
 
             // Color swatch (tap → ColorPicker → setLayerColor). The label is empty
             // so only the well shows; macOS renders it as a tappable swatch.

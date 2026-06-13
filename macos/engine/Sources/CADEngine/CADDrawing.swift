@@ -544,6 +544,15 @@ public final class CADDrawing {
     /// emitted on write so save preserves named styles + their ext-line offsets.
     public var dimStyles = DimStyleTable()
 
+    /// The named layer-state registry (feature-catalog F17 / AutoCAD LAYERSTATE).
+    /// Each entry is a snapshot of every layer's display/edit flags the user saved;
+    /// `restoreLayerState` re-applies one onto the live `layers` table through the
+    /// undoable funnel. App-local SESSION state: DXF has no LAYERSTATE table, so this
+    /// is not serialized into the .dxf payload, but every mutation IS undoable (the
+    /// value-snapshot funnel below) so save/restore + ⌘Z behave consistently within
+    /// a session.
+    public private(set) var layerStates = LayerStateTable()
+
     /// The `UndoManager` mutations register with. Injected by the document layer
     /// (SwiftUI hands one in from `DocumentGroup`); nil == undo disabled.
     public weak var undoManager: UndoManager?
@@ -741,6 +750,69 @@ public final class CADDrawing {
     /// Sets a layer's construction flag. Undoable.
     public func setLayerConstruction(_ name: String, _ construction: Bool) {
         mutateLayers { $0.setConstruction(name, construction) }
+    }
+
+    /// Freezes (`true`) or thaws (`false`) EVERY layer in one undoable step
+    /// (`RS_LayerList::freezeAll`). Used by the sidebar's freeze-all affordance.
+    public func freezeAllLayers(_ frozen: Bool) {
+        mutateLayers { $0.freezeAll(frozen) }
+    }
+
+    /// Locks (`true`) or unlocks (`false`) EVERY layer in one undoable step
+    /// (`RS_LayerList::lockAll`). Used by the sidebar's lock-all affordance.
+    public func lockAllLayers(_ locked: Bool) {
+        mutateLayers { $0.lockAll(locked) }
+    }
+
+    // MARK: - Layer states (value-snapshot undo of the whole LayerStateTable)
+
+    /// Whole-table layer-state mutation with undo (the same value-snapshot scheme as
+    /// `mutateLayers`/`mutateBlocks`; `LayerStateTable` is a value type so the undo
+    /// snapshot is one struct copy, ADR-002). No-op edits don't pollute undo.
+    public func mutateLayerStates(_ body: (inout LayerStateTable) -> Void) {
+        let prior = layerStates
+        body(&layerStates)
+        guard layerStates != prior else { return }
+        registerUndo { drawing in
+            drawing.mutateLayerStates { $0 = prior }
+        }
+    }
+
+    /// Saves the CURRENT layer flags as a named state (overwriting any same-named
+    /// state — AutoCAD LAYERSTATE Save). Undoable. Returns the name it was saved
+    /// under (the requested name, trimmed; empty falls back to a fresh `State-N`).
+    @discardableResult
+    public func saveLayerState(named requestedName: String) -> String {
+        let trimmed = requestedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = trimmed.isEmpty ? layerStates.newName() : trimmed
+        let snapshot = LayerState(name: name, capturing: layers)
+        mutateLayerStates { $0.upsert(snapshot) }
+        return name
+    }
+
+    /// Restores a named layer state onto the live layer table as ONE undoable step
+    /// (so ⌘Z reverts the whole flag restore). Each captured layer that still exists
+    /// gets its frozen/lock/print/construction flags re-applied; layers added since
+    /// the snapshot are untouched, captured-but-deleted layers skipped. No-op if the
+    /// state is unknown. Returns `true` if a state was found + applied.
+    @discardableResult
+    public func restoreLayerState(named name: String) -> Bool {
+        guard let state = layerStates.state(named: name) else { return false }
+        mutateLayers { state.apply(to: &$0) }
+        return true
+    }
+
+    /// Removes a named layer state (undoable). No-op if absent.
+    public func removeLayerState(named name: String) {
+        mutateLayerStates { $0.remove(named: name) }
+    }
+
+    /// Renames a layer state (undoable). Returns `true` on success.
+    @discardableResult
+    public func renameLayerState(_ oldName: String, to newName: String) -> Bool {
+        var ok = false
+        mutateLayerStates { ok = $0.rename(oldName, to: newName) }
+        return ok
     }
 
     // MARK: - Block mutations (value-snapshot undo of the whole BlockTable)
