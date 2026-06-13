@@ -276,16 +276,22 @@ struct DisplayKindsTests {
         #expect(geo.fills[0].loops[1] == hole.map(\.point))
     }
 
-    @Test("pattern hatch (solidFill == false) still fills its boundary for visibility")
-    func patternHatchFallsBackToSolid() {
+    @Test("pattern hatch (a KNOWN .pat) resolves to clipped pattern LINES, not a fill")
+    func patternHatchResolvesToLines() {
+        // ANSI31 is a bundled `.pat` pattern (v5 W4a). A non-solid hatch naming a
+        // known pattern now resolves to its clipped pattern lines (polylines),
+        // NOT a solid fill. An UNKNOWN pattern still falls back to solid — see
+        // HatchPatternResolveTests.unknownPatternFallsBackToSolid.
         let ring = (0..<3).map { i in
             PolylineVertex(point: [Vector(0, 0), Vector(10, 0), Vector(5, 8)][i])
         }
         let e = EntityRecord(id: EntityID(1),
                              kind: .hatch(HatchData(loops: [ring], solidFill: false, patternName: "ANSI31")))
         let geo = e.resolve(ResolveContext())
-        #expect(geo.fills.count == 1)
-        #expect(geo.fills[0].loops[0] == ring.map(\.point))
+        #expect(geo.fills.isEmpty)
+        #expect(!geo.polylines.isEmpty)
+        // Each generated pattern line is a 2-point open segment.
+        #expect(geo.polylines.allSatisfy { $0.points.count == 2 && !$0.closed })
     }
 
     @Test("degenerate hatch (< 3 point loop) resolves to no fill, no crash")

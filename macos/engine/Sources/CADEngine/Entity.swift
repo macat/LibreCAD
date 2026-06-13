@@ -316,15 +316,50 @@ public struct TextData: Sendable, Hashable, Codable {
 ///                  its boundary for visibility.
 /// - `patternName`: the hatch pattern name (e.g. `"ANSI31"`), carried for
 ///                  round-trip; `nil`/`"SOLID"` is a solid fill.
+/// - `patternScale`: the pattern scale (DXF code 41) — multiplies the `.pat`
+///                  line spacing/dash lengths when pattern lines are generated.
+///                  `1` is the un-scaled definition. Ignored for a solid fill.
+/// - `patternAngle`: an EXTRA rotation (radians, DXF code 52) applied to the
+///                  whole pattern, on top of each `.pat` line's own angle.
+///                  Ignored for a solid fill.
 public struct HatchData: Sendable, Hashable, Codable {
     public var loops: [[PolylineVertex]]
     public var solidFill: Bool
     public var patternName: String?
+    /// Pattern scale (DXF code 41); `1` == the `.pat` definition's native scale.
+    /// Additive — a hatch born without it (older data) decodes to `1`.
+    public var patternScale: Double
+    /// Extra pattern rotation in radians (DXF code 52), added to each pattern
+    /// line's own angle. Additive — older data decodes to `0`.
+    public var patternAngle: Double
 
-    public init(loops: [[PolylineVertex]], solidFill: Bool = true, patternName: String? = nil) {
+    public init(loops: [[PolylineVertex]], solidFill: Bool = true, patternName: String? = nil,
+                patternScale: Double = 1, patternAngle: Double = 0) {
         self.loops = loops
         self.solidFill = solidFill
         self.patternName = patternName
+        self.patternScale = patternScale
+        self.patternAngle = patternAngle
+    }
+}
+
+// MARK: - Decodable (back-compat: tolerate missing pattern scale/angle)
+
+extension HatchData {
+    private enum CodingKeys: String, CodingKey {
+        case loops, solidFill, patternName, patternScale, patternAngle
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        loops = try c.decode([[PolylineVertex]].self, forKey: .loops)
+        solidFill = try c.decodeIfPresent(Bool.self, forKey: .solidFill) ?? true
+        patternName = try c.decodeIfPresent(String.self, forKey: .patternName)
+        // A non-positive (or absent) scale collapses the pattern; clamp to the
+        // native `1` so older data and degenerate scales still render.
+        let s = try c.decodeIfPresent(Double.self, forKey: .patternScale) ?? 1
+        patternScale = (s.isFinite && s > 0) ? s : 1
+        patternAngle = try c.decodeIfPresent(Double.self, forKey: .patternAngle) ?? 0
     }
 }
 

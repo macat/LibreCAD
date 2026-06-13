@@ -602,6 +602,11 @@ private final class PODBuilder {
             e.kind = Int32(LC_ENT_HATCH.rawValue)
             e.solidFill = d.solidFill ? 1 : 0
             e.textValue = intern(d.patternName ?? (d.solidFill ? "SOLID" : "ANSI31"))
+            // Pattern scale (code 41) + angle (code 52, radians; the C side converts
+            // to DXF degrees). Only meaningful for a pattern hatch, but harmless to
+            // carry for a solid one (libdxfrw emits 41/52 only when !solid).
+            e.hatchScale = d.patternScale > 0 ? d.patternScale : 1
+            e.hatchAngle = d.patternAngle
             let (vptr, vcount, lptr, lcount) = internHatchLoops(d.loops)
             e.vertices = vptr
             e.vertexCount = vcount
