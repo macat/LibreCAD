@@ -55,6 +55,39 @@ import Foundation
 /// perpendicular/radial distance implied by that point (and on its side).
 public struct OffsetTool: Tool {
 
+    // MARK: - Mode (additive — default reproduces the original behavior)
+
+    /// How the offset distance is determined. The default `.through` mode is the
+    /// original behavior, unchanged byte-for-byte: the offset copy passes THROUGH
+    /// the clicked point (distance = the perpendicular/radial distance to that
+    /// point, on its side). The additive `.distance` mode offsets by a FIXED,
+    /// configured `distance` (LibreCAD's `m_dist`), with the click/cursor only
+    /// choosing the SIDE — the classic "offset by N units" workflow.
+    ///
+    /// This is an UNWIRED option: the public `mode` / `distance` vars exist so a
+    /// later options-bar wire-wave can set them; the tool defaults to the original
+    /// through-point behavior and nothing else in the engine sets them yet.
+    public enum OffsetMode: Sendable, Equatable {
+        /// Original behavior: the offset copy passes through the picked point
+        /// (distance derived from that point, side = the point's side).
+        case through
+        /// Offset by a fixed configured `distance`; the picked point/cursor only
+        /// selects which side of the entity the copy lands on.
+        case distance
+    }
+
+    /// The active mode. Defaults to `.through` (the original behavior — the
+    /// existing tests construct a default `OffsetTool` and expect through-point
+    /// offsets, so this default keeps them byte-identical). Public so a future
+    /// options-bar can switch it; UNWIRED for now.
+    public var mode: OffsetMode = .through
+
+    /// The fixed offset distance used by `.distance` mode (world units). Ignored
+    /// in `.through` mode. A non-positive value yields no offset (no edit), the
+    /// same safe no-op the through mode uses for a degenerate distance. Public for
+    /// the future options-bar; UNWIRED for now.
+    public var distance: Double = 0
+
     // MARK: - Private state machine (no magic Int — engine-architecture note)
 
     /// The tool's lifecycle. Offset is a SINGLE-pick action (the through point),
@@ -96,11 +129,26 @@ public struct OffsetTool: Tool {
     public var preview: [ResolvedPolyline] {
         guard cursor.valid, !captured.isEmpty else { return [] }
         return captured.flatMap { record -> [ResolvedPolyline] in
-            guard let kind = Self.offset(record.kind, through: cursor) else { return [] }
+            guard let kind = offsetForCurrentMode(record.kind, toward: cursor) else { return [] }
             // Resolve the OFFSET geometry, then stamp the shared preview pen on
             // every polyline so the rubber-band reads as a preview regardless of
             // the original entity's pen (the overlay may further recolor it).
             return kind.resolve(pen: .toolPreview, ctx: .default).polylines
+        }
+    }
+
+    /// Computes the offset of `kind` for the active mode, given the picked point
+    /// `p` (or cursor for the preview):
+    ///   - `.through`  → offset so the copy passes THROUGH `p` (original behavior).
+    ///   - `.distance` → offset by the fixed `distance`, on `p`'s side.
+    /// Returns `nil` for an unsupported kind or a degenerate result, matching the
+    /// per-mode geometry helpers.
+    private func offsetForCurrentMode(_ kind: EntityKind, toward p: Vector) -> EntityKind? {
+        switch mode {
+        case .through:
+            return Self.offset(kind, through: p)
+        case .distance:
+            return Self.offset(kind, byDistance: distance, towardSideOf: p)
         }
     }
 
@@ -115,9 +163,12 @@ public struct OffsetTool: Tool {
         }
 
         switch input {
-        case .value:
-            // A typed coordinate doesn't apply to this selection-based MODIFY tool — ignore.
-            return .none
+        case .value(let p):
+            // A TYPED point (U1 coordinate line) where a point is expected: both
+            // modes treat it exactly like the through/side-pick `.click` at that
+            // exact point (no snap drift). The existing tests never feed `.value`,
+            // so the `.through` default behavior is unchanged.
+            return handleClick(p)
 
         case .move(let p):
             cursor = p
@@ -155,7 +206,7 @@ public struct OffsetTool: Tool {
         // edit). Preserve each original's layer/pen/flags; only the geometry is
         // the offset copy. Originals stay (no `.replace`/`.remove`).
         let edits: [ToolEdit] = captured.compactMap { record in
-            guard let kind = Self.offset(record.kind, through: p) else { return nil }
+            guard let kind = offsetForCurrentMode(record.kind, toward: p) else { return nil }
             return .add(EntityRecord(
                 id: .placeholder,
                 layer: record.layer,
@@ -250,6 +301,84 @@ public struct OffsetTool: Tool {
         let newRadius = point.distance(to: d.center)
         guard newRadius > Tolerance.distance else { return nil }        // radius ≤ 0
         guard abs(newRadius - d.radius) > Tolerance.distance else { return nil }   // d ≈ 0
+        return ArcData(
+            center: d.center,
+            radius: newRadius,
+            startAngle: d.startAngle,
+            endAngle: d.endAngle,
+            reversed: d.reversed
+        )
+    }
+
+    // MARK: - Fixed-distance offset geometry (.distance mode)
+
+    /// Computes the offset of `kind` by the FIXED `distance`, on the side of
+    /// `sidePoint` (the picked point / cursor — used only to choose which side).
+    /// Returns `nil` if the kind is unsupported, `distance` is non-positive, or the
+    /// result is degenerate (e.g. a non-positive radius).
+    ///
+    /// - line:   a parallel line shifted by `distance` along the unit normal that
+    ///           points toward `sidePoint` (so the copy lands on the picked side).
+    /// - circle/arc: concentric, radius `r + distance` when `sidePoint` is OUTSIDE
+    ///           the original (or on it) and `r − distance` when inside — i.e. the
+    ///           copy moves toward the picked side.
+    private static func offset(_ kind: EntityKind, byDistance distance: Double,
+                               towardSideOf sidePoint: Vector) -> EntityKind? {
+        guard distance > Tolerance.distance, sidePoint.valid else { return nil }
+        switch kind {
+        case .line(let d):
+            return offsetLine(d, byDistance: distance, towardSideOf: sidePoint).map(EntityKind.line)
+        case .circle(let d):
+            return offsetCircle(d, byDistance: distance, towardSideOf: sidePoint).map(EntityKind.circle)
+        case .arc(let d):
+            return offsetArc(d, byDistance: distance, towardSideOf: sidePoint).map(EntityKind.arc)
+
+        // Same scope as the through-point path: line/circle/arc only.
+        case .polyline, .ellipse, .spline, .splinePoints, .point,
+             .text, .mtext, .hatch, .solid, .dimension, .insert, .xline, .ray, .leader:
+            return nil
+        }
+    }
+
+    /// Parallel line shifted by `distance` along the unit normal toward `sidePoint`.
+    /// The side is the sign of `(sidePoint − start)·normal`; if `sidePoint` lies on
+    /// the line (sign ≈ 0) the positive-normal side is used. Returns `nil` for a
+    /// degenerate (zero-length) line.
+    private static func offsetLine(_ d: LineData, byDistance distance: Double,
+                                   towardSideOf sidePoint: Vector) -> LineData? {
+        let dir = d.end - d.start
+        let len = dir.magnitude
+        guard len > Tolerance.distance else { return nil }   // degenerate line
+        let unit = dir / len
+        // Left-hand unit normal (perpendicular) of the line direction.
+        let normal = Vector(-unit.y, unit.x)
+        // Pick the side: the sign of the side point's projection onto the normal
+        // (default to the positive-normal side when the point is on the line).
+        let signed = (sidePoint - d.start).dot(normal)
+        let sign: Double = signed < 0 ? -1 : 1
+        let shift = normal * (distance * sign)
+        return LineData(start: d.start + shift, end: d.end + shift)
+    }
+
+    /// Concentric circle whose radius moves by `distance` toward `sidePoint`:
+    /// `r + distance` when the point is outside (or on) the circle, `r − distance`
+    /// when inside. Returns `nil` when the new radius would be ~0 or negative.
+    private static func offsetCircle(_ d: CircleData, byDistance distance: Double,
+                                     towardSideOf sidePoint: Vector) -> CircleData? {
+        let inside = sidePoint.distance(to: d.center) < d.radius
+        let newRadius = inside ? d.radius - distance : d.radius + distance
+        guard newRadius > Tolerance.distance else { return nil }        // radius ≤ 0
+        return CircleData(center: d.center, radius: newRadius)
+    }
+
+    /// Concentric arc whose radius moves by `distance` toward `sidePoint` (same
+    /// inside/outside rule as the circle), preserving the start/end angles and the
+    /// `reversed` flag. Returns `nil` when the new radius would be ~0 or negative.
+    private static func offsetArc(_ d: ArcData, byDistance distance: Double,
+                                  towardSideOf sidePoint: Vector) -> ArcData? {
+        let inside = sidePoint.distance(to: d.center) < d.radius
+        let newRadius = inside ? d.radius - distance : d.radius + distance
+        guard newRadius > Tolerance.distance else { return nil }        // radius ≤ 0
         return ArcData(
             center: d.center,
             radius: newRadius,

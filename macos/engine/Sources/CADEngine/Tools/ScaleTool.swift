@@ -61,11 +61,38 @@ import Foundation
 /// scale-by-reference modify action).
 public struct ScaleTool: Tool {
 
+    // MARK: - Mode (additive — default reproduces the original behavior)
+
+    /// How the scale factor is obtained. The default `.factor` mode is the
+    /// original three-pick interaction (center → reference distance point →
+    /// target distance point), unchanged byte-for-byte. The additive `.reference`
+    /// mode lets the user define the factor from a FREE reference length (two
+    /// independent points) and a new length, scaling about a separately-picked
+    /// base — LibreCAD's "scale by reference length" workflow.
+    ///
+    /// This is an UNWIRED option: the public `mode` var exists so a later
+    /// options-bar wire-wave can toggle it; the tool itself defaults to the
+    /// original behavior and nothing else in the engine sets it yet.
+    public enum ScaleMode: Sendable, Equatable {
+        /// Original behavior: factor = |target − center| / |reference − center|,
+        /// where the reference distance is measured from the picked center.
+        case factor
+        /// Scale-by-reference-length: pick a base (pivot), then a reference length
+        /// as two FREE points, then a new length (point or typed value); the factor
+        /// is `newLen / refLen` and the selection scales about the base.
+        case reference
+    }
+
+    /// The active mode. Defaults to `.factor` (the original behavior). Public so a
+    /// future options-bar can switch it; UNWIRED for now.
+    public var mode: ScaleMode = .factor
+
     // MARK: - Private state machine (no magic Int — engine-architecture note)
 
     /// The tool's lifecycle, ported from `RS_ActionModifyScale`'s status integers
     /// (SetReferencePoint → SetFactor1/SetFactor2) to an exhaustive `enum`.
     private enum State: Equatable {
+        // --- .factor mode (original three-pick interaction) ---
         /// Waiting for the scale center / pivot (no fixed point yet).
         case pickingCenter
         /// Center fixed; waiting for the reference distance point. `center` is the
@@ -74,9 +101,26 @@ public struct ScaleTool: Tool {
         /// Center + reference distance fixed; waiting for the target distance
         /// point. `refDist` is the "old size" the factor is measured against.
         case pickingTarget(center: Vector, refDist: Double)
+
+        // --- .reference mode (scale-by-reference-length, four picks) ---
+        /// Waiting for the base / pivot the selection scales about.
+        case refPickingBase
+        /// Base fixed; waiting for the FIRST point of the reference length segment.
+        case refPickingStart(base: Vector)
+        /// Base + reference-segment start fixed; waiting for the SECOND point of the
+        /// reference length segment. `refStart` anchors both the reference length
+        /// and (later) the new length.
+        case refPickingEnd(base: Vector, refStart: Vector)
+        /// Base + reference length fixed; waiting for the new length point (or a
+        /// typed value). `refLen` is the "old size" and the new length is measured
+        /// from `refStart`. The factor is `newLen / refLen`.
+        case refPickingNew(base: Vector, refStart: Vector, refLen: Double)
     }
 
-    /// The current state. Starts waiting for the center point.
+    /// The current state. Starts waiting for the center point (the `.factor`
+    /// default's initial state). When `mode` is set to `.reference` BEFORE the run
+    /// starts, the first `handle`/`status`/`preview` access lazily normalizes it to
+    /// the reference mode's initial state (`refNormalizeIfIdle`).
     private var state: State = .pickingCenter
 
     /// The last cursor point seen via `.move`, used to draw the rubber-band even
@@ -95,7 +139,8 @@ public struct ScaleTool: Tool {
     public var title: String { "Scale" }
 
     public var status: String {
-        switch state {
+        switch normalizedState {
+        // --- .factor mode (original) ---
         case .pickingCenter:
             // Nothing to scale without a selection — tell the user to select first.
             return selection.isEmpty ? "Select objects to scale first" : "Specify center point"
@@ -103,6 +148,37 @@ public struct ScaleTool: Tool {
             return "Specify reference distance point"
         case .pickingTarget:
             return "Specify target distance point"
+
+        // --- .reference mode (scale-by-reference-length) ---
+        case .refPickingBase:
+            return selection.isEmpty ? "Select objects to scale first" : "Specify base point"
+        case .refPickingStart:
+            return "Specify first point of reference length"
+        case .refPickingEnd:
+            return "Specify second point of reference length"
+        case .refPickingNew:
+            return "Specify new length"
+        }
+    }
+
+    /// The state as the current `mode` expects it. If the tool is still at the
+    /// `.factor` default's initial state but `mode == .reference` (the wire-wave
+    /// set the mode after construction), this presents the reference mode's initial
+    /// state instead — without mutating (so `status`/`preview` can be `get`-only).
+    private var normalizedState: State {
+        if mode == .reference, state == .pickingCenter, selection.isEmpty {
+            return .refPickingBase
+        }
+        return state
+    }
+
+    /// Mutating sibling of `normalizedState`: aligns the stored `state` with the
+    /// current `mode` before a run begins. Called at the top of `handle` so the
+    /// reference flow starts from `.refPickingBase` even though `state` is
+    /// constructed at the `.factor` default.
+    private mutating func refNormalizeIfIdle() {
+        if mode == .reference, state == .pickingCenter, selection.isEmpty {
+            state = .refPickingBase
         }
     }
 
@@ -111,12 +187,25 @@ public struct ScaleTool: Tool {
     /// polylines with the preview pen. Empty before the reference distance is set,
     /// before the cursor has moved, with no selection, or for a degenerate factor.
     public var preview: [ResolvedPolyline] {
-        guard case .pickingTarget(let center, let refDist) = state,
-              cursor.valid, center.valid, !selection.isEmpty,
-              let factor = validFactor(target: cursor, center: center, refDist: refDist) else {
+        // Resolve the live (pivot, factor) pair for whichever mode is active; both
+        // share the same "scale the selection about a pivot" rubber-band.
+        let pivotFactor: (pivot: Vector, factor: Double)?
+        switch normalizedState {
+        case .pickingTarget(let center, let refDist):
+            pivotFactor = validFactor(target: cursor, center: center, refDist: refDist)
+                .map { (center, $0) }
+        case .refPickingNew(let base, let refStart, let refLen):
+            // New length = distance from the reference-segment start to the cursor.
+            pivotFactor = validFactor(target: cursor, center: refStart, refDist: refLen)
+                .map { (base, $0) }
+        default:
+            pivotFactor = nil
+        }
+        guard let (pivot, factor) = pivotFactor,
+              cursor.valid, pivot.valid, !selection.isEmpty else {
             return []
         }
-        let t = Affine2D.scale(factor: factor, about: center)
+        let t = Affine2D.scale(factor: factor, about: pivot)
         return selection.flatMap { record -> [ResolvedPolyline] in
             // Transform the geometry, then resolve it directly with the shared
             // tool-preview pen so the overlay reads as a preview.
@@ -129,10 +218,19 @@ public struct ScaleTool: Tool {
     /// A MODIFY tool: it reads `context.selected` (the entities to scale) and emits
     /// `.replace(id, newKind)` edits — never `.add`.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
+        // Align the stored state with the active mode before the run starts (the
+        // wire-wave may have set `mode = .reference` after construction). No-op for
+        // the `.factor` default, so its behavior stays byte-identical.
+        refNormalizeIfIdle()
+
         switch input {
-        case .value:
-            // A typed coordinate doesn't apply to this selection-based MODIFY tool — ignore.
-            return .none
+        case .value(let p):
+            // A TYPED point (U1 coordinate line) where a point/length is expected:
+            // both modes treat it exactly like a `.click` at that exact point (no
+            // snap drift). This is what lets the user type a reference/new length
+            // or a base/center instead of clicking it. `.factor`'s existing tests
+            // never feed `.value`, so the default behavior is unchanged.
+            return handleClick(p, context: context)
 
         case .move(let p):
             cursor = p
@@ -190,17 +288,59 @@ public struct ScaleTool: Tool {
             guard let factor = validFactor(target: p, center: center, refDist: refDist) else {
                 return .none
             }
-            let t = Affine2D.scale(factor: factor, about: center)
-            let edits: [ToolEdit] = selection.map {
-                .replace($0.id, $0.kind.transformed(by: t))
+            return commitScale(factor: factor, about: center)
+
+        // --- .reference mode (scale-by-reference-length) ---
+
+        case .refPickingBase:
+            // No selection → nothing to scale; ignore the click.
+            guard !context.selected.isEmpty, p.valid else { return .none }
+            // Capture the selection snapshot now, then fix the base / pivot.
+            selection = context.selected
+            state = .refPickingStart(base: p)
+            cursor = p
+            return .none
+
+        case .refPickingStart(let base):
+            // First point of the FREE reference-length segment.
+            guard p.valid else { return .none }
+            state = .refPickingEnd(base: base, refStart: p)
+            cursor = p
+            return .none
+
+        case .refPickingEnd(let base, let refStart):
+            // Second point: refLen = |end − start| (the "old size"). Ignore a
+            // near-zero reference length (it would make the factor undefined).
+            let refLen = (p - refStart).magnitude
+            guard p.valid, refLen > Tolerance.distance else { return .none }
+            state = .refPickingNew(base: base, refStart: refStart, refLen: refLen)
+            cursor = p
+            return .none
+
+        case .refPickingNew(let base, let refStart, let refLen):
+            // New length = |new − refStart|; factor = newLen / refLen, scaled about
+            // the base. Ignore a degenerate factor (≈ 1 no-op; ≈ 0 collapses).
+            guard let factor = validFactor(target: p, center: refStart, refDist: refLen) else {
+                return .none
             }
-            reset()
-            return .commit(edits)
+            return commitScale(factor: factor, about: base)
         }
+    }
+
+    /// Emits one `.replace` per captured entity, scaling its geometry by `factor`
+    /// about `pivot`, then resets the run. Shared by both modes' commit arms.
+    private mutating func commitScale(factor: Double, about pivot: Vector) -> ToolOutcome {
+        let t = Affine2D.scale(factor: factor, about: pivot)
+        let edits: [ToolEdit] = selection.map {
+            .replace($0.id, $0.kind.transformed(by: t))
+        }
+        reset()
+        return .commit(edits)
     }
 
     private mutating func handleBackspace() -> ToolOutcome {
         switch state {
+        // --- .factor mode (original) ---
         case .pickingCenter:
             // Nothing to step back.
             return .none
@@ -213,6 +353,26 @@ public struct ScaleTool: Tool {
         case .pickingTarget(let center, _):
             // Step back to before the reference-distance pick.
             state = .pickingRef(center: center)
+            cursor = .invalid
+            return .preview
+
+        // --- .reference mode (scale-by-reference-length) ---
+        case .refPickingBase:
+            // Nothing to step back.
+            return .none
+        case .refPickingStart:
+            // Step back to before the base pick (keep the captured selection).
+            state = .refPickingBase
+            cursor = .invalid
+            return .preview
+        case .refPickingEnd(let base, _):
+            // Step back to before the reference-start pick.
+            state = .refPickingStart(base: base)
+            cursor = .invalid
+            return .preview
+        case .refPickingNew(let base, let refStart, _):
+            // Step back to before the reference-end pick.
+            state = .refPickingEnd(base: base, refStart: refStart)
             cursor = .invalid
             return .preview
         }
@@ -233,10 +393,12 @@ public struct ScaleTool: Tool {
         return factor
     }
 
-    /// Returns to the initial waiting-for-center state, dropping the captured
-    /// selection snapshot and cursor.
+    /// Returns to the active mode's initial waiting state, dropping the captured
+    /// selection snapshot and cursor. For the `.factor` default this is
+    /// `.pickingCenter` (byte-identical to the original); for `.reference` it is
+    /// `.refPickingBase`, so a second scale in the same run starts cleanly.
     private mutating func reset() {
-        state = .pickingCenter
+        state = (mode == .reference) ? .refPickingBase : .pickingCenter
         cursor = .invalid
         selection = []
     }
