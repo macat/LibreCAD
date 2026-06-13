@@ -136,7 +136,7 @@ public enum EntityDirection {
             return .splinePoints(s)
 
         case .point, .circle, .text, .mtext, .hatch, .solid, .dimension,
-             .insert, .xline, .ray:
+             .insert, .xline, .ray, .leader:
             // No meaningful direction to revert.
             return nil
         }
