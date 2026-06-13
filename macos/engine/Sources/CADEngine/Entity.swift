@@ -622,6 +622,69 @@ public enum DimKind: Sendable, Hashable, Codable {
     case angular3p(vertex: Vector, point1: Vector, point2: Vector)
 }
 
+// MARK: - Leader defining data (RS_Leader / DRW_Leader, DXF LEADER)
+
+/// `RS_LeaderData` — a **leader** (DXF `LEADER`, libdxfrw `DRW_Leader`): an
+/// annotation callout made of a polyline path (`vertices`), an optional
+/// arrowhead at the FIRST vertex, and an optional attached annotation (text /
+/// mtext) anchored at the LAST vertex. Per ADR-001 a value type holding only the
+/// defining data; the drawn graphic — the path segments, the arrowhead fill, and
+/// the annotation strokes/fills — is produced on demand by `resolve()` (the
+/// arrowhead reuses the shared dimension-arrowhead helper; the annotation reuses
+/// the shared `.text` / `ResolveContext.fontProvider` text path — no second text
+/// code path), never stored.
+///
+/// ## Field grounding (DXF `LEADER` / libdxfrw `DRW_Leader`)
+/// - `vertices`   — DXF codes 10/20/30 (`DRW_Leader::vertexlist`): the ordered
+///                  path points. The arrowhead sits at `vertices.first`; the
+///                  annotation anchors at `vertices.last`. A leader may carry NO
+///                  vertices (a degenerate callout that round-trips but draws
+///                  nothing) — matching the two zero-vertex LEADERs in
+///                  `dim_sample.dxf`.
+/// - `hasArrow`   — DXF code 71 (`DRW_Leader::arrow`, 1 == enabled): whether an
+///                  arrowhead is drawn at the first vertex.
+/// - `arrowSize`  — the arrowhead length in world units (the dim style's arrow
+///                  size / `$DIMASZ`; carried so the leader re-measures
+///                  independently of any document style). `<= 0` ⇒ the resolve
+///                  falls back to the document/engine default arrow size.
+/// - `annotation` — the OPTIONAL attached annotation as a `.text`/`.mtext`
+///                  `EntityKind` (DXF: a separate entity hard-referenced by the
+///                  leader's code 340; we model it inline so the callout is one
+///                  value). `nil` ⇒ a bare leader (path + arrow only). Stored as
+///                  an `EntityKind` so the annotation resolves through the SAME
+///                  `.text`/`.mtext` resolve arm (no second text path).
+/// - `styleName`  — DXF code 3 (`DRW_Leader::style`): the dimension-style name
+///                  the leader references; carried for round-trip.
+public struct LeaderData: Sendable, Hashable, Codable {
+    /// DXF codes 10/20/30 — the ordered path vertices (arrow at the first,
+    /// annotation at the last). May be empty (a degenerate, drawn-nothing leader).
+    public var vertices: [Vector]
+    /// DXF code 71 — whether an arrowhead is drawn at the first vertex.
+    public var hasArrow: Bool
+    /// The arrowhead length in world units. `<= 0` ⇒ resolve uses the document /
+    /// engine default arrow size.
+    public var arrowSize: Double
+    /// The OPTIONAL attached annotation (`.text` or `.mtext`) anchored at the last
+    /// vertex; `nil` for a bare leader. Resolves through the shared text path.
+    public var annotation: EntityKind?
+    /// DXF code 3 — the referenced dimension-style name (round-trip only).
+    public var styleName: String?
+
+    public init(
+        vertices: [Vector],
+        hasArrow: Bool = true,
+        arrowSize: Double = 2.5,
+        annotation: EntityKind? = nil,
+        styleName: String? = nil
+    ) {
+        self.vertices = vertices
+        self.hasArrow = hasArrow
+        self.arrowSize = arrowSize
+        self.annotation = annotation
+        self.styleName = styleName
+    }
+}
+
 // MARK: - Block reference (Insert) defining data (RS_InsertData / DRW_Insert)
 
 /// `RS_InsertData` — a **block reference**: a placement of a named block. Mirrors
@@ -761,6 +824,16 @@ public enum EntityKind: Sendable, Hashable, Codable {
     /// `+direction` sense only. Its drawn segment is computed in `resolve()`,
     /// never stored (ADR-001).
     case ray(RayData)
+    /// A **leader** — an annotation callout (`RS_Leader`, DXF `LEADER`): a
+    /// polyline path + an optional arrowhead at the first vertex + an optional
+    /// attached `.text`/`.mtext` annotation at the last vertex. Its graphic (path
+    /// segments, arrowhead fill via the shared dimension-arrowhead helper, and the
+    /// annotation via the shared `.text`/`.mtext` resolve arm — no second text
+    /// path) is computed in `resolve()`, never stored (ADR-001). `indirect`
+    /// because `LeaderData.annotation` stores an `EntityKind` (a leader contains a
+    /// text/mtext kind — the recursion is bounded: an annotation is never itself a
+    /// leader).
+    indirect case leader(LeaderData)
 }
 
 // MARK: - Per-entity flags

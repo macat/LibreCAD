@@ -146,6 +146,38 @@ public enum InspectorEdits {
         return .ray(d)
     }
 
+    // MARK: - Leader field edits (RS_Leader, DXF LEADER)
+
+    /// Replaces a `.leader`'s arrow size (clamped non-negative), keeping its path +
+    /// annotation. No-op for other kinds.
+    public static func setLeaderArrowSize(_ kind: EntityKind, _ size: Double) -> EntityKind {
+        guard case .leader(var d) = kind else { return kind }
+        d.arrowSize = Swift.max(0, size)
+        return .leader(d)
+    }
+
+    /// Sets/clears whether a `.leader` draws an arrowhead at its first vertex.
+    public static func setLeaderHasArrow(_ kind: EntityKind, _ on: Bool) -> EntityKind {
+        guard case .leader(var d) = kind else { return kind }
+        d.hasArrow = on
+        return .leader(d)
+    }
+
+    /// Replaces a `.leader`'s entire vertex path, keeping its arrow + annotation.
+    /// (The Inspector's "edit leader points" affordance; the path may be empty.)
+    public static func setLeaderVertices(_ kind: EntityKind, _ vertices: [Vector]) -> EntityKind {
+        guard case .leader(var d) = kind else { return kind }
+        d.vertices = vertices
+        return .leader(d)
+    }
+
+    /// Points a `.leader` at a named dimension style (DXF code 3), keeping the rest.
+    public static func setLeaderStyleName(_ kind: EntityKind, _ styleName: String?) -> EntityKind {
+        guard case .leader(var d) = kind else { return kind }
+        d.styleName = styleName
+        return .leader(d)
+    }
+
     // MARK: - Text field edits (TEXT / single-line, RS_TextData)
 
     /// Replaces a `.text`'s insertion point.

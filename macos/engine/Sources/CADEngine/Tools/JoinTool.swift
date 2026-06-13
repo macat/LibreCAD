@@ -214,7 +214,7 @@ public struct JoinTool: Tool {
         // TODO(backlog): join open polylines (concatenate their vertices) and
         // circles/ellipses (only meaningful when split into arcs first).
         case .polyline, .circle, .ellipse, .spline, .splinePoints, .point,
-             .text, .mtext, .hatch, .solid, .dimension, .insert, .xline, .ray:
+             .text, .mtext, .hatch, .solid, .dimension, .insert, .xline, .ray, .leader:
             return false
         }
     }

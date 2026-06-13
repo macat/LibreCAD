@@ -647,6 +647,28 @@ private final class PODBuilder {
             e.kind = Int32(LC_ENT_RAY.rawValue)
             e.p1x = d.base.x;      e.p1y = d.base.y;      e.p1z = d.base.z
             e.p2x = d.direction.x; e.p2y = d.direction.y; e.p2z = d.direction.z
+
+        case .leader(let d):
+            // Emitted as a DXF LEADER (the C side writes DRW_Leader). The path
+            // vertices map to the flat vertex array (bulge unused); the arrow flag
+            // and arrow size (carried as the annotation text height, code 40) and
+            // the dim-style name round-trip. The attached annotation is NOT written
+            // as part of the LEADER (it round-trips via the Codable value model —
+            // DXF stores a leader's annotation as a separate hard-referenced
+            // entity, which our writer does not author). LEADER needs R2000+; at R12
+            // / on DWG (no DWG leader writer) the C side drops it (counted skipped),
+            // matching MTEXT/DIMENSION.
+            e.kind = Int32(LC_ENT_LEADER.rawValue)
+            e.leaderHasArrow = d.hasArrow ? 1 : 0
+            // Carry the arrow size as the LEADER text-height (code 40) so it
+            // round-trips through DRW_Leader (which has no separate arrow-size code).
+            e.height = d.arrowSize
+            e.leaderArrowSize = d.arrowSize
+            if let style = d.styleName, !style.isEmpty { e.styleName = intern(style) }
+            let leaderVerts = d.vertices.map { PolylineVertex(point: $0) }
+            let (ptr, count) = internVertices(leaderVerts)
+            e.vertices = ptr
+            e.vertexCount = count
         }
         return e
     }

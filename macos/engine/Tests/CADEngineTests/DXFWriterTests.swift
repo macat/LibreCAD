@@ -63,16 +63,17 @@ struct DXFWriterTests {
         var line = 0, point = 0, circle = 0, arc = 0, ellipse = 0, polyline = 0
         var text = 0, mtext = 0, solid = 0, hatch = 0, dimension = 0, insert = 0
         var spline = 0
-        var xline = 0, ray = 0
+        var xline = 0, ray = 0, leader = 0
         /// The supported set the writer emits. SPLINE/SPLINEPOINTS are now written
         /// (both as a DXF SPLINE), so they count toward the round-trippable total.
         /// Note: a written `.splinePoints` reads back as a degree-2 `.spline`, so on
         /// re-read both collapse into the `spline` bucket. XLINE/RAY are now written
-        /// (DRW_Xline/DRW_Ray) and round-trip too.
+        /// (DRW_Xline/DRW_Ray) and round-trip too. LEADER is now written
+        /// (DRW_Leader) on DXF and round-trips.
         var supportedTotal: Int {
             line + point + circle + arc + ellipse + polyline
                 + text + mtext + solid + hatch + dimension + spline + insert
-                + xline + ray
+                + xline + ray + leader
         }
     }
 
@@ -96,6 +97,7 @@ struct DXFWriterTests {
                  .splinePoints: t.spline += 1    // now written (DRW_Spline)
             case .xline:        t.xline += 1     // now written (DRW_Xline)
             case .ray:          t.ray += 1       // now written (DRW_Ray)
+            case .leader:       t.leader += 1    // now written (DRW_Leader)
             }
         }
         return t
@@ -856,7 +858,7 @@ struct DXFWriterTests {
         switch r.kind {
         case .line, .point, .circle, .arc, .ellipse, .polyline,
              .text, .mtext, .solid, .hatch, .dimension, .insert,
-             .spline, .splinePoints, .xline, .ray: return true
+             .spline, .splinePoints, .xline, .ray, .leader: return true
         }
     }
 }
