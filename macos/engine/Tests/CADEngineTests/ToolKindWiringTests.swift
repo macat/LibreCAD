@@ -75,6 +75,8 @@ struct ToolKindWiringTests {
             .stretch, .lengthen, .break,                           // wave C (modify)
             .insert,                                               // wave C (blocks)
             .polylineEdit,                                         // wave D (modify)
+            .measureDistance, .measureAngle, .measureArea, .measureLength, // wire-wave-1 (measure/info)
+            .join, .explodeText,                                   // wire-wave-1 (modify)
         ]
         #expect(Set(ToolKind.allCases) == expected,
                 "ToolKind.allCases (\(ToolKind.allCases)) != expected roster")
@@ -200,6 +202,29 @@ struct ToolKindWiringTests {
         }
     }
 
+    /// The six wire-wave-1 additions: the four MeasureTool variants + Join +
+    /// Explode Text. Each mints a non-nil tool whose own title matches the kind's
+    /// UI title. The four measure kinds all mint a `MeasureTool` (distinct `Mode`s),
+    /// so their DISTINCT titles also guard that the mode is wired correctly.
+    @Test func waveOneSurfacedKindsAreWiredWithMatchingTitles() {
+        let wave1: [ToolKind: String] = [
+            .measureDistance: "Measure Distance",
+            .measureAngle:    "Measure Angle",
+            .measureArea:     "Measure Area",
+            .measureLength:   "Total Length",
+            .join:            "Join",
+            .explodeText:     "Explode Text",
+        ]
+        for (kind, title) in wave1 {
+            #expect(kind.title == title,
+                    "ToolKind.\(kind).title (\(kind.title)) != \(title)")
+            let tool = kind.makeTool()
+            #expect(tool != nil, "ToolKind.\(kind) minted a nil Tool")
+            #expect(tool?.title == title,
+                    "ToolKind.\(kind) tool.title (\(tool?.title ?? "nil")) != \(title)")
+        }
+    }
+
     /// `.insert` mints an Insert tool that is SAFE with no block chosen — the
     /// block-picker UI is a later task, so a wired ⌥/menu activation with no blocks in
     /// the drawing must never crash. With no block name the tool is inert (a no-op),
@@ -258,6 +283,12 @@ struct ToolKindWiringTests {
             (.break, "b", true, false),
             // wave D — Edit Polyline takes ⇧P (bare P is Polyline with no shift twin).
             (.polylineEdit, "p", true, false),
+            // wire-wave-1 — Measure Distance ⇧K, Join ⇧J, Explode Text ⇧E (bare K/J
+            // are unassigned; bare E is Ellipse with no other shift twin). The other
+            // measure modes (angle/area/total-length) are menu/⌘K only — no chord.
+            (.measureDistance, "k", true, false),
+            (.join, "j", true, false),
+            (.explodeText, "e", true, false),
         ]
         // No two entries share a (key, shift, option) chord.
         let chords = keymap.map { "\($0.1)\($0.2 ? "+shift" : "")\($0.3 ? "+option" : "")" }
@@ -281,5 +312,10 @@ struct ToolKindWiringTests {
         }
         // The wave-D kind (Edit Polyline) has a shortcut.
         #expect(kinds.contains(.polylineEdit), "wave-D kind polylineEdit has no keyboard shortcut")
+        // The keyed wire-wave-1 kinds (Measure Distance / Join / Explode Text) have
+        // chords. The other three measure modes are intentionally menu/⌘K only.
+        for k in [ToolKind.measureDistance, .join, .explodeText] {
+            #expect(kinds.contains(k), "wire-wave-1 kind \(k) has no keyboard shortcut")
+        }
     }
 }

@@ -120,6 +120,14 @@ enum CommandRegistry {
         case .break:       return ("scissors.badge.ellipsis", "⇧B")
         case .insert:      return ("square.on.square.dashed", "⇧I")
         case .polylineEdit: return ("point.topleft.down.to.point.bottomright.curvepath.fill", "⇧P")
+        // Wire-wave-1: measure variants (distance keyed ⇧K; the other modes are
+        // menu/⌘K only), Join (⇧J), Explode Text (⇧E).
+        case .measureDistance: return ("ruler", "⇧K")
+        case .measureAngle:    return ("angle", nil)
+        case .measureArea:     return ("square.dashed", nil)
+        case .measureLength:   return ("sum", nil)
+        case .join:            return ("link", "⇧J")
+        case .explodeText:     return ("character.cursor.ibeam", "⇧E")
         }
     }
 

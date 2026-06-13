@@ -287,6 +287,16 @@ struct LibreCADApp: App {
                 Button("Edit Polyline") { activateTool?(.polylineEdit) }
                     .keyboardShortcut("p", modifiers: .shift)
                     .disabled(activateTool == nil)
+                // Wire-wave-1 modify tools. Join (⇧J) fuses touching lines/arcs into a
+                // polyline; Explode Text (⇧E) converts a text/mtext entity to stroke
+                // polylines. Both take free shift chords (bare J/K are unassigned; bare
+                // E is Ellipse with no other shift twin).
+                Button("Join") { activateTool?(.join) }
+                    .keyboardShortcut("j", modifiers: .shift)
+                    .disabled(activateTool == nil)
+                Button("Explode Text") { activateTool?(.explodeText) }
+                    .keyboardShortcut("e", modifiers: .shift)
+                    .disabled(activateTool == nil)
 
                 Divider()
                 // Edit tools (pick entities under the cursor; no pre-selection).
@@ -327,6 +337,23 @@ struct LibreCADApp: App {
                         .disabled(activateTool == nil)
                     Button("Angular Dimension") { activateTool?(.angularDim) }
                         .keyboardShortcut("n", modifiers: [])
+                        .disabled(activateTool == nil)
+                }
+
+                Divider()
+                // Measure / info tools (wire-wave-1, F11) — read-only queries that
+                // report a value in the status HUD and never mutate the drawing. Only
+                // Measure Distance takes a key chord (⇧K, free); the other modes are
+                // reachable via this menu and the ⌘K palette.
+                Menu("Measure") {
+                    Button("Measure Distance") { activateTool?(.measureDistance) }
+                        .keyboardShortcut("k", modifiers: .shift)
+                        .disabled(activateTool == nil)
+                    Button("Measure Angle") { activateTool?(.measureAngle) }
+                        .disabled(activateTool == nil)
+                    Button("Measure Area") { activateTool?(.measureArea) }
+                        .disabled(activateTool == nil)
+                    Button("Total Length") { activateTool?(.measureLength) }
                         .disabled(activateTool == nil)
                 }
             }
