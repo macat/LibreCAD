@@ -412,6 +412,9 @@ public struct StretchTool: Tool {
             case let .radial(c, p):        return inside(c) || inside(p)
             case let .diameter(p1, p2):    return inside(p1) || inside(p2)
             case let .angular(a, b, c, e): return inside(a) || inside(b) || inside(c) || inside(e)
+            case let .ordinate(o, f, l, _):    return inside(o) || inside(f) || inside(l)
+            case let .arcLength(c, _, _, _, _): return inside(c)
+            case let .angular3p(v, p1, p2):    return inside(v) || inside(p1) || inside(p2)
             }
         case .insert(let ins):
             // A block reference's only stretch reference point is its insertion point.

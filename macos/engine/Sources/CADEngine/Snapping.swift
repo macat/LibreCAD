@@ -364,6 +364,14 @@ public enum Snapping {
             case let .radial(center, pointOnCircle):    pts += [center, pointOnCircle]
             case let .diameter(p1, p2):                 pts += [p1, p2]
             case let .angular(l1s, l1e, l2s, l2e):      pts += [l1s, l1e, l2s, l2e]
+            case let .ordinate(origin, feature, leaderEnd, _):
+                pts += [origin, feature, leaderEnd]
+            case let .arcLength(center, radius, startAngle, endAngle, _):
+                // The feature-arc endpoints (+ its center) are the snap targets.
+                pts += [center,
+                        center + Vector.polar(radius: abs(radius), angle: startAngle),
+                        center + Vector.polar(radius: abs(radius), angle: endAngle)]
+            case let .angular3p(vertex, p1, p2):        pts += [vertex, p1, p2]
             }
             return pts.filter(\.valid)
 

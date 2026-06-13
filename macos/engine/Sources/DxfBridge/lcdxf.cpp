@@ -523,10 +523,8 @@ public:
     void addDimRadial(const DRW_DimRadial *data) override { emitDimRadial(data); }
     void addDimDiametric(const DRW_DimDiametric *data) override { emitDimDiametric(data); }
     void addDimAngular(const DRW_DimAngular *data) override { emitDimAngular(data); }
-    // Angular-3p and ordinate dimensions are not in the frozen DimKind model;
-    // surface them as warnings rather than dropping them silently.
-    void addDimAngular3P(const DRW_DimAngular3p *data) override { addUnsupportedDim(data, "DIMENSION"); }
-    void addDimOrdinate(const DRW_DimOrdinate *data) override { addUnsupportedDim(data, "DIMENSION"); }
+    void addDimAngular3P(const DRW_DimAngular3p *data) override { emitDimAngular3P(data); }
+    void addDimOrdinate(const DRW_DimOrdinate *data) override { emitDimOrdinate(data); }
     void addLeader(const DRW_Leader *data) override { addUnsupportedDim(data, "LEADER"); }
     void addHatch(const DRW_Hatch *data) override { emitHatch(data); }
     void addViewport(const DRW_Viewport &data) override { addUnsupportedEntity(data, "VIEWPORT"); }
@@ -830,6 +828,37 @@ private:
         e.dimDef2x = l1b.x; e.dimDef2y = l1b.y; e.dimDef2z = l1b.z;
         e.dimDef5x = l2a.x; e.dimDef5y = l2a.y; e.dimDef5z = l2a.z;
         e.dimArcx  = arc.x; e.dimArcy  = arc.y; e.dimArcz  = arc.z;
+        pushEntity(e);
+    }
+
+    void emitDimAngular3P(const DRW_DimAngular3p *data) {
+        ++m_out->geometryCount;
+        if (!data) { addUnsupportedDim(data, "DIMENSION"); return; }
+        // 3-point angular: firstLine = point1 (code13), secondLine = point2
+        // (code14), vertex (code15); the dimension arc passes through the def point
+        // (code10, the dim point), already in p1 via makeDimensionBase.
+        LCEntity e = makeDimensionBase(*data, LC_DIM_ANGULAR3P);
+        const DRW_Coord p1 = data->getFirstLine();
+        const DRW_Coord p2 = data->getSecondLine();
+        const DRW_Coord vx = data->getVertexPoint();
+        e.dimDef1x = p1.x; e.dimDef1y = p1.y; e.dimDef1z = p1.z;
+        e.dimDef2x = p2.x; e.dimDef2y = p2.y; e.dimDef2z = p2.z;
+        e.dimDef5x = vx.x; e.dimDef5y = vx.y; e.dimDef5z = vx.z;
+        pushEntity(e);
+    }
+
+    void emitDimOrdinate(const DRW_DimOrdinate *data) {
+        ++m_out->geometryCount;
+        if (!data) { addUnsupportedDim(data, "DIMENSION"); return; }
+        // Ordinate: origin == def point (code 10, already in p1); feature ==
+        // firstLine (code 13); leader end == secondLine (code 14). The X- vs
+        // Y-datum is carried in type-70 bit 0x40 (set == X-datum).
+        LCEntity e = makeDimensionBase(*data, LC_DIM_ORDINATE);
+        const DRW_Coord feat = data->getFirstLine();
+        const DRW_Coord lead = data->getSecondLine();
+        e.dimDef1x = feat.x; e.dimDef1y = feat.y; e.dimDef1z = feat.z;
+        e.dimDef2x = lead.x; e.dimDef2y = lead.y; e.dimDef2z = lead.z;
+        e.dimOrdinateX = (data->type & 0x40) ? 1 : 0;
         pushEntity(e);
     }
 
@@ -1688,6 +1717,43 @@ private:
             DRW_DimRadial d(base);
             // centerPoint == defPoint (code 10), already set on base.
             d.setDiameterPoint(def5);            // code 15: radius point
+            emitDimension(&d);
+            break; }
+        case LC_DIM_ANGULAR3P: {
+            base.type = 5;                       // 3-point angular
+            DRW_DimAngular3p d(base);
+            d.setFirstLine(def1);                // code 13: point1
+            d.setSecondLine(def2);               // code 14: point2
+            d.SetVertexPoint(def5);              // code 15: vertex
+            // dimPoint == defPoint (code 10), already set on base.
+            emitDimension(&d);
+            break; }
+        case LC_DIM_ORDINATE: {
+            base.type = 6;                       // ordinate
+            // X-datum carries the type-70 bit 0x40 (libdxfrw's writeDimension
+            // emits ent->type verbatim — see writeDimension's writeInt16(70,...)).
+            if (e.dimOrdinateX) base.type |= 0x40;
+            DRW_DimOrdinate d(base);
+            d.setFirstLine(def1);                // code 13: feature point
+            d.setSecondLine(def2);               // code 14: leader end
+            // originPoint == defPoint (code 10), already set on base.
+            emitDimension(&d);
+            break; }
+        case LC_DIM_ARC_LENGTH: {
+            // Arc-length has no DXF DIMENSION subtype in libdxfrw (and upstream
+            // LibreCAD does not round-trip LC_DimArc through DXF either). Persist
+            // its geometry via the 3-point-angular form (vertex = arc center, the
+            // two rays = the arc endpoints, the dim point = the dim-arc location)
+            // so the file stays valid and re-readable; the arc-length's full
+            // fidelity round-trips through the engine's Codable value model.
+            base.type = 5;                       // 3-point angular carrier
+            // The dim point (code 10) is the dim-arc location (carried in dimArc*),
+            // NOT the center (which is in p1). Override the base def point.
+            base.setDefPoint(DRW_Coord{e.dimArcx, e.dimArcy, e.dimArcz});
+            DRW_DimAngular3p d(base);
+            d.setFirstLine(def1);                // arc start point (code 13)
+            d.setSecondLine(def2);               // arc end point (code 14)
+            d.SetVertexPoint(DRW_Coord{e.cx, e.cy, e.cz});  // center (code 15)
             emitDimension(&d);
             break; }
         default:
