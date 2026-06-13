@@ -359,6 +359,25 @@ public struct GraphicVariables: Sendable, Hashable, Codable {
         set { setDouble("$DIMGAP", newValue) }
     }
 
+    /// `$PDMODE` — the document-default point display mode (the AutoCAD point-marker
+    /// encoding; see `PointDisplayMode`). New points and points left at the `.dot`
+    /// inherit sentinel render with this. Defaults `0` (a dot). Round-trips through
+    /// the header bridge (other CAD apps honor `$PDMODE` natively).
+    public var pointDisplayMode: PointDisplayMode {
+        get { PointDisplayMode(rawMode: int("$PDMODE", default: 0)) }
+        set { setInt("$PDMODE", newValue.rawMode) }
+    }
+
+    /// `$PDSIZE` — the document-default point marker size (world units). The marker
+    /// glyph is drawn at this half-extent. `<= 0` (unset / "auto") ⇒ the resolve
+    /// step uses its built-in default half-extent (AutoCAD's `0` means "5% of the
+    /// viewport", which the viewport-free resolve approximates with a fixed size).
+    /// Defaults `0`. Round-trips through the header bridge.
+    public var pointSize: Double {
+        get { double("$PDSIZE", default: 0) }
+        set { setDouble("$PDSIZE", newValue) }
+    }
+
     /// `$LC_SNAPMODE` — a LibreCAD-PRIVATE header var persisting the app's enabled
     /// snap-mode set (`SnapMode.rawValue`, decision D5). It has no standard DXF
     /// header var; we store it as a custom `$`-var so it travels with the document
@@ -1198,6 +1217,11 @@ public final class CADDrawing {
         // references a style by name resolves through it (the D4 middle rung,
         // per-entity > named style > header default).
         let dimStyleTable = dimStyles
+        // Snapshot the document-default point style ($PDMODE) + size ($PDSIZE) so a
+        // point left at the `.dot` inherit sentinel picks up the drawing-wide point
+        // style (the Document Settings Points tab writes these header vars).
+        let docPointMode = graphicVariables.pointDisplayMode
+        let docPointSize = graphicVariables.pointSize
         // Snapshot the block table → member records map (value copies) so an
         // `.insert` can resolve a referenced block's geometry. Building the
         // name→[EntityRecord] map once here keeps the per-insert lookup O(1) and
@@ -1214,6 +1238,7 @@ public final class CADDrawing {
             annotationScale: annotationScale,
             dimStyleProvider: { docDimStyle },
             namedDimStyleProvider: { name in dimStyleTable.style(named: name)?.style },
+            pointStyleProvider: { (mode: docPointMode, size: docPointSize) },
             blockProvider: { name in blockMembers[name] }
         )
     }

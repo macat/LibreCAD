@@ -225,6 +225,21 @@ public struct ResolveContext: Sendable {
     /// aware annotative is a later wave; this wires the mechanism + field now.
     public var annotationScale: Double = 1.0
 
+    /// The document-default point display style + size (AutoCAD `$PDMODE` /
+    /// `$PDSIZE`). The `.point` resolve arm consults this when a point carries no
+    /// explicit per-entity style (its style is left at the `.dot` inherit
+    /// sentinel) so a drawing-wide point style applies to plain points; an
+    /// explicit per-entity style still wins. The returned `size` is the marker's
+    /// world-space half-extent (radius for the circle, half-side for the square,
+    /// half-arm for the plus/cross/tick); a non-positive size ⇒ the resolve arm's
+    /// built-in default. `nil` (the default) ⇒ no document default is wired, so a
+    /// plain `.dot` point resolves to the historical single-point marker exactly
+    /// as before (existing callers/tests unchanged). Wired by
+    /// `CADDrawing.makeResolveContext` from the `$PDMODE`/`$PDSIZE` header vars
+    /// (the Document Settings Points tab writes those). Parallel to
+    /// `dimStyleProvider`.
+    public var pointStyleProvider: (@Sendable () -> (mode: PointDisplayMode, size: Double))? = nil
+
     /// Resolves a block NAME (DXF code 2, an `.insert`'s `blockName`) to that
     /// block's ordered member `EntityRecord`s — the geometry placed by the insert.
     /// The same provider pattern as `fontProvider`/`dimStyleProvider`: wired by
@@ -283,6 +298,7 @@ public struct ResolveContext: Sendable {
         annotationScale: Double = 1.0,
         dimStyleProvider: (@Sendable () -> ResolvedDimStyle)? = nil,
         namedDimStyleProvider: (@Sendable (String) -> ResolvedDimStyle?)? = nil,
+        pointStyleProvider: (@Sendable () -> (mode: PointDisplayMode, size: Double))? = nil,
         blockProvider: (@Sendable (String) -> [EntityRecord]?)? = nil,
         blockRecursionDepth: Int = ResolveContext.maxBlockRecursionDepth,
         clipBounds: AABB? = nil
@@ -296,6 +312,7 @@ public struct ResolveContext: Sendable {
         self.annotationScale = annotationScale
         self.dimStyleProvider = dimStyleProvider
         self.namedDimStyleProvider = namedDimStyleProvider
+        self.pointStyleProvider = pointStyleProvider
         self.blockProvider = blockProvider
         self.blockRecursionDepth = blockRecursionDepth
         self.clipBounds = clipBounds
@@ -757,11 +774,7 @@ extension EntityKind {
     public func resolve(pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
         switch self {
         case .point(let d):
-            // A point is a degenerate single-point polyline; the renderer draws
-            // it as a marker. Carry it so the seam is exercised.
-            return ResolvedGeometry(polylines: [
-                ResolvedPolyline(points: [d.position], closed: false, pen: pen)
-            ])
+            return Self.resolvePoint(d, pen: pen, ctx: ctx)
 
         case .line(let d):
             return ResolvedGeometry(polylines: [
@@ -902,6 +915,106 @@ extension EntityKind {
             // `.mtext` resolve arm (no second text path; honors ctx.fontProvider).
             return Self.resolveLeader(d, pen: pen, ctx: ctx)
         }
+    }
+
+    // MARK: - Point resolve ($PDMODE marker glyph + $PDSIZE)
+
+    /// The half-extent (world units) a point marker resolves to when the document
+    /// supplies no `$PDSIZE` (or a non-positive one). A small absolute size keeps a
+    /// `.dot`-default point looking like the historical single-pixel marker while
+    /// giving the glyph styles a visible body. AutoCAD's `$PDSIZE == 0` means "5%
+    /// of the viewport"; the resolve step has no viewport, so this fixed world-unit
+    /// fallback stands in (the document Points tab supplies a real size).
+    static let pointMarkerDefaultHalf: Double = 2.5
+
+    /// Resolves a point's `$PDMODE` marker to geometry (ADR-001: derived, never
+    /// stored), scaled by the effective `$PDSIZE`. PURE — no mutation, no viewport.
+    ///
+    /// Precedence (mirrors the dimension D4 pattern): an explicit per-entity style
+    /// wins; a point left at the `.dot` inherit sentinel picks up the document
+    /// `pointStyleProvider` default (mode + size). With no provider wired a plain
+    /// `.dot` point resolves to the historical single-point polyline EXACTLY (so
+    /// `ResolveTests.pointResolves` is unaffected).
+    ///
+    /// Each glyph emits world-space `ResolvedPolyline`s (and the enclosure bits add
+    /// a circle ring / square ring), so the existing renderer draws every style with
+    /// NO new render path (the brief's "resolve to geometry, don't touch
+    /// LineRenderer"). A `.dot` glyph stays a single-point polyline (the renderer's
+    /// existing zero-length-segment dot).
+    static func resolvePoint(_ d: PointData, pen: ResolvedPen, ctx: ResolveContext)
+        -> ResolvedGeometry
+    {
+        // Per-entity style wins; a `.dot`-default point inherits the document
+        // mode/size (decision D4 pattern). With no provider, the per-entity `.dot`
+        // default keeps the historical single-point marker.
+        var mode = d.style
+        var half = Self.pointMarkerDefaultHalf
+        if let provider = ctx.pointStyleProvider {
+            let doc = provider()
+            if doc.size > 0 { half = doc.size }
+            if d.style == .dot { mode = doc.mode }
+        }
+
+        let c = d.position
+
+        // A plain dot (no enclosures) is the historical single-point marker — keep
+        // it BYTE-for-byte so existing point/render tests don't regress.
+        if mode.glyph == .dot && !mode.hasCircle && !mode.hasSquare {
+            return ResolvedGeometry(polylines: [
+                ResolvedPolyline(points: [c], closed: false, pen: pen)
+            ])
+        }
+
+        var polylines: [ResolvedPolyline] = []
+
+        // Base glyph.
+        switch mode.glyph {
+        case .dot:
+            // A dot under an enclosure: the centre dot as a single-point polyline.
+            polylines.append(ResolvedPolyline(points: [c], closed: false, pen: pen))
+        case .none:
+            break  // No glyph; only the enclosure(s) draw.
+        case .plus:
+            // Axis-aligned cross +: a horizontal and a vertical arm.
+            polylines.append(ResolvedPolyline(
+                points: [Vector(c.x - half, c.y, c.z), Vector(c.x + half, c.y, c.z)],
+                closed: false, pen: pen))
+            polylines.append(ResolvedPolyline(
+                points: [Vector(c.x, c.y - half, c.z), Vector(c.x, c.y + half, c.z)],
+                closed: false, pen: pen))
+        case .cross:
+            // Diagonal cross ×: the two diagonals of the marker box.
+            polylines.append(ResolvedPolyline(
+                points: [Vector(c.x - half, c.y - half, c.z), Vector(c.x + half, c.y + half, c.z)],
+                closed: false, pen: pen))
+            polylines.append(ResolvedPolyline(
+                points: [Vector(c.x - half, c.y + half, c.z), Vector(c.x + half, c.y - half, c.z)],
+                closed: false, pen: pen))
+        case .tick:
+            // A vertical tick running UP from the point (AutoCAD `$PDMODE 4`).
+            polylines.append(ResolvedPolyline(
+                points: [c, Vector(c.x, c.y + half, c.z)],
+                closed: false, pen: pen))
+        }
+
+        // Enclosure bits (drawn AROUND the glyph at the marker half-extent).
+        if mode.hasCircle {
+            let ring = Tessellation.circlePoints(
+                center: c, radius: half, tolerance: ctx.tessellationTolerance)
+            polylines.append(ResolvedPolyline(points: ring, closed: true, pen: pen))
+        }
+        if mode.hasSquare {
+            // The marker's bounding square (closed ring; the renderer adds the
+            // closing edge for a closed polyline).
+            polylines.append(ResolvedPolyline(points: [
+                Vector(c.x - half, c.y - half, c.z),
+                Vector(c.x + half, c.y - half, c.z),
+                Vector(c.x + half, c.y + half, c.z),
+                Vector(c.x - half, c.y + half, c.z),
+            ], closed: true, pen: pen))
+        }
+
+        return ResolvedGeometry(polylines: polylines)
     }
 
     // MARK: - Leader resolve (path + arrowhead + attached annotation)
