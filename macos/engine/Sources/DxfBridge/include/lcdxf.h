@@ -237,6 +237,16 @@ typedef struct LCEntity {
     int32_t dimAlign;            /**< attachment point (code 71): 1..9. */
     int32_t dimLineStyle;        /**< text line-spacing style (code 72): 1 at-least, 2 exact. */
     double dimLineFactor;        /**< text line-spacing factor (code 41); default 1. */
+    /** Per-entity DIMENSION text-height / arrow-size OVERRIDE, parsed from the
+     *  `ACAD:DSTYLE` xdata group (extData: 1070 dim-var code + 1040 value pairs;
+     *  text height is var 140, arrow size var 41). `has*` == 0 means "no per-entity
+     *  override — inherit the dim style / document default" (resolve precedence:
+     *  per-entity wins when set). When 0 the Swift reader leaves DimData.textHeight/
+     *  arrowSize at the inherit sentinel so the document `$DIMTXT`/`$DIMASZ` apply. */
+    double dimTextHeightOverride;
+    int32_t dimHasTextHeightOverride;
+    double dimArrowSizeOverride;
+    int32_t dimHasArrowSizeOverride;
 
     /* INSERT-only fields (meaningful when kind == LC_ENT_INSERT). The block name
      * is in `textValue`; the insertion point in p1; the rotation (radians) in
@@ -293,6 +303,72 @@ typedef struct LCBlock {
     int32_t memberOffset;   /**< index of the first member in `lc_block_entities`. */
     int32_t memberCount;    /**< number of member entities. */
 } LCBlock;
+
+/* ------------------------------------------------------------------------- *
+ *  Header variables + dimension styles
+ *
+ *  The reader captures the small set of HEADER variables and the DIMSTYLE table
+ *  entries the renderer needs (dimension text height / arrow size / scale and the
+ *  drawing-unit / linear-format vars). Both the DXF (`lc_dxf_read`) and DWG
+ *  (`lc_dwg_read`) paths populate them via the shared `FlatteningReader`. Each
+ *  numeric field carries an explicit `has*` flag (0 == the file did not supply the
+ *  var, so Swift should leave the corresponding graphic-variable at its default).
+ * ------------------------------------------------------------------------- */
+
+/**
+ * The captured drawing HEADER variables (a flat POD copy of the subset of
+ * `DRW_Header.vars` the renderer needs). DXF stores these keys `$`-prefixed
+ * ($INSUNITS); the DWG path stores them un-prefixed (INSUNITS) — the reader looks
+ * up both. A `has*` flag of 0 means the var was absent (leave the Swift default).
+ */
+typedef struct LCHeader {
+    int32_t insUnits;       /**< $INSUNITS — drawing unit code (DrawingUnit). */
+    int32_t hasInsUnits;
+    int32_t luUnits;        /**< $LUNITS — linear display format (1..5). */
+    int32_t hasLuUnits;
+    int32_t luPrec;         /**< $LUPREC — linear precision (decimal places). */
+    int32_t hasLuPrec;
+    int32_t auUnits;        /**< $AUNITS — angle display format (0..4). */
+    int32_t hasAuUnits;
+    int32_t auPrec;         /**< $AUPREC — angle precision. */
+    int32_t hasAuPrec;
+    double dimTxt;          /**< $DIMTXT — dimension text height (world units). */
+    int32_t hasDimTxt;
+    double dimAsz;          /**< $DIMASZ — dimension arrowhead size (world units). */
+    int32_t hasDimAsz;
+    double dimScale;        /**< $DIMSCALE — overall dimension scale factor. */
+    int32_t hasDimScale;
+    int32_t dimLUnit;       /**< $DIMLUNIT — dimension linear format (1..5). */
+    int32_t hasDimLUnit;
+    int32_t dimDec;         /**< $DIMDEC — dimension linear precision. */
+    int32_t hasDimDec;
+    double dimExo;          /**< $DIMEXO — extension-line offset (world units). */
+    int32_t hasDimExo;
+    double dimExe;          /**< $DIMEXE — extension-line extend-beyond (world units). */
+    int32_t hasDimExe;
+    double dimGap;          /**< $DIMGAP — text gap (world units). */
+    int32_t hasDimGap;
+    /** The active dimension style name ($DIMSTYLE, code 2). NULL/empty if absent. */
+    const char *dimStyle;
+} LCHeader;
+
+/**
+ * One captured DIMSTYLE table entry (a flat POD copy of the subset of
+ * `DRW_Dimstyle` the renderer needs). libdxfrw defaults the imperial standard
+ * (`dimtxt = dimasz = 0.18`) and fills these from the file. `name` borrows the
+ * owning list's string pool. Populated by both the DXF and DWG read paths.
+ */
+typedef struct LCDimStyle {
+    const char *name;       /**< style name, code 2 (borrows the list's string pool). */
+    double dimTxt;          /**< code 140 — text height (world units). */
+    double dimAsz;          /**< code 41 — arrowhead size (world units). */
+    double dimScale;        /**< code 40 — overall scale factor. */
+    int32_t dimDec;         /**< code 271 — linear precision (decimal places). */
+    int32_t dimLUnit;       /**< code 277 — linear format (1..5). */
+    double dimExo;          /**< code 42 — extension-line offset (world units). */
+    double dimExe;          /**< code 44 — extension-line extend-beyond (world units). */
+    double dimGap;          /**< code 147 — text gap (world units). */
+} LCDimStyle;
 
 /** Opaque owned result handle. Free with `lc_entity_list_free`. */
 typedef struct LCEntityList LCEntityList;
@@ -379,6 +455,20 @@ int lc_block_entity_count(const LCEntityList *list);
 /** Pointer to the contiguous flat array of `lc_block_entity_count` block-member
  *  entities, or NULL. Same lifetime as the top-level entity array. */
 const LCEntity *lc_block_entities(const LCEntityList *list);
+
+/** Pointer to the captured drawing HEADER variables, or NULL if the list is NULL.
+ *  Always non-NULL for a successfully-read file (the struct's `has*` flags say which
+ *  vars the file actually supplied). The pointer (and `dimStyle`) stays valid until
+ *  `lc_entity_list_free`. NULL-safe. */
+const LCHeader *lc_header(const LCEntityList *list);
+
+/** Number of captured DIMSTYLE table entries (>= 0). NULL-safe. */
+int lc_dimstyle_count(const LCEntityList *list);
+
+/** Pointer to the contiguous flat array of `lc_dimstyle_count` dimension styles,
+ *  or NULL. The pointer (and each style's `name`) stays valid until
+ *  `lc_entity_list_free`. NULL-safe. */
+const LCDimStyle *lc_dimstyles(const LCEntityList *list);
 
 /** Frees a handle returned by `lc_dxf_read`. NULL-safe. */
 void lc_entity_list_free(LCEntityList *list);

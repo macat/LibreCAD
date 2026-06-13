@@ -72,8 +72,18 @@ pass or by the relevant downstream owner. Each cites its source.
   `DimKind`, so they still surface as a "DIMENSION" reader warning and are never written (dim_sample.dxf
   has 6 ordinate dims that stay warnings). Add `DimKind.ordinate`/`.angular3p` + resolve arms first.
   Also: the DIMENSION entity's **text height / arrow size live in DIMSTYLE, not on the entity**, so
-  `DimData.textHeight`/`arrowSize` do NOT survive a DXF round-trip (they reset to the resolve defaults);
-  carrying them needs a DIMSTYLE table writer. The rendered geometry's **anonymous block (code 2) is not
+  `DimData.textHeight`/`arrowSize` do NOT survive a DXF *round-trip* on WRITE (they reset to the resolve
+  defaults); carrying them on write needs a DIMSTYLE table writer.
+  ~~**READ side: `addHeader`/`addDimStyle` were no-ops → every dim fell back to the 2.5 engine default**~~
+  DONE (ws-dimstyle-header-read, DC.5): the bridge now reads the HEADER vars (`$INSUNITS`/`$LUNITS`/
+  `$LUPREC`/`$AUNITS`/`$AUPREC`/`$DIMTXT`/`$DIMASZ`/`$DIMSCALE`/`$DIMLUNIT`/`$DIMDEC`) and the DIMSTYLE
+  table via new `LCHeader`/`LCDimStyle` PODs + `lc_header()`/`lc_dimstyles()`/`lc_dimstyle_count()`
+  accessors (both DXF and DWG paths, since both use `FlatteningReader`). `DXFReader` maps them into
+  `CADDrawing.graphicVariables`, so the existing `dimStyleProvider` resolves dims at the file's real size.
+  Per-dimension `ACAD:DSTYLE` xdata overrides (1070 140/41 + 1040 value) are stamped onto
+  `DimData.textHeight`/`arrowSize` (per-entity wins). Validated on the owner's
+  `mechanical_example-imperial.dwg`: dim text height 2.5 → 0.125, units mm → inch. *(ws-dimstyle-header-read)*
+  The rendered geometry's **anonymous block (code 2) is not
   authored** — we write the entity definition with an empty block name (libdxfrw forces the type-70 |32
   bit); a real CAD app regenerates the block and our own `resolve()` regenerates the visual on read.
   *(ws-dim-dxf)*
