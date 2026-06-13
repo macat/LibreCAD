@@ -132,6 +132,23 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     /// The Explode-Text modify tool (`ExplodeTextTool`) — convert a `.text`/`.mtext`
     /// entity into its stroke `.polyline`s (via the font provider).
     case explodeText
+    // --- Wire-wave-2 tools (wired into the UI in this wave) ---
+    /// The Ordinate dimension tool (`OrdinateDimTool`) — measure the X/Y coordinate of
+    /// a feature point relative to a datum origin, shown as a leader to a text point.
+    case ordinateDim
+    /// The Arc-Length dimension tool (`ArcLengthDimTool`) — dimension the swept length
+    /// of an arc (or arc segment of a polyline) with a curved dimension line.
+    case arcLengthDim
+    /// The 3-point Angular dimension tool (`Angular3pDimTool`) — angle defined by a
+    /// vertex + two endpoint picks (vs the 2-line `AngularDimTool`).
+    case angular3pDim
+    /// The Create-Block-from-selection tool (`CreateBlockTool`) — group the current
+    /// selection into a NAMED block and replace it with one `.insert`. Produces a
+    /// `CreateBlockRequest` the app applies via `CADDrawing.makeBlockFromEntities`.
+    case createBlock
+    /// The Explode-Insert modify tool (`ExplodeInsertTool`) — replace a selected block
+    /// reference (`.insert`) with its block's member entities (per MINSERT cell).
+    case explodeInsert
     // Append new draw tools here (one `case` per tool) — see the collision note.
 
     /// A short title for the UI (toolbar button / menu).
@@ -178,6 +195,11 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .measureLength:   return "Total Length"
         case .join:            return "Join"
         case .explodeText:     return "Explode Text"
+        case .ordinateDim:     return "Ordinate Dimension"
+        case .arcLengthDim:    return "Arc Length Dimension"
+        case .angular3pDim:    return "Angular Dimension (3-point)"
+        case .createBlock:     return "Create Block"
+        case .explodeInsert:   return "Explode Block"
         // Append a title arm per new case.
         }
     }
@@ -232,6 +254,18 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .measureLength:   return MeasureTool(mode: .totalLength)
         case .join:            return JoinTool()
         case .explodeText:     return ExplodeTextTool()
+        // Wire-wave-2 dimension subtypes (Annotate group).
+        case .ordinateDim:     return OrdinateDimTool()
+        case .arcLengthDim:    return ArcLengthDimTool()
+        case .angular3pDim:    return Angular3pDimTool()
+        // CreateBlockTool with the default "Block" name: it produces a
+        // `pendingCreation` REQUEST the app applies via the undoable
+        // `CADDrawing.makeBlockFromEntities` (see CanvasModel.handleToolInput).
+        case .createBlock:     return CreateBlockTool()
+        // ExplodeInsertTool minted with the inert (no-blocks) provider; the app
+        // injects the real `blockMembers` provider in `CanvasModel.applyToolConfig`
+        // (the same construction-injection InsertTool uses for its preview members).
+        case .explodeInsert:   return ExplodeInsertTool()
         // Append a `case <kind>: return <Name>Tool()` arm per new tool.
         }
     }

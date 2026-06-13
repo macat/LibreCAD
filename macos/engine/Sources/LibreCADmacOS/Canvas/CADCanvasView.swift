@@ -351,6 +351,18 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
         controller?.invertSelectionEntities()
     }
 
+    /// Edit ▸ Select Connected — grow the selection to the seed's connected component
+    /// (`SelectionTraversal.connected`).
+    @objc func selectConnectedAction(_ sender: Any?) {
+        controller?.selectConnectedFromSeed()
+    }
+
+    /// Edit ▸ Select Contour — grow the selection to the seed's closed contour loop
+    /// (`SelectionTraversal.contour`).
+    @objc func selectContourAction(_ sender: Any?) {
+        controller?.selectContourFromSeed()
+    }
+
     /// View ▸ Ortho (F8) — toggles the persistent ortho restriction.
     @objc func toggleOrthoAction(_ sender: Any?) {
         controller?.toggleOrtho()
@@ -370,6 +382,11 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
             return controller.hasSelectableEntities
         case #selector(deselectAllEntities(_:)), #selector(invertSelectionAction(_:)):
             return true
+        case #selector(selectConnectedAction(_:)), #selector(selectContourAction(_:)):
+            // Enabled only when there is a seed to grow from (a single selected entity
+            // or an entity under the cursor); greyed out otherwise so the verb is never
+            // a silent no-op.
+            return controller.hasSelectionSeed
         case #selector(toggleOrthoAction(_:)):
             // Reflect the persistent ortho state as the menu checkmark.
             if let menuItem = item as? NSMenuItem {
@@ -1015,6 +1032,60 @@ final class CADCanvasController {
         if model.invertSelection() { refreshGizmo(); redraw() }
     }
 
+    // MARK: Select Connected / Contour (wire-wave-2)
+
+    /// The SEED a Select-Connected / Select-Contour traversal grows from: the single
+    /// currently-selected entity if there is exactly one, else the entity under the
+    /// cursor (the hover target, falling back to a hit-test at the last cursor world
+    /// point). `nil` when there is no unambiguous seed (empty/multi selection with
+    /// nothing under the cursor). Pure read of the model's selection + hover state.
+    private func selectionSeed() -> EntityID? {
+        if model.selection.ids.count == 1, let only = model.selection.ids.first {
+            return only
+        }
+        if let hovered = model.hoverID { return hovered }
+        guard let world = model.cursorWorld else { return nil }
+        return model.selection.hitTest(
+            worldPoint: world, worldTolerance: model.worldTolerance,
+            in: model.drawing, using: model.quadtree
+        )
+    }
+
+    /// Whether a Select-Connected / Select-Contour traversal has a seed to grow from
+    /// (drives the Edit-menu items' enabled state via `validateUserInterfaceItem`).
+    var hasSelectionSeed: Bool { selectionSeed() != nil }
+
+    /// Edit ▸ Select Connected — replace the selection with the seed's connected
+    /// component (every entity transitively sharing an endpoint with the seed), via
+    /// the pure engine `SelectionTraversal.connected`. No-op (no seed) leaves the
+    /// selection unchanged.
+    func selectConnectedFromSeed() {
+        guard let seed = selectionSeed() else { return }
+        let ids = SelectionTraversal.connected(
+            seed: seed, in: model.drawing, using: model.quadtree)
+        applyTraversalSelection(ids)
+    }
+
+    /// Edit ▸ Select Contour — replace the selection with the closed contour loop the
+    /// seed belongs to, via the pure engine `SelectionTraversal.contour`. A seed that
+    /// is NOT part of a closed loop yields `nil` → no change (a clean no-op).
+    func selectContourFromSeed() {
+        guard let seed = selectionSeed() else { return }
+        guard let ids = SelectionTraversal.contour(
+            seed: seed, in: model.drawing, using: model.quadtree) else { return }
+        applyTraversalSelection(ids)
+    }
+
+    /// Sets the result of a Select-Connected / Select-Contour traversal as the new
+    /// selection on the model (view-side state, no undo — like the other Select verbs)
+    /// and repaints the highlight + re-glues the gizmo. No-op for an empty result.
+    private func applyTraversalSelection(_ ids: Set<EntityID>) {
+        guard !ids.isEmpty else { return }
+        model.setSelection(ids)
+        refreshGizmo()
+        redraw()
+    }
+
     /// View ▸ Ortho — flips the persistent ortho restriction and repaints (the
     /// status-bar chip + any active rubber-band preview reflect it on the next move).
     func toggleOrtho() {
@@ -1119,15 +1190,23 @@ final class CADCanvasController {
             }
             return false
         }
-        // ⌥S = Stretch (modify). It is the sole option chord — handled before the
-        // bare-letter switch so option+S does NOT fall through to S (Spline). Any
-        // other option combo is left for the responder chain.
+        // Option chords (the third tier, after bare + ⇧) — handled before the
+        // bare-letter switch so e.g. ⌥S does NOT fall through to S (Spline). ⌥ is
+        // reserved for tools whose bare/⇧ letter twins are both taken:
+        //   ⌥S Stretch · ⌥O Ordinate dim · ⌥G Arc-length dim · ⌥N Angular-3p dim ·
+        //   ⌥B Create Block · ⌥X Explode Block (wire-wave-2).
+        // Any other option combo is left for the responder chain.
         if option {
-            if !command, chars == "s" {
-                activateTool(.stretch)
-                return true
+            guard !command else { return false }
+            switch chars {
+            case "s": activateTool(.stretch);        return true
+            case "o": activateTool(.ordinateDim);    return true
+            case "g": activateTool(.arcLengthDim);   return true
+            case "n": activateTool(.angular3pDim);   return true
+            case "b": activateTool(.createBlock);    return true
+            case "x": activateTool(.explodeInsert);  return true
+            default:  return false
             }
-            return false
         }
         // Bare letter keys (no command modifier) activate tools. Shift selects the
         // modify variant where a draw tool shares the letter (C/R/S/M/O).
