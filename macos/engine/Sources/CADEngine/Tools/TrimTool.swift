@@ -413,4 +413,227 @@ public struct TrimTool: Tool {
     private static func angularGap(_ from: Double, _ to: Double, reversed: Bool) -> Double {
         MathUtils.getAngleDifference(from, to, reversed: reversed)
     }
+
+    // MARK: - Trim modes (UNWIRED — surfaced by a later wire-wave)
+
+    /// The trim variants this tool can perform. The interactive `handle` path drives
+    /// `.boundary` (the unchanged single-click default); the other two are exposed as
+    /// PURE static entry points (`trimAmount` / `trimAmountBoth` / `mutualTrim`) so a
+    /// future tool/UI can invoke them without going through this value's state
+    /// machine. (Modeled as an enum to mirror the LibreCAD action family; no
+    /// `ToolKind` case is added here — wiring is a separate wave.)
+    ///
+    /// - `.boundary`: the default. Click the overhang of a LINE/ARC to cut it back to
+    ///                the nearest cutting intersection with another entity (the
+    ///                existing `handle`/`trim(at:context:)` behavior — UNCHANGED).
+    /// - `.amount`:   shorten OR lengthen a LINE/ARC at a chosen end by a numeric
+    ///                signed distance (LibreCAD `RS_ActionModifyTrimAmount`). Invoke
+    ///                via `TrimTool.trimAmount(_:near:distance:)` (single end) or
+    ///                `TrimTool.trimAmountBoth(_:distance:)` (symmetric, both ends).
+    /// - `.mutual`:   trim/extend BOTH of two entities to their mutual intersection
+    ///                (LibreCAD trim2). Invoke via
+    ///                `TrimTool.mutualTrim(_:pickA:_:pickB:)`.
+    public enum Mode: Sendable, Equatable {
+        /// Single-click cut-to-boundary (the unchanged default).
+        case boundary
+        /// Trim by a signed amount at a chosen end (`RS_ActionModifyTrimAmount`).
+        case amount
+        /// Mutual trim/extend of two entities to their intersection (trim2).
+        case mutual
+    }
+
+    // MARK: - Mode 1: trim by amount (RS_ActionModifyTrimAmount)
+
+    /// Shortens OR lengthens `kind` (a LINE or ARC) at ONE end by the signed
+    /// `distance`, mirroring LibreCAD's `RS_ActionModifyTrimAmount` /
+    /// `RS_Modification::trimAmount` (single-end form). PURE — no context, no GUI.
+    ///
+    /// Semantics (matching LibreCAD `trimAmount(coord, e, dist, trimBoth=false)`,
+    /// which trims the endpoint nearer the pick to `getNearestDist(-dist, end)`):
+    ///   - The end nearer `near` is the one that moves; the other end is the anchor.
+    ///   - A POSITIVE `distance` LENGTHENS the entity at that end (moves the endpoint
+    ///     outward, away from the anchor); a NEGATIVE `distance` SHORTENS it (moves
+    ///     the endpoint inward, toward the anchor). The motion is measured ALONG the
+    ///     entity — straight for a line, by arc length (`Δangle = distance / radius`)
+    ///     for an arc.
+    ///   - `byTotalLength == true` reinterprets `distance` as a desired TOTAL length
+    ///     (the action's "total length" toggle): the applied signed delta becomes
+    ///     `|distance| − currentLength`, so the result has that total length.
+    ///
+    /// Returns `nil` for an unsupported kind, an invalid `near`, a zero/degenerate
+    /// delta, or a result whose length/sweep would collapse to ≤ 0 (mirrors the
+    /// engine's clamp in `LengthenTool`).
+    public static func trimAmount(_ kind: EntityKind, near: Vector, distance: Double,
+                                  byTotalLength: Bool = false) -> EntityKind? {
+        guard near.valid else { return nil }
+        let moveEnd = LengthenTool.endNearerIsEnd(kind, point: near)
+        let delta = byTotalLength ? (abs(distance) - currentLength(kind)) : distance
+        guard abs(delta) > Tolerance.distance else { return nil }
+        // The signed-delta lengthen math (positive = grow, negative = shrink at the
+        // chosen end) is exactly LibreCAD's `getNearestDist(-dist, end)` outcome.
+        return LengthenTool.lengthenByDelta(kind, moveEnd: moveEnd, delta: delta)
+    }
+
+    /// The symmetric (both-ends) form of trim-by-amount — LibreCAD's `trimAmount`
+    /// with `trimBoth == true` (the action's "symmetric" toggle, valid only when NOT
+    /// in total-length mode). Applies the SAME signed `distance` to BOTH ends:
+    /// positive lengthens both ends outward, negative shortens both ends inward.
+    ///
+    /// Returns `nil` for an unsupported kind, a zero/degenerate delta, or a result
+    /// that would collapse (e.g. shortening past the whole length / sweep).
+    public static func trimAmountBoth(_ kind: EntityKind, distance: Double) -> EntityKind? {
+        guard abs(distance) > Tolerance.distance else { return nil }
+        // Grow/shrink the END first, then the START, by the same delta. Each step
+        // reuses the clamped per-end lengthen so a collapse is rejected as `nil`.
+        guard let afterEnd = LengthenTool.lengthenByDelta(kind, moveEnd: true, delta: distance) else {
+            return nil
+        }
+        return LengthenTool.lengthenByDelta(afterEnd, moveEnd: false, delta: distance)
+    }
+
+    /// The current length of a LINE (Euclidean) or ARC (arc length), used by the
+    /// total-length form of `trimAmount`. `0` for an unsupported kind.
+    static func currentLength(_ kind: EntityKind) -> Double {
+        switch kind {
+        case .line(let d):
+            return d.start.distance(to: d.end)
+        case .arc(let d):
+            let sweep = MathUtils.getAngleDifference(d.startAngle, d.endAngle, reversed: d.reversed)
+            return abs(d.radius) * sweep
+        default:
+            return 0
+        }
+    }
+
+    // MARK: - Mode 2: mutual trim / trim-2 (LibreCAD trim2)
+
+    /// The result of a mutual trim: the new geometry for BOTH entities.
+    public struct MutualTrim: Equatable {
+        /// The trimmed/extended geometry for the first entity (`a`).
+        public let a: EntityKind
+        /// The trimmed/extended geometry for the second entity (`b`).
+        public let b: EntityKind
+    }
+
+    /// MUTUAL TRIM (LibreCAD trim2): trims OR extends BOTH `a` and `b` so each ends
+    /// at their mutual intersection point. PURE — no context, no GUI.
+    ///
+    /// `pickA` / `pickB` are the points the user clicked on each entity; like
+    /// LibreCAD's two-click trim they select (1) which intersection to use when the
+    /// pair crosses more than once — the intersection nearest the two picks — and
+    /// (2) which side/end of each entity is reshaped: the endpoint nearer that
+    /// entity's pick is the one moved to the intersection (so the picked portion is
+    /// the part KEPT, matching the action where you click the segment to keep).
+    ///
+    /// Both entities are intersected on their INFINITE carrier (full line / full
+    /// circle) so the operation EXTENDS as readily as it TRIMS — exactly the trim2
+    /// behavior where a gap is closed by lengthening to the crossing. Supports
+    /// line↔line, line↔arc, and arc↔arc (the line/arc scope of the rest of the tool).
+    ///
+    /// Returns `nil` when the kinds are unsupported, the carriers don't intersect,
+    /// or either reshape would collapse an entity to zero length/sweep.
+    public static func mutualTrim(_ a: EntityKind, pickA: Vector,
+                                  _ b: EntityKind, pickB: Vector) -> MutualTrim? {
+        guard pickA.valid, pickB.valid else { return nil }
+        guard isMutualSupported(a), isMutualSupported(b) else { return nil }
+
+        // The carriers' intersections (infinite line / full circle), choosing the one
+        // nearest the picks so an ambiguous pair resolves to the clicked crossing.
+        let cuts = carrierIntersections(a, b)
+        guard !cuts.isEmpty else { return nil }
+        let mid = (pickA + pickB) * 0.5
+        let (cut, _) = VectorSolutions(cuts).closest(to: mid)
+        guard cut.valid else { return nil }
+
+        // Reshape each entity so the endpoint nearer its OWN pick reaches `cut`.
+        guard let newA = reshapeToPoint(a, near: pickA, target: cut),
+              let newB = reshapeToPoint(b, near: pickB, target: cut) else {
+            return nil
+        }
+        return MutualTrim(a: newA, b: newB)
+    }
+
+    /// Whether `kind` is a supported operand for mutual trim (line / arc).
+    static func isMutualSupported(_ kind: EntityKind) -> Bool {
+        switch kind {
+        case .line, .arc: return true
+        default: return false
+        }
+    }
+
+    /// All intersection points of the two entities taken on their INFINITE carriers
+    /// (a line's whole infinite line, an arc's whole circle) so mutual trim can
+    /// EXTEND to a crossing that lies beyond an entity's current extent, not only
+    /// trim to one inside it. Line↔line / line↔arc / arc↔arc.
+    static func carrierIntersections(_ a: EntityKind, _ b: EntityKind) -> [Vector] {
+        let sols: VectorSolutions
+        switch (a, b) {
+        case (.line(let la), .line(let lb)):
+            sols = Intersections.lineLine(la.start, la.end, lb.start, lb.end, segment: false)
+        case (.line(let l), .arc(let ar)):
+            sols = Intersections.lineCircle(line: (l.start, l.end),
+                                            center: ar.center, radius: ar.radius, segment: false)
+        case (.arc(let ar), .line(let l)):
+            sols = Intersections.lineCircle(line: (l.start, l.end),
+                                            center: ar.center, radius: ar.radius, segment: false)
+        case (.arc(let a1), .arc(let a2)):
+            sols = Intersections.circleCircle(center1: a1.center, radius1: a1.radius,
+                                              center2: a2.center, radius2: a2.radius)
+        default:
+            sols = VectorSolutions()
+        }
+        return sols.filter(\.valid)
+    }
+
+    /// Reshapes `kind` (a LINE or ARC) so the appropriate endpoint is moved to the
+    /// world point `target` (which lies on the entity's carrier). This is the
+    /// trim-OR-extend primitive for mutual trim: it both shortens (when `target` is
+    /// inside the current extent) and lengthens (when beyond it).
+    ///
+    /// Which endpoint moves is decided EXACTLY as LibreCAD's `getTrimPoint`
+    /// (`RS_Line`/`RS_Arc`) using the pick `near`, so the result matches the trim2
+    /// action's keep/discard choice:
+    ///   - LINE: the side test `dot(start − near, target − near)`. When the start is
+    ///           on the OPPOSITE side of the pick from `target` (dot < 0) the END is
+    ///           moved to `target` (keeping the picked portion); otherwise the START
+    ///           is moved. (`target` is on the line's carrier, so the moved endpoint
+    ///           stays collinear.)
+    ///   - ARC:  the end whose endpoint-angle is angularly NEARER the pick angle is
+    ///           the one moved to `target`'s angle on the circle; rejected if the
+    ///           resulting sweep collapses or exceeds a turn.
+    /// Returns `nil` for an unsupported kind or a degenerate result.
+    static func reshapeToPoint(_ kind: EntityKind, near: Vector, target: Vector) -> EntityKind? {
+        guard target.valid else { return nil }
+        switch kind {
+        case .line(let d):
+            // LibreCAD RS_Line::getTrimPoint: move the END iff start is on the far
+            // side of the pick from the intersection.
+            let moveEnd = (d.start - near).dot(target - near) < 0
+            let anchor = moveEnd ? d.start : d.end
+            guard (target - anchor).squared > Tolerance.distanceSquared else { return nil }
+            let newLine = moveEnd ? LineData(start: anchor, end: target)
+                                  : LineData(start: target, end: anchor)
+            return .line(newLine)
+        case .arc(let d):
+            guard d.radius > Tolerance.distance else { return nil }
+            // LibreCAD RS_Arc::getTrimPoint: move the end whose angle is nearer the
+            // pick angle (the near-side overhang is removed / extended).
+            let angMouse = (near - d.center).angle
+            let dStart = abs((angMouse - d.startAngle).remainder(dividingBy: 2 * Double.pi))
+            let dEnd = abs((angMouse - d.endAngle).remainder(dividingBy: 2 * Double.pi))
+            let moveStart = dStart < dEnd
+            let newAngle = (target - d.center).angle
+            let candidate = moveStart
+                ? ArcData(center: d.center, radius: d.radius,
+                          startAngle: newAngle, endAngle: d.endAngle, reversed: d.reversed)
+                : ArcData(center: d.center, radius: d.radius,
+                          startAngle: d.startAngle, endAngle: newAngle, reversed: d.reversed)
+            let sweep = MathUtils.getAngleDifference(candidate.startAngle, candidate.endAngle,
+                                                     reversed: candidate.reversed)
+            guard sweep > Tolerance.angle, sweep < 2 * Double.pi - Tolerance.angle else { return nil }
+            return .arc(candidate)
+        default:
+            return nil
+        }
+    }
 }
