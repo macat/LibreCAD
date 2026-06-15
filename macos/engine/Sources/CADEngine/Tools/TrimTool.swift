@@ -56,17 +56,45 @@ import Foundation
 /// entity (LibreCAD's modify-trim, single-click form).
 public struct TrimTool: Tool {
 
+    // MARK: - Mode configuration (driven by the options bar via CanvasModel)
+
+    /// Which trim variant the interactive `handle` path performs. Set by the app
+    /// from the options-bar selection (see `CanvasModel.applyToolConfig`); defaults
+    /// to `.boundary` so a freshly minted tool behaves EXACTLY as before. The three
+    /// modes are documented on `Mode` below.
+    public var mode: Mode = .boundary
+
+    /// The signed distance used by `.amount` (and `.amount` only). POSITIVE
+    /// lengthens, NEGATIVE shortens, measured along the entity (straight for a line,
+    /// by arc length for an arc) — see `trimAmount`. Ignored by `.boundary` /
+    /// `.mutual`. Defaults to `0` (an `.amount` click with a zero amount is a no-op).
+    public var amount: Double = 0
+
+    /// Whether `.amount` applies the distance to BOTH ends (symmetric) rather than
+    /// only the end nearer the pick. `false` is the LibreCAD-standard single-end
+    /// form (`RS_ActionModifyTrimAmount` default); `true` selects the symmetric
+    /// toggle (`trimAmountBoth`). Ignored by `.boundary` / `.mutual`.
+    public var amountBoth: Bool = false
+
     // MARK: - Private state machine (no magic Int — engine-architecture note)
 
-    /// The tool's lifecycle. Trim is a SINGLE-click action, so there is one
-    /// waiting state; kept as an `enum` (not a flag) to match the tool family and
-    /// stay exhaustive if states are added.
+    /// The tool's lifecycle. `.boundary` and `.amount` are SINGLE-click actions
+    /// (one waiting state); `.mutual` needs TWO entity picks, so a second case
+    /// carries the first pick made so far. Kept as an `enum` (not a flag) to match
+    /// the tool family and stay exhaustive.
     private enum State: Equatable {
-        /// Waiting for the click on the part of an entity to trim away.
+        /// Waiting for the click on the part of an entity to trim away (the only
+        /// state for `.boundary` / `.amount`, and the FIRST pick for `.mutual`).
         case picking
+        /// `.mutual` only: the first entity is fixed; waiting for the SECOND entity.
+        /// `first` is the chosen first record (kept so the second pick can exclude
+        /// it and the mutual-trim can reference its id); `firstPick` is the click
+        /// point on the first entity (it selects which side of it is kept, matching
+        /// LibreCAD's two-click trim2). Reached only when `mode == .mutual`.
+        case pickingSecond(first: EntityRecord, firstPick: Vector)
     }
 
-    /// The current state. There is only one.
+    /// The current state. Starts at the first pick.
     private var state: State = .picking
 
     /// The last cursor point seen via `.move`, used to drive the highlight preview
@@ -79,11 +107,25 @@ public struct TrimTool: Tool {
 
     public var title: String { "Trim" }
 
-    public var status: String { "Click the part of a line or arc to trim away" }
+    public var status: String {
+        switch mode {
+        case .boundary:
+            return "Click the part of a line or arc to trim away"
+        case .amount:
+            return "Click a line or arc near the end to trim by amount"
+        case .mutual:
+            switch state {
+            case .picking:       return "Specify first entity to trim"
+            case .pickingSecond: return "Specify second entity to trim"
+            }
+        }
+    }
 
-    /// The live preview: if a LINE/ARC under the cursor can be trimmed at the
-    /// cursor, highlight the RESULTING (shortened) geometry with the preview pen.
-    /// Empty when nothing would be trimmed (no target / no bounding intersection).
+    /// The live preview: in `.boundary` mode, if a LINE/ARC under the cursor can be
+    /// trimmed at the cursor, highlight the RESULTING (shortened) geometry with the
+    /// preview pen. Empty when nothing would be trimmed (no target / no bounding
+    /// intersection). The `.amount` / `.mutual` modes don't drive a move preview
+    /// (they act on click — see `previewKind`, only populated by `.boundary` moves).
     public var preview: [ResolvedPolyline] {
         guard cursor.valid else { return [] }
         // The preview has no `ToolContext`, so it can only reflect what `.move`
@@ -97,9 +139,15 @@ public struct TrimTool: Tool {
     /// (cached because `preview` has no context). Nil when nothing would trim.
     private var previewKind: EntityKind?
 
-    /// A TRIM editing tool: it reads the boundary hooks (`nearbyEntities` /
-    /// `allEntities`) and, on a click, emits ONE `.replace(targetID, kind)` to
-    /// shorten the clicked target up to the nearest cutting intersection.
+    /// A TRIM editing tool. The `mode` selects which variant a click performs (set
+    /// by the app from the options bar):
+    ///   - `.boundary` (default): reads the boundary hooks and, on a click, emits
+    ///     ONE `.replace(targetID, kind)` shortening the clicked target up to the
+    ///     nearest cutting intersection — UNCHANGED from the original tool.
+    ///   - `.amount`: a single entity pick (near the end to act on) → emits ONE
+    ///     `.replace` shortened/lengthened by `amount`. No boundary pick.
+    ///   - `.mutual`: collects TWO entity picks → emits TWO `.replace`s (both
+    ///     entities reshaped to their mutual intersection) as one undoable group.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
         switch input {
         case .value:
@@ -108,42 +156,117 @@ public struct TrimTool: Tool {
 
         case .move(let p):
             cursor = p
-            // Recompute the would-trim preview from the live context so the
-            // highlight tracks the cursor (the geometry kept after a trim here).
-            previewKind = Self.trim(at: p, context: context)?.kind
+            // The would-trim highlight is the `.boundary` preview only (the
+            // amount/mutual modes act on click and have no single-cursor preview).
+            previewKind = (mode == .boundary) ? Self.trim(at: p, context: context)?.kind : nil
             return previewKind == nil ? .none : .preview
 
         case .click(let p):
             return handleClick(p, context: context)
 
         case .backspace:
-            // Trim is a single pick; there is nothing to step back.
-            return .none
+            return handleBackspace()
 
         case .cancel:
-            // Esc — discard the preview and finish.
+            // Esc — discard the preview / in-progress pick and finish.
             reset()
             return .finished
 
         case .commit:
-            // Return — trim commits on the click, so nothing is pending here.
+            // Return — every mode commits on its click(s), so nothing is pending
+            // here; just end the run.
             reset()
             return .finished
         }
     }
 
-    // MARK: - Click handling
+    // MARK: - Click handling (dispatched on the active mode)
 
     private mutating func handleClick(_ p: Vector, context: ToolContext) -> ToolOutcome {
-        // Find the nearest LINE/ARC target under the click and the shortened
-        // geometry; if either the target or a bounding intersection is missing,
-        // the click is a no-op.
+        switch mode {
+        case .boundary: return handleBoundaryClick(p, context: context)
+        case .amount:   return handleAmountClick(p, context: context)
+        case .mutual:   return handleMutualClick(p, context: context)
+        }
+    }
+
+    /// `.boundary` (the default, UNCHANGED): find the nearest LINE/ARC target under
+    /// the click and the shortened geometry; if either the target or a bounding
+    /// intersection is missing, the click is a no-op.
+    private mutating func handleBoundaryClick(_ p: Vector, context: ToolContext) -> ToolOutcome {
         guard let result = Self.trim(at: p, context: context) else { return .none }
         reset()
         return .commit([.replace(result.targetID, result.kind)])
     }
 
-    /// Returns to the initial waiting state and drops the cached preview.
+    /// `.amount`: ONE entity pick. Picks the nearest LINE/ARC under the click (the
+    /// click point also chooses which end is acted on — see `trimAmount`), applies
+    /// the signed `amount` (single-end, or both ends when `amountBoth`), and emits
+    /// ONE `.replace`. A no-target click, a zero/degenerate amount, or a result that
+    /// would collapse is a no-op.
+    private mutating func handleAmountClick(_ p: Vector, context: ToolContext) -> ToolOutcome {
+        let tol = Self.pickTolerance(context)
+        guard let target = Self.nearestTarget(at: p, tolerance: tol, context: context) else {
+            return .none
+        }
+        let trimmed = amountBoth
+            ? Self.trimAmountBoth(target.kind, distance: amount)
+            : Self.trimAmount(target.kind, near: p, distance: amount)
+        guard let trimmed else { return .none }
+        reset()
+        return .commit([.replace(target.id, trimmed)])
+    }
+
+    /// `.mutual`: TWO entity picks. The first click fixes the first LINE/ARC (and
+    /// the side to keep via its pick point); the second click selects a different
+    /// LINE/ARC, and `mutualTrim` reshapes BOTH to their mutual intersection, emitted
+    /// as TWO `.replace`s in one group. A no-target first pick keeps waiting; a
+    /// no-target or degenerate second pick keeps waiting for a valid second entity.
+    private mutating func handleMutualClick(_ p: Vector, context: ToolContext) -> ToolOutcome {
+        let tol = Self.pickTolerance(context)
+        switch state {
+        case .picking:
+            // First click selects the nearest LINE/ARC. A non-target (or empty)
+            // pick is ignored — keep waiting for the first entity.
+            guard let first = Self.nearestTarget(at: p, tolerance: tol, context: context) else {
+                return .none
+            }
+            state = .pickingSecond(first: first, firstPick: p)
+            cursor = p
+            previewKind = nil
+            return .none
+
+        case .pickingSecond(let first, let firstPick):
+            // Second click selects a DIFFERENT LINE/ARC and computes the mutual trim.
+            guard let second = Self.nearestTarget(at: p, tolerance: tol,
+                                                  exclude: first.id, context: context) else {
+                return .none
+            }
+            guard let result = Self.mutualTrim(first.kind, pickA: firstPick,
+                                               second.kind, pickB: p) else {
+                // The carriers don't cross / a reshape collapses — drop the second
+                // pick and keep waiting for a valid second entity.
+                return .none
+            }
+            reset()
+            return .commit([.replace(first.id, result.a), .replace(second.id, result.b)])
+        }
+    }
+
+    /// Backspace: `.boundary` / `.amount` are single picks with nothing to step
+    /// back; `.mutual` un-does the first-entity pick when one is pending.
+    private mutating func handleBackspace() -> ToolOutcome {
+        switch state {
+        case .picking:
+            return .none
+        case .pickingSecond:
+            // Undo the first-entity pick → back to waiting for the first entity.
+            reset()
+            return .preview
+        }
+    }
+
+    /// Returns to the initial waiting state and drops the cached preview / pick.
     private mutating func reset() {
         state = .picking
         cursor = .invalid
@@ -210,12 +333,14 @@ public struct TrimTool: Tool {
         }
     }
 
-    /// The nearest LINE or ARC within `tolerance` of `p`, or `nil`. Other kinds
-    /// are skipped (scope: line/arc).
-    static func nearestTarget(at p: Vector, tolerance: Double, context: ToolContext) -> EntityRecord? {
+    /// The nearest LINE or ARC within `tolerance` of `p`, optionally excluding one
+    /// id (so the `.mutual` second pick can't re-pick the first), or `nil`. Other
+    /// kinds are skipped (scope: line/arc).
+    static func nearestTarget(at p: Vector, tolerance: Double,
+                              exclude: EntityID? = nil, context: ToolContext) -> EntityRecord? {
         var best: EntityRecord?
         var bestDist = Double.greatestFiniteMagnitude
-        for e in context.nearbyEntities(p, tolerance) {
+        for e in context.nearbyEntities(p, tolerance) where e.id != exclude {
             switch e.kind {
             case .line, .arc:
                 let d = HitTesting.worldDistance(from: p, to: e)
@@ -414,24 +539,24 @@ public struct TrimTool: Tool {
         MathUtils.getAngleDifference(from, to, reversed: reversed)
     }
 
-    // MARK: - Trim modes (UNWIRED — surfaced by a later wire-wave)
+    // MARK: - Trim modes (wired into `handle` via the `mode` field)
 
-    /// The trim variants this tool can perform. The interactive `handle` path drives
-    /// `.boundary` (the unchanged single-click default); the other two are exposed as
-    /// PURE static entry points (`trimAmount` / `trimAmountBoth` / `mutualTrim`) so a
-    /// future tool/UI can invoke them without going through this value's state
-    /// machine. (Modeled as an enum to mirror the LibreCAD action family; no
-    /// `ToolKind` case is added here — wiring is a separate wave.)
+    /// The trim variants this tool can perform. The interactive `handle` path now
+    /// dispatches on the settable `mode` field (set by the app from the options bar
+    /// via `CanvasModel.applyToolConfig`); each mode is also backed by a PURE static
+    /// entry point (`trim` / `trimAmount` / `trimAmountBoth` / `mutualTrim`) the
+    /// click handlers call. (Modeled as an enum to mirror the LibreCAD action family.)
     ///
     /// - `.boundary`: the default. Click the overhang of a LINE/ARC to cut it back to
     ///                the nearest cutting intersection with another entity (the
     ///                existing `handle`/`trim(at:context:)` behavior — UNCHANGED).
     /// - `.amount`:   shorten OR lengthen a LINE/ARC at a chosen end by a numeric
-    ///                signed distance (LibreCAD `RS_ActionModifyTrimAmount`). Invoke
-    ///                via `TrimTool.trimAmount(_:near:distance:)` (single end) or
-    ///                `TrimTool.trimAmountBoth(_:distance:)` (symmetric, both ends).
+    ///                signed distance (LibreCAD `RS_ActionModifyTrimAmount`). The
+    ///                click handler drives `TrimTool.trimAmount(_:near:distance:)`
+    ///                (single end) or `TrimTool.trimAmountBoth(_:distance:)` (the
+    ///                symmetric both-ends form, when `amountBoth`).
     /// - `.mutual`:   trim/extend BOTH of two entities to their mutual intersection
-    ///                (LibreCAD trim2). Invoke via
+    ///                (LibreCAD trim2). The two-click handler drives
     ///                `TrimTool.mutualTrim(_:pickA:_:pickB:)`.
     public enum Mode: Sendable, Equatable {
         /// Single-click cut-to-boundary (the unchanged default).

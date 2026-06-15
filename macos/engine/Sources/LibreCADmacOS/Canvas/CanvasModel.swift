@@ -722,12 +722,16 @@ final class CanvasModel {
             // EllipseTool's `mode` is fixed at construction (it seeds the start state),
             // so re-mint with the configured mode (the DivideTool/ArcTool pattern).
             tool = EllipseTool(mode: ellipseModeValue)
-        // NOTE: TrimTool needs NO config push here — it carries no `mode` field and its
-        // `handle` always drives the single-click `.boundary` cut. The selected
-        // `trimModeIndex`/`trimAmount` are held in CanvasModel state for the options bar;
-        // the `.amount`/`.mutual` variants are PURE static entry points on TrimTool not
-        // yet dispatched from `handle` (engine gap — see the report), so there is nothing
-        // to set on the tool value. It falls through to the `default` arm unchanged.
+        case var t as TrimTool:
+            // Push the options-bar trim mode + signed amount onto the active tool so
+            // a click dispatches to the chosen variant. `trimModeValue` maps the
+            // stored case INDEX (`trimModeIndex`) → `TrimTool.Mode`; `trimAmount` is
+            // the signed distance the `.amount` mode applies (positive lengthens,
+            // negative shortens). `.boundary` (index 0, the default) leaves the
+            // single-click cut-to-boundary behavior unchanged.
+            t.mode = trimModeValue
+            t.amount = trimAmount
+            tool = t
         case var t as CircleTool:
             t.sizeMode = circleSizeMode
             t.fixedSize = circleFixedSize > 0 ? circleFixedSize : nil
