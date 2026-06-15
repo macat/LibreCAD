@@ -2063,18 +2063,30 @@ final class CanvasModel {
         paste(records: clipboard.pasteRecords())
     }
 
-    /// Duplicates the current selection in place at the default offset WITHOUT
-    /// touching the clipboard (the ⌘D / "Duplicate" verb): snapshots the selected
-    /// records, re-mints + offsets them via a transient clipboard, and adds them as
-    /// the new selection (one undo step). Returns whether anything was duplicated.
+    /// Duplicates the current selection in place WITHOUT touching the clipboard (the
+    /// ⌘D / "Duplicate" verb): resolves the selected records and runs them through the
+    /// PURE `Duplicate.duplicate(_:offset:)` static API (one `.add` per entity, a deep
+    /// value copy translated by `offset` — the AutoCAD-standard small nudge by default
+    /// so the copies are grabbable apart from their sources), then applies the
+    /// resulting `[ToolEdit]` through the shared undoable `.add` path, capturing the
+    /// minted ids so the duplicates become the new selection (one undo step). Returns
+    /// whether anything was duplicated. `offset: Vector(0, 0)` gives an exact in-place
+    /// duplicate.
     @discardableResult
-    func duplicateSelection() -> Bool {
+    func duplicateSelection(offset: Vector = Duplicate.defaultOffset) -> Bool {
         guard !selection.isEmpty else { return false }
         let recs = selection.ids.compactMap { drawing.entity($0) }
-        guard !recs.isEmpty else { return false }
-        var scratch = EntityClipboard()
-        scratch.copy(recs)
-        return paste(records: scratch.pasteRecords())
+        // The exact call the ⌘D command funnels through: the pure static Duplicate API.
+        let edits = Duplicate.duplicate(recs, offset: offset)
+        guard !edits.isEmpty else { return false }
+        // Reuse the shared add-and-select path: extract the `.add` records from the
+        // edits, then add+select them through the same undoable group paste/duplicate
+        // use. This keeps the duplicates selected and the undo a single step.
+        let records: [EntityRecord] = edits.compactMap { edit in
+            guard case .add(let r) = edit else { return nil }
+            return r
+        }
+        return paste(records: records)
     }
 
     /// Shared add-and-select for paste/duplicate: routes `records` through the

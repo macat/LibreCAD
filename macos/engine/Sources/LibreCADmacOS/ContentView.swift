@@ -90,6 +90,16 @@ struct ContentView: View {
     /// focus to the canvas (so tool letters work again).
     @FocusState private var commandFieldFocused: Bool
 
+    /// The user-customized set of tools PINNED to the primary toolbar as buttons,
+    /// persisted across launches via `@AppStorage` (a comma-separated list of
+    /// `ToolKind` raw values). Tools NOT pinned still live in their group's `▾`
+    /// overflow menu, so every tool stays reachable. The empty default ("") means
+    /// "use the built-in default primary set" (`ToolCatalog.defaultPrimary`), so a
+    /// fresh install shows a sensible curated toolbar; once the user toggles any
+    /// pin the stored string becomes authoritative (a leading sentinel distinguishes
+    /// "user cleared everything" from "never customized"). See `pinnedToolsSet`.
+    @AppStorage("toolbar.pinnedTools") private var pinnedToolsRaw: String = ""
+
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             // Leading pane: the modern Layers (+ Blocks stub) sidebar, bound to
@@ -242,6 +252,12 @@ struct ContentView: View {
             redo: { model.redo() },
             delete: {
                 if model.deleteSelection() { controllerBox.controller?.requestRedraw() }
+            },
+            // ⌘D Duplicate: resolve the current selection, duplicate it via the pure
+            // `Duplicate.duplicate` static API (a small AutoCAD-standard nudge), and
+            // apply the resulting edits as ONE undoable group through the model funnel.
+            duplicate: {
+                if model.duplicateSelection() { controllerBox.controller?.requestRedraw() }
             }
         )
     }
@@ -325,150 +341,76 @@ struct ContentView: View {
         document.updatePayload(model.drawing.payloadSnapshot)
     }
 
-    // MARK: - Toolbar (Select + Draw group + Modify group)
+    // MARK: - Toolbar (grouped: core + Draw / Modify / Annotate, with overflow)
 
-    /// One toolbar button per tool, grouped Select → Draw → Modify (dividers
-    /// between groups). Each button activates its tool on the focused canvas and
-    /// shows the active badge. SF Symbols where one fits; the `help` carries the
-    /// shortcut so the toolbar is self-documenting. The shortcuts shown match the
-    /// Tools menu / canvas keymap exactly.
+    /// The grouped tool toolbar (macOS-HIG). Instead of one overcrowded flat row of
+    /// ~50 buttons, tools are organized into a small always-visible CORE (Select +
+    /// the user's PINNED tools) followed by three group sections — Draw, Modify,
+    /// Annotate — each rendered as its pinned buttons plus a `▾` overflow `Menu` that
+    /// lists EVERY tool in that group (so nothing is ever unreachable). The overflow
+    /// menu doubles as the customization surface: each entry toggles whether the tool
+    /// is pinned to the toolbar (a checkmark shows the current state), persisted via
+    /// `@AppStorage`. Decomposed into small per-group helpers so the SwiftUI
+    /// type-checker never sees a large monolithic toolbar expression (gotcha #2).
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .principal) {
-            toolButton(.select, symbol: "cursorarrow", help: "Select / pan (V)")
+            // Always-visible core: Select is never groupable/unpinnable.
+            toolButton(.select)
 
             Divider()
-            // Draw tools.
-            toolButton(.line, symbol: "line.diagonal", help: "Draw line (L)")
-            toolButton(.circle, symbol: "circle", help: "Draw circle (C)")
-            toolButton(.arc, symbol: "point.topleft.down.to.point.bottomright.curvepath",
-                       help: "Draw arc (A)")
-            toolButton(.rectangle, symbol: "rectangle", help: "Draw rectangle (R)")
-            toolButton(.polyline, symbol: "scribble", help: "Draw polyline (P)")
-            toolButton(.point, symbol: "smallcircle.filled.circle", help: "Place point (O)")
-            toolButton(.ellipse, symbol: "oval", help: "Draw ellipse (E)")
-            toolButton(.polygon, symbol: "hexagon", help: "Draw polygon (G)")
-            toolButton(.spline, symbol: "scribble.variable", help: "Draw spline (S)")
-            // Hatch fills the region bounded by the current selection.
-            toolButton(.hatch, symbol: "square.grid.2x2.fill", help: "Hatch fill selection (H)")
-            // Image: place a reference to an image FILE. Activating it FIRST presents a
-            // file-picker (NSOpenPanel) — the chosen file's path + source pixel size are
-            // read and pushed onto the tool — then the user clicks two corners (lower-
-            // left, then a bottom-edge corner that sets size + rotation). So this button
-            // routes through `chooseAndPlaceImage`, NOT the bare `activateTool`.
-            Button {
-                chooseAndPlaceImage()
-            } label: {
-                Label(ToolKind.image.title, systemImage: "photo")
+            groupSection(.draw)
+            Divider()
+            groupSection(.modify)
+            Divider()
+            groupSection(.annotate)
+        }
+    }
+
+    /// One group's toolbar section: its PINNED tools as buttons, then a `▾` overflow
+    /// `Menu` carrying the whole group (every tool, with a pin toggle each). Split out
+    /// per group so each toolbar sub-expression stays tiny for the type-checker.
+    @ViewBuilder
+    private func groupSection(_ group: ToolGroup) -> some View {
+        ForEach(pinnedTools(in: group), id: \.self) { kind in
+            toolButton(kind)
+        }
+        groupOverflowMenu(group)
+    }
+
+    /// The `▾` overflow menu for one group: every tool in the group (so all are
+    /// reachable regardless of what is pinned), each as an "activate" button plus a
+    /// "pin to toolbar" checkbox toggle for customization. Built from `ToolCatalog`,
+    /// the single source of truth shared with the test's no-orphan check.
+    @ViewBuilder
+    private func groupOverflowMenu(_ group: ToolGroup) -> some View {
+        Menu {
+            ForEach(ToolCatalog.tools(in: group), id: \.self) { kind in
+                overflowEntry(kind)
             }
-            .help("Place image — pick a file, then click two corners (⇧Y)")
-            .background(activeBadge(.image))
-            // Text authoring: a click sets the insertion point and raises the inline
-            // editor; type, then Return commits the text.
-            toolButton(.text, symbol: "character.textbox", help: "Add text (⇧T)")
-            // Blocks: place a reference to a named block. With no block chosen the
-            // tool is inert (the block-picker UI is a later task) — it never crashes.
-            toolButton(.insert, symbol: "square.on.square.dashed", help: "Insert block (⇧I)")
-            // Wire-wave-3 construction lines: XLine is an INFINITE line through a base in
-            // a picked direction; Ray is the SEMI-infinite (one-way) variant. Both pick a
-            // base then a direction point. Free option chords (⌥I / ⌥Y).
-            toolButton(.xline, symbol: "line.diagonal.arrow",
-                       help: "Construction line — infinite (⌥I)")
-            toolButton(.ray, symbol: "arrow.up.right",
-                       help: "Ray — semi-infinite construction line (⌥Y)")
+        } label: {
+            Label(group.title, systemImage: group.symbol)
+        }
+        .menuIndicator(.visible)
+        .help("\(group.title) tools — click to activate or pin to the toolbar")
+    }
 
+    /// One overflow-menu row for a tool: an "activate" button (its title + glyph +
+    /// shortcut hint) and a nested pin toggle so the user can add/remove it from the
+    /// primary toolbar (the lightweight, no-risk "Customize…" affordance, #4).
+    @ViewBuilder
+    private func overflowEntry(_ kind: ToolKind) -> some View {
+        let meta = ToolCatalog.metadata(for: kind)
+        Menu {
+            // Activate (the same routing the toolbar button uses — Image goes through
+            // the file-picker flow, everything else through `activateTool`).
+            Button("Use \(kind.title)") { activate(kind) }
             Divider()
-            // Modify tools (act on the current selection).
-            toolButton(.move, symbol: "arrow.up.and.down.and.arrow.left.and.right",
-                       help: "Move selection (M)")
-            toolButton(.copy, symbol: "plus.square.on.square", help: "Copy selection (⇧C)")
-            toolButton(.offset, symbol: "plus.rectangle.on.rectangle",
-                       help: "Offset selection (⇧O)")
-            toolButton(.rotate, symbol: "rotate.right", help: "Rotate selection (⇧R)")
-            toolButton(.scale, symbol: "square.resize",
-                       help: "Scale selection (⇧S)")
-            toolButton(.mirror, symbol: "flip.horizontal", help: "Mirror selection (⇧M)")
-            toolButton(.array, symbol: "square.grid.3x3", help: "Array selection (⇧A)")
-            toolButton(.divide, symbol: "divide", help: "Divide selection (⇧D)")
-            toolButton(.explode, symbol: "burst", help: "Explode selection (⇧X)")
-            // Wire-wave-C modify tools.
-            toolButton(.stretch,
-                       symbol: "arrow.left.and.right.righttriangle.left.righttriangle.right",
-                       help: "Stretch selection (⌥S)")
-            toolButton(.lengthen, symbol: "ruler", help: "Lengthen line/arc (⇧L)")
-            toolButton(.break, symbol: "scissors.badge.ellipsis", help: "Break entity (⇧B)")
-            // Wire-wave-D: edit an existing polyline's vertices/segments.
-            toolButton(.polylineEdit,
-                       symbol: "point.topleft.down.to.point.bottomright.curvepath.fill",
-                       help: "Edit polyline vertices (⇧P)")
-            // Wire-wave-1 modify tools: Join fuses touching lines/arcs into one
-            // polyline; Explode Text converts a text/mtext entity to stroke polylines.
-            toolButton(.join, symbol: "link", help: "Join lines/arcs into a polyline (⇧J)")
-            toolButton(.explodeText, symbol: "character.cursor.ibeam",
-                       help: "Explode text to geometry (⇧E)")
-            // Wire-wave-2 block tools: Create Block groups the selection into a named
-            // block (replaced by one INSERT); Explode Block replaces a selected INSERT
-            // with its member entities. Free option chords (⌥B / ⌥X).
-            toolButton(.createBlock, symbol: "square.on.square.dashed",
-                       help: "Create block from selection (⌥B)")
-            toolButton(.explodeInsert, symbol: "square.split.2x2",
-                       help: "Explode block reference (⌥X)")
-            // Wire-wave-3 modify tools: Align maps the selection onto a 2-point
-            // source→destination reference; Array Along Path distributes copies along a
-            // picked path. Both act on the current selection. Free option chords (⌥A / ⌥P).
-            toolButton(.align, symbol: "arrow.up.and.down.righttriangle.up.righttriangle.down",
-                       help: "Align selection to a 2-point reference (⌥A)")
-            toolButton(.arrayPath, symbol: "point.topleft.down.to.point.bottomright.curvepath",
-                       help: "Array selection along a path (⌥P)")
-
-            Divider()
-            // Edit tools (pick entities under the cursor; no pre-selection needed).
-            toolButton(.trim, symbol: "scissors", help: "Trim to boundary (T)")
-            toolButton(.extend, symbol: "arrow.right.to.line",
-                       help: "Extend to boundary (X)")
-            toolButton(.fillet, symbol: "circle.bottomrighthalf.checkered",
-                       help: "Fillet (round) corner (F)")
-            toolButton(.chamfer, symbol: "skew", help: "Chamfer (bevel) corner (⇧F)")
-
-            Divider()
-            // Dimension tools (annotate measurements). Linear/Aligned place two
-            // origins + a dimension-line point; Radius/Diameter pick a circle/arc +
-            // a leader point; Angular defines two rays + an arc location.
-            toolButton(.linearDim, symbol: "ruler", help: "Linear dimension (D)")
-            toolButton(.alignedDim, symbol: "arrow.up.left.and.arrow.down.right",
-                       help: "Aligned dimension (I)")
-            toolButton(.radialDim, symbol: "arrow.left.and.right",
-                       help: "Radius dimension (U)")
-            toolButton(.diameterDim, symbol: "circle.and.line.horizontal",
-                       help: "Diameter dimension (B)")
-            toolButton(.angularDim, symbol: "angle", help: "Angular dimension (N)")
-            // Wire-wave-2 dimension subtypes: Ordinate measures a feature's X/Y from a
-            // datum; Arc Length dimensions a swept arc; Angular (3-point) uses a vertex
-            // + two endpoints. Free option chords (⌥O / ⌥G / ⌥N).
-            toolButton(.ordinateDim, symbol: "arrow.down.to.line",
-                       help: "Ordinate dimension (⌥O)")
-            toolButton(.arcLengthDim, symbol: "arrow.up.and.down.and.sparkles",
-                       help: "Arc length dimension (⌥G)")
-            toolButton(.angular3pDim, symbol: "angle",
-                       help: "Angular dimension, 3-point (⌥N)")
-            // Wire-wave-3 annotate tools: Leader is a callout (arrow + path + optional
-            // text); Baseline/Continue chain linear dims (stacked from a common origin /
-            // running end-to-start). Free option chords (⌥L / ⌥D / ⌥C).
-            toolButton(.leader, symbol: "text.bubble",
-                       help: "Leader callout (⌥L)")
-            toolButton(.baselineDim, symbol: "arrow.up.and.line.horizontal.and.arrow.down",
-                       help: "Baseline dimension chain (⌥D)")
-            toolButton(.continueDim, symbol: "arrow.left.and.line.vertical.and.arrow.right",
-                       help: "Continue dimension chain (⌥C)")
-
-            Divider()
-            // Measure / info tools (read-only): report a value in the status HUD
-            // without mutating the drawing. Distance is keyed ⇧K; the other modes
-            // are reachable from the toolbar, the Tools ▸ Measure menu, and ⌘K.
-            toolButton(.measureDistance, symbol: "ruler", help: "Measure distance (⇧K)")
-            toolButton(.measureAngle, symbol: "angle", help: "Measure angle")
-            toolButton(.measureArea, symbol: "square.dashed", help: "Measure area + perimeter")
-            toolButton(.measureLength, symbol: "sum", help: "Total length of selection")
+            // Pin / unpin: customize which tools appear as primary toolbar buttons.
+            Toggle("Show in Toolbar", isOn: pinBinding(kind))
+        } label: {
+            Label("\(kind.title)\(meta.shortcut.map { "  (\($0))" } ?? "")",
+                  systemImage: meta.symbol)
         }
     }
 
@@ -487,16 +429,19 @@ struct ContentView: View {
         }
     }
 
-    /// A single toolbar tool button: activates `kind`, labels it with `symbol`, and
-    /// shows the active-tool badge.
+    /// A single primary-toolbar tool button: activates `kind`, labels it from the
+    /// shared `ToolCatalog` (glyph + help carrying the shortcut), and shows the
+    /// active-tool badge. Symbol/help come from the catalog so the toolbar, overflow
+    /// menu, and palette stay consistent.
     @ViewBuilder
-    private func toolButton(_ kind: ToolKind, symbol: String, help: String) -> some View {
+    private func toolButton(_ kind: ToolKind) -> some View {
+        let meta = ToolCatalog.metadata(for: kind)
         Button {
-            controllerBox.controller?.activateTool(kind)
+            activate(kind)
         } label: {
-            Label(kind.title, systemImage: symbol)
+            Label(kind.title, systemImage: meta.symbol)
         }
-        .help(help)
+        .help(meta.help)
         .background(activeBadge(kind))
     }
 
@@ -506,6 +451,59 @@ struct ContentView: View {
         if model.activeToolKind == kind {
             RoundedRectangle(cornerRadius: 6).fill(.tint.opacity(0.25))
         }
+    }
+
+    /// Routes a tool activation the same way the menus/palette do: the `.image` kind
+    /// goes through the file-picker placement flow (a bare activate would arm an inert
+    /// no-file tool); every other kind activates directly on the focused canvas.
+    private func activate(_ kind: ToolKind) {
+        if kind == .image {
+            chooseAndPlaceImage()
+        } else {
+            controllerBox.controller?.activateTool(kind)
+        }
+    }
+
+    // MARK: - Toolbar customization (pinned tools, @AppStorage)
+
+    /// The set of tools currently PINNED to the primary toolbar. When the stored
+    /// string is empty (never customized) this is the built-in `ToolCatalog`
+    /// default; once the user toggles any pin, a leading sentinel ("•") marks the
+    /// string as authoritative so an empty-after-customize state (everything
+    /// unpinned) is honored rather than reverting to the default.
+    private var pinnedToolsSet: Set<ToolKind> {
+        guard pinnedToolsRaw.hasPrefix(Self.pinnedSentinel) else {
+            return ToolCatalog.defaultPrimary
+        }
+        let body = String(pinnedToolsRaw.dropFirst(Self.pinnedSentinel.count))
+        let kinds = body.split(separator: ",").compactMap { ToolKind(rawValue: String($0)) }
+        return Set(kinds)
+    }
+
+    /// A sentinel prefix that distinguishes "user has customized (even to empty)"
+    /// from "never customized (use the default set)".
+    private static let pinnedSentinel = "•"
+
+    /// The pinned tools of one group, in the group's canonical catalog order, so the
+    /// primary toolbar buttons read left-to-right in a stable sequence.
+    private func pinnedTools(in group: ToolGroup) -> [ToolKind] {
+        let pinned = pinnedToolsSet
+        return ToolCatalog.tools(in: group).filter { pinned.contains($0) }
+    }
+
+    /// A two-way binding for whether `kind` is pinned to the toolbar, persisting the
+    /// updated set (with the customized sentinel) back into `@AppStorage`.
+    private func pinBinding(_ kind: ToolKind) -> Binding<Bool> {
+        Binding(
+            get: { pinnedToolsSet.contains(kind) },
+            set: { isOn in
+                var set = pinnedToolsSet
+                if isOn { set.insert(kind) } else { set.remove(kind) }
+                // Persist in canonical catalog order, prefixed with the sentinel.
+                let ordered = ToolCatalog.allGroupedTools.filter { set.contains($0) }
+                pinnedToolsRaw = Self.pinnedSentinel + ordered.map(\.rawValue).joined(separator: ",")
+            }
+        )
     }
 
     // MARK: - Command palette registry
@@ -741,6 +739,203 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Tool grouping catalog (single source of truth)
+
+/// The three macOS-HIG toolbar/menu groups every drawing tool falls into. `.select`
+/// is intentionally NOT a group member — it is the always-visible core mode, handled
+/// separately. Mirrors AutoCAD's ribbon split (Draw / Modify / Annotate).
+enum ToolGroup: String, CaseIterable, Sendable {
+    /// Geometry-creating tools (lines, curves, hatch, image, construction lines).
+    case draw
+    /// Selection transforms + edit-under-cursor tools + block ops.
+    case modify
+    /// Text, dimensions, leaders, and read-only measurement tools.
+    case annotate
+
+    /// The group's menu/overflow label.
+    var title: String {
+        switch self {
+        case .draw:     return "Draw"
+        case .modify:   return "Modify"
+        case .annotate: return "Annotate"
+        }
+    }
+
+    /// An SF Symbol for the group's `▾` overflow button / menu.
+    var symbol: String {
+        switch self {
+        case .draw:     return "pencil.tip.crop.circle"
+        case .modify:   return "slider.horizontal.3"
+        case .annotate: return "text.bubble"
+        }
+    }
+}
+
+/// The canonical mapping from every `ToolKind` to its UI group + display metadata
+/// (SF Symbol, tooltip help carrying the shortcut, and a compact shortcut hint).
+///
+/// This is the SINGLE SOURCE OF TRUTH the grouped toolbar AND the grouped Tools menu
+/// both read, so the two never drift. The engine test target cannot import this app
+/// module, so `ToolKindWiringTests` mirrors this same roster and asserts it covers
+/// every `ToolKind` (no orphaned tools) — a deliberate data-mirror guard (the same
+/// pattern `toolShortcutsAreUnique` uses).
+enum ToolCatalog {
+
+    /// Per-tool display metadata.
+    struct Metadata {
+        let symbol: String
+        let help: String
+        /// A compact keyboard hint (e.g. "L", "⇧C", "⌥A") for menu/overflow rows;
+        /// `nil` for tools reachable only via menu/⌘K (no key chord).
+        let shortcut: String?
+    }
+
+    /// The group `kind` belongs to, or `nil` for `.select` (the core mode, not a
+    /// group member).
+    static func group(for kind: ToolKind) -> ToolGroup? {
+        for group in ToolGroup.allCases where tools(in: group).contains(kind) {
+            return group
+        }
+        return nil
+    }
+
+    /// Every tool in one group, in canonical (toolbar/menu) order.
+    static func tools(in group: ToolGroup) -> [ToolKind] {
+        switch group {
+        case .draw:     return drawTools
+        case .modify:   return modifyTools
+        case .annotate: return annotateTools
+        }
+    }
+
+    /// All grouped tools (Draw → Modify → Annotate), in canonical order. Used to
+    /// serialize the user's pinned set in a stable sequence.
+    static var allGroupedTools: [ToolKind] {
+        drawTools + modifyTools + annotateTools
+    }
+
+    /// The built-in default PINNED (primary toolbar) set on a fresh install — a small
+    /// curated row of the most-used tools per group, so the toolbar is useful out of
+    /// the box without being overcrowded. Everything else lives in the group `▾`
+    /// overflow menus. The user can re-pin any tool (persisted via `@AppStorage`).
+    static let defaultPrimary: Set<ToolKind> = [
+        // Draw essentials.
+        .line, .circle, .arc, .rectangle, .polyline,
+        // Modify essentials.
+        .move, .copy, .rotate, .scale, .trim, .offset,
+        // Annotate essentials.
+        .text, .linearDim, .leader,
+    ]
+
+    // MARK: Group rosters (canonical order)
+
+    private static let drawTools: [ToolKind] = [
+        .line, .circle, .arc, .rectangle, .polyline, .point,
+        .ellipse, .polygon, .spline, .hatch, .image,
+        .xline, .ray, .insert,
+    ]
+
+    private static let modifyTools: [ToolKind] = [
+        .move, .copy, .offset, .rotate, .scale, .mirror,
+        .array, .arrayPath, .divide, .explode, .stretch, .lengthen, .break,
+        .trim, .extend, .fillet, .chamfer,
+        .polylineEdit, .join, .explodeText, .align,
+        .createBlock, .explodeInsert,
+    ]
+
+    private static let annotateTools: [ToolKind] = [
+        .text,
+        .linearDim, .alignedDim, .radialDim, .diameterDim, .angularDim,
+        .ordinateDim, .arcLengthDim, .angular3pDim,
+        .leader, .baselineDim, .continueDim,
+        .measureDistance, .measureAngle, .measureArea, .measureLength,
+    ]
+
+    // MARK: Per-tool display metadata
+
+    /// SF Symbol + tooltip help (with shortcut) + compact shortcut hint for `kind`.
+    static func metadata(for kind: ToolKind) -> Metadata {
+        switch kind {
+        case .select:    return .init(symbol: "cursorarrow", help: "Select / pan (V)", shortcut: "V")
+        // Draw.
+        case .line:      return .init(symbol: "line.diagonal", help: "Draw line (L)", shortcut: "L")
+        case .circle:    return .init(symbol: "circle", help: "Draw circle (C)", shortcut: "C")
+        case .arc:       return .init(symbol: "point.topleft.down.to.point.bottomright.curvepath",
+                                      help: "Draw arc (A)", shortcut: "A")
+        case .rectangle: return .init(symbol: "rectangle", help: "Draw rectangle (R)", shortcut: "R")
+        case .polyline:  return .init(symbol: "scribble", help: "Draw polyline (P)", shortcut: "P")
+        case .point:     return .init(symbol: "smallcircle.filled.circle", help: "Place point (O)", shortcut: "O")
+        case .ellipse:   return .init(symbol: "oval", help: "Draw ellipse (E)", shortcut: "E")
+        case .polygon:   return .init(symbol: "hexagon", help: "Draw polygon (G)", shortcut: "G")
+        case .spline:    return .init(symbol: "scribble.variable", help: "Draw spline (S)", shortcut: "S")
+        case .hatch:     return .init(symbol: "square.grid.2x2.fill", help: "Hatch fill selection (H)", shortcut: "H")
+        case .image:     return .init(symbol: "photo",
+                                      help: "Place image — pick a file, then click two corners (⇧Y)", shortcut: "⇧Y")
+        case .xline:     return .init(symbol: "line.diagonal.arrow",
+                                      help: "Construction line — infinite (⌥I)", shortcut: "⌥I")
+        case .ray:       return .init(symbol: "arrow.up.right",
+                                      help: "Ray — semi-infinite construction line (⌥Y)", shortcut: "⌥Y")
+        case .insert:    return .init(symbol: "square.on.square.dashed", help: "Insert block (⇧I)", shortcut: "⇧I")
+        // Modify.
+        case .move:      return .init(symbol: "arrow.up.and.down.and.arrow.left.and.right",
+                                      help: "Move selection (M)", shortcut: "M")
+        case .copy:      return .init(symbol: "plus.square.on.square", help: "Copy selection (⇧C)", shortcut: "⇧C")
+        case .offset:    return .init(symbol: "plus.rectangle.on.rectangle",
+                                      help: "Offset selection (⇧O)", shortcut: "⇧O")
+        case .rotate:    return .init(symbol: "rotate.right", help: "Rotate selection (⇧R)", shortcut: "⇧R")
+        case .scale:     return .init(symbol: "square.resize", help: "Scale selection (⇧S)", shortcut: "⇧S")
+        case .mirror:    return .init(symbol: "flip.horizontal", help: "Mirror selection (⇧M)", shortcut: "⇧M")
+        case .array:     return .init(symbol: "square.grid.3x3", help: "Array selection (⇧A)", shortcut: "⇧A")
+        case .arrayPath: return .init(symbol: "point.topleft.down.to.point.bottomright.curvepath",
+                                      help: "Array selection along a path (⌥P)", shortcut: "⌥P")
+        case .divide:    return .init(symbol: "divide", help: "Divide selection (⇧D)", shortcut: "⇧D")
+        case .explode:   return .init(symbol: "burst", help: "Explode selection (⇧X)", shortcut: "⇧X")
+        case .stretch:   return .init(symbol: "arrow.left.and.right.righttriangle.left.righttriangle.right",
+                                      help: "Stretch selection (⌥S)", shortcut: "⌥S")
+        case .lengthen:  return .init(symbol: "ruler", help: "Lengthen line/arc (⇧L)", shortcut: "⇧L")
+        case .break:     return .init(symbol: "scissors.badge.ellipsis", help: "Break entity (⇧B)", shortcut: "⇧B")
+        case .trim:      return .init(symbol: "scissors", help: "Trim to boundary (T)", shortcut: "T")
+        case .extend:    return .init(symbol: "arrow.right.to.line", help: "Extend to boundary (X)", shortcut: "X")
+        case .fillet:    return .init(symbol: "circle.bottomrighthalf.checkered",
+                                      help: "Fillet (round) corner (F)", shortcut: "F")
+        case .chamfer:   return .init(symbol: "skew", help: "Chamfer (bevel) corner (⇧F)", shortcut: "⇧F")
+        case .polylineEdit: return .init(symbol: "point.topleft.down.to.point.bottomright.curvepath.fill",
+                                         help: "Edit polyline vertices (⇧P)", shortcut: "⇧P")
+        case .join:      return .init(symbol: "link", help: "Join lines/arcs into a polyline (⇧J)", shortcut: "⇧J")
+        case .explodeText: return .init(symbol: "character.cursor.ibeam",
+                                        help: "Explode text to geometry (⇧E)", shortcut: "⇧E")
+        case .align:     return .init(symbol: "arrow.up.and.down.righttriangle.up.righttriangle.down",
+                                      help: "Align selection to a 2-point reference (⌥A)", shortcut: "⌥A")
+        case .createBlock:   return .init(symbol: "square.on.square.dashed",
+                                          help: "Create block from selection (⌥B)", shortcut: "⌥B")
+        case .explodeInsert: return .init(symbol: "square.split.2x2",
+                                          help: "Explode block reference (⌥X)", shortcut: "⌥X")
+        // Annotate.
+        case .text:        return .init(symbol: "character.textbox", help: "Add text (⇧T)", shortcut: "⇧T")
+        case .linearDim:   return .init(symbol: "ruler", help: "Linear dimension (D)", shortcut: "D")
+        case .alignedDim:  return .init(symbol: "arrow.up.left.and.arrow.down.right",
+                                        help: "Aligned dimension (I)", shortcut: "I")
+        case .radialDim:   return .init(symbol: "arrow.left.and.right", help: "Radius dimension (U)", shortcut: "U")
+        case .diameterDim: return .init(symbol: "circle.and.line.horizontal",
+                                        help: "Diameter dimension (B)", shortcut: "B")
+        case .angularDim:  return .init(symbol: "angle", help: "Angular dimension (N)", shortcut: "N")
+        case .ordinateDim: return .init(symbol: "arrow.down.to.line", help: "Ordinate dimension (⌥O)", shortcut: "⌥O")
+        case .arcLengthDim: return .init(symbol: "arrow.up.and.down.and.sparkles",
+                                         help: "Arc length dimension (⌥G)", shortcut: "⌥G")
+        case .angular3pDim: return .init(symbol: "angle", help: "Angular dimension, 3-point (⌥N)", shortcut: "⌥N")
+        case .leader:      return .init(symbol: "text.bubble", help: "Leader callout (⌥L)", shortcut: "⌥L")
+        case .baselineDim: return .init(symbol: "arrow.up.and.line.horizontal.and.arrow.down",
+                                        help: "Baseline dimension chain (⌥D)", shortcut: "⌥D")
+        case .continueDim: return .init(symbol: "arrow.left.and.line.vertical.and.arrow.right",
+                                        help: "Continue dimension chain (⌥C)", shortcut: "⌥C")
+        case .measureDistance: return .init(symbol: "ruler", help: "Measure distance (⇧K)", shortcut: "⇧K")
+        case .measureAngle:    return .init(symbol: "angle", help: "Measure angle", shortcut: nil)
+        case .measureArea:     return .init(symbol: "square.dashed", help: "Measure area + perimeter", shortcut: nil)
+        case .measureLength:   return .init(symbol: "sum", help: "Total length of selection", shortcut: nil)
+        }
+    }
+}
+
 // MARK: - Focused command plumbing
 
 /// Focused scene values carrying the active window's app actions (Zoom-to-Fit,
@@ -821,6 +1016,14 @@ extension FocusedValues {
         set { self[DeleteSelectionKey.self] = newValue }
     }
 
+    /// Duplicate the focused window's current selection (Edit ▸ Duplicate, ⌘D).
+    /// Duplicates the selection in place (a small nudge) as one undoable group via
+    /// `CanvasModel.duplicateSelection` (the pure `Duplicate.duplicate` static API).
+    var duplicateSelection: (() -> Void)? {
+        get { self[DuplicateSelectionKey.self] }
+        set { self[DuplicateSelectionKey.self] = newValue }
+    }
+
     /// Whether the focused window has a draw tool mid-run. Used by LibreCADApp to
     /// disable the Edit ▸ Delete item (so its bare-⌫ shortcut does not pre-empt the
     /// tool's `.backspace` — MUST-FIX 1). `nil` when no canvas is focused; the
@@ -878,6 +1081,7 @@ private struct ToolActionHandlersModifier: ViewModifier {
     let undo: () -> Void
     let redo: () -> Void
     let delete: () -> Void
+    let duplicate: () -> Void
 
     func body(content: Content) -> some View {
         content
@@ -886,6 +1090,7 @@ private struct ToolActionHandlersModifier: ViewModifier {
             .focusedSceneValue(\.undoAction) { undo() }
             .focusedSceneValue(\.redoAction) { redo() }
             .focusedSceneValue(\.deleteSelection) { delete() }
+            .focusedSceneValue(\.duplicateSelection) { duplicate() }
     }
 }
 
@@ -898,6 +1103,10 @@ private struct RedoActionKey: FocusedValueKey {
 }
 
 private struct DeleteSelectionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct DuplicateSelectionKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 

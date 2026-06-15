@@ -61,6 +61,10 @@ struct LibreCADApp: App {
     @FocusedValue(\.redoAction) private var redoAction
     /// Delete-selection action published by the focused window (Edit ▸ Delete, ⌫).
     @FocusedValue(\.deleteSelection) private var deleteSelection
+    /// Duplicate-selection action published by the focused window (Edit ▸ Duplicate,
+    /// ⌘D) — duplicates the current selection in place (a small nudge) as one
+    /// undoable group via the pure `Duplicate.duplicate` static API.
+    @FocusedValue(\.duplicateSelection) private var duplicateSelection
     /// Whether the focused window has a draw tool mid-run. When true the Edit ▸
     /// Delete item is disabled so its bare-⌫ shortcut does NOT pre-empt the tool's
     /// `.backspace` (see the Delete button below and MUST-FIX 1).
@@ -146,6 +150,18 @@ struct LibreCADApp: App {
                     .keyboardShortcut(.delete, modifiers: [])
                     .disabled(deleteSelection == nil || (isToolActive ?? false))
 
+                // Edit ▸ Duplicate (⌘D) — duplicate the current selection in place
+                // (AutoCAD-style: a small nudge so the copies are grabbable apart from
+                // their sources), as one undoable group. Routes to the focused window
+                // via the `duplicateSelection` focused value, which calls
+                // `CanvasModel.duplicateSelection` (the pure `Duplicate.duplicate`
+                // static API → `applyCommit`). ⌘D is a command-modifier chord, so it
+                // never collides with the canvas keymap (bare/⇧/⌥ tool letters) — it
+                // stays enabled even while a draw tool is mid-run.
+                Button("Duplicate") { duplicateSelection?() }
+                    .keyboardShortcut("d", modifiers: .command)
+                    .disabled(duplicateSelection == nil)
+
                 Divider()
                 // Edit ▸ Select All / Deselect All / Invert Selection — the standard
                 // editing-selection primitives. Each routes through the responder
@@ -227,261 +243,23 @@ struct LibreCADApp: App {
                 .keyboardShortcut(Self.f8Key, modifiers: [])
             }
             // The Tools menu — the discoverable source of truth for EVERY tool and
-            // its shortcut. Each item activates the tool on the focused canvas via
-            // the `activateTool` focused value; the same shortcuts are also handled
-            // directly by the canvas `keyDown` (CADCanvasView.handleKey) so they work
-            // whether the menu or the canvas has focus. Grouped Select → Draw →
-            // Modify. Modify tools act on the current selection (select in V mode,
-            // then activate); with nothing selected the tool's HUD prompts "Select
-            // objects…". Shift picks the modify variant where a letter is shared
-            // (⇧C Copy vs C Circle, ⇧R Rotate vs R Rectangle, ⇧M Mirror vs M Move,
-            // ⇧O Offset vs O Point). New draw tools: E Ellipse, G Polygon. Edit
-            // tools (pick under the cursor, no pre-selection): T Trim, X Extend,
-            // F Fillet, ⇧F Chamfer.
+            // its shortcut. Grouped into Draw / Modify / Annotate SUBMENUS (consistent
+            // with the toolbar's grouped sections + per-group overflow), with Select as
+            // the always-present core mode at top. Each item activates the tool on the
+            // focused canvas via the `activateTool` focused value; the same shortcuts
+            // are also handled directly by the canvas `keyDown` (CADCanvasView.handleKey)
+            // so they work whether the menu or the canvas has focus. Decomposed into
+            // small per-group computed properties so the SwiftUI type-checker never sees
+            // a large monolithic menu expression (gotcha #2).
             CommandMenu("Tools") {
                 Button("Select") { activateTool?(.select) }
                     .keyboardShortcut("v", modifiers: [])
                     .disabled(activateTool == nil)
 
                 Divider()
-                // Draw tools.
-                Button("Line") { activateTool?(.line) }
-                    .keyboardShortcut("l", modifiers: [])
-                    .disabled(activateTool == nil)
-                Button("Circle") { activateTool?(.circle) }
-                    .keyboardShortcut("c", modifiers: [])
-                    .disabled(activateTool == nil)
-                Button("Arc") { activateTool?(.arc) }
-                    .keyboardShortcut("a", modifiers: [])
-                    .disabled(activateTool == nil)
-                Button("Rectangle") { activateTool?(.rectangle) }
-                    .keyboardShortcut("r", modifiers: [])
-                    .disabled(activateTool == nil)
-                Button("Polyline") { activateTool?(.polyline) }
-                    .keyboardShortcut("p", modifiers: [])
-                    .disabled(activateTool == nil)
-                Button("Point") { activateTool?(.point) }
-                    .keyboardShortcut("o", modifiers: [])
-                    .disabled(activateTool == nil)
-                Button("Ellipse") { activateTool?(.ellipse) }
-                    .keyboardShortcut("e", modifiers: [])
-                    .disabled(activateTool == nil)
-                Button("Polygon") { activateTool?(.polygon) }
-                    .keyboardShortcut("g", modifiers: [])
-                    .disabled(activateTool == nil)
-                Button("Spline") { activateTool?(.spline) }
-                    .keyboardShortcut("s", modifiers: [])
-                    .disabled(activateTool == nil)
-                // Hatch fills the region bounded by the current selection.
-                Button("Hatch") { activateTool?(.hatch) }
-                    .keyboardShortcut("h", modifiers: [])
-                    .disabled(activateTool == nil)
-                // Image (⇧Y): place a reference to an image FILE. Routes through the
-                // file-picker flow (NOT a bare activateTool) — the user chooses a file
-                // first, then clicks two corners (lower-left + a bottom-edge corner that
-                // sets size + rotation). ⇧Y is free (bare Y is unassigned; ⌥Y is Ray).
-                Button("Image…") { placeImage?() }
-                    .keyboardShortcut("y", modifiers: .shift)
-                    .disabled(placeImage == nil)
-                // Text authoring (⇧T): a click sets the insertion point and raises the
-                // inline editor; type, then Return commits a text/mtext entity.
-                Button("Text") { activateTool?(.text) }
-                    .keyboardShortcut("t", modifiers: .shift)
-                    .disabled(activateTool == nil)
-                // Insert Block (⇧I): place a reference to a named block. Inert until a
-                // block is chosen (the block-picker UI is a later task) — no crash.
-                Button("Insert Block") { activateTool?(.insert) }
-                    .keyboardShortcut("i", modifiers: .shift)
-                    .disabled(activateTool == nil)
-                // Wire-wave-3 construction lines. Both pick a base + a direction point;
-                // XLine commits an INFINITE line, Ray a SEMI-infinite one. They take free
-                // OPTION chords (⌥I / ⌥Y) — the bare/⇧ twins of I are taken (I Aligned dim
-                // / ⇧I Insert Block) and Y is unassigned.
-                Button("Construction Line") { activateTool?(.xline) }
-                    .keyboardShortcut("i", modifiers: .option)
-                    .disabled(activateTool == nil)
-                Button("Ray") { activateTool?(.ray) }
-                    .keyboardShortcut("y", modifiers: .option)
-                    .disabled(activateTool == nil)
-
-                Divider()
-                // Modify tools (act on the current selection).
-                Button("Move") { activateTool?(.move) }
-                    .keyboardShortcut("m", modifiers: [])
-                    .disabled(activateTool == nil)
-                Button("Copy") { activateTool?(.copy) }
-                    .keyboardShortcut("c", modifiers: .shift)
-                    .disabled(activateTool == nil)
-                Button("Offset") { activateTool?(.offset) }
-                    .keyboardShortcut("o", modifiers: .shift)
-                    .disabled(activateTool == nil)
-                Button("Rotate") { activateTool?(.rotate) }
-                    .keyboardShortcut("r", modifiers: .shift)
-                    .disabled(activateTool == nil)
-                Button("Scale") { activateTool?(.scale) }
-                    .keyboardShortcut("s", modifiers: .shift)
-                    .disabled(activateTool == nil)
-                Button("Mirror") { activateTool?(.mirror) }
-                    .keyboardShortcut("m", modifiers: .shift)
-                    .disabled(activateTool == nil)
-                // Array / Divide / Explode use the shift convention for their letters
-                // (⇧A vs A Arc, ⇧X vs X Extend; ⇧D is free). Each acts on the current
-                // selection (select in V mode, then activate) using sensible DEFAULTS
-                // (Array: 2×3 grid; Divide: 2 parts) — a config UI is a later wave.
-                Button("Array") { activateTool?(.array) }
-                    .keyboardShortcut("a", modifiers: .shift)
-                    .disabled(activateTool == nil)
-                Button("Divide") { activateTool?(.divide) }
-                    .keyboardShortcut("d", modifiers: .shift)
-                    .disabled(activateTool == nil)
-                Button("Explode") { activateTool?(.explode) }
-                    .keyboardShortcut("x", modifiers: .shift)
-                    .disabled(activateTool == nil)
-                // Wire-wave-C modify tools. Stretch uses ⌥S (⇧S is Scale); Lengthen ⇧L
-                // and Break ⇧B take free shift chords (bare L/B have no shift twin).
-                Button("Stretch") { activateTool?(.stretch) }
-                    .keyboardShortcut("s", modifiers: .option)
-                    .disabled(activateTool == nil)
-                Button("Lengthen") { activateTool?(.lengthen) }
-                    .keyboardShortcut("l", modifiers: .shift)
-                    .disabled(activateTool == nil)
-                Button("Break") { activateTool?(.break) }
-                    .keyboardShortcut("b", modifiers: .shift)
-                    .disabled(activateTool == nil)
-                // Wire-wave-D: Edit Polyline (⇧P) — pick a polyline, then move / add /
-                // remove a vertex, or toggle a segment straight↔arc. ⇧P is free (bare P
-                // is Polyline with no shift twin).
-                Button("Edit Polyline") { activateTool?(.polylineEdit) }
-                    .keyboardShortcut("p", modifiers: .shift)
-                    .disabled(activateTool == nil)
-                // Wire-wave-1 modify tools. Join (⇧J) fuses touching lines/arcs into a
-                // polyline; Explode Text (⇧E) converts a text/mtext entity to stroke
-                // polylines. Both take free shift chords (bare J/K are unassigned; bare
-                // E is Ellipse with no other shift twin).
-                Button("Join") { activateTool?(.join) }
-                    .keyboardShortcut("j", modifiers: .shift)
-                    .disabled(activateTool == nil)
-                Button("Explode Text") { activateTool?(.explodeText) }
-                    .keyboardShortcut("e", modifiers: .shift)
-                    .disabled(activateTool == nil)
-                // Wire-wave-3 modify tools. Align (⌥A) maps the selection onto a 2-point
-                // source→destination reference; Array Along Path (⌥P) distributes copies
-                // along a picked path. Free OPTION chords (bare/⇧ A and P are taken —
-                // A Arc / ⇧A Array, P Polyline / ⇧P Edit Polyline).
-                Button("Align") { activateTool?(.align) }
-                    .keyboardShortcut("a", modifiers: .option)
-                    .disabled(activateTool == nil)
-                Button("Array Along Path") { activateTool?(.arrayPath) }
-                    .keyboardShortcut("p", modifiers: .option)
-                    .disabled(activateTool == nil)
-
-                Divider()
-                // Edit tools (pick entities under the cursor; no pre-selection).
-                // Their letters are free (no draw/modify twin), so they take plain
-                // keys; Chamfer shares F with Fillet via the shift convention
-                // (⇧F Chamfer vs F Fillet, like ⇧C Copy vs C Circle).
-                Button("Trim") { activateTool?(.trim) }
-                    .keyboardShortcut("t", modifiers: [])
-                    .disabled(activateTool == nil)
-                Button("Extend") { activateTool?(.extend) }
-                    .keyboardShortcut("x", modifiers: [])
-                    .disabled(activateTool == nil)
-                Button("Fillet") { activateTool?(.fillet) }
-                    .keyboardShortcut("f", modifiers: [])
-                    .disabled(activateTool == nil)
-                Button("Chamfer") { activateTool?(.chamfer) }
-                    .keyboardShortcut("f", modifiers: .shift)
-                    .disabled(activateTool == nil)
-
-                Divider()
-                // Dimension tools (annotate measurements). Each takes a bare,
-                // collision-free letter (no draw/modify twin): D Linear, I Aligned,
-                // U Radius, B Diameter, N Angular. Linear/Aligned place two extension
-                // origins + a dimension-line point; Radius/Diameter pick a circle/arc
-                // + a leader; Angular defines two rays + an arc location.
-                Menu("Dimensions") {
-                    Button("Linear Dimension") { activateTool?(.linearDim) }
-                        .keyboardShortcut("d", modifiers: [])
-                        .disabled(activateTool == nil)
-                    Button("Aligned Dimension") { activateTool?(.alignedDim) }
-                        .keyboardShortcut("i", modifiers: [])
-                        .disabled(activateTool == nil)
-                    Button("Radius Dimension") { activateTool?(.radialDim) }
-                        .keyboardShortcut("u", modifiers: [])
-                        .disabled(activateTool == nil)
-                    Button("Diameter Dimension") { activateTool?(.diameterDim) }
-                        .keyboardShortcut("b", modifiers: [])
-                        .disabled(activateTool == nil)
-                    Button("Angular Dimension") { activateTool?(.angularDim) }
-                        .keyboardShortcut("n", modifiers: [])
-                        .disabled(activateTool == nil)
-
-                    Divider()
-                    // Wire-wave-2 dimension subtypes. They take free OPTION chords
-                    // (⌥O / ⌥G / ⌥N) — the bare/⇧ twins of O/G/N are taken (O Point /
-                    // ⇧O Offset, G Polygon, N Angular). ⌥ is the third tier (like ⌥S
-                    // Stretch). Ordinate measures a feature's X/Y from a datum; Arc
-                    // Length dimensions a swept arc; Angular (3-point) uses a vertex +
-                    // two endpoints.
-                    Button("Ordinate Dimension") { activateTool?(.ordinateDim) }
-                        .keyboardShortcut("o", modifiers: .option)
-                        .disabled(activateTool == nil)
-                    Button("Arc Length Dimension") { activateTool?(.arcLengthDim) }
-                        .keyboardShortcut("g", modifiers: .option)
-                        .disabled(activateTool == nil)
-                    Button("Angular Dimension (3-point)") { activateTool?(.angular3pDim) }
-                        .keyboardShortcut("n", modifiers: .option)
-                        .disabled(activateTool == nil)
-
-                    Divider()
-                    // Wire-wave-3 annotate tools. Leader (⌥L) is a callout (arrow + path
-                    // + optional attached text); Baseline (⌥D) stacks linear dims from a
-                    // common origin; Continue (⌥C) chains them end-to-start in line. Free
-                    // OPTION chords (the bare/⇧ twins of L/D/C are taken — L Line / ⇧L
-                    // Lengthen, D Linear dim / ⇧D Divide, C Circle / ⇧C Copy).
-                    Button("Leader") { activateTool?(.leader) }
-                        .keyboardShortcut("l", modifiers: .option)
-                        .disabled(activateTool == nil)
-                    Button("Baseline Dimension") { activateTool?(.baselineDim) }
-                        .keyboardShortcut("d", modifiers: .option)
-                        .disabled(activateTool == nil)
-                    Button("Continue Dimension") { activateTool?(.continueDim) }
-                        .keyboardShortcut("c", modifiers: .option)
-                        .disabled(activateTool == nil)
-                }
-
-                Divider()
-                // Measure / info tools (wire-wave-1, F11) — read-only queries that
-                // report a value in the status HUD and never mutate the drawing. Only
-                // Measure Distance takes a key chord (⇧K, free); the other modes are
-                // reachable via this menu and the ⌘K palette.
-                Menu("Measure") {
-                    Button("Measure Distance") { activateTool?(.measureDistance) }
-                        .keyboardShortcut("k", modifiers: .shift)
-                        .disabled(activateTool == nil)
-                    Button("Measure Angle") { activateTool?(.measureAngle) }
-                        .disabled(activateTool == nil)
-                    Button("Measure Area") { activateTool?(.measureArea) }
-                        .disabled(activateTool == nil)
-                    Button("Total Length") { activateTool?(.measureLength) }
-                        .disabled(activateTool == nil)
-                }
-
-                Divider()
-                // Blocks (wire-wave-2): Create Block groups the current selection into
-                // a named block and replaces it with one INSERT (applied via the
-                // undoable `CADDrawing.makeBlockFromEntities`); Explode Block replaces
-                // a selected INSERT with its member entities. Free option chords
-                // (⌥B / ⌥X) — the bare/⇧ twins of B/X are taken (B Diameter / ⇧B Break,
-                // X Extend / ⇧X Explode).
-                Menu("Blocks") {
-                    Button("Create Block from Selection") { activateTool?(.createBlock) }
-                        .keyboardShortcut("b", modifiers: .option)
-                        .disabled(activateTool == nil)
-                    Button("Explode Block Reference") { activateTool?(.explodeInsert) }
-                        .keyboardShortcut("x", modifiers: .option)
-                        .disabled(activateTool == nil)
-                }
+                drawMenu
+                modifyMenu
+                annotateMenu
             }
             // The Arrange menu (F16) — draw-order (Z-stack) ops + Revert Direction on
             // the current selection. Routed through the responder chain to the focused
@@ -515,6 +293,152 @@ struct LibreCADApp: App {
                     NSApp.sendAction(Selector(("revertDirectionAction:")), to: nil, from: nil)
                 }
             }
+        }
+    }
+
+    // MARK: - Tools menu groups (Draw / Modify / Annotate)
+    //
+    // Each group is a SUBMENU mirroring the toolbar's grouped sections (ContentView's
+    // `ToolCatalog`). Split into small computed properties (and per-group helpers) so
+    // no single menu body is large enough to blow the SwiftUI type-checker (gotcha #2).
+    // Every existing keyboard shortcut is preserved exactly; only the nesting changed.
+
+    /// Tools ▸ Draw — geometry-creating tools (+ a Construction Lines subgroup). A
+    /// `toolItem(_:_:_:)` button activates a kind via `activateTool`; Image routes
+    /// through the file-picker `placeImage` flow (the kind needs a file chosen first).
+    @ViewBuilder
+    private var drawMenu: some View {
+        Menu("Draw") {
+            toolItem(.line, "l", [])
+            toolItem(.circle, "c", [])
+            toolItem(.arc, "a", [])
+            toolItem(.rectangle, "r", [])
+            toolItem(.polyline, "p", [])
+            toolItem(.point, "o", [])
+            toolItem(.ellipse, "e", [])
+            toolItem(.polygon, "g", [])
+            toolItem(.spline, "s", [])
+            toolItem(.hatch, "h", [])
+            // Image (⇧Y) routes through the file-picker flow, not a bare activate.
+            Button("Image…") { placeImage?() }
+                .keyboardShortcut("y", modifiers: .shift)
+                .disabled(placeImage == nil)
+
+            Divider()
+            // Construction lines: infinite XLine (⌥I) + semi-infinite Ray (⌥Y).
+            toolItem(.xline, "i", .option)
+            toolItem(.ray, "y", .option)
+            toolItem(.insert, "i", .shift)
+        }
+    }
+
+    /// Tools ▸ Modify — selection transforms + edit-under-cursor tools (+ a Blocks
+    /// subgroup). Modify tools act on the current selection (select in V mode, then
+    /// activate); with nothing selected the tool's HUD prompts "Select objects…".
+    @ViewBuilder
+    private var modifyMenu: some View {
+        Menu("Modify") {
+            toolItem(.move, "m", [])
+            toolItem(.copy, "c", .shift)
+            toolItem(.offset, "o", .shift)
+            toolItem(.rotate, "r", .shift)
+            toolItem(.scale, "s", .shift)
+            toolItem(.mirror, "m", .shift)
+            toolItem(.array, "a", .shift)
+            toolItem(.arrayPath, "p", .option)
+            toolItem(.divide, "d", .shift)
+            toolItem(.explode, "x", .shift)
+            toolItem(.stretch, "s", .option)
+            toolItem(.lengthen, "l", .shift)
+            toolItem(.break, "b", .shift)
+
+            Divider()
+            // Edit tools (pick entities under the cursor; no pre-selection needed).
+            toolItem(.trim, "t", [])
+            toolItem(.extend, "x", [])
+            toolItem(.fillet, "f", [])
+            toolItem(.chamfer, "f", .shift)
+            toolItem(.polylineEdit, "p", .shift)
+            toolItem(.join, "j", .shift)
+            toolItem(.explodeText, "e", .shift)
+            toolItem(.align, "a", .option)
+
+            Divider()
+            blocksMenu
+        }
+    }
+
+    /// Tools ▸ Annotate — text, dimensions (+ subtypes), leaders, and the read-only
+    /// Measure subgroup. Mirrors the toolbar's Annotate group.
+    @ViewBuilder
+    private var annotateMenu: some View {
+        Menu("Annotate") {
+            toolItem(.text, "t", .shift)
+
+            Divider()
+            dimensionsMenu
+
+            Divider()
+            // Leader callout + chained linear dims (stacked / running).
+            toolItem(.leader, "l", .option)
+            toolItem(.baselineDim, "d", .option)
+            toolItem(.continueDim, "c", .option)
+
+            Divider()
+            measureMenu
+        }
+    }
+
+    /// Dimensions subgroup (the five base dims + the three wave-2 subtypes).
+    @ViewBuilder
+    private var dimensionsMenu: some View {
+        Menu("Dimensions") {
+            toolItem(.linearDim, "d", [])
+            toolItem(.alignedDim, "i", [])
+            toolItem(.radialDim, "u", [])
+            toolItem(.diameterDim, "b", [])
+            toolItem(.angularDim, "n", [])
+
+            Divider()
+            toolItem(.ordinateDim, "o", .option)
+            toolItem(.arcLengthDim, "g", .option)
+            toolItem(.angular3pDim, "n", .option)
+        }
+    }
+
+    /// Measure subgroup (read-only queries; only Distance keys ⇧K).
+    @ViewBuilder
+    private var measureMenu: some View {
+        Menu("Measure") {
+            toolItem(.measureDistance, "k", .shift)
+            toolItem(.measureAngle, nil, [])
+            toolItem(.measureArea, nil, [])
+            toolItem(.measureLength, nil, [])
+        }
+    }
+
+    /// Blocks subgroup (Create Block / Explode Block).
+    @ViewBuilder
+    private var blocksMenu: some View {
+        Menu("Blocks") {
+            toolItem(.createBlock, "b", .option)
+            toolItem(.explodeInsert, "x", .option)
+        }
+    }
+
+    /// One Tools-menu item: a button that activates `kind` via the focused
+    /// `activateTool`, titled from the kind, with the given keyboard shortcut. A `nil`
+    /// `key` means the tool has no key chord (menu/⌘K only). Disabled when no canvas is
+    /// focused. Keeps each menu group body tiny for the type-checker.
+    @ViewBuilder
+    private func toolItem(_ kind: ToolKind, _ key: Character?, _ modifiers: EventModifiers) -> some View {
+        if let key {
+            Button(kind.title) { activateTool?(kind) }
+                .keyboardShortcut(KeyEquivalent(key), modifiers: modifiers)
+                .disabled(activateTool == nil)
+        } else {
+            Button(kind.title) { activateTool?(kind) }
+                .disabled(activateTool == nil)
         }
     }
 }
