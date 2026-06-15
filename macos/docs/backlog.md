@@ -149,3 +149,6 @@ pass or by the relevant downstream owner. Each cites its source.
 - **Real DXF read/write in `CADDocument`** (currently empty round-trip stub) — Phase 2 / consolidated gate.
 - **Spline tight bbox** (currently conservative control-hull) + closed-spline wrapping on DXF import. *(ws-entities)*
 - **Ellipse/arc-tangent recovery** (TangentFinder) if exact ellipse tangents are needed by tools. *(ws-math)*
+
+## Test infra
+- **Core Text static-init deadlock (parallel `swift test`)** — `CADFonts.provider` (CADDrawing.swift) makes its first `CTFont*` calls inside a `swift_once` static-init critical section; under the parallel test runner this lock-inverts with `@MainActor` tests → ~2-3/30 runs hang at 0% CPU. **Workaround in use:** run the gate with `--no-parallel` (0 hangs, <1s). **Proper fix (TODO):** ensure NO `CTFont*`/font resolution happens during ANY `static let`/`swift_once` initializer — make the provider static-init cheap and move first Core Text touch to a lazy per-call path (or a deterministic main-thread warm-up). A prior attempt (`/tmp/font-fix-attempt.diff`, 2026-06-15) reduced but did not eliminate it — needs a complete audit of all font static-init paths. *(diagnosis: decision-log 2026-06-15)*
