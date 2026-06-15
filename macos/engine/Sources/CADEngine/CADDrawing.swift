@@ -563,6 +563,18 @@ public final class CADDrawing {
     /// emitted on write so save preserves named styles + their ext-line offsets.
     public var dimStyles = DimStyleTable()
 
+    /// The drawing's paper-space LAYOUT table — the named printed sheets (paper-
+    /// space P0, paperspace-plan §2). Each `Layout` is a named sheet plus its page
+    /// descriptor; the entities painted on it carry `space == .paper` +
+    /// `layoutName == layout.name`. **Model space is IMPLICIT — never an entry
+    /// here** (it is the entities with `space == .model`). Names are unique
+    /// (case-insensitive) and the table stays ordered by `tabOrder`. Mutated only
+    /// through the undoable funnel (`mutateLayouts` and its `addLayout` /
+    /// `removeLayout` / `renameLayout` helpers), mirroring the block table. Carried
+    /// through the document payload so layouts survive save/load; the DXF/DWG
+    /// serialization of layouts is a later phase.
+    public private(set) var layouts: [Layout] = []
+
     /// The named layer-state registry (feature-catalog F17 / AutoCAD LAYERSTATE).
     /// Each entry is a snapshot of every layer's display/edit flags the user saved;
     /// `restoreLayerState` re-applies one onto the live `layers` table through the
@@ -1109,6 +1121,91 @@ public final class CADDrawing {
         return BlockCreation(blockName: blockName, insertID: insertID)
     }
 
+    // MARK: - Layout mutations (value-snapshot undo of the whole layout table)
+    //
+    // Paper-space P0 (paperspace-plan §2). The layout table mirrors the block table:
+    // a whole-array value-snapshot undo funnel (`mutateLayouts`) plus name-unique,
+    // ordered add/remove/rename helpers. Model space stays IMPLICIT — it is NEVER a
+    // `Layout` entry. Lookup + uniqueness are case-insensitive (AutoCAD LAYOUT names
+    // are case-insensitive); the array is kept sorted by `tabOrder` so the (later)
+    // tab strip reads it in order directly.
+
+    /// The layout with `name` (case-insensitive), or `nil`.
+    public func layout(named name: String) -> Layout? {
+        layouts.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+    }
+
+    /// Whether a layout with `name` (case-insensitive) is present.
+    public func hasLayout(_ name: String) -> Bool { layout(named: name) != nil }
+
+    /// Whole-table layout mutation with undo (the same value-snapshot scheme as
+    /// `mutateBlocks`; `[Layout]` is a value type, so the undo snapshot is one array
+    /// copy, ADR-002). The body mutates the layout array; afterwards it is re-sorted
+    /// by `tabOrder` (stable on ties) so the table is always ordered. No-op edits
+    /// (the array unchanged after sorting) don't pollute undo.
+    public func mutateLayouts(_ body: (inout [Layout]) -> Void) {
+        let prior = layouts
+        var working = layouts
+        body(&working)
+        working.sort { $0.tabOrder < $1.tabOrder }   // keep ordered by tab position
+        guard working != prior else { return }
+        layouts = working
+        registerUndo { drawing in
+            drawing.mutateLayouts { $0 = prior }
+        }
+    }
+
+    /// Adds a layout (no-op + no undo if the name is taken, case-insensitive).
+    /// Returns `true` if added. Mirrors `addBlock`.
+    @discardableResult
+    public func addLayout(_ layout: Layout) -> Bool {
+        guard !hasLayout(layout.name) else { return false }
+        mutateLayouts { $0.append(layout) }
+        return true
+    }
+
+    /// Removes a layout by name (case-insensitive). Entities still tagged for the
+    /// removed sheet are LEFT as-is (their `layoutName` simply no longer resolves —
+    /// the table never silently rewrites entity records); a higher layer decides
+    /// whether to delete or re-home them. No-op (no undo) if absent. Returns `true`
+    /// if a layout was removed.
+    @discardableResult
+    public func removeLayout(name: String) -> Bool {
+        guard hasLayout(name) else { return false }
+        mutateLayouts {
+            $0.removeAll { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        }
+        return true
+    }
+
+    /// Renames a layout (case-insensitive match on the old name). Re-points every
+    /// paper-space entity whose `layoutName` matches `from` to `to` (each an
+    /// undoable `replace`, in the same undo group) so the entities keep their sheet.
+    /// No-op (returns `false`) if `from` is absent or `to` is already taken (and is
+    /// not just a case-change of `from`). Returns `true` on success.
+    @discardableResult
+    public func renameLayout(from oldName: String, to newName: String) -> Bool {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, hasLayout(oldName) else { return false }
+        let isCaseChange = trimmed.caseInsensitiveCompare(oldName) == .orderedSame
+        guard isCaseChange || !hasLayout(trimmed) else { return false }
+        // Re-point referencing paper-space entities first (each undoable), then the
+        // layout record itself — so the whole rename reverses as one undo group.
+        for e in entities where e.layoutName?.caseInsensitiveCompare(oldName) == .orderedSame {
+            var moved = e
+            moved.layoutName = trimmed
+            replace(moved)
+        }
+        mutateLayouts {
+            if let i = $0.firstIndex(where: {
+                $0.name.caseInsensitiveCompare(oldName) == .orderedSame
+            }) {
+                $0[i].name = trimmed
+            }
+        }
+        return true
+    }
+
     // MARK: - Graphic-variable mutations (value-snapshot undo of the whole bag)
 
     /// Whole-bag graphic-variable mutation with undo — the same value-snapshot
@@ -1174,13 +1271,18 @@ public final class CADDrawing {
         layers newLayers: LayerTable,
         blocks newBlocks: BlockTable = BlockTable(),
         graphicVariables newVariables: GraphicVariables = GraphicVariables(),
-        dimStyles newDimStyles: DimStyleTable = DimStyleTable()
+        dimStyles newDimStyles: DimStyleTable = DimStyleTable(),
+        layouts newLayouts: [Layout] = []
     ) {
         entities = newEntities
         layers = newLayers
         blocks = newBlocks
         graphicVariables = newVariables
         dimStyles = newDimStyles
+        // Carry the paper-space layout table (paperspace-plan P0), kept ordered by
+        // tab position — symmetric to the block/dim-style tables. Defaults empty so
+        // existing callers (and a model-space-only drawing) are unchanged.
+        layouts = newLayouts.sorted { $0.tabOrder < $1.tabOrder }
         indexByID.removeAll(keepingCapacity: true)
         for (i, e) in entities.enumerated() { indexByID[e.id] = i }
         // Advance the id counter past the highest loaded id.

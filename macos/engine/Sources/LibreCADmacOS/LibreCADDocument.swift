@@ -40,6 +40,13 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import CADEngine
+// Bring the engine's paper-space `Layout` struct in BY NAME so it shadows
+// SwiftUI's `Layout` protocol in this SwiftUI-importing module (a targeted
+// `import struct` takes precedence over the broad `import SwiftUI`, so the bare
+// `Layout` below resolves unambiguously to the engine struct). A `CADEngine.`
+// qualifier can't be used: the module name collides with the engine ACTOR of the
+// same name, so `CADEngine.Layout` would resolve to the actor, not the module.
+import struct CADEngine.Layout
 
 // MARK: - Sendable document payload
 
@@ -61,19 +68,28 @@ struct DXFPayload: Sendable, Equatable {
     /// The named DIMSTYLE table (named dim styles + ext-line offsets). Carried so a
     /// save preserves named styles — symmetric to `graphicVariables`/`blocks`.
     var dimStyles: DimStyleTable
+    /// The paper-space LAYOUT table — the named sheets (paper-space P0). Carried so
+    /// the native value-model round-trip preserves layouts + the per-entity space
+    /// tag (which travels on the `EntityRecord`s in `entities`). Symmetric to
+    /// `dimStyles`/`blocks`. (DXF/DWG serialization of layouts is a later phase; the
+    /// engine bridge does not yet emit them, so a SAVE to disk does not carry them
+    /// — only the in-memory payload ↔ drawing round-trip does.)
+    var layouts: [Layout]
 
     init(
         entities: [EntityRecord] = [],
         layers: LayerTable = LayerTable(),
         blocks: BlockTable = BlockTable(),
         graphicVariables: GraphicVariables = GraphicVariables(),
-        dimStyles: DimStyleTable = DimStyleTable()
+        dimStyles: DimStyleTable = DimStyleTable(),
+        layouts: [Layout] = []
     ) {
         self.entities = entities
         self.layers = layers
         self.blocks = blocks
         self.graphicVariables = graphicVariables
         self.dimStyles = dimStyles
+        self.layouts = layouts
     }
 
     /// An empty drawing for File ▸ New: no entities, the default layer table
@@ -155,7 +171,8 @@ extension CADDrawing {
             layers: payload.layers,
             blocks: payload.blocks,
             graphicVariables: payload.graphicVariables,
-            dimStyles: payload.dimStyles
+            dimStyles: payload.dimStyles,
+            layouts: payload.layouts
         )
         return drawing
     }
@@ -170,7 +187,8 @@ extension CADDrawing {
             layers: layers,
             blocks: blocks,
             graphicVariables: graphicVariables,
-            dimStyles: dimStyles
+            dimStyles: dimStyles,
+            layouts: layouts
         )
     }
 }
