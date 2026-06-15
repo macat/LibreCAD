@@ -197,4 +197,133 @@ public enum SnapGeometry {
         let t = (cursor - from).dot(refDir) / len2
         return from + refDir * t
     }
+
+    // MARK: - Distance-along-entity (equidistant / "Snap distance")
+
+    /// A hard cap on how many equidistant points are generated for one entity, so
+    /// a tiny `spacing` against a very long entity can't produce an unbounded
+    /// candidate list (rendering-performance.md §5: snapping must stay responsive).
+    public static let distanceAlongPointCap = 4096
+
+    /// Equidistant points along the **finite line segment** `start → end`, spaced
+    /// `spacing` apart, measured from the chosen reference end.
+    ///
+    /// Mirrors LibreCAD's "Snap distance" (`RS_Snapper` equidistant snap): the
+    /// returned points are at `1·spacing, 2·spacing, …` from the reference
+    /// endpoint, walking toward the far end, and stopping before the far end. The
+    /// reference endpoint itself (distance 0) is NOT emitted — it is already an
+    /// endpoint snap. Points are clamped to the segment, so none lie past `end`.
+    ///
+    /// - Parameters:
+    ///   - start:     one segment endpoint.
+    ///   - end:       the other segment endpoint.
+    ///   - spacing:   distance between successive snap points (world units, > 0).
+    ///   - fromStart: `true` measures from `start`; `false` measures from `end`.
+    public static func pointsAlongLine(start: Vector, end: Vector,
+                                       spacing: Double, fromStart: Bool = true) -> [Vector] {
+        guard start.valid, end.valid, spacing > Tolerance.distance else { return [] }
+        let ref = fromStart ? start : end
+        let far = fromStart ? end : start
+        let total = (far - ref).magnitude
+        guard total > Tolerance.distance else { return [] }
+        let dir = (far - ref) * (1.0 / total)
+        return marchPoints(spacing: spacing, total: total).map { ref + dir * $0 }
+    }
+
+    /// Equidistant points along a circular **arc**, spaced `spacing` apart by
+    /// **arc length** (not chord length), measured from the chosen reference end.
+    ///
+    /// The arc sweeps from `startAngle` to `endAngle`; `reversed == true` is the
+    /// clockwise sweep (LibreCAD convention). The reference end (distance 0) is not
+    /// emitted; points stop before the far end. Arc length `s` maps to a swept
+    /// angle `s / radius` taken in the sweep direction from the reference end.
+    ///
+    /// - Parameters:
+    ///   - center / radius / startAngle / endAngle / reversed: the arc.
+    ///   - spacing:   arc-length distance between successive points (> 0).
+    ///   - fromStart: measure from `startAngle` (true) or from `endAngle` (false).
+    public static func pointsAlongArc(center: Vector, radius: Double,
+                                      startAngle: Double, endAngle: Double, reversed: Bool,
+                                      spacing: Double, fromStart: Bool = true) -> [Vector] {
+        let r = abs(radius)
+        guard center.valid, r > Tolerance.distance, spacing > Tolerance.distance else { return [] }
+        // Total swept angle in [0, 2π) in the direction of travel, then arc length.
+        let twoPi = 2.0 * Double.pi
+        var sweep = reversed ? (startAngle - endAngle) : (endAngle - startAngle)
+        sweep = sweep.truncatingRemainder(dividingBy: twoPi)
+        if sweep <= Tolerance.angle { sweep += twoPi }
+        let total = sweep * r                                   // total arc length
+        // March from whichever end is the reference, in the sweep direction.
+        let refAngle = fromStart ? startAngle : endAngle
+        // Stepping toward the far end: from start we follow the sweep sign; from
+        // end we go opposite the sweep sign (back toward start).
+        let stepSign: Double = (fromStart == reversed) ? -1.0 : 1.0
+        return marchPoints(spacing: spacing, total: total).map { s in
+            let dAng = (s / r) * stepSign
+            return center + Vector.polar(radius: r, angle: refAngle + dAng)
+        }
+    }
+
+    /// Equidistant points along a **polyline** path (a chain of points, optionally
+    /// closed), spaced `spacing` apart by cumulative path length, measured from the
+    /// chosen reference end. Straight-segment interpolation along the chord chain
+    /// (bulge arcs are walked by their resolved chord points by the caller). The
+    /// reference end (distance 0) is not emitted.
+    ///
+    /// - Parameters:
+    ///   - points:    ordered path vertices (>= 2).
+    ///   - closed:    whether the path closes back to `points[0]`.
+    ///   - spacing:   distance between successive points (> 0).
+    ///   - fromStart: measure from `points.first` (true) or `points.last` (false).
+    public static func pointsAlongPolyline(points: [Vector], closed: Bool,
+                                           spacing: Double, fromStart: Bool = true) -> [Vector] {
+        guard spacing > Tolerance.distance else { return [] }
+        var path = points.filter(\.valid)
+        guard path.count >= 2 else { return [] }
+        if closed, let f = path.first { path.append(f) }
+        if !fromStart { path.reverse() }
+        // Cumulative arc-length along the (possibly reversed) path.
+        var cum: [Double] = [0]
+        cum.reserveCapacity(path.count)
+        for i in 1..<path.count {
+            cum.append(cum[i - 1] + (path[i] - path[i - 1]).magnitude)
+        }
+        let total = cum[cum.count - 1]
+        guard total > Tolerance.distance else { return [] }
+        var out: [Vector] = []
+        for s in marchPoints(spacing: spacing, total: total) {
+            // Find the segment containing cumulative length `s`.
+            var seg = 1
+            while seg < cum.count && cum[seg] < s { seg += 1 }
+            if seg >= cum.count { break }
+            let segLen = cum[seg] - cum[seg - 1]
+            let t = segLen > Tolerance.distance ? (s - cum[seg - 1]) / segLen : 0
+            out.append(path[seg - 1] + (path[seg] - path[seg - 1]) * t)
+        }
+        return out
+    }
+
+    /// The interior march distances `spacing, 2·spacing, …` strictly less than
+    /// `total` (the reference end and far end are excluded — both are already
+    /// endpoint snaps). Capped at `distanceAlongPointCap`.
+    private static func marchPoints(spacing: Double, total: Double) -> [Double] {
+        guard spacing > Tolerance.distance, total > Tolerance.distance else { return [] }
+        var out: [Double] = []
+        var s = spacing
+        while s < total - Tolerance.distance && out.count < distanceAlongPointCap {
+            out.append(s)
+            s += spacing
+        }
+        return out
+    }
+
+    // MARK: - Manual (two-pick) snap primitives
+
+    /// The midpoint of two user-picked points (LibreCAD "Snap middle manual" —
+    /// `RS_ActionSnapMiddleManual`): the snap point is `(a + b) / 2`, regardless of
+    /// any entity. Returns `.invalid` if either pick is invalid.
+    public static func manualMiddle(a: Vector, b: Vector) -> Vector {
+        guard a.valid, b.valid else { return .invalid }
+        return (a + b) * 0.5
+    }
 }
