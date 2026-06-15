@@ -324,6 +324,18 @@ struct LibreCADApp: App {
                 }
             }
         }
+
+        // The APPLICATION-LEVEL Preferences window (audit G7). On macOS a `Settings`
+        // scene is special: AppKit AUTOMATICALLY wires it to the standard application-
+        // menu "Settings…/Preferences…" item with the conventional ⌘, shortcut and the
+        // standard preferences-window chrome — we must NOT declare ⌘, ourselves (that
+        // would double-bind it). These app-WIDE prefs (defaults for new drawings,
+        // global appearance/quality) are backed by `@AppStorage` (see AppSettingsView),
+        // so they persist + apply to new documents — DISTINCT from the per-DOCUMENT
+        // settings sheet (File ▸ Document Settings…, ⌥⌘,) which stays unchanged (D8).
+        Settings {
+            AppSettingsView()
+        }
     }
 
     // MARK: - Tools menu groups (Draw / Modify / Annotate)
