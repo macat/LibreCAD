@@ -90,6 +90,21 @@ struct ContentView: View {
     /// focus to the canvas (so tool letters work again).
     @FocusState private var commandFieldFocused: Bool
 
+    /// Whether the bottom COMMAND BAR's tool-filter field has keyboard focus. The bar
+    /// is the AutoCAD-style tool launcher ADDED alongside the grouped button toolbar
+    /// (the toolbar stays the primary visual surface; the bar is the keyboard surface).
+    /// Focused on click, or on the `/` launcher keystroke over the canvas; Esc /
+    /// activation returns focus to the canvas (so tool letters work again). Kept
+    /// separate from `commandFieldFocused` so the two bottom fields never fight.
+    @FocusState private var commandBarFocused: Bool
+
+    /// The command bar's most-recently-used tools, persisted across launches as a
+    /// comma-separated list of `ToolKind` raw values (most-recent first). Seeded into
+    /// the live model on appear and re-persisted whenever the model's MRU changes —
+    /// the LIST + promote-on-use logic live on the model (the pure
+    /// `ToolSuggester.updatedMRU`), this is only its durable store.
+    @AppStorage("commandBar.mru") private var commandBarMRURaw: String = ""
+
     /// The user-customized set of tools PINNED to the primary toolbar as buttons,
     /// persisted across launches via `@AppStorage` (a comma-separated list of
     /// `ToolKind` raw values). Tools NOT pinned still live in their group's `▾`
@@ -129,6 +144,27 @@ struct ContentView: View {
         // every edit (and on the initial load); pushing the value-type snapshot is
         // cheap and never touches the off-main document codec.
         .onChange(of: model.modelVersion) { _, _ in syncPayloadToDocument() }
+        // Command-bar MRU lifecycle: seed the live model from the persisted list on
+        // appear, then re-persist whenever the model promotes a freshly-used tool. The
+        // list + promote logic live on the model (pure `ToolSuggester.updatedMRU`); the
+        // durable store is the `@AppStorage` string here.
+        .onAppear { model.commandBarMRU = Self.decodeMRU(commandBarMRURaw) }
+        .onChange(of: model.commandBarMRU) { _, new in
+            commandBarMRURaw = Self.encodeMRU(new)
+        }
+    }
+
+    // MARK: - Command-bar MRU persistence (encode/decode the @AppStorage string)
+
+    /// Decodes the persisted comma-separated `ToolKind` raw values into an MRU list
+    /// (unknown raws skipped, so a roster change never crashes a stored list).
+    private static func decodeMRU(_ raw: String) -> [ToolKind] {
+        raw.split(separator: ",").compactMap { ToolKind(rawValue: String($0)) }
+    }
+
+    /// Encodes an MRU list back to the comma-separated raw-value string for storage.
+    private static func encodeMRU(_ mru: [ToolKind]) -> String {
+        mru.map(\.rawValue).joined(separator: ",")
     }
 
     /// The canvas detail pane — the interactive canvas + HUD + toolbar + Inspector +
@@ -162,6 +198,21 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     StatusBar(model: model)
                     commandBar
+                    // The AutoCAD-style tool LAUNCHER bar — ADDED below the U1
+                    // coordinate line, alongside the grouped button toolbar at the
+                    // top (the toolbar stays the primary visual surface). Mouse users
+                    // use the toolbar; keyboard users type a command here to narrow
+                    // the chips. All ranking is the pure `ToolSuggester`; image
+                    // placement routes through the same View-layer file-picker the
+                    // toolbar uses (`chooseAndPlaceImage`) so no modal is reachable
+                    // from the model/suggester/tool.
+                    CommandBar(
+                        model: model,
+                        focused: $commandBarFocused,
+                        activateTool: { kind in controllerBox.controller?.activateTool(kind) },
+                        placeImage: { chooseAndPlaceImage() },
+                        returnFocusToCanvas: { controllerBox.controller?.returnFocusToCanvas() }
+                    )
                 }
             }
             // Trailing Inspector: the selected entity's editable properties, plus
@@ -235,6 +286,16 @@ struct ContentView: View {
             }
             // View ▸ Show Command Line (⇧⌘L) focuses the field from the menu.
             .focusedSceneValue(\.focusCommandLine) { commandFieldFocused = true }
+            // The `/` launcher keystroke focuses the bottom COMMAND BAR's tool filter
+            // (AutoCAD's command-line convention). `/` is not a tool letter (the canvas
+            // never consumes it), so this is non-disruptive: the canvas's bare-letter
+            // shortcuts keep working unchanged, and clicking the bar focuses it too.
+            // SwiftUI delivers the press here only when the canvas is NOT capturing the
+            // key; the always-available focus path remains a click on the field.
+            .onKeyPress("/") {
+                commandBarFocused = true
+                return .handled
+            }
     }
 
     /// The grouped tool / image / undo / redo / delete focused-scene-value handlers,
