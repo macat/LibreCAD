@@ -47,6 +47,8 @@ struct ShaderCompileTests {
         "line_fragment",
         "flat_vertex",
         "flat_fragment",
+        "image_vertex",
+        "image_fragment",
     ]
 
     @Test("real canvasMetalSource compiles and exposes every renderer function")

@@ -553,10 +553,11 @@ public enum SelectionTraversal {
             pts = [f, l]
 
         case .point, .circle, .text, .mtext, .hatch, .solid, .dimension, .insert,
-             .xline, .ray, .leader:
+             .xline, .ray, .leader, .image:
             // No free ends to chain from (closed/areal/annotative, or infinite —
             // a construction line has no FINITE end to chain to). A leader is an
-            // annotation callout (like a dimension), so it is terminal too.
+            // annotation callout (like a dimension), so it is terminal too; a raster
+            // image is an areal placement (its quad has no free chain-end).
             return []
         }
         return pts.filter(\.valid)

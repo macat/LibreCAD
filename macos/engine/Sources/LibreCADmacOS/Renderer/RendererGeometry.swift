@@ -48,6 +48,37 @@ struct LineInstance: Equatable {
     var halfWidthPx: Float
 }
 
+// MARK: - The textured-quad vertex (matches `TexturedVertex` in the Metal source)
+
+/// One vertex of a raster-image quad: a render-space position (f32 offset from the
+/// floating origin, ADR-003) + a texture coordinate. Layout MUST match
+/// `struct TexturedVertex` in `Shaders.swift`. Six per image (two triangles).
+struct TexturedVertex: Equatable {
+    /// Vertex position, `f32(world - renderOrigin)`.
+    var position: SIMD2<Float>
+    /// Texture coordinate (0..1).
+    var uv: SIMD2<Float>
+}
+
+/// One resolved raster image ready for the textured-quad pass: the six quad
+/// vertices (two triangles) packed in render space, plus the texture key + display
+/// params the renderer needs to bind the texture and set the per-draw shader
+/// uniform. The renderer groups by `textureKey` and binds the cached `MTLTexture`.
+struct ImageQuad {
+    /// The six render-space vertices (triangle list: 0-1-2, 0-2-3).
+    var vertices: [TexturedVertex]
+    /// The texture cache key (source file path). Empty ⇒ placeholder only.
+    var textureKey: String
+    /// Brightness 0–100 (DXF 281).
+    var brightness: Int
+    /// Contrast 0–100 (DXF 282).
+    var contrast: Int
+    /// Fade 0–100 (DXF 283).
+    var fade: Int
+    /// Whether to draw only the placeholder outline (hidden/missing image).
+    var placeholder: Bool
+}
+
 // MARK: - Fill triangulation (earcut / ear-clipping, GPU-free & testable)
 
 /// Ear-clipping triangulator for the renderer's filled regions (hatch solid fills,
@@ -455,6 +486,48 @@ enum RendererGeometry {
         for p in tris {
             verts.append(FlatVertex(position: offset(p, from: renderOrigin), color: color))
         }
+    }
+
+    /// Builds an `ImageQuad` from a resolved raster image: the four world corners
+    /// (CCW from lower-left) become two triangles in render space, UV-mapped so the
+    /// image renders upright (the source's TOP-LEFT pixel lands at the upper-left
+    /// corner `+v·H`, i.e. `corners[3]`). Returns `nil` for a degenerate (non-4-
+    /// corner) image so the caller skips it.
+    ///
+    /// ## UV mapping (upright, y-down image space → y-up CAD corners)
+    /// `corners` are `[LL, LR, UR, UL]` (CCW from lower-left). A raster image's
+    /// pixel rows run TOP→bottom, so the image top (UV v=0) maps to the CAD top
+    /// (the upper corners UR/UL) and the image bottom (UV v=1) to the lower corners
+    /// LL/LR. Thus:
+    ///   LL → (0,1)  LR → (1,1)  UR → (1,0)  UL → (0,0)
+    static func imageQuad(for image: ResolvedImage, renderOrigin: Vector) -> ImageQuad? {
+        let c = image.corners
+        guard c.count == 4 else { return nil }
+        let ll = offset(c[0], from: renderOrigin)
+        let lr = offset(c[1], from: renderOrigin)
+        let ur = offset(c[2], from: renderOrigin)
+        let ul = offset(c[3], from: renderOrigin)
+        let uvLL = SIMD2<Float>(0, 1)
+        let uvLR = SIMD2<Float>(1, 1)
+        let uvUR = SIMD2<Float>(1, 0)
+        let uvUL = SIMD2<Float>(0, 0)
+        // Two triangles: LL-LR-UR, LL-UR-UL.
+        let verts = [
+            TexturedVertex(position: ll, uv: uvLL),
+            TexturedVertex(position: lr, uv: uvLR),
+            TexturedVertex(position: ur, uv: uvUR),
+            TexturedVertex(position: ll, uv: uvLL),
+            TexturedVertex(position: ur, uv: uvUR),
+            TexturedVertex(position: ul, uv: uvUL),
+        ]
+        return ImageQuad(
+            vertices: verts,
+            textureKey: image.textureKey,
+            brightness: image.brightness,
+            contrast: image.contrast,
+            fade: image.fade,
+            placeholder: image.placeholder
+        )
     }
 
     /// Builds the full instance array for a set of resolved geometries.

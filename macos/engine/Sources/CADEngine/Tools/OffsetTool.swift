@@ -258,7 +258,8 @@ public struct OffsetTool: Tool {
         // For now they are SKIPPED — no edit is emitted, matching the brief's
         // scope (line/circle/arc only).
         case .polyline, .ellipse, .spline, .splinePoints, .point,
-             .text, .mtext, .hatch, .solid, .dimension, .insert, .xline, .ray, .leader:
+             .text, .mtext, .hatch, .solid, .dimension, .insert, .xline, .ray, .leader,
+             .image:
             return nil
         }
     }
@@ -335,7 +336,8 @@ public struct OffsetTool: Tool {
 
         // Same scope as the through-point path: line/circle/arc only.
         case .polyline, .ellipse, .spline, .splinePoints, .point,
-             .text, .mtext, .hatch, .solid, .dimension, .insert, .xline, .ray, .leader:
+             .text, .mtext, .hatch, .solid, .dimension, .insert, .xline, .ray, .leader,
+             .image:
             return nil
         }
     }

@@ -242,7 +242,30 @@ public enum EntityTransform {
         case .xline(let x):           return .xline(transformXLine(x, t))
         case .ray(let r):             return .ray(transformRay(r, t))
         case .leader(let ld):         return .leader(transformLeader(ld, t))
+        case .image(let im):          return .image(transformImage(im, t))
         }
+    }
+
+    // MARK: image — the insertion (lower-left) corner transforms (full affine);
+    //       the per-pixel u/v vectors are FREE direction-and-scale vectors, so they
+    //       get the LINEAR part only (rotate + scale + reflect). This translates/
+    //       rotates/scales/mirrors the placed quad correctly: under a uniform scale
+    //       the image scales about the insertion, under a rotation it spins, and
+    //       under a mirror u/v reflect across the axis so the quad flips (matching
+    //       RS_Image::move/rotate/scale/mirror, which transform the insertion + the
+    //       u/v vectors). The IMAGEDEF (file path + pixel size) + display params are
+    //       size-independent and unchanged. NOTE: a mirror flips the image left-
+    //       right / top-bottom exactly as the reflected u/v dictate — the texture
+    //       sampling follows the corners, so the picture mirrors with the frame.
+
+    static func transformImage(_ im: ImageData, _ t: Affine2D) -> ImageData {
+        ImageData(
+            insertion: t.apply(im.insertion),
+            uVector: t.applyLinear(im.uVector),
+            vVector: t.applyLinear(im.vVector),
+            imageDef: im.imageDef,
+            display: im.display
+        )
     }
 
     // MARK: leader — every path vertex transforms (full affine); the arrow size

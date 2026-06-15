@@ -132,8 +132,20 @@ typedef enum LCEntityKind {
      *  model round-trips via Codable, not DXF. Distinct from LC_ENT_UNSUPPORTED so
      *  the reader maps it to `.leader` (was previously dropped as unsupported). */
     LC_ENT_LEADER = 16,
+    /** A raster IMAGE (DXF IMAGE + its IMAGEDEF, DRW_Image + DRW_ImageDef). The
+     *  insertion point (lower-left, code 10) is in p1; the per-pixel U vector
+     *  (code 11) in p2; the per-pixel V vector (code 12) in `imgVVec*`; the image
+     *  pixel size (codes 13/23, and the IMAGEDEF codes 10/20) in `imgSizeU`/
+     *  `imgSizeV`; the display params (codes 280/281/282/283) in `imgClip`/
+     *  `imgBrightness`/`imgContrast`/`imgFade`; the show-image display flag in
+     *  `imgShow`; and the source file PATH (the IMAGEDEF name, code 1) in
+     *  `textValue`. The reader links the IMAGE (addImage, code 340 ref) to its
+     *  IMAGEDEF (linkImage, code 5 handle) by handle and folds the path + pixel
+     *  size in. Distinct from LC_ENT_UNSUPPORTED so the reader maps it to `.image`
+     *  (was previously dropped as unsupported). */
+    LC_ENT_IMAGE = 17,
     /** An entity libdxfrw delivered but the reader does not flatten
-     *  (IMAGE/ordinate-DIMENSION/...). Carries only its `typeName` so Swift
+     *  (ordinate-DIMENSION/...). Carries only its `typeName` so Swift
      *  can collect a warning; geometry fields are unset. */
     LC_ENT_UNSUPPORTED = 100
 } LCEntityKind;
@@ -302,6 +314,20 @@ typedef struct LCEntity {
      * annotation height is in `height` (code 40); `styleName` the dim style. */
     int32_t leaderHasArrow;      /**< code 71 — 1 if an arrowhead is drawn, else 0. */
     double leaderArrowSize;      /**< arrowhead length (dim style arrow size). */
+
+    /* IMAGE-only fields (meaningful when kind == LC_ENT_IMAGE). The insertion
+     * (lower-left, code 10) is in p1; the per-pixel U vector (code 11) in p2; the
+     * per-pixel V vector (code 12) here; the pixel size (codes 13/23 + IMAGEDEF
+     * 10/20) here; the display params (codes 280–283 + show flag) here; the source
+     * file path (IMAGEDEF name, code 1) in `textValue`. */
+    double imgVVecX, imgVVecY, imgVVecZ; /**< per-pixel V vector (code 12/22/32). */
+    double imgSizeU;             /**< image pixel width  (IMAGEDEF code 10 / IMAGE code 13). */
+    double imgSizeV;             /**< image pixel height (IMAGEDEF code 20 / IMAGE code 23). */
+    int32_t imgBrightness;       /**< code 281, 0–100; default 50. */
+    int32_t imgContrast;         /**< code 282, 0–100; default 50. */
+    int32_t imgFade;             /**< code 283, 0–100; default 0. */
+    int32_t imgClip;             /**< code 280 clip on/off; default 0. */
+    int32_t imgShow;             /**< show-image display flag (code 70 bit 1); default 1. */
 
     /* Variable-length data — borrowed pointers into the owning list's pools. */
     const LCVertex *vertices;   /**< polyline vertices, spline control points, hatch

@@ -31,7 +31,9 @@
 //  Copyright (C) 2026 LibreCAD macOS contributors.
 //
 
+import Foundation
 import CoreGraphics
+import ImageIO
 import CADEngine
 
 /// Renders an `ExportScene` into a `CGContext` for PDF/PNG/Print. Stateless;
@@ -76,14 +78,22 @@ enum CGSceneRenderer {
         let ty = page.height - transform.offsetY + s * transform.worldOrigin.y
         ctx.concatenate(CGAffineTransform(a: s, b: 0, c: 0, d: -s, tx: tx, ty: ty))
 
-        // Fills first (even-odd, holes cut out).
+        // Raster images first (UNDER fills + strokes, so a frame outline overlays
+        // them — matching the on-screen renderer's order). A missing/unloadable file
+        // (or a hidden image) draws a placeholder outline instead, so export never
+        // crashes and the placement stays visible.
+        let strokeWorld = s > 1e-12 ? 1.0 / s : 1.0
+        for image in scene.images {
+            drawImage(image, in: ctx, strokeWorld: strokeWorld)
+        }
+
+        // Fills next (even-odd, holes cut out).
         for fill in scene.fills {
             drawFill(fill, in: ctx)
         }
 
         // Strokes on top. Stroke width is in WORLD units (scaled by the CTM) so a
         // ~1pt hairline on paper is `1/scale` world units — matching the SVG path.
-        let strokeWorld = s > 1e-12 ? 1.0 / s : 1.0
         ctx.setLineWidth(strokeWorld)
         ctx.setLineJoin(.round)
         ctx.setLineCap(.round)
@@ -92,6 +102,63 @@ enum CGSceneRenderer {
         }
 
         ctx.restoreGState()
+    }
+
+    // MARK: - Image drawing
+
+    /// Draws a resolved raster image into its world-space quad, so PDF/PNG export
+    /// matches the screen. The quad corners are CCW from the lower-left
+    /// `[LL, LR, UR, UL]`; we build a per-image CTM that maps the unit square
+    /// `[0,1]²` onto the quad (origin LL, +x → LR edge, +y → UL edge) and draw the
+    /// `CGImage` in `[0,1]²` — this reproduces the image's rotation + aspect from
+    /// the u/v vectors exactly. A missing/unloadable file (or a placeholder image)
+    /// draws the quad outline instead (no crash, placement still visible).
+    private static func drawImage(_ image: ResolvedImage, in ctx: CGContext, strokeWorld: Double) {
+        let c = image.corners
+        guard c.count == 4, c.allSatisfy(\.valid) else { return }
+
+        let cgImage: CGImage? = image.placeholder || image.textureKey.isEmpty
+            ? nil : loadCGImage(path: image.textureKey)
+
+        if let cgImage {
+            // CTM: unit square → quad. LL is the origin; the +x basis is the LL→LR
+            // edge, the +y basis is the LL→UL edge (so the image's bottom edge runs
+            // LL→LR and its left edge LL→UL). The CGImage draws y-UP in [0,1]² (CG's
+            // default), which lands the image's bottom row at v=0 → the LL/LR edge,
+            // matching the on-screen UV mapping.
+            let ll = c[0], lr = c[1], ul = c[3]
+            let ex = lr - ll          // +x basis (bottom edge)
+            let ey = ul - ll          // +y basis (left edge)
+            ctx.saveGState()
+            ctx.concatenate(CGAffineTransform(
+                a: ex.x, b: ex.y, c: ey.x, d: ey.y, tx: ll.x, ty: ll.y))
+            ctx.setAlpha(CGFloat(image.opacity))
+            ctx.interpolationQuality = .high
+            ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+            ctx.restoreGState()
+        } else {
+            // Placeholder: the quad outline (so a missing image is visibly a frame).
+            let path = CGMutablePath()
+            path.move(to: CGPoint(x: c[0].x, y: c[0].y))
+            for p in c.dropFirst() { path.addLine(to: CGPoint(x: p.x, y: p.y)) }
+            path.closeSubpath()
+            ctx.saveGState()
+            ctx.setStrokeColor(cgColor(.librecadGreen))
+            ctx.setLineWidth(strokeWorld)
+            ctx.addPath(path)
+            ctx.strokePath()
+            ctx.restoreGState()
+        }
+    }
+
+    /// Loads a `CGImage` from an image file at `path`, or `nil` if missing/
+    /// unreadable. Uses `CGImageSource` (no AppKit `NSImage` dependency in the
+    /// export path) so any ImageIO-supported format (PNG/JPEG/TIFF/…) works.
+    private static func loadCGImage(path: String) -> CGImage? {
+        guard !path.isEmpty else { return nil }
+        let url = URL(fileURLWithPath: path) as CFURL
+        guard let src = CGImageSourceCreateWithURL(url, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(src, 0, nil)
     }
 
     // MARK: - Element drawing

@@ -394,15 +394,26 @@ public enum Snapping {
             // The leader's path vertices (the arrow tip + each knee + the
             // annotation anchor) are the snappable points.
             return d.vertices.filter(\.valid)
+
+        case .image(let d):
+            // The four quad corners + the insertion (lower-left) point are the
+            // snappable defining points of a placed image (the center is offered by
+            // `centers(of:)` below).
+            return (d.corners + [d.insertion]).filter(\.valid)
         }
     }
 
-    /// The center(s) of an entity: circle / arc / ellipse center. Others none.
+    /// The center(s) of an entity: circle / arc / ellipse center, or a placed
+    /// image's quad center. Others none.
     static func centers(of entity: EntityRecord) -> [Vector] {
         switch entity.kind {
         case .circle(let d): return [d.center]
         case .arc(let d):    return [d.center]
         case .ellipse(let d): return [d.center]
+        case .image(let d):
+            // The quad center == insertion + (u·W + v·H) / 2.
+            let c = d.insertion + (d.widthVector + d.heightVector) * 0.5
+            return c.valid ? [c] : []
         default:             return []
         }
     }
@@ -503,6 +514,18 @@ public enum Snapping {
             var mids: [Vector] = []
             for i in 0..<(d.vertices.count - 1) {
                 mids.append((d.vertices[i] + d.vertices[i + 1]) * 0.5)
+            }
+            return mids.filter(\.valid)
+
+        case .image(let d):
+            // The midpoint of each edge of the image frame quad (so the image's
+            // borders snap like a closed polyline's; the corners are the endpoint
+            // snap and the quad center is the center snap).
+            let corners = d.corners
+            guard corners.count == 4 else { return [] }
+            var mids: [Vector] = []
+            for i in 0..<4 {
+                mids.append((corners[i] + corners[(i + 1) % 4]) * 0.5)
             }
             return mids.filter(\.valid)
         }

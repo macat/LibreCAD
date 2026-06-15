@@ -136,8 +136,10 @@ public enum EntityDirection {
             return .splinePoints(s)
 
         case .point, .circle, .text, .mtext, .hatch, .solid, .dimension,
-             .insert, .xline, .ray, .leader:
-            // No meaningful direction to revert.
+             .insert, .xline, .ray, .leader, .image:
+            // No meaningful direction to revert (a raster image's u/v placement has
+            // no "traversal direction" — flipping it would mirror the picture, which
+            // is a TRANSFORM, not a reverse).
             return nil
         }
     }

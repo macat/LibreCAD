@@ -871,6 +871,206 @@ extension InsertData {
     }
 }
 
+// MARK: - Raster image defining data (RS_Image / DRW_Image, DXF IMAGE + IMAGEDEF)
+
+/// The IMAGEDEF half of a raster image — the shared **image definition** (the
+/// source file + its pixel size). Mirrors libdxfrw's `DRW_ImageDef` (DXF
+/// `IMAGEDEF`, an OBJECTS-section object the `IMAGE` entity hard-references by
+/// handle, code 340). In AutoCAD one `IMAGEDEF` can back many `IMAGE` placements;
+/// the engine models it inline on each `ImageData` (a value type, no shared-graph
+/// reference) so a placed image is one self-contained value that round-trips via
+/// Codable. The DXF reader links the two halves by handle and folds the IMAGEDEF
+/// into the `ImageData` it builds.
+///
+/// ## Field grounding (DXF `IMAGEDEF` / libdxfrw `DRW_ImageDef`)
+/// - `path`        — code 1: the image file's path/name (`DRW_ImageDef::name`).
+/// - `pixelWidth`  — code 10: image size in pixels, U value (`DRW_ImageDef::u`).
+/// - `pixelHeight` — code 20: image size in pixels, V value (`DRW_ImageDef::v`).
+public struct ImageDefData: Sendable, Hashable, Codable {
+    /// DXF code 1 — the source image file path/URL string.
+    public var path: String
+    /// DXF code 10 — the image's pixel width (U size). `0` ⇒ unknown.
+    public var pixelWidth: Double
+    /// DXF code 20 — the image's pixel height (V size). `0` ⇒ unknown.
+    public var pixelHeight: Double
+
+    public init(path: String, pixelWidth: Double = 0, pixelHeight: Double = 0) {
+        self.path = path
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+    }
+}
+
+/// The display adjustments AutoCAD lets a placed raster image carry (DXF IMAGE
+/// codes 280–283). Carried for round-trip + honored by the renderer where cheap
+/// (`showImage`); `brightness`/`contrast`/`fade` are passed to the texture draw as
+/// shader params (the f32 [0,1] forms are derived from the DXF 0–100 integers).
+public struct ImageDisplay: Sendable, Hashable, Codable {
+    /// DXF code 281 — brightness, 0–100, default 50.
+    public var brightness: Int
+    /// DXF code 282 — contrast, 0–100, default 50.
+    public var contrast: Int
+    /// DXF code 283 — fade, 0–100, default 0 (0 == fully opaque image).
+    public var fade: Int
+    /// Whether the image is drawn at all (DXF "show image" display flag, code 70
+    /// bit 1). `false` ⇒ the resolve still emits the placeholder outline so the
+    /// frame is selectable, but the renderer skips the texture.
+    public var showImage: Bool
+    /// Whether a clip boundary is active (DXF code 280). The engine does not yet
+    /// honor clipping (the full polygon clip path is backlog); carried for
+    /// round-trip + so the inspector can show the state. Always treated as "off"
+    /// by the resolve/render path for now.
+    public var clipping: Bool
+
+    public init(brightness: Int = 50, contrast: Int = 50, fade: Int = 0,
+                showImage: Bool = true, clipping: Bool = false) {
+        self.brightness = brightness
+        self.contrast = contrast
+        self.fade = fade
+        self.showImage = showImage
+        self.clipping = clipping
+    }
+
+    /// The engine default display (neutral brightness/contrast, no fade, shown,
+    /// not clipped).
+    public static let `default` = ImageDisplay()
+}
+
+// MARK: - Decodable (back-compat: tolerate missing display fields)
+
+extension ImageDisplay {
+    private enum CodingKeys: String, CodingKey {
+        case brightness, contrast, fade, showImage, clipping
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        brightness = try c.decodeIfPresent(Int.self, forKey: .brightness) ?? 50
+        contrast = try c.decodeIfPresent(Int.self, forKey: .contrast) ?? 50
+        fade = try c.decodeIfPresent(Int.self, forKey: .fade) ?? 0
+        showImage = try c.decodeIfPresent(Bool.self, forKey: .showImage) ?? true
+        clipping = try c.decodeIfPresent(Bool.self, forKey: .clipping) ?? false
+    }
+}
+
+/// `RS_ImageData` — a placed **raster image** (DXF `IMAGE`, libdxfrw `DRW_Image`).
+/// A value type holding only the defining placement data (ADR-001); the drawn
+/// graphic — a textured quad at the four world corners, or a placeholder outline
+/// when the file is missing — is produced on demand by `resolve()`, never stored.
+///
+/// ## DXF IMAGE placement semantics (the u/v vector encoding)
+/// A DXF IMAGE is placed by an `insertion` point (code 10, the image's
+/// **lower-left** corner in world space) plus two direction-and-scale vectors:
+/// - `uVector` (code 11) is **one pixel's worth of the row direction** — i.e. the
+///   image's bottom edge spans `uVector * pixelWidth` from the insertion point.
+/// - `vVector` (code 12) is one pixel's worth of the column direction — the left
+///   edge spans `vVector * pixelHeight`.
+///
+/// Together u and v encode the image's **size, rotation, and aspect** (they need
+/// not be perpendicular or equal length, though they usually are). `pixelWidth`/
+/// `pixelHeight` come from the IMAGEDEF (`imageDef.pixelWidth`/`pixelHeight`),
+/// captured on `imageDef`. The four world corners the resolve produces are:
+///   `insertion`,  `insertion + u·W`,  `insertion + u·W + v·H`,  `insertion + v·H`
+/// (CCW from the lower-left), where `W = imageDef.pixelWidth`, `H = pixelHeight`.
+///
+/// To keep the placement self-consistent even when the IMAGEDEF pixel size is
+/// unknown (`0`), `corners` falls back to treating `uVector`/`vVector` as the FULL
+/// edge vectors (pixel size `1`); a real DXF always supplies the pixel size, so the
+/// per-pixel form is exact there.
+///
+/// ## Field grounding (DXF `IMAGE` / libdxfrw `DRW_Image`)
+/// - `insertion` — code 10 (`DRW_Image::basePoint`): the lower-left corner.
+/// - `uVector`   — code 11 (`DRW_Image::secPoint`): per-pixel U (row) vector.
+/// - `vVector`   — code 12 (`DRW_Image::vVector`): per-pixel V (column) vector.
+/// - `imageDef`  — the linked IMAGEDEF (file path + pixel size).
+/// - `display`   — brightness/contrast/fade/show/clip (codes 280–283).
+public struct ImageData: Sendable, Hashable, Codable {
+    /// DXF code 10 — the image's lower-left corner in world coords.
+    public var insertion: Vector
+    /// DXF code 11 — the per-pixel U (row-direction) vector. Scaled by the
+    /// image's pixel width to span the image's bottom edge.
+    public var uVector: Vector
+    /// DXF code 12 — the per-pixel V (column-direction) vector. Scaled by the
+    /// image's pixel height to span the image's left edge.
+    public var vVector: Vector
+    /// The linked image DEFINITION (source file path + pixel size).
+    public var imageDef: ImageDefData
+    /// Display adjustments (brightness/contrast/fade/show/clip).
+    public var display: ImageDisplay
+
+    public init(
+        insertion: Vector,
+        uVector: Vector,
+        vVector: Vector,
+        imageDef: ImageDefData,
+        display: ImageDisplay = .default
+    ) {
+        self.insertion = insertion
+        self.uVector = uVector
+        self.vVector = vVector
+        self.imageDef = imageDef
+        self.display = display
+    }
+
+    /// Convenience for building a placement from a file path + the WHOLE edge
+    /// vectors (`width`/`height` spanning the full image edges) — the form the
+    /// placement TOOL produces from two clicks. The per-pixel u/v the DXF model
+    /// stores are derived by dividing the edge vectors by the pixel size.
+    ///
+    /// - `lowerLeft`:  the lower-left corner.
+    /// - `widthVector`: the full bottom-edge vector (size + rotation of the width).
+    /// - `heightVector`: the full left-edge vector.
+    /// - `pixelWidth`/`pixelHeight`: the source pixel dimensions (default 1×1 so a
+    ///   caller that doesn't know them gets `u`/`v` equal to the edge vectors).
+    public init(
+        path: String,
+        lowerLeft: Vector,
+        widthVector: Vector,
+        heightVector: Vector,
+        pixelWidth: Double = 1,
+        pixelHeight: Double = 1,
+        display: ImageDisplay = .default
+    ) {
+        let w = pixelWidth > 0 ? pixelWidth : 1
+        let h = pixelHeight > 0 ? pixelHeight : 1
+        self.insertion = lowerLeft
+        self.uVector = widthVector / w
+        self.vVector = heightVector / h
+        self.imageDef = ImageDefData(path: path, pixelWidth: w, pixelHeight: h)
+        self.display = display
+    }
+
+    /// The full bottom-edge vector (`uVector · pixelWidth`) — the image's width as a
+    /// world vector (size + rotation). Uses pixel size `1` when unknown so `uVector`
+    /// is treated as the full edge.
+    public var widthVector: Vector { uVector * (imageDef.pixelWidth > 0 ? imageDef.pixelWidth : 1) }
+
+    /// The full left-edge vector (`vVector · pixelHeight`).
+    public var heightVector: Vector { vVector * (imageDef.pixelHeight > 0 ? imageDef.pixelHeight : 1) }
+
+    /// The effective image width in world units (the bottom-edge length).
+    public var worldWidth: Double { widthVector.magnitude }
+
+    /// The effective image height in world units (the left-edge length).
+    public var worldHeight: Double { heightVector.magnitude }
+
+    /// The image's rotation (radians) — the angle of the bottom edge (`uVector`).
+    public var rotation: Double { uVector.angle }
+
+    /// The four world-space corners of the placed image, CCW from the lower-left:
+    /// `[insertion, +u·W, +u·W +v·H, +v·H]` where `W`/`H` are the pixel sizes (or
+    /// `1` when unknown, so `u`/`v` are then treated as full edge vectors).
+    public var corners: [Vector] {
+        let u = widthVector
+        let v = heightVector
+        let p0 = insertion
+        let p1 = insertion + u
+        let p2 = insertion + u + v
+        let p3 = insertion + v
+        return [p0, p1, p2, p3]
+    }
+}
+
 // MARK: - The entity-kind sum type
 
 /// The discriminated union of entity geometry. This is the **seed set** for the
@@ -933,6 +1133,13 @@ public enum EntityKind: Sendable, Hashable, Codable {
     /// text/mtext kind — the recursion is bounded: an annotation is never itself a
     /// leader).
     indirect case leader(LeaderData)
+    /// A placed **raster image** (`RS_Image`, DXF `IMAGE` + `IMAGEDEF`). Its
+    /// graphic — a textured quad at the four world corners (or a placeholder
+    /// outline when the source file is missing) — is produced on demand by
+    /// `resolve()` as a `ResolvedImage`, never stored (ADR-001). The bitmap is NOT
+    /// part of the value model: only the file PATH + pixel size travel in
+    /// `ImageData.imageDef`; the renderer loads + caches the texture by that path.
+    case image(ImageData)
 }
 
 // MARK: - Per-entity flags

@@ -37,10 +37,10 @@ struct DXFReaderTests {
         var line = 0, point = 0, circle = 0, arc = 0
         var ellipse = 0, polyline = 0, spline = 0, splinePoints = 0
         var text = 0, mtext = 0, hatch = 0, solid = 0, dimension = 0, insert = 0
-        var xline = 0, ray = 0, leader = 0
+        var xline = 0, ray = 0, leader = 0, image = 0
         var total: Int {
             line + point + circle + arc + ellipse + polyline + spline + splinePoints
-                + text + mtext + hatch + solid + dimension + insert + xline + ray + leader
+                + text + mtext + hatch + solid + dimension + insert + xline + ray + leader + image
         }
     }
 
@@ -74,6 +74,8 @@ struct DXFReaderTests {
             case .ray:          t.ray += 1
             // Leaders (DXF LEADER) are now imported (was an unsupported warning).
             case .leader:       t.leader += 1
+            // Raster images (DXF IMAGE + IMAGEDEF) are now imported (was unsupported).
+            case .image:        t.image += 1
             }
         }
         return t

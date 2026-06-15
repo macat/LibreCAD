@@ -69,18 +69,75 @@ public struct ResolvedFill: Sendable, Equatable {
     }
 }
 
+/// A resolved **raster image** placement (DXF IMAGE): the four world-space
+/// corners of the quad plus a texture key (the source file path) and the display
+/// params the renderer applies. The renderer draws a textured quad at `corners`
+/// (loading + caching the bitmap by `textureKey`); the CG export renderer draws
+/// the same `CGImage` into the quad rect. When the bitmap is missing/unloadable
+/// BOTH draw a placeholder outline instead (`placeholder == true` hints that, and
+/// the corners always form the frame so the entity stays selectable).
+///
+/// `corners` are CCW from the lower-left: `[insertion, +u·W, +u·W +v·H, +v·H]`
+/// (see `ImageData.corners`). The texture is sampled with the standard quad UVs
+/// so the image's top-left pixel lands at the upper-left corner (`+v·H`) and
+/// renders upright.
+public struct ResolvedImage: Sendable, Equatable {
+    /// The four world-space quad corners, CCW from the lower-left.
+    public var corners: [Vector]
+    /// The texture cache key — the source image file path. Empty ⇒ no source
+    /// (always a placeholder).
+    public var textureKey: String
+    /// Brightness 0–100 (DXF 281), default 50 (neutral).
+    public var brightness: Int
+    /// Contrast 0–100 (DXF 282), default 50 (neutral).
+    public var contrast: Int
+    /// Fade 0–100 (DXF 283), default 0 (opaque). The renderer maps this to the
+    /// quad's alpha (`1 - fade/100`).
+    public var fade: Int
+    /// When `true`, the renderer should draw ONLY the placeholder outline (the
+    /// image is hidden via `showImage == false`); the frame still draws so the
+    /// entity is selectable. A missing/unloadable texture also falls back to the
+    /// outline at draw time regardless of this flag.
+    public var placeholder: Bool
+
+    public init(corners: [Vector], textureKey: String,
+                brightness: Int = 50, contrast: Int = 50, fade: Int = 0,
+                placeholder: Bool = false) {
+        self.corners = corners
+        self.textureKey = textureKey
+        self.brightness = brightness
+        self.contrast = contrast
+        self.fade = fade
+        self.placeholder = placeholder
+    }
+
+    /// The opacity the renderer applies to the quad, derived from `fade`
+    /// (`1 - fade/100`, clamped to [0, 1]).
+    public var opacity: Float {
+        Float(Swift.max(0, Swift.min(100, 100 - fade))) / 100
+    }
+}
+
 /// Everything an entity contributes to the screen for one render pass.
 public struct ResolvedGeometry: Sendable, Equatable {
     public var polylines: [ResolvedPolyline]
     public var fills: [ResolvedFill]
-    public init(polylines: [ResolvedPolyline] = [], fills: [ResolvedFill] = []) {
+    /// Resolved raster-image quads (DXF IMAGE). Drawn by the textured-quad pass
+    /// (and the CG export's image path); empty for every non-image entity, so the
+    /// existing line/fill rendering is untouched.
+    public var images: [ResolvedImage]
+    public init(polylines: [ResolvedPolyline] = [], fills: [ResolvedFill] = [],
+                images: [ResolvedImage] = []) {
         self.polylines = polylines
         self.fills = fills
+        self.images = images
     }
 
     /// Merges two resolved geometries (used when composing block contents).
     public func merged(with other: ResolvedGeometry) -> ResolvedGeometry {
-        ResolvedGeometry(polylines: polylines + other.polylines, fills: fills + other.fills)
+        ResolvedGeometry(polylines: polylines + other.polylines,
+                         fills: fills + other.fills,
+                         images: images + other.images)
     }
 }
 
@@ -914,7 +971,43 @@ extension EntityKind {
             // attached text/mtext annotation resolved through the SAME `.text`/
             // `.mtext` resolve arm (no second text path; honors ctx.fontProvider).
             return Self.resolveLeader(d, pen: pen, ctx: ctx)
+
+        case .image(let d):
+            // Raster image → a textured-quad `ResolvedImage` at the four world
+            // corners (the renderer loads+caches the bitmap by the file path and
+            // draws it; a missing file falls back to the placeholder outline). PLUS
+            // a frame `ResolvedPolyline` over the same corners in the resolved pen,
+            // so the image border is always visible/snappable and a hidden/missing
+            // image still shows its placement. Derived geometry, never stored.
+            return Self.resolveImage(d, pen: pen, ctx: ctx)
         }
+    }
+
+    // MARK: - Image resolve (textured quad + frame outline)
+
+    /// Resolves a raster image to its textured-quad `ResolvedImage` + a frame
+    /// outline (ADR-001: PURE — no bitmap loading here, only the placement). The
+    /// frame is a closed `ResolvedPolyline` over the four world corners in the
+    /// resolved pen so the image's border draws even when the texture is hidden,
+    /// missing, or unloadable (the renderer/export draw the placeholder outline
+    /// from the same corners). A degenerate placement (collapsed corners) resolves
+    /// to nothing.
+    static func resolveImage(_ d: ImageData, pen: ResolvedPen, ctx: ResolveContext)
+        -> ResolvedGeometry
+    {
+        let corners = d.corners
+        guard corners.count == 4, corners.allSatisfy(\.valid) else { return ResolvedGeometry() }
+
+        let frame = ResolvedPolyline(points: corners, closed: true, pen: pen)
+        let image = ResolvedImage(
+            corners: corners,
+            textureKey: d.imageDef.path,
+            brightness: d.display.brightness,
+            contrast: d.display.contrast,
+            fade: d.display.fade,
+            placeholder: !d.display.showImage || d.imageDef.path.isEmpty
+        )
+        return ResolvedGeometry(polylines: [frame], images: [image])
     }
 
     // MARK: - Point resolve ($PDMODE marker glyph + $PDSIZE)
@@ -2161,6 +2254,13 @@ extension EntityKind {
             // Union of the path vertices + the (font-less, estimated) annotation
             // box. The ctx-carrying `boundingBox(ctx:)` returns the tight text box.
             return Self.leaderBoundingBox(d, ctx: nil)
+
+        case .image(let d):
+            // The image's four world corners (which already encode size + rotation
+            // + aspect). A degenerate placement collapses to the insertion point.
+            let corners = d.corners.filter(\.valid)
+            return corners.isEmpty ? AABB(point: d.insertion.valid ? d.insertion : Vector(0, 0))
+                                   : AABB(points: corners)
         }
     }
 

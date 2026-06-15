@@ -160,13 +160,20 @@ public struct ExportScene: Sendable, Equatable {
     /// All visible filled regions (world coords; `loops[0]` outer, `loops[1...]`
     /// holes — even-odd / nonzero per the `ResolvedFill` contract).
     public var fills: [ResolvedFill]
+    /// All visible raster-image placements (world-space quad corners + texture key
+    /// + display params). The CG export renderer draws the `CGImage` into the quad
+    /// rect (or a placeholder outline when the file is missing) so PDF/PNG match the
+    /// screen; the pure-string SVG emitter does NOT embed the bitmap (it only knows
+    /// the path) — out of scope for SVG, which keeps it dependency-free.
+    public var images: [ResolvedImage]
     /// The world-space union bounds of the included geometry.
     public var bounds: AABB
 
     public init(polylines: [ResolvedPolyline] = [], fills: [ResolvedFill] = [],
-                bounds: AABB = .empty) {
+                images: [ResolvedImage] = [], bounds: AABB = .empty) {
         self.polylines = polylines
         self.fills = fills
+        self.images = images
         self.bounds = bounds
     }
 }
@@ -186,6 +193,7 @@ public enum ExportSceneBuilder {
         let layers = drawing.layers
         var polylines: [ResolvedPolyline] = []
         var fills: [ResolvedFill] = []
+        var images: [ResolvedImage] = []
         var bounds = AABB.empty
 
         for e in drawing.entities {
@@ -207,8 +215,12 @@ public enum ExportSceneBuilder {
                 fills.append(fill)
                 for loop in fill.loops { for p in loop { bounds.expand(toInclude: p) } }
             }
+            for image in geo.images {
+                images.append(image)
+                for p in image.corners { bounds.expand(toInclude: p) }
+            }
         }
-        return ExportScene(polylines: polylines, fills: fills, bounds: bounds)
+        return ExportScene(polylines: polylines, fills: fills, images: images, bounds: bounds)
     }
 }
 
