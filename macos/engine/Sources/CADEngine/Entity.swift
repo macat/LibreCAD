@@ -1175,23 +1175,66 @@ public struct EntityRecord: Sendable, Hashable, Codable, Identifiable {
     public var flags: EntityFlags
     public var kind: EntityKind
 
+    /// Which space the entity lives in — model (the implicit world drawing) or
+    /// paper (a printed sheet). ADDITIVE (paper-space P0, paperspace-plan §2): a
+    /// record born without it, and every old saved file (no space key), is
+    /// `.model`, so existing model-space drawings are 100% unaffected. Maps 1:1 to
+    /// DXF code 67 (the DXF round-trip is a later phase).
+    public var space: EntitySpace
+    /// WHICH paper sheet a `.paper` entity is on — the `Layout.name` it belongs to.
+    /// `nil` for model-space entities (and for paper-space entities not yet bound to
+    /// a named layout). ADDITIVE: born `nil`, old files decode `nil`.
+    public var layoutName: String?
+
     public init(
         id: EntityID,
         layer: LayerID = .zero,
         pen: Pen = .byLayer,
         flags: EntityFlags = .default,
-        kind: EntityKind
+        kind: EntityKind,
+        space: EntitySpace = .model,
+        layoutName: String? = nil
     ) {
         self.id = id
         self.layer = layer
         self.pen = pen
         self.flags = flags
         self.kind = kind
+        self.space = space
+        self.layoutName = layoutName
     }
 
     /// Convenience: is this entity currently selected?
     public var isSelected: Bool {
         get { flags.contains(.selected) }
         set { if newValue { flags.insert(.selected) } else { flags.remove(.selected) } }
+    }
+}
+
+// MARK: - Decodable (back-compat: tolerate missing space / layoutName)
+//
+// The paper-space P0 fields (`space`, `layoutName`) are ADDITIVE: an OLD saved
+// file (encoded before they existed) has no `space`/`layoutName` keys. A hand-
+// written `init(from:)` with `decodeIfPresent` (the same pattern HatchData et al.
+// use) decodes those absent keys as `.model` / `nil`, so old model-space drawings
+// load unchanged. `encode(to:)` and `Hashable`/`Equatable` stay synthesized (the
+// `CodingKeys` below cover every field, so the synthesized encode includes the new
+// keys; Hashable/Equatable auto-include the new stored properties).
+
+extension EntityRecord {
+    private enum CodingKeys: String, CodingKey {
+        case id, layer, pen, flags, kind, space, layoutName
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(EntityID.self, forKey: .id)
+        layer = try c.decode(LayerID.self, forKey: .layer)
+        pen = try c.decode(Pen.self, forKey: .pen)
+        flags = try c.decode(EntityFlags.self, forKey: .flags)
+        kind = try c.decode(EntityKind.self, forKey: .kind)
+        // Additive paper-space fields: absent in old files ⇒ model space, no layout.
+        space = try c.decodeIfPresent(EntitySpace.self, forKey: .space) ?? .model
+        layoutName = try c.decodeIfPresent(String.self, forKey: .layoutName)
     }
 }
