@@ -106,12 +106,15 @@ public struct TextTool: Tool {
 
     /// Creates a fresh Text tool for AUTHORING new text. The insertion point is
     /// picked by the first `.click`; `text` is filled by the inline editor before
-    /// `.commit`.
+    /// `.commit`. The height/style default to the app-wide Preferences ▸ Text
+    /// defaults (`TextTool.defaultHeight` / `.defaultFontStyleName`), which the app
+    /// sets from `@AppStorage` at launch; absent prefs leave the built-in
+    /// "Standard" / 2.5 fallback (today's behavior).
     public init(
         text: String = "",
         height: Double = TextTool.defaultHeight,
         rotation: Double = 0,
-        styleName: String = TextTool.standardStyleName
+        styleName: String = TextTool.defaultFontStyleName
     ) {
         self.state = .awaitingPoint
         self.text = text
@@ -131,7 +134,7 @@ public struct TextTool: Tool {
         text: String,
         height: Double = TextTool.defaultHeight,
         rotation: Double = 0,
-        styleName: String = TextTool.standardStyleName
+        styleName: String = TextTool.defaultFontStyleName
     ) {
         self.state = .placed(point)
         self.text = text
@@ -144,12 +147,54 @@ public struct TextTool: Tool {
     // MARK: - Defaults
 
     /// The default text style name — the always-present "Standard" style, whose
-    /// `primaryFont` is Helvetica Neue (`TextStyle.defaultNativeFamily`).
+    /// `primaryFont` is Helvetica Neue (`TextStyle.defaultNativeFamily`). This is the
+    /// IMMUTABLE built-in fallback; the runtime app-wide default is
+    /// `defaultFontStyleName` (overridable from Preferences ▸ Text).
     public static let standardStyleName = "Standard"
 
-    /// The default cap height (world units) for new text — the "Standard" style's
-    /// last interactively used height (`TextStyle.lastHeight` default).
-    public static let defaultHeight: Double = 2.5
+    /// The built-in fallback cap height (world units) for new text — the "Standard"
+    /// style's last interactively used height (`TextStyle.lastHeight` default). The
+    /// runtime app-wide default lives in `defaultHeight` (overridable from
+    /// Preferences ▸ Text); this constant is what it falls back to.
+    public static let standardHeight: Double = 2.5
+
+    // MARK: App-wide Text preferences (set once at launch from @AppStorage)
+    //
+    // CADEngine is the pure layer and cannot import the executable's `AppSettings`
+    // (where the @AppStorage keys live), so the app pushes its resolved Preferences ▸
+    // Text defaults DOWN into these globals at launch via `applyAppDefaults(...)`.
+    // The Text tool's `init` defaults then read them, so new text honors the user's
+    // chosen font/height. They are `nonisolated(unsafe) static var` — the SAME
+    // set-once-on-main, read-on-tool-construction pattern `OverlayStyle` uses for the
+    // canvas chrome — and start at the built-in fallbacks, so a user who never opened
+    // Preferences gets exactly today's behavior ("Standard" / 2.5).
+
+    /// The app-wide default text-style NAME stamped on new text entities. Defaults to
+    /// the built-in `standardStyleName`; the app overrides it from Preferences ▸ Text.
+    public nonisolated(unsafe) static var defaultFontStyleName = standardStyleName
+
+    /// The app-wide default cap height (world units) for new text. Defaults to the
+    /// built-in `standardHeight`; the app overrides it from Preferences ▸ Text.
+    public nonisolated(unsafe) static var defaultHeight: Double = standardHeight
+
+    /// Pushes the app-wide Preferences ▸ Text defaults into the Text tool. Called once
+    /// at launch (on the main actor) from the executable, which reads the
+    /// `@AppStorage` keys. An empty font name or a non-positive height falls back to
+    /// the built-in defaults (mirrors `AppSettings.clampTextHeight` / the empty-font
+    /// rule), so a corrupt/blank stored value can never produce invisible/unnamed
+    /// text. Pure value assignment — safe to call before any tool is constructed.
+    public static func applyAppDefaults(fontStyleName: String, height: Double) {
+        let name = fontStyleName.trimmingCharacters(in: .whitespacesAndNewlines)
+        defaultFontStyleName = name.isEmpty ? standardStyleName : name
+        defaultHeight = (height.isFinite && height > 0) ? height : standardHeight
+    }
+
+    /// Resets the app-wide Text defaults to the built-in fallbacks (used by tests so
+    /// one suite's override never leaks into another).
+    public static func resetAppDefaults() {
+        defaultFontStyleName = standardStyleName
+        defaultHeight = standardHeight
+    }
 
     // MARK: - Tool
 

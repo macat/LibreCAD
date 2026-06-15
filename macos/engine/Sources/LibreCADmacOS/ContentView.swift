@@ -115,6 +115,26 @@ struct ContentView: View {
     /// "user cleared everything" from "never customized"). See `pinnedToolsSet`.
     @AppStorage("toolbar.pinnedTools") private var pinnedToolsRaw: String = ""
 
+    // MARK: App-wide preference reads (Preferences ▸ General / Text)
+    //
+    // These back the new-document seeding (General tab) and the Text tool defaults
+    // (Text tab). Each falls back to its `AppSettings.Default` when unset, so a user
+    // who never opened Preferences gets exactly today's behavior. They drive NEW
+    // documents/windows only (units/template seed at creation, autosave/text defaults
+    // are app policy) — an open drawing's units are governed by its own DXF header.
+
+    /// READ-SITE (General ▸ default units): the unit a NEW drawing is seeded with.
+    @AppStorage(AppSettings.Key.defaultUnit) private var prefDefaultUnitRaw = AppSettings.Default.unit.rawValue
+    /// READ-SITE (General ▸ default template): the template a NEW empty drawing is
+    /// pre-populated from (`"blank"` / unmatched = none → just seed units).
+    @AppStorage(AppSettings.Key.defaultTemplate) private var prefDefaultTemplate = AppSettings.Default.template
+    /// READ-SITE (General ▸ autosave): whether new documents autosave.
+    @AppStorage(AppSettings.Key.autosaveEnabled) private var prefAutosaveEnabled = AppSettings.Default.autosaveEnabled
+    /// READ-SITE (Text ▸ default font): the font style stamped on new text.
+    @AppStorage(AppSettings.Key.defaultTextFont) private var prefTextFont = AppSettings.Default.textFont
+    /// READ-SITE (Text ▸ default height): the cap height new text is born with.
+    @AppStorage(AppSettings.Key.defaultTextHeight) private var prefTextHeight = AppSettings.Default.textHeight
+
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             // Leading pane: the modern Layers (+ Blocks stub) sidebar, bound to
@@ -331,12 +351,61 @@ struct ContentView: View {
     /// document, so nothing here crosses the launch-crash boundary.
     @MainActor
     private func loadFromDocument() {
-        let drawing = CADDrawing.make(from: document.payload)
+        // Push the app-wide Text defaults (Preferences ▸ Text) into the Text tool so
+        // newly authored text uses the chosen font/height. Idempotent — reads the
+        // current prefs each load; absent prefs leave the built-in "Standard"/2.5.
+        applyTextDefaults()
+        // Honor the autosave preference for new windows (Preferences ▸ General).
+        applyAutosavePreference()
+
+        // A BRAND-NEW document (File ▸ New) arrives with the empty payload. Seed it
+        // from the General preferences: start from the default template if one is set
+        // + bundled, otherwise an empty drawing carrying the preferred units. An
+        // OPENED file keeps its own header units (its DXF is authoritative) — we only
+        // seed a fresh, empty drawing.
+        if PrefsSeeding.isNewEmptyPayload(document.payload),
+           let resource = PrefsSeeding.templateResourceName(forPrefID: prefDefaultTemplate),
+           let template = DrawingTemplate.bundled.first(where: { $0.resourceName == resource }) {
+            Task { await seedNewDocument(from: template) }
+            return
+        }
+
+        let drawing = CADDrawing.make(from: PrefsSeeding.seededPayload(
+            document.payload, defaultUnitRaw: prefDefaultUnitRaw))
         model.setDrawing(drawing, viewSize: model.viewport.size)
         adoptEnvironmentUndo()
         controllerBox.controller?.zoomToFit()
         let n = model.entityCount
-        status = n == 0 ? "New drawing" : "\(n) entities"
+        status = n == 0 ? "New drawing (\(DrawingUnit(rawValue: prefDefaultUnitRaw)?.sign ?? ""))" : "\(n) entities"
+    }
+
+    /// Pushes the Preferences ▸ Text defaults (font style + height) into the pure
+    /// `TextTool` defaults so a new `TextTool()` authors text with them. `TextTool`
+    /// lives in CADEngine and cannot read the executable's `@AppStorage`, so the app
+    /// hands the resolved values down (the same set-once pattern `CanvasTheme` uses
+    /// for the canvas chrome). Validation (empty font / non-positive height → built-in
+    /// fallback) happens inside `applyAppDefaults`.
+    @MainActor
+    private func applyTextDefaults() {
+        TextTool.applyAppDefaults(fontStyleName: prefTextFont, height: prefTextHeight)
+    }
+
+    /// Honors the Preferences ▸ General autosave toggle for new windows by driving the
+    /// shared document controller's autosaving delay: a positive delay enables
+    /// periodic autosave-in-place, 0 disables the timed autosave. Absent the pref this
+    /// is the default ON (today's behavior).
+    @MainActor
+    private func applyAutosavePreference() {
+        NSDocumentController.shared.autosavingDelay = prefAutosaveEnabled
+            ? PrefsSeeding.autosaveDelaySeconds : 0
+    }
+
+    /// Seeds THIS fresh window from the General-pref default template, then pushes it
+    /// into the document so a Save writes the seeded geometry. Reuses the same
+    /// off-main DXF read path as `seedFromTemplate` (a template is just a DXF).
+    @MainActor
+    private func seedNewDocument(from template: DrawingTemplate) async {
+        await seedFromTemplate(template)
     }
 
     /// Seeds THIS window's drawing from a bundled `.dxf` template (File ▸ New from

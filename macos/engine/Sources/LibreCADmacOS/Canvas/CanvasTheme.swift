@@ -105,6 +105,76 @@ enum CanvasTheme {
         isDark(appearance) ? dark : light
     }
 
+    // MARK: - Preference overrides (Appearance ▸ canvas background + grid color)
+
+    /// Parses a `#RRGGBB` / `RRGGBB` hex string into an opaque `SIMD4<Float>`
+    /// (alpha 1), or `nil` for an empty / malformed string. This is the SAME hex
+    /// shape the Preferences ▸ Appearance color pickers persist (see
+    /// `AppSettings.Key.canvasBackgroundHex` / `.gridColorHex`); an EMPTY value is
+    /// the "follow the theme palette" sentinel, so it resolves to `nil` and the
+    /// caller keeps the theme default. Pure value math — unit-tested in
+    /// `PrefsWiringTests` (no AppKit/Metal needed).
+    static func rgba(fromAppHex hex: String) -> SIMD4<Float>? {
+        var s = hex.trimmingCharacters(in: .whitespaces)
+        guard !s.isEmpty else { return nil }
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let v = UInt32(s, radix: 16) else { return nil }
+        return SIMD4<Float>(
+            Float((v >> 16) & 0xFF) / 255.0,
+            Float((v >> 8) & 0xFF) / 255.0,
+            Float(v & 0xFF) / 255.0,
+            1.0)
+    }
+
+    /// An `MTLClearColor` from a `#RRGGBB` hex, or `nil` for empty/invalid (so the
+    /// theme default is kept). Shares the parse with `rgba(fromAppHex:)`.
+    static func clearColor(fromAppHex hex: String) -> MTLClearColor? {
+        guard let c = rgba(fromAppHex: hex) else { return nil }
+        return MTLClearColor(red: Double(c.x), green: Double(c.y),
+                             blue: Double(c.z), alpha: 1.0)
+    }
+
+    /// Returns `chrome` with the user's Preferences ▸ Appearance canvas-background
+    /// and grid-color overrides applied where set. An EMPTY hex (the default) leaves
+    /// the corresponding theme color untouched, so a user who never opened
+    /// Preferences gets byte-for-byte today's palette. A non-empty override REPLACES
+    /// that one color in BOTH light and dark chrome — it is an explicit user choice,
+    /// not a theme-tracked value. The grid override also tints the grid AXIS color
+    /// (a slightly stronger variant) so the override reads consistently. Pure — no
+    /// AppKit/Metal state mutated; the value is handed to `apply` to push into the
+    /// view + `OverlayStyle`.
+    static func overridden(_ chrome: CanvasChrome,
+                           backgroundHex: String,
+                           gridHex: String) -> CanvasChrome {
+        var out = chrome
+        if let bg = clearColor(fromAppHex: backgroundHex) {
+            out.clearColor = bg
+        }
+        if let grid = rgba(fromAppHex: gridHex) {
+            // Keep the theme grid's alpha (a faint guide), only override the hue, so
+            // the grid stays a subtle background guide rather than an opaque slab.
+            out.grid = SIMD4<Float>(grid.x, grid.y, grid.z, chrome.grid.w)
+            // Tint the axis with the same hue at the theme axis alpha so the two
+            // read as a set.
+            out.gridAxis = SIMD4<Float>(grid.x, grid.y, grid.z, chrome.gridAxis.w)
+        }
+        return out
+    }
+
+    /// Reads the two Appearance color overrides straight from `UserDefaults`
+    /// (the keys the `@AppStorage` Preferences controls write) and applies them on
+    /// top of the theme chrome. The defaults are EMPTY strings (the
+    /// `AppSettings.Default.*Hex` "follow theme" sentinel), so absent keys are a
+    /// no-op — today's behavior for any user who never touched Preferences.
+    static func appearanceOverridden(_ chrome: CanvasChrome,
+                                     defaults: UserDefaults = .standard) -> CanvasChrome {
+        let bg = defaults.string(forKey: AppSettings.Key.canvasBackgroundHex)
+            ?? AppSettings.Default.canvasBackgroundHex
+        let grid = defaults.string(forKey: AppSettings.Key.gridColorHex)
+            ?? AppSettings.Default.gridColorHex
+        return overridden(chrome, backgroundHex: bg, gridHex: grid)
+    }
+
     // MARK: - Apply
 
     /// Applies the chrome for `appearance` to the MTKView's clear color AND to the
@@ -115,7 +185,11 @@ enum CanvasTheme {
     @discardableResult
     @MainActor
     static func apply(to view: MTKView, appearance: NSAppearance) -> CanvasChrome {
-        let chrome = chrome(for: appearance)
+        // Resolve the appearance palette, THEN layer the user's Preferences ▸
+        // Appearance canvas-background / grid-color overrides on top (empty = follow
+        // theme, so this is a no-op for anyone who never opened Preferences). Pulled
+        // from UserDefaults — the same keys the @AppStorage controls write.
+        let chrome = appearanceOverridden(chrome(for: appearance))
         view.clearColor = chrome.clearColor
         OverlayStyle.gridColor = chrome.grid
         OverlayStyle.gridAxisColor = chrome.gridAxis
