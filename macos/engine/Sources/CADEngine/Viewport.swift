@@ -349,3 +349,64 @@ public struct Viewport: Sendable, Equatable {
         )
     }
 }
+
+// MARK: - Navigation input math (pure, device-agnostic, testable)
+
+/// Pure helpers that turn raw device input (a scroll-wheel delta, a screen-space
+/// drag delta) into the `Viewport` mutations the canvas applies. Kept OUT of the
+/// AppKit view so the mapping (sign convention, per-tick clamp, the zoom-to-cursor
+/// composition) is unit-testable without a live `NSView` or `NSEvent`.
+///
+/// The GUI layer (`CADCanvasView`) is the thin plumbing: it classifies the device
+/// (trackpad vs mouse wheel) and the gesture (pan vs zoom), reads the cursor point,
+/// and calls one of these; everything numeric lives here / on `Viewport`.
+public enum ViewportNav {
+
+    /// Per-tick multiplicative zoom step for a notch of mouse-wheel travel. Tuned so a
+    /// normal notch is a noticeable-but-controlled ~10% zoom rather than the
+    /// imperceptible 1% the old `1 + delta*0.01` gave a coarse (line-granular) wheel.
+    public static let wheelZoomStep = 0.10
+
+    /// The tightest / widest single-tick zoom factors. Clamps a fast flick (a large
+    /// accumulated delta) so one event can never zoom more than 2× / 0.5× — keeping
+    /// wheel zoom smooth and predictable instead of teleporting the view.
+    public static let minWheelZoomFactor = 0.5
+    public static let maxWheelZoomFactor = 2.0
+
+    /// Maps a raw scroll-wheel `delta` (AppKit `scrollingDeltaY`) to a multiplicative
+    /// zoom factor for `Viewport.zoom(by:about:)`.
+    ///
+    /// Direction (standard CAD / macOS): **scrolling up / wheel forward** gives a
+    /// POSITIVE `scrollingDeltaY` → a factor `> 1` → **zoom IN**; scrolling down →
+    /// factor `< 1` → zoom out. A zero delta is the identity (`1.0`).
+    ///
+    /// The magnitude is `(1 + step) ^ delta` so successive notches COMPOUND smoothly
+    /// (two notches in == one notch in twice) and a coarse `delta == 1` notch is a
+    /// clean `1 + step`. The result is clamped to `[minWheelZoomFactor,
+    /// maxWheelZoomFactor]` so a single fast flick can't teleport the zoom.
+    public static func zoomFactor(forWheelDelta delta: Double) -> Double {
+        guard delta.isFinite, delta != 0 else { return 1.0 }
+        let factor = pow(1.0 + wheelZoomStep, delta)
+        guard factor.isFinite else { return delta > 0 ? maxWheelZoomFactor : minWheelZoomFactor }
+        return Swift.min(Swift.max(factor, minWheelZoomFactor), maxWheelZoomFactor)
+    }
+
+    /// Applies a mouse-wheel zoom to `viewport`, anchored so the world point under
+    /// `cursor` stays under `cursor`. Pure: returns a NEW viewport, leaving the input
+    /// untouched (the model assigns the result). This is the exact composition the
+    /// `scrollWheel` mouse-wheel branch performs, factored out for testing.
+    public static func zoomedByWheel(_ viewport: Viewport, delta: Double, about cursor: CGPoint) -> Viewport {
+        var vp = viewport
+        vp.zoom(by: zoomFactor(forWheelDelta: delta), about: cursor)
+        return vp
+    }
+
+    /// Applies a trackpad/middle-drag PAN to `viewport` by a screen-space delta
+    /// (AppKit points, Y-down): the content follows the delta. Pure: returns a NEW
+    /// viewport. Mirrors the `scrollPan` / `panDrag` plumbing.
+    public static func panned(_ viewport: Viewport, byScreenDelta d: CGSize) -> Viewport {
+        var vp = viewport
+        vp.pan(byScreenDelta: d)
+        return vp
+    }
+}
