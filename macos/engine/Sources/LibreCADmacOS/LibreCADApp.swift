@@ -232,6 +232,31 @@ struct LibreCADApp: App {
                 .keyboardShortcut("[", modifiers: [.command, .option])
 
                 Divider()
+                // View ▸ Named Views (LibreCAD / AutoCAD parity) — save the current
+                // viewport under a name and restore it later. Routed through the
+                // responder chain to the focused canvas (the Ortho / Zoom-Window /
+                // Relative-zero pattern); the `@objc` handlers live in the extension on
+                // the canvas view in THIS file (below), so the whole feature's wiring
+                // stays in the menu + app. Save prompts for a name via an AppKit alert
+                // (View-layer only — never reachable from tests); Restore/Delete raise a
+                // small AppKit picker of the saved names (a "Manage Views…" affordance,
+                // which the brief allows) so the dynamic name list does not depend on a
+                // SwiftUI focused value (ContentView, the focused-value provider, is not
+                // part of this change). ⌥⌘S saves; Restore/Delete have no chord (they
+                // open a picker). `validateUserInterfaceItem` greys out Restore/Delete
+                // when no view is saved.
+                Button("Save View…") {
+                    NSApp.sendAction(Selector(("saveNamedViewAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("s", modifiers: [.command, .option])
+                Button("Restore View…") {
+                    NSApp.sendAction(Selector(("restoreNamedViewAction:")), to: nil, from: nil)
+                }
+                Button("Delete View…") {
+                    NSApp.sendAction(Selector(("deleteNamedViewAction:")), to: nil, from: nil)
+                }
+
+                Divider()
                 // View ▸ Ortho (F8) — toggles the persistent ortho restriction
                 // (horizontal/vertical lock relative to the last point while drawing).
                 // Routed through the responder chain to the focused canvas (which also
@@ -520,5 +545,143 @@ extension FlippedMTKView {
     @objc func resetRelativeZeroAction(_ sender: Any?) {
         controller?.model.resetRelativeZeroToOrigin()
         controller?.requestRedraw()
+    }
+}
+
+// MARK: - Named-views responder-chain actions (LibreCAD / AutoCAD "Named Views")
+//
+// The View ▸ Save View… / Restore View… / Delete View… menu items dispatch via
+// `NSApp.sendAction(_:to:nil:from:)` (the same responder-chain wiring the Ortho /
+// Zoom-Window / Relative-zero items use). The focused window's canvas
+// (`FlippedMTKView`) is the first responder, so the action lands here. These handlers
+// live in an EXTENSION on the canvas view (same module) so the feature's wiring is
+// contained to the menu + this file — no edit to the canvas-view or content-view
+// source is needed. Each forwards to the owning controller's `CanvasModel` (the
+// testable save/restore/delete logic on `NamedViewTable`) and requests a redraw so the
+// restored viewport repaints.
+//
+// The NAME PROMPT (Save) and the NAME PICKER (Restore / Delete) are AppKit panels
+// (`NSAlert`), so they are View-layer ONLY — never reachable from the headless tests
+// (which exercise `NamedViewTable` + capture/apply + the `CanvasModel` save/restore
+// methods directly). Restore/Delete on an empty table show a brief notice instead of a
+// silent no-op (the items stay enabled because `validateUserInterfaceItem`, which lives
+// in the non-owned canvas-view file, is not extended for these selectors).
+extension FlippedMTKView {
+
+    /// View ▸ Save View… (⌥⌘S) — prompt for a name, then save the current viewport
+    /// under it (overwriting a same-named view, AutoCAD "save over").
+    @objc func saveNamedViewAction(_ sender: Any?) {
+        guard let controller else { return }
+        let suggested = "View \(controller.model.namedViewNames.count + 1)"
+        guard let name = Self.promptForViewName(
+            title: "Save View",
+            message: "Save the current view (center + zoom) under a name:",
+            defaultName: suggested,
+            confirm: "Save",
+            in: window) else { return }
+        _ = controller.model.saveNamedView(name: name)
+        controller.requestRedraw()
+    }
+
+    /// View ▸ Restore View… — pick a saved view by name, then restore its viewport.
+    @objc func restoreNamedViewAction(_ sender: Any?) {
+        guard let controller else { return }
+        let names = controller.model.namedViewNames
+        guard !names.isEmpty else {
+            Self.showNoViewsNotice(in: window)
+            return
+        }
+        guard let name = Self.promptForExistingView(
+            title: "Restore View",
+            message: "Choose a saved view to restore:",
+            names: names,
+            confirm: "Restore",
+            in: window) else { return }
+        _ = controller.model.restoreNamedView(name: name)
+        controller.requestRedraw()
+    }
+
+    /// View ▸ Delete View… — pick a saved view by name, then delete it.
+    @objc func deleteNamedViewAction(_ sender: Any?) {
+        guard let controller else { return }
+        let names = controller.model.namedViewNames
+        guard !names.isEmpty else {
+            Self.showNoViewsNotice(in: window)
+            return
+        }
+        guard let name = Self.promptForExistingView(
+            title: "Delete View",
+            message: "Choose a saved view to delete:",
+            names: names,
+            confirm: "Delete",
+            in: window) else { return }
+        _ = controller.model.deleteNamedView(name: name)
+        controller.requestRedraw()
+    }
+
+    // MARK: AppKit prompts (View-layer only — never reached by the headless tests)
+
+    /// A modal name-entry alert (an OK/Cancel `NSAlert` with an accessory text
+    /// field). Returns the trimmed entered name, or `nil` if cancelled / blank.
+    private static func promptForViewName(
+        title: String, message: String, defaultName: String,
+        confirm: String, in window: NSWindow?
+    ) -> String? {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: confirm)
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.stringValue = defaultName
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        let response = runAlert(alert, in: window)
+        guard response == .alertFirstButtonReturn else { return nil }
+        let trimmed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// A modal name-PICKER alert (an OK/Cancel `NSAlert` with an accessory popup of
+    /// the saved names). Returns the chosen name, or `nil` if cancelled.
+    private static func promptForExistingView(
+        title: String, message: String, names: [String],
+        confirm: String, in window: NSWindow?
+    ) -> String? {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: confirm)
+        alert.addButton(withTitle: "Cancel")
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 240, height: 26))
+        popup.addItems(withTitles: names)
+        alert.accessoryView = popup
+        let response = runAlert(alert, in: window)
+        guard response == .alertFirstButtonReturn,
+              let chosen = popup.titleOfSelectedItem else { return nil }
+        return chosen
+    }
+
+    /// Shows a brief "no saved views yet" notice (Restore/Delete with an empty table).
+    private static func showNoViewsNotice(in window: NSWindow?) {
+        let alert = NSAlert()
+        alert.messageText = "No Saved Views"
+        alert.informativeText = "Save a view first with View ▸ Save View…"
+        alert.addButton(withTitle: "OK")
+        _ = runAlert(alert, in: window)
+    }
+
+    /// Runs an alert as a sheet on `window` (falling back to a modal run when there
+    /// is no window), returning the user's response. Sheets are run via a nested run
+    /// loop so this stays a synchronous helper matching the responder-chain handlers.
+    private static func runAlert(_ alert: NSAlert, in window: NSWindow?) -> NSApplication.ModalResponse {
+        guard let window else { return alert.runModal() }
+        // Present as a sheet but run a nested modal loop so this stays synchronous
+        // (matching the responder-chain handlers). The completion stops the nested
+        // loop with the user's response, which `runModal(for:)` then returns.
+        alert.beginSheetModal(for: window) { response in
+            NSApp.stopModal(withCode: response)
+        }
+        return NSApp.runModal(for: alert.window)
     }
 }
