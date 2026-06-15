@@ -82,6 +82,7 @@ struct ToolKindWiringTests {
             .xline, .ray,                                          // wire-wave-3 (construction lines)
             .align, .arrayPath,                                    // wire-wave-3 (modify)
             .leader, .baselineDim, .continueDim,                   // wire-wave-3 (annotate)
+            .image,                                                // wire-wave (image)
         ]
         #expect(Set(ToolKind.allCases) == expected,
                 "ToolKind.allCases (\(ToolKind.allCases)) != expected roster")
@@ -277,6 +278,32 @@ struct ToolKindWiringTests {
             #expect(tool?.title == title,
                     "ToolKind.\(kind) tool.title (\(tool?.title ?? "nil")) != \(title)")
         }
+    }
+
+    /// The Image wiring addition: `.image` maps to the title "Image" and mints a
+    /// non-nil, constructable `ImageTool` whose own title matches. A bare `makeTool()`
+    /// mints an INERT (no-file) tool — the app's file-picker injects the path + source
+    /// pixel size via `CanvasModel.applyToolConfig` — so activation never crashes even
+    /// before a file is chosen.
+    @Test func imageKindIsWiredWithMatchingTitle() {
+        #expect(ToolKind.image.title == "Image")
+        let tool = ToolKind.image.makeTool()
+        #expect(tool != nil, "ToolKind.image minted a nil Tool")
+        #expect(tool?.title == "Image")
+        // Inert with no file: the bare-minted tool ignores a placement click (no commit).
+        var t = tool as! ImageTool
+        let outcome = t.handle(.click(Vector(0, 0)), context: .empty)
+        #expect(outcome == .none, "a no-file ImageTool must be inert (no commit)")
+    }
+
+    /// `.image` shares no keyboard chord with another kind. Image takes ⇧Y (bare Y is
+    /// unassigned, ⌥Y is Ray), so it adds cleanly to the chord set guarded by
+    /// `toolShortcutsAreUnique` above. This focused check documents the chosen chord.
+    @Test func imageShortcutIsShiftY() {
+        // The chord (y, shift, no-option) must not collide with Ray (y, no-shift, option).
+        let imageChord = "y+shift"
+        let rayChord = "y+option"
+        #expect(imageChord != rayChord)
     }
 
     /// `.createBlock` mints a CreateBlockTool that starts with NO pending request

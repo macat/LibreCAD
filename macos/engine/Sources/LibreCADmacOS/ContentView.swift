@@ -202,14 +202,11 @@ struct ContentView: View {
             // (they are not the document type — DocumentGroup handles only DXF I/O).
             .focusedSceneValue(\.exportDocument) { format in Task { await exportDrawing(format) } }
             .focusedSceneValue(\.printDocument) { printDrawing() }
-            .focusedSceneValue(\.activateTool) { kind in
-                controllerBox.controller?.activateTool(kind)
-            }
-            .focusedSceneValue(\.undoAction) { model.undo() }
-            .focusedSceneValue(\.redoAction) { model.redo() }
-            .focusedSceneValue(\.deleteSelection) {
-                if model.deleteSelection() { controllerBox.controller?.requestRedraw() }
-            }
+            // The tool / image / undo / redo / delete action handlers are grouped into
+            // one modifier so the `canvasDetail` chain stays under the Swift
+            // type-checker's expression-complexity limit (adding the Image action inline
+            // pushed it over).
+            .modifier(toolActionHandlers)
             // Publish whether a draw tool is mid-run so the Edit ▸ Delete menu item
             // (bound to bare ⌫) can DISABLE itself while a tool is active. A disabled
             // item's key equivalent is NOT consumed by `NSMenu.performKeyEquivalent`
@@ -228,6 +225,25 @@ struct ContentView: View {
             }
             // View ▸ Show Command Line (⇧⌘L) focuses the field from the menu.
             .focusedSceneValue(\.focusCommandLine) { commandFieldFocused = true }
+    }
+
+    /// The grouped tool / image / undo / redo / delete focused-scene-value handlers,
+    /// pulled out of `canvasDetail` so that view's modifier chain stays within the
+    /// Swift type-checker's complexity budget. Each handler is identical to its former
+    /// inline form (a tool activation, the Image file-picker flow, undo/redo, delete).
+    private var toolActionHandlers: some ViewModifier {
+        ToolActionHandlersModifier(
+            activateTool: { kind in controllerBox.controller?.activateTool(kind) },
+            // Tools ▸ Image… (and the ⌘K palette's Image entry) route through the
+            // file-picker flow, not a bare `activateTool(.image)`, so the user always
+            // chooses a file before placement.
+            placeImage: { chooseAndPlaceImage() },
+            undo: { model.undo() },
+            redo: { model.redo() },
+            delete: {
+                if model.deleteSelection() { controllerBox.controller?.requestRedraw() }
+            }
+        )
     }
 
     // MARK: - Document ⇄ live model bridge (MAIN ACTOR)
@@ -335,6 +351,18 @@ struct ContentView: View {
             toolButton(.spline, symbol: "scribble.variable", help: "Draw spline (S)")
             // Hatch fills the region bounded by the current selection.
             toolButton(.hatch, symbol: "square.grid.2x2.fill", help: "Hatch fill selection (H)")
+            // Image: place a reference to an image FILE. Activating it FIRST presents a
+            // file-picker (NSOpenPanel) — the chosen file's path + source pixel size are
+            // read and pushed onto the tool — then the user clicks two corners (lower-
+            // left, then a bottom-edge corner that sets size + rotation). So this button
+            // routes through `chooseAndPlaceImage`, NOT the bare `activateTool`.
+            Button {
+                chooseAndPlaceImage()
+            } label: {
+                Label(ToolKind.image.title, systemImage: "photo")
+            }
+            .help("Place image — pick a file, then click two corners (⇧Y)")
+            .background(activeBadge(.image))
             // Text authoring: a click sets the insertion point and raises the inline
             // editor; type, then Return commits the text.
             toolButton(.text, symbol: "character.textbox", help: "Add text (⇧T)")
@@ -494,6 +522,7 @@ struct ContentView: View {
     private var paletteCommands: [PaletteCommand] {
         CommandRegistry.commands(.init(
             activateTool: { kind in controllerBox.controller?.activateTool(kind) },
+            placeImage: { chooseAndPlaceImage() },
             open: { sendDocumentAction(#selector(NSDocumentController.openDocument(_:))) },
             save: { sendDocumentAction(#selector(NSDocument.save(_:))) },
             saveAs: { sendDocumentAction(#selector(NSDocument.saveAs(_:))) },
@@ -637,6 +666,61 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Image placement (file-picker → two-click placement)
+
+    /// Activates the Image tool via a file-picker, then a two-click placement.
+    ///
+    /// Flow (the brief's "file-picker → 2 clicks"):
+    ///   1. Present an `NSOpenPanel` filtered to common raster types (PNG / JPEG /
+    ///      TIFF / GIF / BMP / HEIC). On CANCEL, revert to the select tool (so a
+    ///      cancelled pick never leaves an inert Image tool armed) and return.
+    ///   2. On a pick, read the source PIXEL size from the file via `NSImage`'s pixel-
+    ///      backed representation (the DXF IMAGE model + `ImageTool` keep the source
+    ///      pixel aspect). A file with no readable raster falls back to 1×1 (the tool
+    ///      then uses the click distances directly as the edge lengths).
+    ///   3. Push the path + pixel size into the model and activate the Image tool
+    ///      (`setImageSourceAndActivate`), so the next two canvas clicks place the
+    ///      image: the first is the lower-left corner, the second a bottom-edge corner
+    ///      that sets the width + rotation (ImageTool already does the geometry).
+    @MainActor
+    private func chooseAndPlaceImage() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.png, .jpeg, .tiff, .gif, .bmp, .heic]
+        panel.title = "Choose an Image to Place"
+        panel.prompt = "Place"
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            // Cancelled — don't leave an inert Image tool armed; return to select.
+            controllerBox.controller?.activateTool(.select)
+            status = "Image placement cancelled"
+            return
+        }
+        let (pw, ph) = Self.imagePixelSize(of: url)
+        model.setImageSourceAndActivate(path: url.path, pixelWidth: pw, pixelHeight: ph)
+        controllerBox.controller?.requestRedraw()
+        status = "Place image \(url.lastPathComponent) — click two corners"
+    }
+
+    /// The source PIXEL dimensions of the image at `url`, read from its pixel-backed
+    /// `NSImageRep` (NOT `NSImage.size`, which is in points and DPI-scaled). Falls back
+    /// to 1×1 when the file has no readable raster representation, so a bad pick never
+    /// produces a zero-size placement (the tool then uses the click distances as the
+    /// edge lengths directly).
+    private static func imagePixelSize(of url: URL) -> (Double, Double) {
+        guard let image = NSImage(contentsOf: url) else { return (1, 1) }
+        for rep in image.representations {
+            if rep.pixelsWide > 0 && rep.pixelsHigh > 0 {
+                return (Double(rep.pixelsWide), Double(rep.pixelsHigh))
+            }
+        }
+        // No pixel-backed rep — fall back to the (point) size if positive, else 1×1.
+        let s = image.size
+        return (s.width > 0 ? Double(s.width) : 1, s.height > 0 ? Double(s.height) : 1)
+    }
+
     /// A reasonable default base name for an exported file: the focused document
     /// window's title (the file name DocumentGroup shows), else "Drawing".
     private var exportBaseName: String {
@@ -713,6 +797,14 @@ extension FocusedValues {
         set { self[ActivateToolKey.self] = newValue }
     }
 
+    /// Begin Image placement on the focused window (Tools ▸ Image…): present the
+    /// file-picker, then arm the two-click placement. Distinct from `activateTool`
+    /// because the Image tool needs a file chosen up front.
+    var placeImage: (() -> Void)? {
+        get { self[PlaceImageKey.self] }
+        set { self[PlaceImageKey.self] = newValue }
+    }
+
     /// Undo / redo the focused window's drawing (Edit menu, ⌘Z / ⇧⌘Z).
     var undoAction: (() -> Void)? {
         get { self[UndoActionKey.self] }
@@ -770,6 +862,31 @@ private struct PrintDocumentKey: FocusedValueKey {
 
 private struct ActivateToolKey: FocusedValueKey {
     typealias Value = (ToolKind) -> Void
+}
+
+private struct PlaceImageKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+/// Groups the tool-activation / Image-placement / undo / redo / delete focused-scene-
+/// value handlers into one `ViewModifier`, so `ContentView.canvasDetail`'s long
+/// modifier chain stays under the Swift type-checker's expression-complexity limit.
+/// Each closure is the same action the menus/palette/toolbar fire.
+private struct ToolActionHandlersModifier: ViewModifier {
+    let activateTool: (ToolKind) -> Void
+    let placeImage: () -> Void
+    let undo: () -> Void
+    let redo: () -> Void
+    let delete: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .focusedSceneValue(\.activateTool) { kind in activateTool(kind) }
+            .focusedSceneValue(\.placeImage) { placeImage() }
+            .focusedSceneValue(\.undoAction) { undo() }
+            .focusedSceneValue(\.redoAction) { redo() }
+            .focusedSceneValue(\.deleteSelection) { delete() }
+    }
 }
 
 private struct UndoActionKey: FocusedValueKey {

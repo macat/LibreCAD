@@ -171,6 +171,13 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     /// The Continue linear-dimension tool (`ContinueDimTool`) — chain dims end-to-start
     /// along one shared dimension-line level (a running, in-line chain).
     case continueDim
+    // --- Wire-wave (image) tool (wired into the UI in this wave) ---
+    /// The Image (raster reference) draw tool (`ImageTool`) — place a reference to an
+    /// image FILE by clicking a lower-left corner then a bottom-edge corner (size +
+    /// rotation). The file path + source pixel size are chosen up front via a
+    /// file-picker (the app presents `NSOpenPanel`, reads the pixel size, and pushes
+    /// path + pixel size onto the minted tool through `CanvasModel.applyToolConfig`).
+    case image
     // Append new draw tools here (one `case` per tool) — see the collision note.
 
     /// A short title for the UI (toolbar button / menu).
@@ -229,6 +236,7 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .leader:          return "Leader"
         case .baselineDim:     return "Baseline Dimension"
         case .continueDim:     return "Continue Dimension"
+        case .image:           return "Image"
         // Append a title arm per new case.
         }
     }
@@ -306,6 +314,12 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .leader:          return LeaderTool()
         case .baselineDim:     return BaselineDimTool()
         case .continueDim:     return ContinueDimTool()
+        // ImageTool minted with NO file (inert no-op) — the app presents a file-picker
+        // on activation and re-mints with the chosen path + source pixel size via
+        // `CanvasModel.applyToolConfig` (the same construction-injection InsertTool /
+        // ExplodeInsertTool use). A bare `makeTool()` never crashes: with no path the
+        // tool ignores every input until the picker provides one.
+        case .image:           return ImageTool()
         // Append a `case <kind>: return <Name>Tool()` arm per new tool.
         }
     }

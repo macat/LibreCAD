@@ -80,6 +80,9 @@ struct ToolOptionsBar: View {
     private var hasOptions: Bool {
         switch model.activeToolKind {
         case .polygon, .rectangle, .circle, .arc, .point, .text,
+             // NEW modes surfaced this wave: Ellipse construction mode, Trim mode,
+             // and the Image tool's chosen-file readout.
+             .ellipse, .trim, .image,
              .fillet, .chamfer, .array, .divide,
              // Wire-wave-3 configurable tools.
              .align, .arrayPath, .leader, .baselineDim:
@@ -99,6 +102,22 @@ struct ToolOptionsBar: View {
 
         case .polygon:
             stepperField("Sides", value: $model.polygonSides, range: 3...64, width: 56)
+            // Construction mode: Center→corner / Edge / Star. (case index 0/1/2 →
+            // PolygonMode in applyToolConfig.)
+            Picker("Mode", selection: $model.polygonModeStyle) {
+                Text("Center").tag(0)
+                Text("Edge").tag(1)
+                Text("Star").tag(2)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .labelsHidden()
+            .onChange(of: model.polygonModeStyle) { _, _ in apply() }
+            // The star ratio (inner/outer radius), only meaningful in Star mode.
+            if model.polygonModeStyle == 2 {
+                numberField("Ratio", value: $model.polygonStarRatio, width: 60)
+            }
+            // Inscribed/circumscribed applies to Center & Star (ignored by Edge).
             Picker("Fit", selection: $model.polygonFit) {
                 Text("Inscribed").tag(PolygonFit.inscribed)
                 Text("Circumscribed").tag(PolygonFit.circumscribed)
@@ -109,10 +128,79 @@ struct ToolOptionsBar: View {
             .onChange(of: model.polygonFit) { _, _ in apply() }
 
         case .rectangle:
+            // Corner treatment: Square / Rounded / Chamfer (case index 0/1/2 →
+            // RectangleCorner in applyToolConfig). A radius/distance field shows for
+            // the non-square modes.
+            Picker("Corner", selection: $model.rectCornerStyle) {
+                Text("Square").tag(0)
+                Text("Rounded").tag(1)
+                Text("Chamfer").tag(2)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .labelsHidden()
+            .onChange(of: model.rectCornerStyle) { _, _ in apply() }
+            if model.rectCornerStyle != 0 {
+                numberField(model.rectCornerStyle == 1 ? "Radius" : "Distance",
+                            value: $model.rectCornerSize, width: 64)
+            }
+            Divider().frame(height: 16)
             numberField("Width", value: $model.rectWidth, width: 70)
             numberField("Height", value: $model.rectHeight, width: 70)
             Text("0 = drag two corners")
                 .font(.caption).foregroundStyle(.tertiary)
+
+        case .ellipse:
+            // Construction mode: Axis / Foci / 4-Point / Inscribe / Arc (case index
+            // 0…4 → EllipseTool.Mode in applyToolConfig). EllipseTool's mode is fixed at
+            // construction, so applyToolConfig RE-MINTS on change. (Bound to an Int index
+            // because EllipseTool.Mode isn't Hashable — can't be a Picker tag.)
+            Picker("Mode", selection: $model.ellipseModeIndex) {
+                Text("Axis").tag(0)
+                Text("Foci").tag(1)
+                Text("4-Point").tag(2)
+                Text("Inscribe").tag(3)
+                Text("Arc").tag(4)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .labelsHidden()
+            .onChange(of: model.ellipseModeIndex) { _, _ in apply() }
+
+        case .trim:
+            // Trim mode: Boundary (single-click cut) / Amount (signed distance) /
+            // Mutual (trim two to their intersection) — case index 0/1/2. NOTE: only
+            // `.boundary` is driven end-to-end by TrimTool.handle today; `.amount` /
+            // `.mutual` are pure static entry points not yet dispatched from `handle`
+            // (engine gap — see report). (Bound to an Int index because TrimTool.Mode
+            // isn't Hashable — can't be a Picker tag.)
+            Picker("Mode", selection: $model.trimModeIndex) {
+                Text("Boundary").tag(0)
+                Text("Amount").tag(1)
+                Text("Mutual").tag(2)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .labelsHidden()
+            .onChange(of: model.trimModeIndex) { _, _ in apply() }
+            if model.trimModeIndex == 1 {
+                numberField("Amount", value: $model.trimAmount, width: 70)
+            }
+
+        case .image:
+            // Show the chosen file name (the picker set it on activation); empty when
+            // none is chosen yet (the tool is then a no-op until a file is picked).
+            if let name = model.imageFileName {
+                Label(name, systemImage: "photo")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text("Click lower-left, then a bottom-edge corner")
+                    .font(.caption).foregroundStyle(.tertiary)
+            } else {
+                Text("No image chosen")
+                    .font(.callout).foregroundStyle(.tertiary)
+            }
 
         case .circle:
             Picker("Size", selection: $model.circleSizeMode) {

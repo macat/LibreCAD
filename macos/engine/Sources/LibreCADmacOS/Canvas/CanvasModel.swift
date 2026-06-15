@@ -215,12 +215,85 @@ final class CanvasModel {
     var polygonSides: Int = 6
     var polygonFit: PolygonFit = .inscribed
 
+    /// Polygon tool: which construction MODE the two clicks define. Stored as the
+    /// case index + the star-ratio scalar separately (an enum-with-associated-value
+    /// doesn't bind cleanly to a segmented control), and assembled into
+    /// `PolygonMode` in `applyToolConfig`. 0 = center→corner (default), 1 = edge,
+    /// 2 = star (uses `polygonStarRatio`, clamped to (0,1) by the tool's geometry).
+    var polygonModeStyle: Int = 0
+    var polygonStarRatio: Double = 0.5
+
     /// Rectangle tool: an optional EXACT width/height. When BOTH are set (> 0) a
     /// single click drops a rectangle of that size; `nil`/0 keeps the two-corner
     /// drag. Stored as `Double` (0 ⇒ "unset") so the bar binds a plain numeric field;
     /// `applyToolConfig` maps 0 → `nil` on the tool.
     var rectWidth: Double = 0
     var rectHeight: Double = 0
+
+    /// Rectangle tool: the CORNER treatment. Stored as the case index + the cut
+    /// scalar separately (an enum-with-associated-value doesn't bind to a segmented
+    /// control), assembled into `RectangleCorner` in `applyToolConfig`. 0 = square
+    /// (default), 1 = rounded(radius:), 2 = chamfer(distance:); `rectCornerSize` is
+    /// the radius/distance used by modes 1 and 2.
+    var rectCornerStyle: Int = 0
+    var rectCornerSize: Double = 10.0
+
+    /// Ellipse tool: the construction MODE, stored as a case INDEX (the engine
+    /// `EllipseTool.Mode` is `Equatable` but not `Hashable`, so it can't be a SwiftUI
+    /// Picker tag — the index is the UI-simple binding the brief prescribes).
+    /// `EllipseTool.mode` is fixed at construction (it seeds the start state), so
+    /// `applyToolConfig` RE-MINTS the tool with `ellipseModeValue` (the DivideTool/
+    /// ArcTool pattern). 0 = axis (default), 1 = foci+point, 2 = 4-point, 3 = inscribe,
+    /// 4 = elliptic arc.
+    var ellipseModeIndex: Int = 0
+
+    /// The `EllipseTool.Mode` for the current `ellipseModeIndex` (assembled here so
+    /// `applyToolConfig` and the tests share one mapping).
+    var ellipseModeValue: EllipseTool.Mode {
+        switch ellipseModeIndex {
+        case 1:  return .fociPoint
+        case 2:  return .fourPoint
+        case 3:  return .inscribeQuad
+        case 4:  return .arc
+        default: return .axis
+        }
+    }
+
+    /// Trim tool: which trim MODE is active, stored as a case INDEX (the engine
+    /// `TrimTool.Mode` is `Equatable` but not `Hashable`, so it can't be a Picker tag).
+    /// 0 = boundary (the single-click cut-to-boundary default — the ONLY mode
+    /// `TrimTool.handle` drives end-to-end), 1 = amount (a signed distance via the PURE
+    /// static `TrimTool.trimAmount`), 2 = mutual (`TrimTool.mutualTrim`). The `.amount`
+    /// / `.mutual` variants are NOT dispatched from `handle` yet (engine gap — see the
+    /// report); the options bar surfaces them + a signed amount for when the
+    /// interaction path is plumbed. `trimAmount` is the distance used by `.amount`.
+    var trimModeIndex: Int = 0
+    var trimAmount: Double = 10.0
+
+    /// The `TrimTool.Mode` for the current `trimModeIndex`.
+    var trimModeValue: TrimTool.Mode {
+        switch trimModeIndex {
+        case 1:  return .amount
+        case 2:  return .mutual
+        default: return .boundary
+        }
+    }
+
+    /// Image tool: the chosen image file path + its source pixel size (read from the
+    /// file by the app's file-picker via `NSImage`). `ToolKind.makeTool()` mints a
+    /// bare (inert) `ImageTool`; `applyToolConfig` RE-MINTS it with these so the placed
+    /// image references the file and keeps its pixel aspect. `nil`/0 ⇒ no file chosen
+    /// (the tool is a no-op until the picker provides one).
+    var imagePath: String?
+    var imagePixelWidth: Double = 1
+    var imagePixelHeight: Double = 1
+
+    /// The display name of the chosen image file (for the options bar readout), or
+    /// `nil` when no file is chosen. Derived from `imagePath`'s last path component.
+    var imageFileName: String? {
+        guard let imagePath, !imagePath.isEmpty else { return nil }
+        return (imagePath as NSString).lastPathComponent
+    }
 
     /// Circle tool: whether numeric size entry is a radius (default) or diameter, and
     /// an optional EXACT size (0 ⇒ unset → two-click center+radius).
@@ -575,6 +648,20 @@ final class CanvasModel {
         lastCommandError = nil
     }
 
+    /// Sets the Image tool's source (file path + the source pixel size the picker read
+    /// from the file) and activates the Image tool, so the user can then click the two
+    /// placement corners. The path + pixel size flow onto the freshly-minted `ImageTool`
+    /// via `applyToolConfig` (`activateTool` calls it). Called by the app's file-picker
+    /// flow (ContentView) after the user chooses an image and `NSImage` reports its
+    /// pixel dimensions. A non-positive pixel size falls back to 1 (the tool then treats
+    /// the click distances as the edge lengths directly).
+    func setImageSourceAndActivate(path: String, pixelWidth: Double, pixelHeight: Double) {
+        imagePath = path
+        imagePixelWidth = pixelWidth > 0 ? pixelWidth : 1
+        imagePixelHeight = pixelHeight > 0 ? pixelHeight : 1
+        activateTool(.image)
+    }
+
     /// Pushes the Inspector's stored tool options onto the live tool value. The
     /// parameterized tools expose their parameters as public `var`s / a `config`
     /// (`ToolKind.makeTool()` mints them with fixed defaults), so we downcast and
@@ -612,12 +699,35 @@ final class CanvasModel {
         case var t as PolygonTool:
             t.sides = polygonSides          // the tool clamps to ≥ 3
             t.fit = polygonFit
+            // Assemble the enum-with-associated-value from the split state (case index
+            // + the star-ratio scalar) — the UI-simple split the brief prescribes.
+            switch polygonModeStyle {
+            case 1:  t.mode = .edge
+            case 2:  t.mode = .star(ratio: polygonStarRatio)
+            default: t.mode = .centerCorner
+            }
             tool = t
         case var t as RectangleTool:
             // 0 ⇒ "unset" so the optional exact-size flow is opt-in (both must be > 0).
             t.fixedWidth = rectWidth > 0 ? rectWidth : nil
             t.fixedHeight = rectHeight > 0 ? rectHeight : nil
+            // Assemble the corner enum from the split state (case index + cut scalar).
+            switch rectCornerStyle {
+            case 1:  t.corner = .rounded(radius: rectCornerSize)
+            case 2:  t.corner = .chamfer(distance: rectCornerSize)
+            default: t.corner = .square
+            }
             tool = t
+        case is EllipseTool:
+            // EllipseTool's `mode` is fixed at construction (it seeds the start state),
+            // so re-mint with the configured mode (the DivideTool/ArcTool pattern).
+            tool = EllipseTool(mode: ellipseModeValue)
+        // NOTE: TrimTool needs NO config push here — it carries no `mode` field and its
+        // `handle` always drives the single-click `.boundary` cut. The selected
+        // `trimModeIndex`/`trimAmount` are held in CanvasModel state for the options bar;
+        // the `.amount`/`.mutual` variants are PURE static entry points on TrimTool not
+        // yet dispatched from `handle` (engine gap — see the report), so there is nothing
+        // to set on the tool value. It falls through to the `default` arm unchanged.
         case var t as CircleTool:
             t.sizeMode = circleSizeMode
             t.fixedSize = circleFixedSize > 0 ? circleFixedSize : nil
@@ -645,6 +755,17 @@ final class CanvasModel {
             // edited between runs explodes correctly on the next run.
             let members = blockMembersSnapshot()
             tool = ExplodeInsertTool(blockMembers: { name in members[name] })
+
+        // MARK: Image tool — file path + source pixel size injected at construction
+
+        case is ImageTool:
+            // ImageTool's path + pixel size are fixed at construction (the picker reads
+            // them from the file), so re-mint with the chosen file (the construction-
+            // injection pattern InsertTool/ExplodeInsertTool use). With no path chosen
+            // the tool is inert (a safe no-op) — the picker sets `imagePath` first.
+            tool = ImageTool(path: imagePath,
+                             pixelWidth: imagePixelWidth,
+                             pixelHeight: imagePixelHeight)
 
         // MARK: Wire-wave-3 tool options
 
@@ -683,10 +804,12 @@ final class CanvasModel {
         let savedStatus = toolStatus
         applyToolConfig()
         // Some tools are RE-MINTED by `applyToolConfig` (DivideTool's count, ArcTool's
-        // mode, BaselineDimTool's spacing are fixed at construction), which resets their
-        // state/status to the initial prompt. For those, take the fresh tool's status;
-        // for the in-place tools (which keep their state) restore the prior prompt text.
-        if tool is DivideTool || tool is ArcTool || tool is BaselineDimTool {
+        // mode, EllipseTool's mode, BaselineDimTool's spacing, ImageTool's file are fixed
+        // at construction), which resets their state/status to the initial prompt. For
+        // those, take the fresh tool's status; for the in-place tools (which keep their
+        // state) restore the prior prompt text.
+        if tool is DivideTool || tool is ArcTool || tool is EllipseTool
+            || tool is BaselineDimTool || tool is ImageTool {
             toolStatus = tool?.status ?? ""
         } else {
             toolStatus = savedStatus
