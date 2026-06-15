@@ -446,4 +446,143 @@ struct ToolKindWiringTests {
             #expect(kinds.contains(k), "wire-wave-3 kind \(k) has no keyboard shortcut")
         }
     }
+
+    // MARK: - UI grouping (no orphaned tools) — Draw / Modify / Annotate
+    //
+    // The final UI-organization wave groups every drawing tool into one of three
+    // macOS-HIG groups — Draw / Modify / Annotate — that BOTH the grouped toolbar
+    // (ContentView's `ToolCatalog`/`groupSection`) and the grouped Tools menu
+    // (LibreCADApp's `drawMenu`/`modifyMenu`/`annotateMenu`) read from one source of
+    // truth. The engine test target cannot import the SwiftUI app module, so this is
+    // a DATA MIRROR of that grouping (the same pattern `toolShortcutsAreUnique` uses):
+    // it asserts the rosters PARTITION every non-`.select` `ToolKind` exactly once, so
+    // a newly added tool that someone forgets to place in a group fails loudly here
+    // ("no orphaned tools"). `.select` is the always-visible core mode (not grouped).
+
+    /// The Draw group roster — geometry-creating tools (mirrors `ToolCatalog.draw`).
+    private static let drawGroup: [ToolKind] = [
+        .line, .circle, .arc, .rectangle, .polyline, .point,
+        .ellipse, .polygon, .spline, .hatch, .image,
+        .xline, .ray, .insert,
+    ]
+
+    /// The Modify group roster — transforms + edit-under-cursor + blocks
+    /// (mirrors `ToolCatalog.modify`).
+    private static let modifyGroup: [ToolKind] = [
+        .move, .copy, .offset, .rotate, .scale, .mirror,
+        .array, .arrayPath, .divide, .explode, .stretch, .lengthen, .break,
+        .trim, .extend, .fillet, .chamfer,
+        .polylineEdit, .join, .explodeText, .align,
+        .createBlock, .explodeInsert,
+    ]
+
+    /// The Annotate group roster — text, dimensions, leaders, measure
+    /// (mirrors `ToolCatalog.annotate`).
+    private static let annotateGroup: [ToolKind] = [
+        .text,
+        .linearDim, .alignedDim, .radialDim, .diameterDim, .angularDim,
+        .ordinateDim, .arcLengthDim, .angular3pDim,
+        .leader, .baselineDim, .continueDim,
+        .measureDistance, .measureAngle, .measureArea, .measureLength,
+    ]
+
+    /// Every `ToolKind` (except `.select`, the core mode) appears in EXACTLY ONE UI
+    /// group — no orphaned tools (every tool reachable via its toolbar group + Tools
+    /// menu group) and no tool double-listed. The union of the three rosters plus
+    /// `.select` must equal `ToolKind.allCases`.
+    @Test func everyToolKindBelongsToExactlyOneUIGroup() {
+        let all = Self.drawGroup + Self.modifyGroup + Self.annotateGroup
+
+        // No tool appears in more than one group (or twice within one group).
+        #expect(Set(all).count == all.count,
+                "A ToolKind is listed in more than one UI group: \(all)")
+
+        // `.select` is the core mode — it must NOT be in any group.
+        #expect(!all.contains(.select), ".select must stay the ungrouped core mode")
+
+        // Together with `.select`, the groups cover EVERY kind — nothing orphaned.
+        let covered = Set(all).union([.select])
+        let missing = Set(ToolKind.allCases).subtracting(covered)
+        #expect(missing.isEmpty,
+                "Orphaned ToolKind(s) not in any UI group: \(missing)")
+        let extra = covered.subtracting(Set(ToolKind.allCases))
+        #expect(extra.isEmpty, "UI group lists a non-existent ToolKind: \(extra)")
+        #expect(covered == Set(ToolKind.allCases),
+                "UI grouping does not match ToolKind.allCases exactly")
+    }
+
+    /// The default PINNED (primary toolbar) set is a SUBSET of the real tools (every
+    /// pinned default is a valid, grouped kind) and is small enough to keep the
+    /// toolbar uncrowded — the rest live in the per-group `▾` overflow menus. Mirrors
+    /// `ToolCatalog.defaultPrimary`; guards that the curated default never references a
+    /// removed/renamed kind or pins `.select` (which is the always-present core).
+    @Test func defaultPinnedToolbarSetIsValidAndCurated() {
+        let defaultPrimary: Set<ToolKind> = [
+            .line, .circle, .arc, .rectangle, .polyline,   // draw
+            .move, .copy, .rotate, .scale, .trim, .offset, // modify
+            .text, .linearDim, .leader,                    // annotate
+        ]
+        let grouped = Set(Self.drawGroup + Self.modifyGroup + Self.annotateGroup)
+        // Every pinned default is a real, grouped tool (not `.select`, not orphaned).
+        #expect(defaultPrimary.isSubset(of: grouped),
+                "defaultPrimary pins a tool not in any group: \(defaultPrimary.subtracting(grouped))")
+        #expect(!defaultPrimary.contains(.select), "must not pin the core .select mode")
+        // Curated, not the whole set — the overflow menus carry the rest.
+        #expect(defaultPrimary.count < grouped.count,
+                "the default toolbar should be a curated subset, not every tool")
+    }
+
+    // MARK: - ⌘D Duplicate command (engine-level, via the static API)
+    //
+    // The ⌘D Duplicate menu/command funnel (CanvasModel.duplicateSelection) resolves
+    // the current selection to full records and calls the PURE `Duplicate.duplicate`
+    // static API, applying the resulting `[ToolEdit]` as one undoable group. The model
+    // funnel is `@MainActor` UI code (not reachable from this engine test target), so
+    // these assertions exercise the SAME static API the command calls — engine-level,
+    // no GUI — guaranteeing the command produces correct duplicate edits.
+
+    /// ⌘D over a selection produces one `.add` duplicate per selected entity, each a
+    /// deep copy translated by the default AutoCAD-style small nudge, with a NEW
+    /// (placeholder) id and the source's layer/pen/flags preserved.
+    @Test func duplicateCommandProducesOneNudgedAddPerSelectedEntity() {
+        let selection: [EntityRecord] = [
+            EntityRecord(id: EntityID(1), layer: LayerID("a"), pen: .byLayer,
+                         flags: [.visible, .selected],
+                         kind: .line(LineData(start: Vector(0, 0), end: Vector(4, 0)))),
+            EntityRecord(id: EntityID(2), layer: LayerID("b"), pen: .byLayer,
+                         flags: [.visible, .selected],
+                         kind: .circle(CircleData(center: Vector(10, 10), radius: 3))),
+        ]
+
+        // The exact call the ⌘D funnel makes (default nudge offset).
+        let edits = Duplicate.duplicate(selection)
+        #expect(edits.count == selection.count,
+                "⌘D must yield one duplicate edit per selected entity")
+
+        let nudge = Duplicate.defaultOffset
+        #expect(nudge != Vector(0, 0), "the default duplicate offset must be a visible nudge")
+
+        for (edit, source) in zip(edits, selection) {
+            guard case .add(let copy) = edit else {
+                Issue.record("⌘D must emit `.add` edits, got \(edit)")
+                continue
+            }
+            // NEW id (app re-mints; source id never reused) + attrs preserved.
+            #expect(copy.id == .placeholder, "a duplicate must carry the placeholder id")
+            #expect(copy.layer == source.layer, "duplicate must preserve the source layer")
+            #expect(copy.pen == source.pen, "duplicate must preserve the source pen")
+            #expect(copy.flags == source.flags, "duplicate must preserve the source flags")
+            // Geometry is the source translated by the nudge.
+            let expected = source.kind.transformed(by: .translation(nudge))
+            #expect(copy.kind == expected,
+                    "duplicate geometry must be the source nudged by \(nudge)")
+        }
+    }
+
+    /// ⌘D with NOTHING selected produces no edits (the funnel is a no-op / returns
+    /// false), so an empty selection never mutates the drawing.
+    @Test func duplicateCommandWithEmptySelectionProducesNoEdits() {
+        #expect(Duplicate.duplicate([]).isEmpty,
+                "⌘D over an empty selection must produce no edits")
+    }
 }
