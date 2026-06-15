@@ -251,7 +251,8 @@ public struct BreakTool: Tool {
         case .line, .arc, .polyline: return true
         // TODO(backlog): break circles (→ arc), ellipses, splines.
         case .circle, .ellipse, .spline, .splinePoints, .point,
-             .text, .mtext, .hatch, .solid, .dimension, .insert, .xline, .ray, .leader:
+             .text, .mtext, .hatch, .solid, .dimension, .insert, .xline, .ray, .leader,
+             .image:
             return false
         }
     }

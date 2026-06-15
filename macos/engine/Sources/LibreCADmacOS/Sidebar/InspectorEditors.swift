@@ -137,6 +137,7 @@ struct GeometryEditor: View {
             case .point(let d):      pointEditor(d)
             case .text(let d):       textGeometryEditor(d)
             case .mtext(let d):      mtextGeometryEditor(d)
+            case .image(let d):      imageGeometryEditor(d)
             default:
                 Text("No inline geometry editor for this kind yet.")
                     .font(.callout).foregroundStyle(.secondary)
@@ -201,6 +202,34 @@ struct GeometryEditor: View {
         ScalarField(label: "Wrap width", value: d.rectWidth) { onCommit([replacing(InspectorEdits.setMTextRectWidth(record.kind, $0))]) }
         ScalarField(label: "Rotation (°)", value: d.rotation * 180 / .pi) {
             onCommit([replacing(InspectorEdits.setMTextRotation(record.kind, $0 * .pi / 180))])
+        }
+    }
+
+    // MARK: Image geometry (position / size / rotation / fade / read-only path)
+
+    @ViewBuilder
+    private func imageGeometryEditor(_ d: ImageData) -> some View {
+        PointFields(label: "Insertion", point: d.insertion) {
+            onCommit([replacing(InspectorEdits.setImageInsertion(record.kind, $0))])
+        }
+        ScalarField(label: "Width", value: d.worldWidth) {
+            onCommit([replacing(InspectorEdits.setImageWidth(record.kind, $0))])
+        }
+        ScalarField(label: "Height", value: d.worldHeight) {
+            onCommit([replacing(InspectorEdits.setImageHeight(record.kind, $0))])
+        }
+        ScalarField(label: "Rotation (°)", value: d.rotation * 180 / .pi) {
+            onCommit([replacing(InspectorEdits.setImageRotation(record.kind, $0 * .pi / 180))])
+        }
+        ScalarField(label: "Fade", value: Double(d.display.fade)) {
+            onCommit([replacing(InspectorEdits.setImageFade(record.kind, Int($0.rounded())))])
+        }
+        LabeledContent("File") {
+            Text(d.imageDef.path.isEmpty ? "—" : (d.imageDef.path as NSString).lastPathComponent)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(d.imageDef.path)   // full path on hover (read-only)
         }
     }
 

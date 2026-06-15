@@ -423,9 +423,44 @@ extension CADEngine {
                 styleName: string(e.styleName)
             ))
 
+        case Int32(LC_ENT_IMAGE.rawValue):
+            // DXF IMAGE + IMAGEDEF → `.image` (the bridge linked them by handle and
+            // folded the path + pixel size in). insertion ← p1 (code 10, lower-left);
+            // per-pixel u/v ← p2 (code 11) + imgVVec* (code 12); pixel size ←
+            // imgSizeU/imgSizeV; the source file path ← textValue (IMAGEDEF name);
+            // display ints ← imgBrightness/imgContrast/imgFade/imgClip/imgShow.
+            return mapImage(e)
+
         default: // LC_ENT_UNSUPPORTED (incl. ordinate/3p DIMENSION) and anything else
             return nil
         }
+    }
+
+    /// Maps a flattened IMAGE POD to `ImageData`: the insertion (p1), the per-pixel
+    /// u/v vectors (p2 + imgVVec*), the IMAGEDEF path (textValue) + pixel size
+    /// (imgSize*), and the display params. An image with NO path still imports (it
+    /// resolves to a placeholder outline) so a linked-image-with-missing-IMAGEDEF
+    /// never silently vanishes.
+    private static func mapImage(_ e: LCEntity) -> EntityKind? {
+        let def = ImageDefData(
+            path: string(e.textValue) ?? "",
+            pixelWidth: e.imgSizeU,
+            pixelHeight: e.imgSizeV
+        )
+        let display = ImageDisplay(
+            brightness: Int(e.imgBrightness),
+            contrast: Int(e.imgContrast),
+            fade: Int(e.imgFade),
+            showImage: e.imgShow != 0,
+            clipping: e.imgClip != 0
+        )
+        return .image(ImageData(
+            insertion: Vector(e.p1x, e.p1y, e.p1z),
+            uVector: Vector(e.p2x, e.p2y, e.p2z),
+            vVector: Vector(e.imgVVecX, e.imgVVecY, e.imgVVecZ),
+            imageDef: def,
+            display: display
+        ))
     }
 
     /// Maps a flattened INSERT POD to `InsertData`: block name (`textValue`),

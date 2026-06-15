@@ -32,6 +32,7 @@
 //
 
 import Foundation
+import AppKit
 import CoreGraphics
 import MetalKit
 import simd
@@ -45,6 +46,15 @@ private struct CanvasUniforms {
     // Pad to 16-byte alignment for the float4x4 + float2 (Metal `constant` layout
     // already aligns float4x4 to 16; the trailing float2 needs no extra padding
     // here since the struct is only read, never arrayed).
+}
+
+/// The per-draw image display knobs (matches `struct ImageParams` in the Metal
+/// source): brightness/contrast in [0,1] (DXF 281/282 ÷ 100, 0.5 == neutral) and
+/// opacity (`1 - fade/100`). One is set per textured-quad draw call.
+private struct ImageParams {
+    var brightness: Float
+    var contrast: Float
+    var opacity: Float
 }
 
 @MainActor
@@ -65,6 +75,15 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     private let commandQueue: MTLCommandQueue
     private var linePipeline: MTLRenderPipelineState?
     private var flatPipeline: MTLRenderPipelineState?
+    /// The textured-quad pipeline for raster IMAGE entities (alpha-blended, sRGB).
+    private var imagePipeline: MTLRenderPipelineState?
+
+    /// Texture cache keyed by the image source file path (`ResolvedImage.textureKey`).
+    /// An entry is `nil` when the file is missing/unloadable, so we don't re-attempt
+    /// to load it every frame; the draw pass then falls back to the placeholder
+    /// outline. Cleared only if a model change introduces new image keys (we never
+    /// evict — a CAD drawing has a bounded number of distinct images).
+    private var textureCache: [String: MTLTexture?] = [:]
 
     // MARK: Persistent buffers
 
@@ -128,6 +147,13 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     /// Persistent scratch for the fill triangle vertices, packed in the SAME cull
     /// rebuild as `instanceScratch` (cleared keepingCapacity → no per-frame churn).
     private var fillScratch: [FlatVertex] = []
+
+    /// Resolved raster-image quads from the current cull rebuild (one per visible
+    /// IMAGE entity). Drawn by the textured-quad pass after the fills, under the
+    /// model lines so the frame outline overlays the image. A CAD drawing has few
+    /// images, so a per-image draw call (binding its cached texture) is cheap;
+    /// rebuilt on the SAME model/visible-set change as the line + fill buffers.
+    private var imageScratch: [ImageQuad] = []
 
     /// Cached resolve context, rebuilt ONLY when the model changes (the layer
     /// table snapshot is stable between edits), not per cull.
@@ -209,6 +235,25 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             NSLog("LineRenderer: missing flat shader functions")
             assertionFailure("LineRenderer: missing flat shader functions (flat_vertex/flat_fragment)")
         }
+
+        // ---- Textured-quad pipeline (raster IMAGE entities).
+        if let vfn = library.makeFunction(name: "image_vertex"),
+           let ffn = library.makeFunction(name: "image_fragment") {
+            let desc = MTLRenderPipelineDescriptor()
+            desc.vertexFunction = vfn
+            desc.fragmentFunction = ffn
+            desc.colorAttachments[0].pixelFormat = pixelFormat
+            configureAlphaBlend(desc.colorAttachments[0])
+            do {
+                imagePipeline = try device.makeRenderPipelineState(descriptor: desc)
+            } catch {
+                NSLog("LineRenderer: image pipeline failed: \(error)")
+                assertionFailure("LineRenderer: image pipeline failed: \(error)")
+            }
+        } else {
+            NSLog("LineRenderer: missing image shader functions")
+            assertionFailure("LineRenderer: missing image shader functions (image_vertex/image_fragment)")
+        }
     }
 
     private func configureAlphaBlend(_ a: MTLRenderPipelineColorAttachmentDescriptor) {
@@ -287,6 +332,13 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: fillVertexCount)
         }
 
+        // ---- 1c. Raster images (textured quads) — UNDER the model lines so the
+        // frame outline (a model polyline) overlays the image, and over the grid/
+        // fills. A missing/unloadable texture (or a hidden image) draws nothing here
+        // (its frame still shows via the model-line pass). One draw per image, each
+        // binding its cached texture; a CAD drawing has few images.
+        drawImages(encoder: encoder, uniformBuffer: uniformBuffer)
+
         // ---- 2. Model lines (instanced quads).
         if let linePipeline, let lineInstanceBuffer, lineInstanceCount > 0 {
             encoder.setRenderPipelineState(linePipeline)
@@ -354,6 +406,7 @@ final class LineRenderer: NSObject, MTKViewDelegate {
         // cached resolve context (rebuilt only on model change, not per cull).
         instanceScratch.removeAll(keepingCapacity: true)
         fillScratch.removeAll(keepingCapacity: true)
+        imageScratch.removeAll(keepingCapacity: true)
         let ctx = resolveContext(modelChanged: modelChanged)
         let origin = model.renderOrigin
         let layers = model.drawing.layers
@@ -417,6 +470,13 @@ final class LineRenderer: NSObject, MTKViewDelegate {
         for fill in geo.fills {
             RendererGeometry.appendFillVertices(for: fill, renderOrigin: origin, into: &fillScratch)
         }
+        // Raster images: collect one ImageQuad per resolved image (drawn by the
+        // textured-quad pass, which binds the cached texture per quad).
+        for image in geo.images {
+            if let quad = RendererGeometry.imageQuad(for: image, renderOrigin: origin) {
+                imageScratch.append(quad)
+            }
+        }
     }
 
     /// Returns the resolve context, rebuilding it only when the model changed (the
@@ -475,6 +535,79 @@ final class LineRenderer: NSObject, MTKViewDelegate {
                 buf.contents().copyMemory(from: raw.baseAddress!, byteCount: raw.count)
             }
         }
+    }
+
+    // MARK: - Image (textured-quad) draw pass
+
+    /// Draws every visible raster image as a textured quad: binds its cached texture
+    /// (loaded lazily by source path) and a per-draw `ImageParams` (brightness/
+    /// contrast/fade), then draws the 6-vertex quad. An image whose texture is
+    /// missing/unloadable, or which is marked placeholder (hidden), draws NOTHING in
+    /// this pass — its frame outline still shows via the model-line pass, so the
+    /// placement stays visible + selectable (the brief's "placeholder rectangle, no
+    /// crash"). The quad vertices are uploaded into a small transient buffer; image
+    /// count is tiny, so this is allocation-light and never touches the line buffer.
+    private func drawImages(encoder: MTLRenderCommandEncoder, uniformBuffer: MTLBuffer) {
+        guard let imagePipeline, !imageScratch.isEmpty else { return }
+        encoder.setRenderPipelineState(imagePipeline)
+        encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
+
+        for quad in imageScratch {
+            // A hidden image / empty key has no texture to draw — the frame outline
+            // (model line) covers the placement; skip the textured draw.
+            guard !quad.placeholder, !quad.textureKey.isEmpty,
+                  let texture = texture(for: quad.textureKey),
+                  quad.vertices.count == 6 else { continue }
+
+            // Upload the 6 quad vertices into a transient buffer (storage-shared).
+            let byteCount = MemoryLayout<TexturedVertex>.stride * quad.vertices.count
+            guard let vbuf = device.makeBuffer(length: byteCount, options: .storageModeShared) else { continue }
+            quad.vertices.withUnsafeBytes { raw in
+                vbuf.contents().copyMemory(from: raw.baseAddress!, byteCount: raw.count)
+            }
+
+            var params = ImageParams(
+                brightness: Float(max(0, min(100, quad.brightness))) / 100,
+                contrast: Float(max(0, min(100, quad.contrast))) / 100,
+                opacity: Float(max(0, min(100, 100 - quad.fade))) / 100
+            )
+            encoder.setVertexBuffer(vbuf, offset: 0, index: 0)
+            encoder.setFragmentTexture(texture, index: 0)
+            encoder.setFragmentBytes(&params, length: MemoryLayout<ImageParams>.stride, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        }
+    }
+
+    /// Returns the cached `MTLTexture` for `path`, loading + caching it on first use
+    /// (and caching a `nil` for an unloadable/missing file so we don't retry every
+    /// frame). Loads via `NSImage` → `CGImage` → `MTKTextureLoader`. `@MainActor`
+    /// (the renderer is main-actor); a one-time synchronous load per image is fine
+    /// for a CAD drawing's handful of raster placements.
+    private func texture(for path: String) -> MTLTexture? {
+        if let cached = textureCache[path] { return cached }
+        let loaded = Self.loadTexture(path: path, device: device)
+        textureCache[path] = loaded   // cache even nil (don't re-attempt a bad file)
+        return loaded
+    }
+
+    /// Loads an image file at `path` into an `MTLTexture`, or `nil` if the file is
+    /// missing/unreadable. Tries the path as-is, then as a file URL; decodes via
+    /// `NSImage` → `CGImage` so any AppKit-supported format (PNG/JPEG/TIFF/…) works.
+    private static func loadTexture(path: String, device: MTLDevice) -> MTLTexture? {
+        guard !path.isEmpty else { return nil }
+        guard let nsImage = NSImage(contentsOfFile: path)
+            ?? NSImage(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+        var rect = CGRect(origin: .zero, size: nsImage.size)
+        guard let cgImage = nsImage.cgImage(forProposedRect: &rect, context: nil, hints: nil) else {
+            return nil
+        }
+        let loader = MTKTextureLoader(device: device)
+        let options: [MTKTextureLoader.Option: Any] = [
+            .SRGB: false,
+            .generateMipmaps: false,
+            .textureUsage: NSNumber(value: MTLTextureUsage.shaderRead.rawValue),
+        ]
+        return try? loader.newTexture(cgImage: cgImage, options: options)
     }
 
     /// Rebuilds the overlay buffer (grid + selection + snap) each frame. The

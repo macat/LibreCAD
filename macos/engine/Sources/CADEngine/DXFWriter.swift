@@ -669,6 +669,29 @@ private final class PODBuilder {
             let (ptr, count) = internVertices(leaderVerts)
             e.vertices = ptr
             e.vertexCount = count
+
+        case .image(let d):
+            // Emitted as a DXF IMAGE + its IMAGEDEF (the C side calls
+            // `dxfRW::writeImage`, which creates the IMAGEDEF and the reactor wiring
+            // for us). The insertion (lower-left, p1), the per-pixel u/v vectors
+            // (p2 + imgVVec*), the pixel size (imgSizeU/V) and the display params
+            // (brightness/contrast/fade/clip/show) map onto DRW_Image; the file path
+            // is `textValue` (the IMAGEDEF name). IMAGE needs R2000+; at R12 / on DWG
+            // (no DWG image writer) the C side drops it (counted skipped), like
+            // MTEXT/DIMENSION. (The bitmap itself is NEVER embedded — only the path
+            // is written, exactly as AutoCAD/LibreCAD store a linked raster image.)
+            e.kind = Int32(LC_ENT_IMAGE.rawValue)
+            e.p1x = d.insertion.x; e.p1y = d.insertion.y; e.p1z = d.insertion.z
+            e.p2x = d.uVector.x;   e.p2y = d.uVector.y;   e.p2z = d.uVector.z
+            e.imgVVecX = d.vVector.x; e.imgVVecY = d.vVector.y; e.imgVVecZ = d.vVector.z
+            e.imgSizeU = d.imageDef.pixelWidth
+            e.imgSizeV = d.imageDef.pixelHeight
+            e.imgBrightness = Int32(d.display.brightness)
+            e.imgContrast = Int32(d.display.contrast)
+            e.imgFade = Int32(d.display.fade)
+            e.imgClip = d.display.clipping ? 1 : 0
+            e.imgShow = d.display.showImage ? 1 : 0
+            e.textValue = intern(d.imageDef.path)
         }
         return e
     }

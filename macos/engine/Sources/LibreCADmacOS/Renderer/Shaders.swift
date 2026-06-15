@@ -164,4 +164,58 @@ vertex FlatVaryings flat_vertex(uint vid [[vertex_id]],
 fragment float4 flat_fragment(FlatVaryings in [[stage_in]]) {
     return in.color;
 }
+
+// ============================================================================
+// 3. TEXTURED-QUAD PIPELINE (raster IMAGE entities)
+// ============================================================================
+//
+// One DXF IMAGE entity → two triangles (a quad) at its four resolved world
+// corners. Each vertex carries its render-space position (f32 offset from
+// renderOrigin, same floating-origin scheme as the other pipelines) + a UV. The
+// fragment shader samples the bound MTLTexture and applies the image's
+// brightness/contrast/fade (DXF codes 281/282/283), passed per-draw in a small
+// uniform. The matrix uniform (buffer 1) is shared with the other pipelines so
+// pan/zoom is matrix-only — the image's vertex buffer is rebuilt only when the
+// model / visible set changes, exactly like the line + fill buffers.
+
+// Matches Swift `struct TexturedVertex` (RendererGeometry.swift).
+struct TexturedVertex {
+    float2 position;    // render-space (f32 offset from renderOrigin)
+    float2 uv;          // texture coordinate (0..1)
+};
+
+// Matches Swift `struct ImageParams` (LineRenderer.swift). Per-draw display knobs.
+struct ImageParams {
+    float brightness;   // 0..1 (DXF 281/100), 0.5 == neutral
+    float contrast;     // 0..1 (DXF 282/100), 0.5 == neutral
+    float opacity;      // 1 - fade/100 (DXF 283), 1 == opaque
+};
+
+struct TexturedVaryings {
+    float4 position [[position]];
+    float2 uv;
+};
+
+vertex TexturedVaryings image_vertex(uint vid [[vertex_id]],
+                                     constant TexturedVertex *verts [[buffer(0)]],
+                                     constant Uniforms &u [[buffer(1)]]) {
+    TexturedVertex v = verts[vid];
+    TexturedVaryings out;
+    out.position = u.transform * float4(v.position, 0.0, 1.0);
+    out.uv = v.uv;
+    return out;
+}
+
+fragment float4 image_fragment(TexturedVaryings in [[stage_in]],
+                               texture2d<float> tex [[texture(0)]],
+                               constant ImageParams &p [[buffer(0)]]) {
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float4 c = tex.sample(s, in.uv);
+    // Brightness: (b - 0.5)*2 added; contrast: pivot around mid-gray.
+    float bright = (p.brightness - 0.5) * 2.0;
+    float contrast = (p.contrast - 0.5) * 2.0 + 1.0;   // 0.5 → 1.0 (neutral)
+    float3 rgb = (c.rgb - 0.5) * contrast + 0.5 + bright;
+    rgb = clamp(rgb, 0.0, 1.0);
+    return float4(rgb, c.a * p.opacity);
+}
 """

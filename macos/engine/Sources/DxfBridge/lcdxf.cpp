@@ -96,6 +96,49 @@ public:
         bool anonymous = false;   // *-prefixed (model/paper space, *U…) — not emitted
     };
 
+    // A captured IMAGE entity awaiting its IMAGEDEF link (the entity arrives in the
+    // ENTITIES section; the IMAGEDEF — with the path + pixel size — arrives later in
+    // OBJECTS). `defHandle` is the IMAGE's code-340 hard reference; the geometry +
+    // display fields are captured verbatim. `target` records whether the IMAGE was
+    // read inside a block (so finalize routes it to the same target pushEntity would).
+    struct PendingImage {
+        LCEntity e;
+        duint32 defHandle = 0;
+        PendingBlock *block = nullptr;   // the block being read, or nullptr (top level)
+    };
+    // One captured IMAGEDEF (file path + pixel size) keyed by its code-5 handle.
+    struct ImageDefRecord {
+        std::string path;
+        double u = 0;
+        double v = 0;
+    };
+
+    // After the whole read, link each captured IMAGE to its IMAGEDEF (path + pixel
+    // size) by the code-340 handle, then push the finished POD into its target (the
+    // block it was read in, or the top-level entity list). A missing/unknown
+    // IMAGEDEF still yields a valid `.image` (empty path → placeholder on render),
+    // so an IMAGE never silently vanishes. Call AFTER finalizeBlocks so block PODs
+    // captured here land before the block members are flattened.
+    void finalizeImages() {
+        for (auto &pi : m_pendingImages) {
+            LCEntity e = pi.e;
+            auto it = m_imageDefs.find(pi.defHandle);
+            if (it != m_imageDefs.end()) {
+                e.textValue = intern(it->second.path);
+                e.imgSizeU = it->second.u;
+                e.imgSizeV = it->second.v;
+            }
+            // A robust fallback: if the IMAGEDEF gave no pixel size, fall back to the
+            // IMAGE entity's own sizeu/sizev (DXF codes 13/23), which carry the pixel
+            // dimensions on the entity too.
+            if (e.imgSizeU <= 0 && pi.e.imgSizeU > 0) e.imgSizeU = pi.e.imgSizeU;
+            if (e.imgSizeV <= 0 && pi.e.imgSizeV > 0) e.imgSizeV = pi.e.imgSizeV;
+            if (e.textValue == nullptr) e.textValue = intern("");
+            if (pi.block != nullptr) pi.block->members.push_back(e);
+            else m_out->entities.push_back(e);
+        }
+    }
+
     // After the whole read, flatten the (non-anonymous, non-empty) pending blocks
     // into `m_out->blocks` + `m_out->blockEntities` with correct member windows.
     void finalizeBlocks() {
@@ -546,8 +589,22 @@ public:
     void addLeader(const DRW_Leader *data) override { emitLeader(data); }
     void addHatch(const DRW_Hatch *data) override { emitHatch(data); }
     void addViewport(const DRW_Viewport &data) override { addUnsupportedEntity(data, "VIEWPORT"); }
-    void addImage(const DRW_Image *data) override { addUnsupportedDim(data, "IMAGE"); }
-    void linkImage(const DRW_ImageDef *data) override { (void)data; } // definition, not entity
+    // IMAGE entity (DRW_Image): captured into a PENDING image (POD + its IMAGEDEF
+    // hard-ref handle, code 340) here; finalizeImages() links it to its IMAGEDEF
+    // (linkImage, by code-5 handle) afterward and pushes the finished POD into the
+    // right target. We can't push immediately because the IMAGEDEF (with the file
+    // path + pixel size) arrives LATER in the OBJECTS section.
+    void addImage(const DRW_Image *data) override { capturePendingImage(data); }
+    // IMAGEDEF object (DRW_ImageDef): recorded in the handle→def map so a pending
+    // IMAGE can resolve its path + pixel size by its code-340 reference.
+    void linkImage(const DRW_ImageDef *data) override {
+        if (data == nullptr) return;
+        ImageDefRecord rec;
+        rec.path = data->name;
+        rec.u = data->u;
+        rec.v = data->v;
+        m_imageDefs[data->handle] = rec;
+    }
 
     // ----- misc read hooks (not collected) -------------------------------
     void addComment(const char *comment) override { (void)comment; }
@@ -574,6 +631,11 @@ private:
     // `m_currentBlock` between addBlock and endBlock; `finalizeBlocks` flattens them.
     std::deque<PendingBlock> m_pendingBlocks;   // deque: addresses stable for m_currentBlock
     PendingBlock *m_currentBlock = nullptr;
+
+    // IMAGE/IMAGEDEF link state: pending IMAGE entities (awaiting their IMAGEDEF)
+    // and the IMAGEDEF records keyed by code-5 handle. finalizeImages() joins them.
+    std::vector<PendingImage> m_pendingImages;
+    std::map<duint32, ImageDefRecord> m_imageDefs;
 
     // ----- SOLID / TRACE -------------------------------------------------
     // A filled triangle or quadrilateral. DXF orders the 4 corners as
@@ -687,6 +749,42 @@ private:
         e.vertices = verts.empty() ? nullptr : verts.data();
         e.vertexCount = static_cast<int32_t>(verts.size());
         pushEntity(e);
+    }
+
+    // ----- IMAGE (raster image entity) -----------------------------------
+    // Capture a DRW_Image into a PendingImage. DRW_Image derives from DRW_Line, so
+    // it inherits basePoint (code 10, the lower-left insertion) and secPoint (code
+    // 11, the per-pixel U vector); DRW_Image adds vVector (code 12, the per-pixel V
+    // vector), sizeu/sizev (codes 13/23, the pixel size), the code-340 IMAGEDEF
+    // hard reference (`ref`), and the display ints (clip/brightness/contrast/fade,
+    // codes 280–283). The path + (authoritative) pixel size come from the linked
+    // IMAGEDEF, joined later in finalizeImages() by the `ref` handle; the entity's
+    // own sizeu/sizev are kept as a fallback. The display "show image" flag is DXF
+    // code-70 bit 1 — libdxfrw stores DRW_Image's code-70 as the generic entity
+    // `space`/visibility, so we default show=1 (the common case) and let the engine
+    // toggle it via the inspector; clipping is carried for round-trip.
+    void capturePendingImage(const DRW_Image *data) {
+        ++m_out->geometryCount;
+        PendingImage pi;
+        pi.e = makeEntity(LC_ENT_IMAGE);
+        if (data) {
+            fillCommon(pi.e, *data);
+            pi.e.p1x = data->basePoint.x; pi.e.p1y = data->basePoint.y; pi.e.p1z = data->basePoint.z;
+            pi.e.p2x = data->secPoint.x;  pi.e.p2y = data->secPoint.y;  pi.e.p2z = data->secPoint.z;
+            pi.e.imgVVecX = data->vVector.x; pi.e.imgVVecY = data->vVector.y; pi.e.imgVVecZ = data->vVector.z;
+            pi.e.imgSizeU = data->sizeu;
+            pi.e.imgSizeV = data->sizev;
+            pi.e.imgBrightness = data->brightness;
+            pi.e.imgContrast = data->contrast;
+            pi.e.imgFade = data->fade;
+            pi.e.imgClip = data->clip;
+            pi.e.imgShow = 1;             // DXF show-image flag; default visible.
+            pi.defHandle = data->ref;     // code 340 → IMAGEDEF handle (code 5).
+        } else {
+            pi.e.layer = intern("0"); pi.e.lineType = intern("BYLAYER");
+        }
+        pi.block = m_currentBlock;
+        m_pendingImages.push_back(pi);
     }
 
     // Append one hatch boundary loop's vertices to `verts`.
@@ -1405,6 +1503,7 @@ private:
         case LC_ENT_XLINE:      writeXline(e);      break;
         case LC_ENT_RAY:        writeRay(e);        break;
         case LC_ENT_LEADER:     writeLeader(e);     break;
+        case LC_ENT_IMAGE:      writeImage(e);      break;
         default:                ++m_skipped;        break; // UNSUPPORTED / ...
         }
     }
@@ -1451,6 +1550,45 @@ private:
         }
         ld.vertnum = static_cast<int>(ld.vertexlist.size());
         if (!emitLeader(&ld)) ++m_skipped;   // DWG has no leader writer
+    }
+
+    // ----- IMAGE (raster image) ------------------------------------------
+    // Emit a DXF IMAGE + its IMAGEDEF via dxfRW::writeImage(ent, name). That helper
+    // creates (or reuses) the IMAGEDEF object, wires the IMAGEDEF_REACTOR, and emits
+    // the IMAGE entity + group 340 hard reference for us; we set the DRW_Image's
+    // insertion (basePoint, code 10), per-pixel U vector (secPoint, code 11), V
+    // vector (code 12), pixel size (sizeu/sizev, codes 13/23), and display ints
+    // (clip/brightness/contrast/fade, codes 280–283). The IMAGEDEF's pixel size
+    // (codes 10/20) is set on the returned DRW_ImageDef* AFTER the call (writeImage
+    // leaves it at 0; the IMAGEDEF is written later in writeObjects, so the values
+    // persist). The bitmap is NEVER embedded — only the file PATH is linked, exactly
+    // as AutoCAD/LibreCAD store a raster image.
+    //
+    // Scope: IMAGE needs R2000+ (dxfRW::writeImage returns NULL at AC1009) and the
+    // DWG writer (dwgRW) has NO writeImage path — both cases are skipped + counted,
+    // matching the MTEXT/DIMENSION/LEADER R12/DWG gaps. The polygon clip boundary
+    // (clipPath) is NOT emitted (the engine does not yet model clipping).
+    void writeImage(const LCEntity &e) {
+        // No DXF writer (DWG mode) or pre-R2000 → IMAGE is unsupported here. Count it.
+        if (m_dwg != nullptr || writerVersion() <= DRW::AC1009) { ++m_skipped; return; }
+        const std::string name = (e.textValue && e.textValue[0]) ? std::string(e.textValue)
+                                                                 : std::string();
+        DRW_Image img;
+        fillCommon(img, e);
+        img.basePoint.x = e.p1x; img.basePoint.y = e.p1y; img.basePoint.z = e.p1z;
+        img.secPoint.x  = e.p2x; img.secPoint.y  = e.p2y; img.secPoint.z  = e.p2z;
+        img.vVector.x = e.imgVVecX; img.vVector.y = e.imgVVecY; img.vVector.z = e.imgVVecZ;
+        img.sizeu = e.imgSizeU;
+        img.sizev = e.imgSizeV;
+        img.clip = e.imgClip;
+        img.brightness = e.imgBrightness;
+        img.contrast = e.imgContrast;
+        img.fade = e.imgFade;
+        DRW_ImageDef *def = m_dxf->writeImage(&img, name);
+        if (def == nullptr) { ++m_skipped; return; }   // NULL only at <R2000 (guarded above)
+        // Carry the pixel size into the IMAGEDEF (written in writeObjects).
+        if (e.imgSizeU > 0) def->u = e.imgSizeU;
+        if (e.imgSizeV > 0) def->v = e.imgSizeV;
     }
 
     // ----- INSERT (block reference) --------------------------------------
@@ -1969,6 +2107,9 @@ extern "C" LCStatus lc_dxf_read(const char *path, LCEntityList **out) {
             delete list;
             return LC_ERR_READ_FAILED;
         }
+        // Link captured IMAGEs to their IMAGEDEFs (path + pixel size) BEFORE block
+        // flattening, so a block-embedded image lands in its block's members.
+        reader.finalizeImages();
         // Flatten the collected block definitions + their members into the list's
         // contiguous arrays (after parsing, so interned block-name pointers stay
         // valid and member windows are correct).
@@ -1997,6 +2138,7 @@ extern "C" LCStatus lc_dwg_read(const char *path, LCEntityList **out) {
             delete list;
             return LC_ERR_READ_FAILED;
         }
+        reader.finalizeImages();
         reader.finalizeBlocks();
         *out = list;
         return LC_OK;

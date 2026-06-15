@@ -178,6 +178,84 @@ public enum InspectorEdits {
         return .leader(d)
     }
 
+    // MARK: - Image field edits (RS_Image, DXF IMAGE)
+
+    /// Replaces an `.image`'s insertion (lower-left) corner, keeping its u/v +
+    /// definition + display (so the picture moves but keeps its size/rotation).
+    public static func setImageInsertion(_ kind: EntityKind, _ insertion: Vector) -> EntityKind {
+        guard case .image(var d) = kind else { return kind }
+        d.insertion = insertion
+        return .image(d)
+    }
+
+    /// Sets an `.image`'s WIDTH (the bottom-edge world length) by rescaling its
+    /// per-pixel u vector to match, keeping the rotation + the height aspect. A
+    /// non-positive width is ignored (an image can't have zero width).
+    public static func setImageWidth(_ kind: EntityKind, _ width: Double) -> EntityKind {
+        guard case .image(var d) = kind, width > Tolerance.distance else { return kind }
+        let curLen = d.uVector.magnitude
+        guard curLen > Tolerance.distance else { return kind }
+        // Per-pixel u must produce |u|·pixelWidth == width.
+        let pw = d.imageDef.pixelWidth > 0 ? d.imageDef.pixelWidth : 1
+        let scale = (width / pw) / curLen
+        d.uVector = d.uVector * scale
+        return .image(d)
+    }
+
+    /// Sets an `.image`'s HEIGHT (the left-edge world length) by rescaling its
+    /// per-pixel v vector, keeping the rotation. Non-positive height is ignored.
+    public static func setImageHeight(_ kind: EntityKind, _ height: Double) -> EntityKind {
+        guard case .image(var d) = kind, height > Tolerance.distance else { return kind }
+        let curLen = d.vVector.magnitude
+        guard curLen > Tolerance.distance else { return kind }
+        let ph = d.imageDef.pixelHeight > 0 ? d.imageDef.pixelHeight : 1
+        let scale = (height / ph) / curLen
+        d.vVector = d.vVector * scale
+        return .image(d)
+    }
+
+    /// Sets an `.image`'s ROTATION (radians): re-aims the bottom edge to `angle`
+    /// while keeping the width, and rotates the left edge to stay perpendicular
+    /// (keeping the height). Mirrors the placement gesture's right-angle u/v.
+    public static func setImageRotation(_ kind: EntityKind, _ angle: Double) -> EntityKind {
+        guard case .image(var d) = kind else { return kind }
+        let uLen = d.uVector.magnitude
+        let vLen = d.vVector.magnitude
+        guard uLen > Tolerance.distance else { return kind }
+        d.uVector = Vector(angle: angle) * uLen
+        d.vVector = Vector(angle: angle + Double.pi / 2) * vLen
+        return .image(d)
+    }
+
+    /// Sets an `.image`'s fade (DXF 283, clamped 0–100), keeping the rest.
+    public static func setImageFade(_ kind: EntityKind, _ fade: Int) -> EntityKind {
+        guard case .image(var d) = kind else { return kind }
+        d.display.fade = Swift.max(0, Swift.min(100, fade))
+        return .image(d)
+    }
+
+    /// Sets an `.image`'s brightness (DXF 281, clamped 0–100), keeping the rest.
+    public static func setImageBrightness(_ kind: EntityKind, _ brightness: Int) -> EntityKind {
+        guard case .image(var d) = kind else { return kind }
+        d.display.brightness = Swift.max(0, Swift.min(100, brightness))
+        return .image(d)
+    }
+
+    /// Sets an `.image`'s contrast (DXF 282, clamped 0–100), keeping the rest.
+    public static func setImageContrast(_ kind: EntityKind, _ contrast: Int) -> EntityKind {
+        guard case .image(var d) = kind else { return kind }
+        d.display.contrast = Swift.max(0, Swift.min(100, contrast))
+        return .image(d)
+    }
+
+    /// Sets/clears an `.image`'s show-image display flag (the texture draws when on;
+    /// off shows only the frame placeholder).
+    public static func setImageShow(_ kind: EntityKind, _ on: Bool) -> EntityKind {
+        guard case .image(var d) = kind else { return kind }
+        d.display.showImage = on
+        return .image(d)
+    }
+
     // MARK: - Text field edits (TEXT / single-line, RS_TextData)
 
     /// Replaces a `.text`'s insertion point.
