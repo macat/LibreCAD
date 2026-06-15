@@ -398,20 +398,40 @@ private struct LayersSettingsTab: View {
     }
 }
 
-// MARK: - Paper tab (lighter)
+// MARK: - Paper tab (page setup for Print / scale-aware Export)
 
-/// Paper size + orientation (used to pre-fill Print/Export) and the paper insertion
-/// base (`$PINSBASE`). Paper size/orientation are app-side print defaults stored on
-/// the model; the insertion base round-trips via the header var.
+/// Paper size + orientation, MARGINS, and the PLOT SCALE (Fit / 1:1 / custom ratio)
+/// used by Print and scale-aware PDF export — plus the paper insertion base
+/// (`$PINSBASE`). Paper size/orientation are app-side print defaults stored on the
+/// model; the scale/margin/page-setup is mirrored into the shared `PrintLayoutStore`
+/// (read by `DrawingPrinter`) so the print/export flow honors the chosen scale. The
+/// insertion base round-trips via the header var.
 private struct PaperSettingsTab: View {
     let model: CanvasModel
+
+    /// Plot-scale choices the picker offers. `.fit` is the default (legacy behavior).
+    private enum ScaleChoice: Hashable, CaseIterable {
+        case fit, oneToOne, custom
+        var label: String {
+            switch self {
+            case .fit:      return "Fit to page"
+            case .oneToOne: return "1:1 (true size)"
+            case .custom:   return "Custom ratio…"
+            }
+        }
+    }
+
+    @State private var scaleChoice: ScaleChoice = .fit
+    @State private var customDrawingUnits: Double = 1
+    @State private var customPaperUnits: Double = 1
+    @State private var marginMM: Double = 6.35   // ≈ 18 pt (0.25")
 
     var body: some View {
         Form {
             Section("Paper") {
                 Picker("Size", selection: Binding(
                     get: { model.paperSize },
-                    set: { model.paperSize = $0 }
+                    set: { model.paperSize = $0; syncStore() }
                 )) {
                     ForEach(PaperSize.allCases, id: \.self) { s in
                         Text(s.label).tag(s)
@@ -419,13 +439,52 @@ private struct PaperSettingsTab: View {
                 }
                 Picker("Orientation", selection: Binding(
                     get: { model.paperLandscape },
-                    set: { model.paperLandscape = $0 }
+                    set: { model.paperLandscape = $0; syncStore() }
                 )) {
                     Text("Portrait").tag(false)
                     Text("Landscape").tag(true)
                 }
                 .pickerStyle(.segmented)
+                LabeledContent("Margin (mm)") {
+                    TextField("mm", value: Binding(
+                        get: { marginMM },
+                        set: { marginMM = Swift.max(0, $0); syncStore() }
+                    ), format: .number)
+                    .frame(width: 90).multilineTextAlignment(.trailing)
+                }
             }
+
+            Section("Plot scale") {
+                Picker("Scale", selection: Binding(
+                    get: { scaleChoice },
+                    set: { scaleChoice = $0; syncStore() }
+                )) {
+                    ForEach(ScaleChoice.allCases, id: \.self) { c in
+                        Text(c.label).tag(c)
+                    }
+                }
+                if scaleChoice == .custom {
+                    LabeledContent("Ratio (drawing : paper)") {
+                        HStack(spacing: 4) {
+                            TextField("drawing", value: Binding(
+                                get: { customDrawingUnits },
+                                set: { customDrawingUnits = Swift.max(0, $0); syncStore() }
+                            ), format: .number)
+                            .frame(width: 56).multilineTextAlignment(.trailing)
+                            Text(":")
+                            TextField("paper", value: Binding(
+                                get: { customPaperUnits },
+                                set: { customPaperUnits = Swift.max(0, $0); syncStore() }
+                            ), format: .number)
+                            .frame(width: 56).multilineTextAlignment(.trailing)
+                        }
+                    }
+                }
+                Text(scaleHelp)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Insertion base") {
                 LabeledContent("X") {
                     TextField("x", value: Binding(
@@ -446,6 +505,68 @@ private struct PaperSettingsTab: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear { loadFromStore() }
+    }
+
+    /// A one-line explanation of what the current scale prints, in the drawing's unit.
+    private var scaleHelp: String {
+        let sign = model.drawingUnit.sign
+        let u = sign.isEmpty ? "unit" : sign
+        switch scaleChoice {
+        case .fit:
+            return "Scales the drawing to fill the page (the default — nothing prints to a fixed ratio)."
+        case .oneToOne:
+            return "1 drawing \(u) prints as 1 paper \(u) (true physical size)."
+        case .custom:
+            return "\(trim(customDrawingUnits)) drawing \(u) prints as \(trim(customPaperUnits)) on paper."
+        }
+    }
+
+    private func trim(_ v: Double) -> String {
+        v == v.rounded() ? String(Int(v.rounded())) : String(v)
+    }
+
+    /// The current paper rect in POINTS, with the chosen orientation applied.
+    private var paperPointSize: SizePt {
+        let mm = model.paperSize.sizeMM
+        let wpt = pointsFromMM(mm.width)
+        let hpt = pointsFromMM(mm.height)
+        return model.paperLandscape ? SizePt(width: hpt, height: wpt)
+                                    : SizePt(width: wpt, height: hpt)
+    }
+
+    /// The `PlotScale` for the current UI selection.
+    private var selectedScale: PlotScale {
+        switch scaleChoice {
+        case .fit:      return .fit
+        case .oneToOne: return .oneToOne
+        case .custom:   return .custom(drawingUnits: customDrawingUnits,
+                                       paperUnits: customPaperUnits)
+        }
+    }
+
+    /// Push the current selection into the shared store the print/export flow reads.
+    private func syncStore() {
+        PrintLayoutStore.shared.pageSetup = PageSetup(
+            paperSize: paperPointSize,
+            margin: pointsFromMM(marginMM),
+            scale: selectedScale)
+    }
+
+    /// Seed the UI from the shared store so the sheet shows the persisted page setup.
+    private func loadFromStore() {
+        let setup = PrintLayoutStore.shared.pageSetup
+        marginMM = setup.margin * 25.4 / 72.0
+        switch setup.scale {
+        case .fit:
+            scaleChoice = .fit
+        case .oneToOne:
+            scaleChoice = .oneToOne
+        case .custom(let du, let pu):
+            scaleChoice = .custom
+            customDrawingUnits = du
+            customPaperUnits = pu
+        }
     }
 }
 
