@@ -543,6 +543,78 @@ final class CanvasModel {
         return true
     }
 
+    // MARK: - Named views (LibreCAD / AutoCAD parity — save & restore a viewport)
+
+    /// The named-view registry (`NamedViewTable`): the current viewport saved under
+    /// a name (center + scale + rotation), restorable later via the View menu. Held
+    /// as SESSION state on the model for this version, so save → restore works fully
+    /// within a session; cross-save (on-disk) persistence + DXF/DWG VPORT/VIEW
+    /// round-trip is a documented FOLLOW-UP (the `NamedView`/`NamedViewTable` types
+    /// are already `Codable`, so wiring them into the document codec later is an
+    /// additive step). Observed so the View ▸ Restore/Delete submenus + menu enable
+    /// state track it live.
+    private(set) var namedViews = NamedViewTable()
+
+    /// The saved view names in display order — what the View ▸ Restore/Delete
+    /// submenus list. Bumps via `modelVersion` on every named-view mutation so the
+    /// menu refreshes.
+    var namedViewNames: [String] { namedViews.names }
+
+    /// Whether any named view exists (drives the Restore/Delete menu items' enabled
+    /// state). Observed via `modelVersion` bumps the save/delete ops perform.
+    var hasNamedViews: Bool { !namedViews.isEmpty }
+
+    /// Saves the CURRENT viewport under `name` (View ▸ Save View…). The captured
+    /// state is the viewport's world center + scale (+ rotation 0; the viewport has
+    /// none yet) — NOT the view size, so a restore re-frames into whatever the window
+    /// size is then (`NamedView.capture`). A blank name is rejected; a same-named
+    /// view is overwritten in place (AutoCAD "save over"). Returns the canonical
+    /// (trimmed) name it was saved under, or `nil` for a blank name. Bumps
+    /// `modelVersion` so the menus refresh. Session state only — not undoable / not
+    /// (yet) persisted to disk (a drafting aid, like the relative-zero / ortho).
+    @discardableResult
+    func saveNamedView(name: String) -> String? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let view = NamedView.capture(viewport, name: trimmed)
+        namedViews.upsert(view)
+        modelVersion &+= 1
+        return trimmed
+    }
+
+    /// Applies a saved `NamedView` to the live viewport: restores its world center +
+    /// scale while KEEPING the current view size (so the restore fits the current
+    /// window — `NamedView.apply`). A pure view change (matrix-only, no model dirty);
+    /// bumps `modelVersion` so the menu/canvas refresh. Pushes the prior viewport
+    /// onto the Zoom-Previous history first so a restore can be stepped back from
+    /// (matches `zoomToFit`/zoom-window). Returns `true` if the viewport changed.
+    @discardableResult
+    func applyNamedView(_ view: NamedView) -> Bool {
+        let restored = view.apply(to: viewport)
+        guard restored != viewport else { return false }
+        pushViewportHistory()
+        viewport = restored
+        modelVersion &+= 1
+        return true
+    }
+
+    /// Restores the named view called `name` (View ▸ Restore View ▸ <name>). No-op
+    /// (returns `false`) if no such view exists or it would not change the viewport.
+    @discardableResult
+    func restoreNamedView(name: String) -> Bool {
+        guard let view = namedViews.view(named: name) else { return false }
+        return applyNamedView(view)
+    }
+
+    /// Deletes the named view called `name` (View ▸ Delete View ▸ <name>). No-op
+    /// (returns `false`) if absent. Bumps `modelVersion` so the menus refresh.
+    @discardableResult
+    func deleteNamedView(name: String) -> Bool {
+        let changed = namedViews.remove(named: name)
+        if changed { modelVersion &+= 1 }
+        return changed
+    }
+
     // MARK: - View changes (matrix-only)
 
     /// Updates the stored view size (on resize). Keeps the same world center/scale.
