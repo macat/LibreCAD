@@ -673,8 +673,11 @@ private:
     // rs_filterdxfrw.cpp: a polyline boundary (type & 2) walks its vertlist with
     // bulges; otherwise each edge entity (LINE/ARC/ELLIPSE/SPLINE) contributes
     // its vertices. Arc/ellipse edges are tessellated into straight segments here
-    // (boundary-arc fidelity beyond the start point is layout backlog); bulges on
-    // polyline edges are carried through. solidFill and the pattern name round-trip.
+    // so the boundary reads back as a sampled ring (the arc GEOMETRY survives — the
+    // writer emits real DRW_Arc edges, see WritingInterface::writeHatch + G6a — but
+    // the read collapses them to points; exact-bulge read-back is a documented
+    // follow-up, see DXFWriter.swift G6a note). Bulges on polyline edges are carried
+    // through. solidFill and the pattern name round-trip.
     void emitHatch(const DRW_Hatch *data) {
         ++m_out->geometryCount;
         LCEntity e = makeEntity(LC_ENT_HATCH);
