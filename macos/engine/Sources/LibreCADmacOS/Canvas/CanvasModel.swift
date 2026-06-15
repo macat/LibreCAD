@@ -134,15 +134,35 @@ final class CanvasModel {
     /// empty in select mode. Republished on every tool input so SwiftUI updates.
     private(set) var toolStatus: String = ""
 
-    /// The "relative-zero" — the last point the active tool actually PLACED
-    /// (clicked or typed), the origin that the command line's `@dx,dy`, polar
+    /// The "relative-zero" — by default the last point the active tool actually
+    /// PLACED (clicked or typed), the origin that the command line's `@dx,dy`, polar
     /// `dist<angle`, and bare-distance input are measured from (UX-plan U1 / G7).
     /// Updated by `handleToolInput` on every valid `.click`/`.value` so a typed
-    /// `@10,0` is relative to wherever the previous point landed. Reset to `nil`
-    /// when the run ends (commit/cancel → `.finished`) or the tool changes, so the
-    /// first point of a fresh run has no stale reference. Observed so the command
-    /// field / status bar can show/draw it.
+    /// `@10,0` is relative to wherever the previous point landed — UNLESS the user has
+    /// LOCKED it (`relativeZeroLocked`), in which case it stays fixed at the chosen
+    /// datum and does NOT auto-advance. Unlocked, it is reset to `nil` when the run
+    /// ends (commit/cancel → `.finished`) or the tool changes, so the first point of a
+    /// fresh run has no stale reference; locked, it survives those transitions (a
+    /// persistent datum, LibreCAD's "Set relative zero" workflow). Observed so the
+    /// command field / status bar can show/draw it.
     private(set) var relativeZero: Vector?
+
+    /// Whether the relative-zero is LOCKED at a user-chosen datum (LibreCAD's "Lock
+    /// relative zero"). When locked, `relativeZero` does NOT auto-advance to the last
+    /// placed point and is NOT cleared on run-end / tool-change — it stays where it was
+    /// set so the user can measure/draw multiple things relative to one fixed origin.
+    /// When unlocked, the default auto-follow-the-last-point behavior resumes. Purely a
+    /// live drafting aid (not persisted to the document, like ortho / the cursor mode).
+    /// Observed so the menu state + a status chip can track it live.
+    private(set) var relativeZeroLocked: Bool = false
+
+    /// Whether the canvas is armed for a one-shot "Set Relative Origin" pick: the NEXT
+    /// snapped canvas click (in select mode) sets `relativeZero` to that point instead
+    /// of toggling selection, then auto-disarms (mirrors the Zoom-Window one-shot arm).
+    /// The existing select-mode click path (`toggleSelection`) consults this first, so
+    /// no change to the canvas view is needed. Observed so a status chip / the cursor
+    /// can reflect the armed "pick a point" state.
+    private(set) var settingRelativeZeroArmed: Bool = false
 
     /// The most recent error from a command-line submission (`submitCommandText`),
     /// or `nil` after a successful submit. The command field echoes it so a typo
@@ -650,9 +670,24 @@ final class CanvasModel {
     }
 
     /// Click → hit-test the nearest entity and toggle it into the selection.
-    /// Returns whether the selection changed.
+    /// Returns whether the selection changed (so the caller redraws).
+    ///
+    /// FIRST consults the one-shot "Set Relative Origin" arm: when armed, this click is
+    /// consumed to set `relativeZero` to the SNAPPED click point (and the arm clears)
+    /// instead of toggling selection — so the relative-zero pick rides the EXISTING
+    /// select-mode click path with no change to the canvas view (the view already calls
+    /// this for a select-mode click). Returns `true` so the canvas repaints the moved
+    /// origin marker.
     @discardableResult
     func toggleSelection(atScreenPoint screen: CGPoint) -> Bool {
+        // One-shot relative-origin pick (armed via `armSetRelativeZero`): set the datum
+        // to the snapped click and disarm. Takes precedence over selection toggling.
+        if settingRelativeZeroArmed {
+            let p = snappedWorldPoint(atScreenPoint: screen, gridSpacing: lastGridSpacing)
+            setRelativeZero(p)
+            settingRelativeZeroArmed = false
+            return true
+        }
         let world = viewport.screenToWorld(screen)
         let id = selection.hitTest(
             worldPoint: world,
@@ -663,6 +698,61 @@ final class CanvasModel {
         guard let id else { return false }
         selection.toggle(id)
         return true
+    }
+
+    // MARK: - Relative zero (set / lock / reset) — LibreCAD's "Set relative zero"
+
+    /// Arms the one-shot "Set Relative Origin" pick: the NEXT snapped canvas click (in
+    /// select mode) sets `relativeZero` to that point, then auto-disarms (the
+    /// Zoom-Window one-shot-arm pattern). The pick is consumed by `toggleSelection` on
+    /// the existing select-mode click path, so no canvas-view change is needed. Bumps
+    /// `modelVersion` so a status chip / the cursor reflects the armed state.
+    func armSetRelativeZero() {
+        settingRelativeZeroArmed = true
+        modelVersion &+= 1
+    }
+
+    /// Cancels a pending one-shot relative-origin pick without setting anything
+    /// (Esc / mode change). No-op when not armed.
+    func cancelSetRelativeZero() {
+        guard settingRelativeZeroArmed else { return }
+        settingRelativeZeroArmed = false
+        modelVersion &+= 1
+    }
+
+    /// Sets the relative-zero datum directly to a world point (the resolved one-shot
+    /// pick, or any programmatic set). Does NOT change the lock state — setting an
+    /// origin while locked just moves the locked datum. Bumps `modelVersion` so the
+    /// origin marker / readouts refresh.
+    func setRelativeZero(_ point: Vector) {
+        guard point.valid else { return }
+        relativeZero = point
+        modelVersion &+= 1
+    }
+
+    /// Locks / unlocks the relative-zero (LibreCAD's "Lock relative zero"). When LOCKED
+    /// the datum stops auto-advancing to the last placed point and survives run-end /
+    /// tool-change; when UNLOCKED the default auto-follow-the-last-point behavior
+    /// resumes. Bumps `modelVersion` so the menu state + status chip track it.
+    func setRelativeZeroLocked(_ locked: Bool) {
+        relativeZeroLocked = locked
+        modelVersion &+= 1
+    }
+
+    /// Toggles the relative-zero lock (the menu/keyboard verb). Returns the NEW locked
+    /// state so the caller can reflect it.
+    @discardableResult
+    func toggleRelativeZeroLock() -> Bool {
+        setRelativeZeroLocked(!relativeZeroLocked)
+        return relativeZeroLocked
+    }
+
+    /// Resets the relative-zero to the ABSOLUTE origin (0, 0) — LibreCAD's "Set
+    /// relative zero to origin". Leaves the lock state untouched (a reset just moves
+    /// the datum back to the world origin). Bumps `modelVersion` so readouts refresh.
+    func resetRelativeZeroToOrigin() {
+        relativeZero = Vector(0, 0)
+        modelVersion &+= 1
     }
 
     /// Clears the cursor/snap overlay (mouse left the view).
@@ -682,8 +772,9 @@ final class CanvasModel {
         applyToolConfig()
         toolStatus = tool?.status ?? ""
         // A fresh tool has placed no point yet — clear any stale relative-zero so the
-        // command line's `@`/polar/distance input has no leftover reference.
-        relativeZero = nil
+        // command line's `@`/polar/distance input has no leftover reference. A LOCKED
+        // datum survives the tool change (the user pinned it deliberately).
+        if !relativeZeroLocked { relativeZero = nil }
         lastCommandError = nil
     }
 
@@ -897,11 +988,15 @@ final class CanvasModel {
         // command line's `@dx,dy` / polar / bare-distance input measures from next.
         // (Done regardless of the outcome — even the first click of a Line returns
         // `.none` but still fixes the start point a typed `@10,0` should follow.)
-        switch input {
-        case .click(let p), .value(let p):
-            if p.valid { relativeZero = p }
-        default:
-            break
+        // SKIPPED when the relative-zero is LOCKED: the user pinned a datum, so it must
+        // NOT auto-advance to the placed point (LibreCAD's locked relative zero).
+        if !relativeZeroLocked {
+            switch input {
+            case .click(let p), .value(let p):
+                if p.valid { relativeZero = p }
+            default:
+                break
+            }
         }
 
         switch outcome {
@@ -929,8 +1024,9 @@ final class CanvasModel {
             tool = activeToolKind.makeTool()
             applyToolConfig()
             toolStatus = tool?.status ?? ""
-            // The run is over — drop the relative-zero so the next run starts fresh.
-            relativeZero = nil
+            // The run is over — drop the relative-zero so the next run starts fresh,
+            // UNLESS it is locked (a user-pinned datum persists across runs).
+            if !relativeZeroLocked { relativeZero = nil }
             return true
         }
     }
@@ -1028,6 +1124,26 @@ final class CanvasModel {
         let deg = (w - zero).angle * 180 / .pi
         let degStr = String(format: "%.0f", deg)
         return "\u{27C2} \(distStr)   \u{2220} \(degStr)\u{00B0}"
+    }
+
+    /// The relative-zero DATUM readout for the status bar: its world position formatted
+    /// with the document's linear format/precision, plus a 🔒 marker when locked and a
+    /// "(pick…)" hint while armed for a one-shot set. `nil` when no datum is set AND the
+    /// canvas is neither armed nor locked (nothing to report). Distinct from
+    /// `relativeReadout` (the cursor-relative offset) — this shows WHERE the datum is.
+    var relativeZeroReadout: String? {
+        if settingRelativeZeroArmed {
+            return "RelZero: pick a point\u{2026}"
+        }
+        guard let zero = relativeZero else {
+            return relativeZeroLocked ? "RelZero: locked" : nil
+        }
+        let gv = drawing.graphicVariables
+        let pos = CoordinateFormatter.coordinatePair(
+            x: zero.x, y: zero.y,
+            format: gv.linearFormat, precision: gv.linearPrecision, unit: gv.unit)
+        let lock = relativeZeroLocked ? " \u{1F512}" : ""
+        return "RelZero: \(pos)\(lock)"
     }
 
     /// The current snap mode's short label for the status bar's snap readout (e.g.

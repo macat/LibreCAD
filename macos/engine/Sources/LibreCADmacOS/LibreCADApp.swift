@@ -241,6 +241,36 @@ struct LibreCADApp: App {
                     NSApp.sendAction(Selector(("toggleOrthoAction:")), to: nil, from: nil)
                 }
                 .keyboardShortcut(Self.f8Key, modifiers: [])
+
+                Divider()
+                // Relative-zero (LibreCAD's "Set relative zero") — the datum the
+                // command line's `@dx,dy` / polar / bare-distance input measures from.
+                // Routed through the responder chain to the focused canvas (the
+                // Ortho / Zoom-Window pattern); the `@objc` handlers live in an
+                // extension on the canvas view in THIS file (see below), so the wiring
+                // stays entirely in the menu + app. The shortcuts use ⌥⌘ chords so they
+                // never collide with the canvas keymap (bare / ⇧ / ⌥ tool letters) nor
+                // the existing command-modifier menu chords (confirmed against the
+                // keymap: ⌥⌘R / ⌥⌘L / ⌥⌘0 are all free).
+                //
+                // Set Relative Origin (⌥⌘R) — arm a one-shot pick: the next snapped
+                // canvas click sets the relative zero to that point.
+                Button("Set Relative Origin") {
+                    NSApp.sendAction(Selector(("setRelativeZeroAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("r", modifiers: [.command, .option])
+                // Lock / Unlock Relative Zero (⌥⌘L) — when locked the relative zero
+                // stops auto-advancing to the last placed point (it stays a fixed
+                // datum); unlocking restores the auto-follow behavior.
+                Button("Lock Relative Zero") {
+                    NSApp.sendAction(Selector(("toggleRelativeZeroLockAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("l", modifiers: [.command, .option])
+                // Reset Relative Zero to Origin (⌥⌘0) — set it back to (0, 0).
+                Button("Reset Relative Zero to Origin") {
+                    NSApp.sendAction(Selector(("resetRelativeZeroAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("0", modifiers: [.command, .option])
             }
             // The Tools menu — the discoverable source of truth for EVERY tool and
             // its shortcut. Grouped into Draw / Modify / Annotate SUBMENUS (consistent
@@ -440,5 +470,43 @@ struct LibreCADApp: App {
             Button(kind.title) { activateTool?(kind) }
                 .disabled(activateTool == nil)
         }
+    }
+}
+
+// MARK: - Relative-zero responder-chain actions (LibreCAD's "Set relative zero")
+//
+// The View ▸ Set Relative Origin / Lock Relative Zero / Reset Relative Zero menu items
+// dispatch via `NSApp.sendAction(_:to:nil:from:)` (the same responder-chain wiring the
+// Ortho / Zoom-Window / Select-All items use). The focused window's canvas
+// (`FlippedMTKView`) is the first responder, so the action lands here. These handlers
+// are declared in an EXTENSION on the canvas view (it lives in the same module), which
+// keeps the relative-zero feature's wiring contained to the menu + this file — no edit
+// to the canvas-view or content-view source is needed. Each forwards to the owning
+// controller's `CanvasModel` (the testable set/lock/reset logic) and requests a redraw
+// so the origin marker / status readout refresh. `validateUserInterfaceItem` on the
+// canvas view returns `true` for any selector it doesn't special-case, so these items
+// stay enabled while the canvas is focused (the model methods are safe no-ops/idempotent
+// when there is nothing to do).
+extension FlippedMTKView {
+
+    /// View ▸ Set Relative Origin (⌥⌘R) — arm a one-shot pick: the next snapped canvas
+    /// click sets the relative zero to that point (consumed on the existing select-mode
+    /// click path in `CanvasModel.toggleSelection`).
+    @objc func setRelativeZeroAction(_ sender: Any?) {
+        controller?.model.armSetRelativeZero()
+        controller?.requestRedraw()
+    }
+
+    /// View ▸ Lock / Unlock Relative Zero (⌥⌘L) — toggles whether the relative zero
+    /// stays a fixed datum (locked) or auto-follows the last placed point (unlocked).
+    @objc func toggleRelativeZeroLockAction(_ sender: Any?) {
+        controller?.model.toggleRelativeZeroLock()
+        controller?.requestRedraw()
+    }
+
+    /// View ▸ Reset Relative Zero to Origin (⌥⌘0) — set the relative zero back to (0,0).
+    @objc func resetRelativeZeroAction(_ sender: Any?) {
+        controller?.model.resetRelativeZeroToOrigin()
+        controller?.requestRedraw()
     }
 }
