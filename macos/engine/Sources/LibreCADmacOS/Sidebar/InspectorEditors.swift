@@ -131,16 +131,24 @@ struct GeometryEditor: View {
     var body: some View {
         Section("Geometry") {
             switch record.kind {
-            case .line(let d):       lineEditor(d)
-            case .circle(let d):     circleEditor(d)
-            case .arc(let d):        arcEditor(d)
-            case .point(let d):      pointEditor(d)
-            case .text(let d):       textGeometryEditor(d)
-            case .mtext(let d):      mtextGeometryEditor(d)
-            case .image(let d):      imageGeometryEditor(d)
-            default:
-                Text("No inline geometry editor for this kind yet.")
-                    .font(.callout).foregroundStyle(.secondary)
+            case .line(let d):         lineEditor(d)
+            case .circle(let d):       circleEditor(d)
+            case .arc(let d):          arcEditor(d)
+            case .point(let d):        pointEditor(d)
+            case .ellipse(let d):      ellipseEditor(d)
+            case .spline(let d):       splineEditor(d)
+            case .splinePoints(let d): splinePointsEditor(d)
+            case .polyline(let d):     polylineEditor(d)
+            case .hatch(let d):        hatchEditor(d)
+            case .solid(let d):        solidEditor(d)
+            case .dimension(let d):    dimensionEditor(d)
+            case .insert(let d):       insertEditor(d)
+            case .xline(let d):        xlineEditor(d)
+            case .ray(let d):          rayEditor(d)
+            case .leader(let d):       leaderEditor(d)
+            case .text(let d):         textGeometryEditor(d)
+            case .mtext(let d):        mtextGeometryEditor(d)
+            case .image(let d):        imageGeometryEditor(d)
             }
         }
     }
@@ -180,6 +188,204 @@ struct GeometryEditor: View {
     @ViewBuilder
     private func pointEditor(_ d: PointData) -> some View {
         PointFields(label: "Position", point: d.position) { onCommit([replacing(InspectorEdits.setPointPosition(record.kind, $0))]) }
+    }
+
+    // MARK: Ellipse (center / major-axis endpoint / ratio / start+end angle)
+
+    @ViewBuilder
+    private func ellipseEditor(_ d: EllipseData) -> some View {
+        PointFields(label: "Center", point: d.center) {
+            onCommit([replacing(InspectorEdits.setEllipseCenter(record.kind, $0))])
+        }
+        PointFields(label: "Major axis (Δ)", point: d.majorP) {
+            onCommit([replacing(InspectorEdits.setEllipseMajor(record.kind, $0))])
+        }
+        ScalarField(label: "Ratio (minor/major)", value: d.ratio) {
+            onCommit([replacing(InspectorEdits.setEllipseRatio(record.kind, $0))])
+        }
+        ScalarField(label: "Start angle (°)", value: d.startAngle * 180 / .pi) {
+            onCommit([replacing(InspectorEdits.setEllipseStartAngle(record.kind, $0 * .pi / 180))])
+        }
+        ScalarField(label: "End angle (°)", value: d.endAngle * 180 / .pi) {
+            onCommit([replacing(InspectorEdits.setEllipseEndAngle(record.kind, $0 * .pi / 180))])
+        }
+    }
+
+    // MARK: Spline (degree / closed flag / control-point count + selected point)
+
+    @ViewBuilder
+    private func splineEditor(_ d: SplineData) -> some View {
+        ScalarField(label: "Degree", value: Double(d.degree)) {
+            onCommit([replacing(InspectorEdits.setSplineDegree(record.kind, Int($0.rounded())))])
+        }
+        Toggle("Closed", isOn: Binding(
+            get: { d.closed },
+            set: { onCommit([replacing(InspectorEdits.setSplineClosed(record.kind, $0))]) }
+        ))
+        LabeledContent("Control points") {
+            Text("\(d.controlPoints.count)").foregroundStyle(.secondary)
+        }
+        IndexedPointEditor(label: "Control pt", points: d.controlPoints) { idx, pt in
+            onCommit([replacing(InspectorEdits.setSplineControlPoint(record.kind, index: idx, pt))])
+        }
+    }
+
+    // MARK: SplinePoints (closed flag / control-point count + selected point)
+
+    @ViewBuilder
+    private func splinePointsEditor(_ d: SplinePointsData) -> some View {
+        Toggle("Closed", isOn: Binding(
+            get: { d.closed },
+            set: { onCommit([replacing(InspectorEdits.setSplinePointsClosed(record.kind, $0))]) }
+        ))
+        LabeledContent("Control points") {
+            Text("\(d.controlPoints.count)").foregroundStyle(.secondary)
+        }
+        IndexedPointEditor(label: "Control pt", points: d.controlPoints) { idx, pt in
+            onCommit([replacing(InspectorEdits.setSplinePointsControlPoint(record.kind, index: idx, pt))])
+        }
+    }
+
+    // MARK: Polyline (closed flag / vertex count — per-vertex editing is PolylineEditTool)
+
+    @ViewBuilder
+    private func polylineEditor(_ d: PolylineData) -> some View {
+        Toggle("Closed", isOn: Binding(
+            get: { d.closed },
+            set: { onCommit([replacing(InspectorEdits.setPolylineClosed(record.kind, $0))]) }
+        ))
+        LabeledContent("Vertices") {
+            Text("\(d.vertices.count)").foregroundStyle(.secondary)
+        }
+        IndexedPointEditor(label: "Vertex", points: d.vertices.map(\.point)) { idx, pt in
+            onCommit([replacing(InspectorEdits.setPolylineVertex(record.kind, index: idx, pt))])
+        }
+    }
+
+    // MARK: Hatch (pattern name / scale / angle / solid flag)
+
+    @ViewBuilder
+    private func hatchEditor(_ d: HatchData) -> some View {
+        LabeledContent("Pattern") {
+            TextField("Pattern", text: Binding(
+                get: { d.patternName ?? "" },
+                set: { onCommit([replacing(InspectorEdits.setHatchPatternName(record.kind, $0.isEmpty ? nil : $0))]) }
+            ))
+            .frame(width: 120).multilineTextAlignment(.trailing)
+        }
+        Toggle("Solid fill", isOn: Binding(
+            get: { d.solidFill },
+            set: { onCommit([replacing(InspectorEdits.setHatchSolidFill(record.kind, $0))]) }
+        ))
+        ScalarField(label: "Pattern scale", value: d.patternScale) {
+            onCommit([replacing(InspectorEdits.setHatchPatternScale(record.kind, $0))])
+        }
+        ScalarField(label: "Pattern angle (°)", value: d.patternAngle * 180 / .pi) {
+            onCommit([replacing(InspectorEdits.setHatchPatternAngle(record.kind, $0 * .pi / 180))])
+        }
+    }
+
+    // MARK: Solid (its corner points)
+
+    @ViewBuilder
+    private func solidEditor(_ d: SolidData) -> some View {
+        ForEach(Array(d.corners.enumerated()), id: \.offset) { idx, corner in
+            PointFields(label: "Corner \(idx + 1)", point: corner) {
+                onCommit([replacing(InspectorEdits.setSolidCorner(record.kind, index: idx, $0))])
+            }
+        }
+    }
+
+    // MARK: Dimension (definition point / text override / DIMSTYLE name)
+
+    @ViewBuilder
+    private func dimensionEditor(_ d: DimData) -> some View {
+        PointFields(label: "Definition pt", point: d.definitionPoint) {
+            onCommit([replacing(InspectorEdits.setDimDefinitionPoint(record.kind, $0))])
+        }
+        LabeledContent("Dim style") {
+            TextField("Style", text: Binding(
+                get: { d.styleName ?? "" },
+                set: { onCommit([replacing(InspectorEdits.setDimStyleName(record.kind, $0.isEmpty ? nil : $0))]) }
+            ))
+            .frame(width: 120).multilineTextAlignment(.trailing)
+        }
+        LabeledContent("Text override") {
+            TextField("Measured", text: Binding(
+                get: { d.textOverride ?? "" },
+                set: { onCommit([replacing(InspectorEdits.setDimTextOverride(record.kind, $0))]) }
+            ))
+            .frame(width: 120).multilineTextAlignment(.trailing)
+        }
+    }
+
+    // MARK: Insert / block reference (block name read-only / scale x,y / rotation)
+
+    @ViewBuilder
+    private func insertEditor(_ d: InsertData) -> some View {
+        LabeledContent("Block") {
+            Text(d.blockName.isEmpty ? "—" : d.blockName)
+                .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+        }
+        PointFields(label: "Insertion", point: d.insertionPoint) {
+            onCommit([replacing(InspectorEdits.setInsertPosition(record.kind, $0))])
+        }
+        ScalarField(label: "Scale X", value: d.scale.x) {
+            onCommit([replacing(InspectorEdits.setInsertScaleX(record.kind, $0))])
+        }
+        ScalarField(label: "Scale Y", value: d.scale.y) {
+            onCommit([replacing(InspectorEdits.setInsertScaleY(record.kind, $0))])
+        }
+        ScalarField(label: "Rotation (°)", value: d.rotation * 180 / .pi) {
+            onCommit([replacing(InspectorEdits.setInsertRotation(record.kind, $0 * .pi / 180))])
+        }
+    }
+
+    // MARK: XLine (infinite construction line — base point + direction angle)
+
+    @ViewBuilder
+    private func xlineEditor(_ d: XLineData) -> some View {
+        PointFields(label: "Base", point: d.base) {
+            onCommit([replacing(InspectorEdits.setXLineBase(record.kind, $0))])
+        }
+        ScalarField(label: "Direction (°)", value: d.direction.angle * 180 / .pi) {
+            onCommit([replacing(InspectorEdits.setXLineAngle(record.kind, $0 * .pi / 180))])
+        }
+    }
+
+    // MARK: Ray (semi-infinite construction line — base point + direction angle)
+
+    @ViewBuilder
+    private func rayEditor(_ d: RayData) -> some View {
+        PointFields(label: "Base", point: d.base) {
+            onCommit([replacing(InspectorEdits.setRayBase(record.kind, $0))])
+        }
+        ScalarField(label: "Direction (°)", value: d.direction.angle * 180 / .pi) {
+            onCommit([replacing(InspectorEdits.setRayAngle(record.kind, $0 * .pi / 180))])
+        }
+    }
+
+    // MARK: Leader (vertex count + annotation text + arrow size/flag)
+
+    @ViewBuilder
+    private func leaderEditor(_ d: LeaderData) -> some View {
+        LabeledContent("Vertices") {
+            Text("\(d.vertices.count)").foregroundStyle(.secondary)
+        }
+        Toggle("Arrowhead", isOn: Binding(
+            get: { d.hasArrow },
+            set: { onCommit([replacing(InspectorEdits.setLeaderHasArrow(record.kind, $0))]) }
+        ))
+        ScalarField(label: "Arrow size", value: d.arrowSize) {
+            onCommit([replacing(InspectorEdits.setLeaderArrowSize(record.kind, $0))])
+        }
+        LabeledContent("Text") {
+            TextField("Annotation", text: Binding(
+                get: { InspectorEdits.leaderText(record.kind) },
+                set: { onCommit([replacing(InspectorEdits.setLeaderText(record.kind, $0))]) }
+            ))
+            .frame(width: 140).multilineTextAlignment(.trailing)
+        }
     }
 
     // MARK: Text geometry (position / height / rotation)
@@ -650,5 +856,32 @@ struct ScalarField: View {
         }
         .onAppear { draft = value }
         .onChange(of: value) { _, newValue in draft = newValue }
+    }
+}
+
+/// Picks one point out of a list (a control polygon / vertex ring) and edits its
+/// X/Y. The user selects an index from a stepper; the X/Y row below it edits the
+/// selected point and commits `(index, newPoint)`. Read-only (no row) when the list
+/// is empty. Used for spline / splinePoints control points + polyline vertices,
+/// where full per-point editing lives in a dedicated on-canvas tool but the
+/// inspector still offers a light "nudge a chosen point" affordance.
+struct IndexedPointEditor: View {
+    let label: String
+    let points: [Vector]
+    /// Commits a new coordinate for the point at `index`.
+    let onCommit: (Int, Vector) -> Void
+
+    @State private var index: Int = 0
+
+    var body: some View {
+        if !points.isEmpty {
+            let clamped = Swift.min(index, points.count - 1)
+            Stepper(value: $index, in: 0...(points.count - 1)) {
+                Text("\(label) index: \(clamped + 1) of \(points.count)")
+            }
+            PointFields(label: "\(label) \(clamped + 1)", point: points[clamped]) { pt in
+                onCommit(clamped, pt)
+            }
+        }
     }
 }
