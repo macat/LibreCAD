@@ -96,6 +96,206 @@ public enum InspectorEdits {
         return .point(PointData(position: position))
     }
 
+    // MARK: - Ellipse field edits (RS_Ellipse, DXF ELLIPSE)
+
+    /// Replaces an `.ellipse`'s center, keeping its axes + angles. No-op otherwise.
+    public static func setEllipseCenter(_ kind: EntityKind, _ center: Vector) -> EntityKind {
+        guard case .ellipse(var d) = kind else { return kind }
+        d.center = center
+        return .ellipse(d)
+    }
+
+    /// Replaces an `.ellipse`'s major-axis endpoint (relative to center) — this sets
+    /// both the major radius (its magnitude) and the ellipse rotation (its angle).
+    public static func setEllipseMajor(_ kind: EntityKind, _ major: Vector) -> EntityKind {
+        guard case .ellipse(var d) = kind else { return kind }
+        d.majorP = major
+        return .ellipse(d)
+    }
+
+    /// Replaces an `.ellipse`'s minor/major ratio (clamped to a small positive
+    /// minimum so the ellipse never collapses to a degenerate line).
+    public static func setEllipseRatio(_ kind: EntityKind, _ ratio: Double) -> EntityKind {
+        guard case .ellipse(var d) = kind else { return kind }
+        d.ratio = Swift.max(minEllipseRatio, ratio)
+        return .ellipse(d)
+    }
+
+    /// Replaces an `.ellipse`'s start ellipse-angle (radians, parametric).
+    public static func setEllipseStartAngle(_ kind: EntityKind, _ angle: Double) -> EntityKind {
+        guard case .ellipse(var d) = kind else { return kind }
+        d.startAngle = angle
+        return .ellipse(d)
+    }
+
+    /// Replaces an `.ellipse`'s end ellipse-angle (radians, parametric).
+    public static func setEllipseEndAngle(_ kind: EntityKind, _ angle: Double) -> EntityKind {
+        guard case .ellipse(var d) = kind else { return kind }
+        d.endAngle = angle
+        return .ellipse(d)
+    }
+
+    // MARK: - Spline field edits (RS_Spline, DXF SPLINE)
+
+    /// Sets/clears a `.spline`'s closed (periodic) flag, keeping degree + points.
+    public static func setSplineClosed(_ kind: EntityKind, _ closed: Bool) -> EntityKind {
+        guard case .spline(var d) = kind else { return kind }
+        d.closed = closed
+        return .spline(d)
+    }
+
+    /// Replaces a `.spline`'s degree (clamped to LibreCAD's 1–3 range), keeping the
+    /// control polygon. (Degree must be ≤ controlPoints − 1 to evaluate, but the
+    /// resolve clamps that on demand, so the inspector keeps this light.)
+    public static func setSplineDegree(_ kind: EntityKind, _ degree: Int) -> EntityKind {
+        guard case .spline(var d) = kind else { return kind }
+        d.degree = Swift.max(1, Swift.min(3, degree))
+        return .spline(d)
+    }
+
+    /// Replaces a single `.spline` control point by index, keeping the rest. An
+    /// out-of-range index is a no-op.
+    public static func setSplineControlPoint(_ kind: EntityKind, index: Int, _ point: Vector) -> EntityKind {
+        guard case .spline(var d) = kind, d.controlPoints.indices.contains(index) else { return kind }
+        d.controlPoints[index] = point
+        return .spline(d)
+    }
+
+    // MARK: - SplinePoints field edits (LC_SplinePoints)
+
+    /// Sets/clears a `.splinePoints`'s closed flag, keeping its control polygon.
+    public static func setSplinePointsClosed(_ kind: EntityKind, _ closed: Bool) -> EntityKind {
+        guard case .splinePoints(var d) = kind else { return kind }
+        d.closed = closed
+        return .splinePoints(d)
+    }
+
+    /// Replaces a single `.splinePoints` control point by index, keeping the rest.
+    /// An out-of-range index is a no-op.
+    public static func setSplinePointsControlPoint(_ kind: EntityKind, index: Int, _ point: Vector) -> EntityKind {
+        guard case .splinePoints(var d) = kind, d.controlPoints.indices.contains(index) else { return kind }
+        d.controlPoints[index] = point
+        return .splinePoints(d)
+    }
+
+    // MARK: - Polyline field edits (RS_Polyline, DXF LWPOLYLINE)
+
+    /// Sets/clears a `.polyline`'s closed flag, keeping its vertices. (Per-vertex
+    /// editing lives in `PolylineEditTool`; the inspector keeps this light.)
+    public static func setPolylineClosed(_ kind: EntityKind, _ closed: Bool) -> EntityKind {
+        guard case .polyline(var d) = kind else { return kind }
+        d.closed = closed
+        return .polyline(d)
+    }
+
+    /// Replaces a single `.polyline` vertex POINT by index (keeping its bulge). An
+    /// out-of-range index is a no-op.
+    public static func setPolylineVertex(_ kind: EntityKind, index: Int, _ point: Vector) -> EntityKind {
+        guard case .polyline(var d) = kind, d.vertices.indices.contains(index) else { return kind }
+        d.vertices[index].point = point
+        return .polyline(d)
+    }
+
+    // MARK: - Hatch field edits (RS_Hatch, DXF HATCH)
+
+    /// Replaces a `.hatch`'s pattern name (DXF code 2), keeping its loops + fill
+    /// flags. An empty/`"SOLID"` name resolves as a solid fill at resolve time.
+    public static func setHatchPatternName(_ kind: EntityKind, _ name: String?) -> EntityKind {
+        guard case .hatch(var d) = kind else { return kind }
+        d.patternName = name
+        return .hatch(d)
+    }
+
+    /// Replaces a `.hatch`'s pattern scale (DXF code 41, clamped positive). `1` is
+    /// the `.pat` definition's native scale.
+    public static func setHatchPatternScale(_ kind: EntityKind, _ scale: Double) -> EntityKind {
+        guard case .hatch(var d) = kind else { return kind }
+        d.patternScale = Swift.max(minHatchScale, scale)
+        return .hatch(d)
+    }
+
+    /// Replaces a `.hatch`'s extra pattern rotation (DXF code 52, radians).
+    public static func setHatchPatternAngle(_ kind: EntityKind, _ angle: Double) -> EntityKind {
+        guard case .hatch(var d) = kind else { return kind }
+        d.patternAngle = angle
+        return .hatch(d)
+    }
+
+    /// Sets/clears a `.hatch`'s solid-fill flag (a `false` value means a pattern
+    /// fill).
+    public static func setHatchSolidFill(_ kind: EntityKind, _ solid: Bool) -> EntityKind {
+        guard case .hatch(var d) = kind else { return kind }
+        d.solidFill = solid
+        return .hatch(d)
+    }
+
+    // MARK: - Solid field edits (RS_Solid, DXF SOLID/TRACE)
+
+    /// Replaces a single `.solid` corner POINT by index, keeping the rest. An
+    /// out-of-range index is a no-op (the corner count is fixed at 3 or 4).
+    public static func setSolidCorner(_ kind: EntityKind, index: Int, _ point: Vector) -> EntityKind {
+        guard case .solid(var d) = kind, d.corners.indices.contains(index) else { return kind }
+        d.corners[index] = point
+        return .solid(d)
+    }
+
+    // MARK: - Dimension field edits (RS_Dimension family, DXF DIMENSION)
+
+    /// Replaces a `.dimension`'s dimension-line definition point (DXF code 10),
+    /// keeping its variant + style. (A re-measure happens on resolve.)
+    public static func setDimDefinitionPoint(_ kind: EntityKind, _ point: Vector) -> EntityKind {
+        guard case .dimension(var d) = kind else { return kind }
+        d.definitionPoint = point
+        return .dimension(d)
+    }
+
+    /// Points a `.dimension` at a named DIMSTYLE (DXF code 3), keeping the rest.
+    public static func setDimStyleName(_ kind: EntityKind, _ styleName: String?) -> EntityKind {
+        guard case .dimension(var d) = kind else { return kind }
+        d.styleName = styleName
+        return .dimension(d)
+    }
+
+    /// Replaces a `.dimension`'s explicit text override (DXF code 1). An empty
+    /// string is normalized to `nil` so the dimension shows the measured value.
+    public static func setDimTextOverride(_ kind: EntityKind, _ text: String) -> EntityKind {
+        guard case .dimension(var d) = kind else { return kind }
+        d.textOverride = text.isEmpty ? nil : text
+        return .dimension(d)
+    }
+
+    // MARK: - Insert / block-reference field edits (RS_Insert, DXF INSERT)
+
+    /// Replaces an `.insert`'s insertion (placement) point (DXF code 10).
+    public static func setInsertPosition(_ kind: EntityKind, _ point: Vector) -> EntityKind {
+        guard case .insert(var d) = kind else { return kind }
+        d.insertionPoint = point
+        return .insert(d)
+    }
+
+    /// Replaces an `.insert`'s X scale factor (DXF code 41), keeping Y/Z + rotation.
+    /// A zero factor is ignored (a degenerate, invisible block).
+    public static func setInsertScaleX(_ kind: EntityKind, _ x: Double) -> EntityKind {
+        guard case .insert(var d) = kind, abs(x) > Tolerance.distance else { return kind }
+        d.scale = Vector(x, d.scale.y, d.scale.z)
+        return .insert(d)
+    }
+
+    /// Replaces an `.insert`'s Y scale factor (DXF code 42), keeping X/Z + rotation.
+    /// A zero factor is ignored.
+    public static func setInsertScaleY(_ kind: EntityKind, _ y: Double) -> EntityKind {
+        guard case .insert(var d) = kind, abs(y) > Tolerance.distance else { return kind }
+        d.scale = Vector(d.scale.x, y, d.scale.z)
+        return .insert(d)
+    }
+
+    /// Replaces an `.insert`'s rotation (DXF code 50, radians).
+    public static func setInsertRotation(_ kind: EntityKind, _ angle: Double) -> EntityKind {
+        guard case .insert(var d) = kind else { return kind }
+        d.rotation = angle
+        return .insert(d)
+    }
+
     // MARK: - Construction-line field edits (xline / ray, RS_ConstructionLine)
 
     /// Replaces an `.xline`'s base point, keeping its direction. No-op otherwise.
@@ -175,6 +375,41 @@ public enum InspectorEdits {
     public static func setLeaderStyleName(_ kind: EntityKind, _ styleName: String?) -> EntityKind {
         guard case .leader(var d) = kind else { return kind }
         d.styleName = styleName
+        return .leader(d)
+    }
+
+    /// The plain text of a `.leader`'s attached annotation (its `.text` string or its
+    /// `.mtext` plain text), for seeding the inline editor. Empty for a bare leader
+    /// (no annotation) or a non-leader kind.
+    public static func leaderText(_ kind: EntityKind) -> String {
+        guard case .leader(let d) = kind, let annotation = d.annotation else { return "" }
+        switch annotation {
+        case .text(let t):  return t.text
+        case .mtext:        return mtextPlainText(annotation)
+        default:            return ""
+        }
+    }
+
+    /// Sets a `.leader`'s annotation text. If the leader already carries a `.text`/
+    /// `.mtext` annotation, its string is replaced (its placement/height kept);
+    /// otherwise a fresh single-line `.text` annotation is created at the leader's
+    /// LAST vertex (the DXF anchor) with a default height. An empty string CLEARS
+    /// the annotation back to a bare leader.
+    public static func setLeaderText(_ kind: EntityKind, _ text: String) -> EntityKind {
+        guard case .leader(var d) = kind else { return kind }
+        if text.isEmpty {
+            d.annotation = nil
+            return .leader(d)
+        }
+        switch d.annotation {
+        case .text:
+            d.annotation = setTextString(d.annotation!, text)
+        case .mtext:
+            d.annotation = setMTextPlainText(d.annotation!, text)
+        default:
+            let anchor = d.vertices.last ?? Vector(0, 0)
+            d.annotation = .text(TextData(position: anchor, height: 2.5, text: text))
+        }
         return .leader(d)
     }
 
@@ -491,4 +726,10 @@ public enum InspectorEdits {
     public static let minTextHeight = 0.01
     /// The smallest width factor an inspector edit will write.
     public static let minWidthFactor = 0.01
+    /// The smallest minor/major ratio an inspector edit will write (avoids an
+    /// ellipse collapsing to a degenerate line).
+    public static let minEllipseRatio = 0.001
+    /// The smallest hatch pattern scale an inspector edit will write (a non-positive
+    /// scale would collapse the pattern; mirrors the HatchData decode clamp).
+    public static let minHatchScale = 0.001
 }
