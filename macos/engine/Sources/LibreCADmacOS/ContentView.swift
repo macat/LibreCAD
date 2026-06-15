@@ -341,6 +341,13 @@ struct ContentView: View {
             // Blocks: place a reference to a named block. With no block chosen the
             // tool is inert (the block-picker UI is a later task) — it never crashes.
             toolButton(.insert, symbol: "square.on.square.dashed", help: "Insert block (⇧I)")
+            // Wire-wave-3 construction lines: XLine is an INFINITE line through a base in
+            // a picked direction; Ray is the SEMI-infinite (one-way) variant. Both pick a
+            // base then a direction point. Free option chords (⌥I / ⌥Y).
+            toolButton(.xline, symbol: "line.diagonal.arrow",
+                       help: "Construction line — infinite (⌥I)")
+            toolButton(.ray, symbol: "arrow.up.right",
+                       help: "Ray — semi-infinite construction line (⌥Y)")
 
             Divider()
             // Modify tools (act on the current selection).
@@ -378,6 +385,13 @@ struct ContentView: View {
                        help: "Create block from selection (⌥B)")
             toolButton(.explodeInsert, symbol: "square.split.2x2",
                        help: "Explode block reference (⌥X)")
+            // Wire-wave-3 modify tools: Align maps the selection onto a 2-point
+            // source→destination reference; Array Along Path distributes copies along a
+            // picked path. Both act on the current selection. Free option chords (⌥A / ⌥P).
+            toolButton(.align, symbol: "arrow.up.and.down.righttriangle.up.righttriangle.down",
+                       help: "Align selection to a 2-point reference (⌥A)")
+            toolButton(.arrayPath, symbol: "point.topleft.down.to.point.bottomright.curvepath",
+                       help: "Array selection along a path (⌥P)")
 
             Divider()
             // Edit tools (pick entities under the cursor; no pre-selection needed).
@@ -409,6 +423,15 @@ struct ContentView: View {
                        help: "Arc length dimension (⌥G)")
             toolButton(.angular3pDim, symbol: "angle",
                        help: "Angular dimension, 3-point (⌥N)")
+            // Wire-wave-3 annotate tools: Leader is a callout (arrow + path + optional
+            // text); Baseline/Continue chain linear dims (stacked from a common origin /
+            // running end-to-start). Free option chords (⌥L / ⌥D / ⌥C).
+            toolButton(.leader, symbol: "text.bubble",
+                       help: "Leader callout (⌥L)")
+            toolButton(.baselineDim, symbol: "arrow.up.and.line.horizontal.and.arrow.down",
+                       help: "Baseline dimension chain (⌥D)")
+            toolButton(.continueDim, symbol: "arrow.left.and.line.vertical.and.arrow.right",
+                       help: "Continue dimension chain (⌥C)")
 
             Divider()
             // Measure / info tools (read-only): report a value in the status HUD
