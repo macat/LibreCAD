@@ -1,11 +1,31 @@
 # Feature Gap Catalog — Upstream LibreCAD vs. our Swift app
 
+> ## ⚠️ AUDITED 2026-06-15 — most of this doc is STALE (the per-row table below was written 2026-06-12, pre-v4/v5)
+> A full code-level audit (decision-log 2026-06-15) found that v4 + v5 implemented the **vast majority** of the
+> `missing`/`partial`/P0/P1 rows below — **13 of 14 P0s are DONE**, plus most P1/P2. The `ToolKind` registry grew
+> ~29→~58; `EntityKind` gained insert/xline/ray/leader/image; `DimKind` gained ordinate/arcLength/angular3p.
+> **Treat the per-row statuses below as historical.** The authoritative "what's truly done" list is the
+> decision-log (2026-06-15 audit, Part C). The **genuinely-remaining gaps** as of 2026-06-15 are:
+>
+> - **G1** per-type inline inspector geometry editors for the remaining kinds (ellipse/spline/polyline/hatch/solid/dim/insert/xline/ray/leader) — *in progress*
+> - **G2** scale-aware print preview + page setup + layout-correct PDF — *in progress*
+> - **G5** relative-zero explicit set / lock / reset UX — *in progress*
+> - **G6a** hatch boundary-arc bulge round-trip on DXF **write** (currently flattened) · **G6b** leader annotation authored as DXF hard-ref · **G6c** DXF version picker in Save UI
+> - **G4** distance-along-entity snap + manual middle/intersection snap overrides
+> - **G7** application Preferences window (`Settings {}` scene, ⌘,) — only the per-document settings sheet exists
+> - **G8** parts/symbol library browser, import-block-from-file, in-place block editing, block attributes (ATTDEF/ATTRIB)
+> - **Larger/deferred:** paper space & layouts, named views, UCS, GD&T/tolerance, spline node-editing, SVG/PDF import, app-prefs.
+> - **Save round-trip** of blocks + graphicVariables + dim styles on write — *being verified/fixed*
+>
+> Niche P2/P3 long-tail (construction-line draw submenu, move+rotate combined, layer-tree groups, user-font picker,
+> shortcuts editor, workspaces, about/welcome, CLI converters) remain deferred.
+
 **Purpose:** a *prioritized backlog* of features that **upstream LibreCAD has and our
 native-macOS Swift port does NOT yet** (or only partially). This drives the build
 waves. It complements `feature-inventory.md` (which catalogs the *full* upstream
 surface); this doc focuses on the **delta** and our **implementation status**.
 
-**Date:** 2026-06-12 · **Branch:** `feature-catalog-wt` (off `native-macos`)
+**Date:** 2026-06-12 · **Branch:** `feature-catalog-wt` (off `native-macos`) · **Audited/superseded:** 2026-06-15 (see banner)
 
 ## How to read this
 - **Status:** `missing` (no engine support at all) · `partial` (model/engine
