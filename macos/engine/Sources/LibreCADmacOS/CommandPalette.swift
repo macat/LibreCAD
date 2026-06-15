@@ -68,6 +68,10 @@ enum CommandRegistry {
     /// window already owns; nothing here reaches into private model state.
     struct Actions {
         var activateTool: (ToolKind) -> Void
+        /// Begin Image placement (the file-picker → two-click flow). The `.image`
+        /// kind needs a file chosen up front, so its palette entry routes here instead
+        /// of through the bare `activateTool`.
+        var placeImage: () -> Void
         var open: () -> Void
         var save: () -> Void
         var saveAs: () -> Void
@@ -144,6 +148,8 @@ enum CommandRegistry {
         case .leader:          return ("text.bubble", "⌥L")
         case .baselineDim:     return ("arrow.up.and.line.horizontal.and.arrow.down", "⌥D")
         case .continueDim:     return ("arrow.left.and.line.vertical.and.arrow.right", "⌥C")
+        // Image: place a reference to an image file (picked up front), ⇧Y.
+        case .image:           return ("photo", "⇧Y")
         }
     }
 
@@ -152,15 +158,20 @@ enum CommandRegistry {
     static func commands(_ actions: Actions) -> [PaletteCommand] {
         var list: [PaletteCommand] = []
 
-        // Every tool — activates via the controller (same path as the toolbar).
+        // Every tool — activates via the controller (same path as the toolbar). The
+        // `.image` kind is special-cased to the file-picker flow (a bare activate would
+        // arm an inert tool with no file chosen).
         for kind in ToolKind.allCases {
             let g = glyph(for: kind)
+            let run: () -> Void = (kind == .image)
+                ? actions.placeImage
+                : { actions.activateTool(kind) }
             list.append(PaletteCommand(
                 id: "tool.\(kind.rawValue)",
                 title: kind.title,
                 systemImage: g.symbol,
                 shortcut: g.shortcut,
-                run: { actions.activateTool(kind) }
+                run: run
             ))
         }
 

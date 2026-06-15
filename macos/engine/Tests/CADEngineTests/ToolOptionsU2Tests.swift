@@ -65,6 +65,13 @@ struct ToolOptionsU2Tests {
         return d
     }
 
+    private func committedEllipse(_ outcome: ToolOutcome) -> EllipseData? {
+        guard case .commit(let edits) = outcome, edits.count == 1,
+              case .add(let record) = edits[0],
+              case .ellipse(let d) = record.kind else { return nil }
+        return d
+    }
+
     // MARK: - Polygon: inscribed vs circumscribed
 
     @Test("polygon fit defaults to inscribed")
@@ -422,5 +429,228 @@ struct ToolOptionsU2Tests {
               case .add(let record) = edits[0],
               case .leader(let d) = record.kind else { return nil }
         return d
+    }
+
+    private func committedImage(_ outcome: ToolOutcome) -> ImageData? {
+        guard case .commit(let edits) = outcome, edits.count == 1,
+              case .add(let record) = edits[0],
+              case .image(let d) = record.kind else { return nil }
+        return d
+    }
+
+    // MARK: - NEW modes on already-wired tools (this wave)
+    //
+    // These mirror the SAME downcast-and-set `CanvasModel.applyToolConfig` performs for
+    // the Rectangle corner treatment, the Polygon construction mode, the Ellipse
+    // construction mode, and the Image tool's file injection — proven over the public
+    // tool surface (the model lives in the un-importable executable target). For the
+    // enum-with-associated-value options (Rectangle corner / Polygon mode) the model
+    // stores a case-index + scalar and assembles the enum here, exactly as the model's
+    // arm does.
+
+    /// Mirror of applyToolConfig's Rectangle corner assembly (case index + cut scalar).
+    private func rectCorner(style: Int, size: Double) -> RectangleCorner {
+        switch style {
+        case 1:  return .rounded(radius: size)
+        case 2:  return .chamfer(distance: size)
+        default: return .square
+        }
+    }
+
+    /// Mirror of applyToolConfig's Polygon mode assembly (case index + star ratio).
+    private func polygonMode(style: Int, ratio: Double) -> PolygonMode {
+        switch style {
+        case 1:  return .edge
+        case 2:  return .star(ratio: ratio)
+        default: return .centerCorner
+        }
+    }
+
+    @Test("plumbing: a Rectangle configured Square (style 0) keeps the 4 sharp corners")
+    func plumbingRectCornerSquare() {
+        guard var tool = ToolKind.rectangle.makeTool() as? RectangleTool else {
+            Issue.record("rectangle makeTool did not produce a RectangleTool"); return
+        }
+        tool.corner = rectCorner(style: 0, size: 10)
+        _ = tool.handle(.click(Vector(0, 0)), context: .empty)
+        let poly = committedPolyline(tool.handle(.click(Vector(40, 30)), context: .empty))
+        #expect(poly?.vertices.count == 4)
+        #expect(poly?.vertices.allSatisfy { abs($0.bulge) < 1e-9 } == true)
+    }
+
+    @Test("plumbing: a Rectangle configured Rounded (style 1) produces 8 vertices with a bulge")
+    func plumbingRectCornerRounded() {
+        guard var tool = ToolKind.rectangle.makeTool() as? RectangleTool else {
+            Issue.record("rectangle makeTool did not produce a RectangleTool"); return
+        }
+        tool.corner = rectCorner(style: 1, size: 5)
+        _ = tool.handle(.click(Vector(0, 0)), context: .empty)
+        let poly = committedPolyline(tool.handle(.click(Vector(40, 30)), context: .empty))
+        // Each of the 4 corners becomes two tangent vertices → 8; rounded carries bulges.
+        #expect(poly?.vertices.count == 8)
+        #expect(poly?.vertices.contains { abs($0.bulge) > 1e-9 } == true)
+    }
+
+    @Test("plumbing: a Rectangle configured Chamfer (style 2) produces 8 straight vertices")
+    func plumbingRectCornerChamfer() {
+        guard var tool = ToolKind.rectangle.makeTool() as? RectangleTool else {
+            Issue.record("rectangle makeTool did not produce a RectangleTool"); return
+        }
+        tool.corner = rectCorner(style: 2, size: 5)
+        _ = tool.handle(.click(Vector(0, 0)), context: .empty)
+        let poly = committedPolyline(tool.handle(.click(Vector(40, 30)), context: .empty))
+        #expect(poly?.vertices.count == 8)
+        // A chamfer is straight bevels — all bulges are 0.
+        #expect(poly?.vertices.allSatisfy { abs($0.bulge) < 1e-9 } == true)
+    }
+
+    @Test("plumbing: a Polygon configured Edge (mode 1) builds the N-gon on one clicked edge")
+    func plumbingPolygonModeEdge() {
+        guard var tool = ToolKind.polygon.makeTool() as? PolygonTool else {
+            Issue.record("polygon makeTool did not produce a PolygonTool"); return
+        }
+        tool.sides = 4
+        tool.mode = polygonMode(style: 1, ratio: 0.5)
+        // Two ADJACENT corners define one edge of length 6 → a square, side 6.
+        _ = tool.handle(.click(Vector(0, 0)), context: .empty)
+        let poly = committedPolyline(tool.handle(.click(Vector(6, 0)), context: .empty))
+        let pts = poly!.vertices.map(\.point)
+        #expect(pts.count == 4)
+        #expect((pts[0] - Vector(0, 0)).magnitude < 1e-9)   // first corner at the first click
+        #expect((pts[1] - Vector(6, 0)).magnitude < 1e-9)   // second corner at the second click
+        // Every side has the clicked edge's length (6).
+        for i in 0..<4 {
+            let a = pts[i], b = pts[(i + 1) % 4]
+            #expect(abs((b - a).magnitude - 6) < 1e-9)
+        }
+    }
+
+    @Test("plumbing: a Polygon configured Star (mode 2) commits a 2·N-point star ring")
+    func plumbingPolygonModeStar() {
+        guard var tool = ToolKind.polygon.makeTool() as? PolygonTool else {
+            Issue.record("polygon makeTool did not produce a PolygonTool"); return
+        }
+        tool.sides = 5
+        tool.mode = polygonMode(style: 2, ratio: 0.5)
+        _ = tool.handle(.click(Vector(0, 0)), context: .empty)
+        let poly = committedPolyline(tool.handle(.click(Vector(10, 0)), context: .empty))
+        // A 5-point star → 2·5 = 10 vertices (outer tips alternating inner valleys).
+        #expect(poly?.vertices.count == 10)
+        let pts = poly!.vertices.map(\.point)
+        // Outer tips (even indices) lie on r=10; inner valleys (odd) at r=10·ratio=5.
+        #expect(abs((pts[0] - Vector(0, 0)).magnitude - 10) < 1e-9)
+        #expect(abs((pts[1] - Vector(0, 0)).magnitude - 5) < 1e-9)
+    }
+
+    @Test("plumbing: an Ellipse re-minted with .fociPoint mode walks the foci flow")
+    func plumbingEllipseModeFociPoint() {
+        // Mirror of applyToolConfig: EllipseTool's mode is fixed at construction, so the
+        // model RE-MINTS EllipseTool(mode:) from the selected index.
+        var tool = EllipseTool(mode: .fociPoint)
+        #expect(tool.title == "Ellipse (Foci + Point)")
+        #expect(tool.status == "Specify first focus of ellipse")
+        _ = tool.handle(.click(Vector(-3, 0)), context: .empty)   // focus 1
+        #expect(tool.status == "Specify second focus of ellipse")
+        _ = tool.handle(.click(Vector(3, 0)), context: .empty)    // focus 2
+        #expect(tool.status == "Specify a point on the ellipse")
+        // A point on the ellipse → commits one .ellipse. (foci ±3, point (0,4):
+        // a = ½(5+5)=5, c=3, b=4 → ratio 0.8.)
+        let ell = committedEllipse(tool.handle(.click(Vector(0, 4)), context: .empty))
+        #expect(ell != nil)
+        #expect(abs(ell!.ratio - 0.8) < 1e-9)
+    }
+
+    @Test("plumbing: an Ellipse re-minted with .arc mode commits an elliptic ARC")
+    func plumbingEllipseModeArc() {
+        var tool = EllipseTool(mode: .arc)
+        #expect(tool.title == "Elliptical Arc")
+        _ = tool.handle(.click(Vector(0, 0)), context: .empty)    // center
+        _ = tool.handle(.click(Vector(4, 0)), context: .empty)    // major endpoint
+        _ = tool.handle(.click(Vector(0, 2)), context: .empty)    // minor distance
+        _ = tool.handle(.click(Vector(4, 0)), context: .empty)    // start angle (0)
+        let ell = committedEllipse(tool.handle(.click(Vector(0, 2)), context: .empty)) // end angle
+        #expect(ell != nil)
+        #expect(ell!.isArc, "an .arc-mode ellipse commits an elliptic arc (non-full)")
+    }
+
+    @Test("plumbing: an Ellipse re-minted with the default .axis mode is the full ellipse")
+    func plumbingEllipseModeAxisDefault() {
+        guard let tool = ToolKind.ellipse.makeTool() as? EllipseTool else {
+            Issue.record("ellipse makeTool did not produce an EllipseTool"); return
+        }
+        #expect(tool.mode == .axis)
+        #expect(tool.title == "Ellipse")
+    }
+
+    @Test("plumbing: the Image tool re-minted with a path + pixel size places that file")
+    func plumbingImagePlacement() {
+        // Mirror of applyToolConfig's Image arm: re-mint ImageTool(path:pixelWidth:pixelHeight:).
+        var tool = ImageTool(path: "/tmp/logo.png", pixelWidth: 200, pixelHeight: 100)
+        #expect(tool.status == "Specify the image's lower-left corner")
+        _ = tool.handle(.click(Vector(0, 0)), context: .empty)           // lower-left
+        #expect(tool.status == "Specify the opposite corner (size + rotation)")
+        // Bottom-edge corner sets width (10) + rotation (0); height keeps pixel aspect.
+        let img = committedImage(tool.handle(.click(Vector(10, 0)), context: .empty))
+        #expect(img != nil)
+        #expect(img?.imageDef.path == "/tmp/logo.png")
+        #expect(abs((img?.worldWidth ?? 0) - 10) < 1e-9)
+        // Pixel aspect 100/200 = 0.5 → height = width · 0.5 = 5.
+        #expect(abs((img?.worldHeight ?? 0) - 5) < 1e-9)
+        #expect(img?.imageDef.pixelWidth == 200)
+        #expect(img?.imageDef.pixelHeight == 100)
+    }
+
+    @Test("plumbing: a bare (no-file) Image tool is inert")
+    func plumbingImageNoFileInert() {
+        guard var tool = ToolKind.image.makeTool() as? ImageTool else {
+            Issue.record("image makeTool did not produce an ImageTool"); return
+        }
+        #expect(tool.status == "Choose an image file to place")
+        #expect(tool.handle(.click(Vector(0, 0)), context: .empty) == .none)
+    }
+
+    // MARK: - Trim mode (boundary handled by `handle`; amount/mutual are static funcs)
+    //
+    // ENGINE GAP: TrimTool.handle always drives `.boundary` (single-click cut). The
+    // `.amount` / `.mutual` variants exist only as PURE static entry points, NOT yet
+    // dispatched from `handle`. The options bar surfaces all three modes + a signed
+    // amount; these tests pin the static entry points the model's mode state targets.
+
+    @Test("trim mode index → TrimTool.Mode mapping (mirrors applyToolConfig's split)")
+    func trimModeIndexMapping() {
+        func mode(_ i: Int) -> TrimTool.Mode {
+            switch i { case 1: return .amount; case 2: return .mutual; default: return .boundary }
+        }
+        #expect(mode(0) == .boundary)
+        #expect(mode(1) == .amount)
+        #expect(mode(2) == .mutual)
+    }
+
+    @Test("trim AMOUNT: a positive signed distance lengthens a line at the picked end")
+    func trimAmountLengthensLine() {
+        let line = EntityKind.line(LineData(start: Vector(0, 0), end: Vector(10, 0)))
+        // Pick near the +x end; +5 lengthens it to length 15.
+        let out = TrimTool.trimAmount(line, near: Vector(10, 0), distance: 5)
+        guard case .line(let d)? = out else { Issue.record("trimAmount did not return a line"); return }
+        #expect(abs(d.start.distance(to: d.end) - 15) < 1e-9)
+    }
+
+    @Test("trim MUTUAL: two crossing-carrier lines extend to their intersection (5,5)")
+    func trimMutualMeetsAtIntersection() {
+        // A horizontal and a vertical line whose carriers cross at (5,5). Both are
+        // shorter than the crossing, so mutual trim EXTENDS each to (5,5).
+        let a = EntityKind.line(LineData(start: Vector(0, 5), end: Vector(4, 5)))
+        let b = EntityKind.line(LineData(start: Vector(5, 0), end: Vector(5, 4)))
+        let result = TrimTool.mutualTrim(a, pickA: Vector(2, 5), b, pickB: Vector(5, 2))
+        #expect(result != nil, "two crossing carriers must mutually trim/extend to (5,5)")
+        // Each reshaped line must HAVE an endpoint at the (5,5) crossing (which endpoint
+        // moves is the action's keep/discard choice — assert presence, not position).
+        let crossing = Vector(5, 5)
+        func touchesCrossing(_ kind: EntityKind?) -> Bool {
+            guard case .line(let d)? = kind else { return false }
+            return d.start.distance(to: crossing) < 1e-9 || d.end.distance(to: crossing) < 1e-9
+        }
+        #expect(touchesCrossing(result?.a), "entity a must reach the (5,5) crossing")
+        #expect(touchesCrossing(result?.b), "entity b must reach the (5,5) crossing")
     }
 }

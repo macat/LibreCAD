@@ -53,6 +53,9 @@ struct LibreCADApp: App {
     @FocusedValue(\.printDocument) private var printDocument
     /// The tool-activation action published by the focused window.
     @FocusedValue(\.activateTool) private var activateTool
+    /// The "begin Image placement" action published by the focused window (Tools ▸
+    /// Image…) — presents the file-picker, then arms the two-click placement.
+    @FocusedValue(\.placeImage) private var placeImage
     /// Undo / redo actions published by the focused window.
     @FocusedValue(\.undoAction) private var undoAction
     @FocusedValue(\.redoAction) private var redoAction
@@ -273,6 +276,13 @@ struct LibreCADApp: App {
                 Button("Hatch") { activateTool?(.hatch) }
                     .keyboardShortcut("h", modifiers: [])
                     .disabled(activateTool == nil)
+                // Image (⇧Y): place a reference to an image FILE. Routes through the
+                // file-picker flow (NOT a bare activateTool) — the user chooses a file
+                // first, then clicks two corners (lower-left + a bottom-edge corner that
+                // sets size + rotation). ⇧Y is free (bare Y is unassigned; ⌥Y is Ray).
+                Button("Image…") { placeImage?() }
+                    .keyboardShortcut("y", modifiers: .shift)
+                    .disabled(placeImage == nil)
                 // Text authoring (⇧T): a click sets the insertion point and raises the
                 // inline editor; type, then Return commits a text/mtext entity.
                 Button("Text") { activateTool?(.text) }
