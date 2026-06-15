@@ -84,6 +84,62 @@ struct DXFPayload: Sendable, Equatable {
     }
 }
 
+// MARK: - New-document preference seeding (Preferences ▸ General)
+//
+// Pure helpers for the General-tab prefs (default units / default template /
+// autosave) the new-document path consults. Free of SwiftUI/AppKit so they are
+// unit-tested headlessly (`PrefsWiringTests`); the SwiftUI read-site
+// (`ContentView.loadFromDocument`) just calls them with the stored `@AppStorage`
+// values. The whole contract: a fresh File ▸ New gets the preferred units (and the
+// preferred template, if set), while an opened DXF keeps its own header — so the
+// pref never silently rewrites an existing drawing.
+enum PrefsSeeding {
+
+    /// The autosaving delay (seconds) used when the autosave preference is ON. A
+    /// modest interval — autosave-in-place is incremental, so this is the "max age of
+    /// unsaved work" knob, not a per-keystroke cost. 0 (the OFF value) disables the
+    /// timed autosave entirely.
+    static let autosaveDelaySeconds: TimeInterval = 30
+
+    /// Whether `payload` is a brand-new EMPTY drawing (File ▸ New): no entities and no
+    /// blocks. Such a payload is the only thing we seed from the General prefs — an
+    /// opened file (any entities/blocks) is authoritative and left untouched.
+    static func isNewEmptyPayload(_ payload: DXFPayload) -> Bool {
+        payload.entities.isEmpty && payload.blocks.blocks.isEmpty
+    }
+
+    /// Returns `payload` with its `$INSUNITS` set from the stored default-unit raw
+    /// value, ONLY when the payload is a new empty drawing that does not already carry
+    /// an explicit `$INSUNITS`. An opened drawing (or one that already declares units)
+    /// is returned unchanged. The raw value is decoded forgivingly (unknown code →
+    /// the default unit), so a corrupt stored value can never produce a bad header.
+    static func seededPayload(_ payload: DXFPayload, defaultUnitRaw: Int) -> DXFPayload {
+        guard isNewEmptyPayload(payload), !payload.graphicVariables.has("$INSUNITS") else {
+            return payload
+        }
+        var seeded = payload
+        seeded.graphicVariables.unit = AppSettings.unit(fromRaw: defaultUnitRaw)
+        return seeded
+    }
+
+    /// Maps a stored default-template PREF id (the `GeneralSettingsTab` picker tags:
+    /// `"blank"`, `"a4_mm"`, `"letter_inch"`, `"iso_a3"`) to a bundled template
+    /// RESOURCE name (`DrawingTemplate.resourceName`), or `nil` for "no template"
+    /// (`"blank"`, empty, or an unknown id → seed units only, no pre-population). This
+    /// is the bridge between the Preferences picker's stable tags and the on-disk
+    /// template files, kept as a pure String→String? table so it is unit-tested
+    /// without touching the bundle/file system.
+    static func templateResourceName(forPrefID id: String) -> String? {
+        switch id {
+        case "a4_mm":       return "Titleblock_A4_Metric"
+        case "letter_inch": return "Blank_Imperial"
+        case "iso_a3":      return "Blank_Metric_A3"
+        // "blank" / "" / unknown → no template (just seed the preferred units).
+        default:            return nil
+        }
+    }
+}
+
 // MARK: - Payload ↔ live drawing bridge (MAIN ACTOR ONLY)
 
 extension CADDrawing {

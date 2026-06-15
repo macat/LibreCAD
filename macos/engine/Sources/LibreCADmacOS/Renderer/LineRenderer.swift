@@ -57,6 +57,94 @@ private struct ImageParams {
     var opacity: Float
 }
 
+// MARK: - Render preferences (Rendering ▸ antialias / LOD / default line width)
+
+/// The resolved Rendering preferences the renderer consumes, derived purely from
+/// the stored `AppSettings` values (or their defaults when unset). Kept as a small
+/// VALUE type with NO Metal dependency so it is unit-testable headlessly
+/// (`PrefsWiringTests`) and so a missing pref always falls back to today's behavior.
+///
+/// What each knob drives at the render path:
+///   • `antialias`        — whether the analytic edge-AA stroke keeps its soft
+///                          ~half-pixel feather. When OFF, lines are drawn at a
+///                          crisp minimum width with no AA bleed (a hard hairline).
+///   • `quality` (LOD)    — scales the tessellation tolerance the resolve context
+///                          uses: High = finest curves, Low = coarser (fewer
+///                          segments, faster). Maps to a multiplier on the engine's
+///                          default tolerance.
+///   • `lineHalfWidthPx`  — the per-segment device-pixel half-width every stroke is
+///                          packed with. Derived from the stored default line width
+///                          (mm) via the points-per-mm scale; 0 mm (the sentinel)
+///                          keeps the renderer's hairline default.
+struct RenderPrefs: Equatable, Sendable {
+    var antialias: Bool
+    var quality: RenderQuality
+    /// Stored default line width in millimeters (0 = "by default" → hairline).
+    var defaultLineWidthMM: Double
+
+    /// Today's defaults — what an untouched install resolves to. Identical to the
+    /// pre-prefs renderer behavior (AA on, high LOD, hairline default width).
+    static let standard = RenderPrefs(
+        antialias: AppSettings.Default.antialias,
+        quality: AppSettings.Default.renderQuality,
+        defaultLineWidthMM: AppSettings.Default.defaultLineWidthMM)
+
+    /// Reads the three Rendering prefs from `UserDefaults` (the `@AppStorage` keys),
+    /// each falling back to its `AppSettings.Default` when the key is unset — so a
+    /// user who never opened Preferences gets `.standard` (today's behavior).
+    static func fromDefaults(_ d: UserDefaults = .standard) -> RenderPrefs {
+        let antialias = d.object(forKey: AppSettings.Key.antialias) == nil
+            ? AppSettings.Default.antialias
+            : d.bool(forKey: AppSettings.Key.antialias)
+        let quality = (d.string(forKey: AppSettings.Key.renderQuality)
+            .flatMap(RenderQuality.init(rawValue:))) ?? AppSettings.Default.renderQuality
+        let widthMM = d.object(forKey: AppSettings.Key.defaultLineWidthMM) == nil
+            ? AppSettings.Default.defaultLineWidthMM
+            : d.double(forKey: AppSettings.Key.defaultLineWidthMM)
+        return RenderPrefs(antialias: antialias, quality: quality,
+                           defaultLineWidthMM: AppSettings.clampLineWidthMM(widthMM))
+    }
+
+    /// The device-pixel half-width every stroke is packed with, for a given backing
+    /// `scale` (points→pixels, e.g. 2 on Retina). A 0 mm stored width keeps the
+    /// renderer's hairline default (`RendererGeometry.defaultHalfWidthPx`); a
+    /// positive width converts mm→points (1 pt ≈ 1/72 in ≈ 0.3528 mm) → device px.
+    /// When antialias is OFF we floor the half-width to a crisp 0.5 px (a 1 px hard
+    /// stroke) so a hairline reads sharp without the AA feather.
+    func lineHalfWidthPx(backingScale scale: CGFloat) -> Float {
+        let s = Float(scale > 0 ? scale : 1)
+        let base: Float
+        if defaultLineWidthMM > 0 {
+            // mm → points → device px, halved (the instance stores HALF width).
+            let pts = Float(defaultLineWidthMM) / RenderPrefs.mmPerPoint
+            base = max(RendererGeometry.defaultHalfWidthPx, pts * s * 0.5)
+        } else {
+            base = RendererGeometry.defaultHalfWidthPx
+        }
+        // No-AA: floor to a crisp 0.5px half-width (1px hard stroke) so the line is
+        // sharp, never thinner than a visible pixel.
+        return antialias ? base : max(0.5, base)
+    }
+
+    /// Millimeters per typographic point (1 pt = 1/72 inch, 1 inch = 25.4 mm).
+    static let mmPerPoint: Float = 25.4 / 72.0
+
+    /// The engine's default tessellation tolerance (mirrors the default argument of
+    /// `CADDrawing.makeResolveContext`) — the High-LOD value the quality tier scales.
+    static let defaultTessellationTolerance: Double = 0.05
+
+    /// The tessellation tolerance multiplier for this LOD tier, applied to the
+    /// engine's default tolerance (smaller = finer curves). High keeps the default
+    /// (1×), Medium is a touch coarser, Low coarsest (fewer segments → faster).
+    var tessellationToleranceScale: Double {
+        switch quality {
+        case .high:   return 1.0
+        case .medium: return 2.0
+        case .low:    return 4.0
+        }
+    }
+}
+
 @MainActor
 final class LineRenderer: NSObject, MTKViewDelegate {
 
@@ -65,9 +153,21 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     /// Shared canvas state (model, viewport, index, selection, snap).
     private let model: CanvasModel
 
+    /// The resolved Rendering preferences (antialias / LOD / default line width),
+    /// read once from `UserDefaults` at init (each key falls back to its default
+    /// when unset → today's behavior for a user who never opened Preferences). The
+    /// half-width feeds every packed stroke; the LOD scales the resolve tolerance.
+    private let renderPrefs: RenderPrefs = .fromDefaults()
+
     /// Grid spacing chosen on the last frame (fed to snapping). Read by the
     /// interaction layer so grid-snap matches the drawn grid.
     private(set) var lastGridSpacing: Double = 1
+
+    /// The latest backing scale (points→device-pixels) seen from the view, used to
+    /// convert the stored default line width (mm) into device pixels. Updated each
+    /// frame from the drawable; defaults to 2 (a typical Retina display) so the very
+    /// first frame before a window exists is still reasonable.
+    private var backingScale: CGFloat = 2
 
     // MARK: Metal objects
 
@@ -294,6 +394,10 @@ final class LineRenderer: NSObject, MTKViewDelegate {
         guard let drawable = view.currentDrawable,
               let passDescriptor = view.currentRenderPassDescriptor else { return }
 
+        // Track the current backing scale so the stored default line width (mm) is
+        // converted to the right device-pixel half-width on this display.
+        backingScale = view.window?.backingScaleFactor ?? view.layer?.contentsScale ?? backingScale
+
         // Refresh model/overlay geometry if needed (NOT on matrix-only pan/zoom).
         let visibleRect = model.viewport.visibleWorldRect
         rebuildLineInstancesIfNeeded(visibleRect: visibleRect)
@@ -462,8 +566,13 @@ final class LineRenderer: NSObject, MTKViewDelegate {
         let identity: (SIMD4<Float>) -> SIMD4<Float> = { $0 }
         let colorTransform: (SIMD4<Float>) -> SIMD4<Float> =
             OverlayStyle.invertNearWhiteEntities ? RendererGeometry.autoInvertWhite : identity
+        // The stroke half-width comes from the Rendering prefs (default line width +
+        // antialias toggle), converted to device pixels for this display. A 0 mm
+        // stored width / untouched prefs resolve to the renderer's hairline default.
+        let halfWidthPx = renderPrefs.lineHalfWidthPx(backingScale: backingScale)
         for poly in geo.polylines {
             RendererGeometry.appendInstances(for: poly, renderOrigin: origin,
+                                             halfWidthPx: halfWidthPx,
                                              colorTransform: colorTransform,
                                              into: &instanceScratch)
         }
@@ -485,7 +594,13 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     private func resolveContext(modelChanged: Bool) -> ResolveContext {
         if modelChanged || cachedResolveContext == nil
             || resolveContextVersion != model.modelVersion {
-            let ctx = model.drawing.makeResolveContext()
+            // Scale the engine's default tessellation tolerance by the render-quality
+            // (LOD) tier: High keeps the fine default, Medium/Low coarsen it (fewer
+            // curve segments → faster). Untouched prefs resolve to High (1×) so the
+            // default look is unchanged.
+            let tolerance = RenderPrefs.defaultTessellationTolerance
+                * renderPrefs.tessellationToleranceScale
+            let ctx = model.drawing.makeResolveContext(tessellationTolerance: tolerance)
             cachedResolveContext = ctx
             resolveContextVersion = model.modelVersion
             return ctx
