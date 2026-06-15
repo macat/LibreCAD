@@ -336,4 +336,91 @@ struct ToolOptionsU2Tests {
         // First click only fixes a corner (no exact-size commit).
         #expect(tool.handle(.click(Vector(0, 0)), context: .empty) == .none)
     }
+
+    // MARK: - Wire-wave-3 configurable-tool plumbing (mirrored — model not importable)
+    //
+    // The SAME downcast-and-set the model's `applyToolConfig` performs for the wave-3
+    // tools, mirrored over the public tool surface so the option → live-tool path is
+    // proven without importing the executable-target `CanvasModel`.
+
+    @Test("plumbing: Align scaleToFit toggles between scale-to-fit and rotate-only")
+    func plumbingAlignScaleToFit() {
+        guard var on = ToolKind.align.makeTool() as? AlignTool,
+              var off = ToolKind.align.makeTool() as? AlignTool else {
+            Issue.record("align makeTool did not produce an AlignTool"); return
+        }
+        on.scaleToFit = true
+        off.scaleToFit = false
+        #expect(on.scaleToFit == true)
+        #expect(off.scaleToFit == false)
+        // The align map honors the flag: a 1→2 source mapped onto a 1→4 destination
+        // scales ×2 under scale-to-fit, ×1 (rotate-only) when off.
+        let withFit = AlignTool.alignTransform(
+            src1: Vector(0, 0), dst1: Vector(0, 0),
+            src2: Vector(1, 0), dst2: Vector(4, 0), scaleToFit: true)
+        let noFit = AlignTool.alignTransform(
+            src1: Vector(0, 0), dst1: Vector(0, 0),
+            src2: Vector(1, 0), dst2: Vector(4, 0), scaleToFit: false)
+        #expect(abs((withFit?.a ?? 0) - 4) < 1e-9)   // ×4 scale on +X
+        #expect(abs((noFit?.a ?? 0) - 1) < 1e-9)     // unit scale (rotate-only)
+    }
+
+    @Test("plumbing: an ArrayPath configured with count=3 distributes 3 copies")
+    func plumbingArrayPathCount() {
+        guard var tool = ToolKind.arrayPath.makeTool() as? ArrayPathTool else {
+            Issue.record("arrayPath makeTool did not produce an ArrayPathTool"); return
+        }
+        // Mirror of the applyToolConfig arm: count + alignToTangent (path preserved).
+        tool.config = ArrayPathTool.Config(count: 3, alignToTangent: false, path: tool.config.path)
+        #expect(tool.config.count == 3)
+        #expect(tool.config.alignToTangent == false)
+        // A straight horizontal path, one selected item → 3 equal-spaced copy transforms.
+        let path = EntityRecord(id: .placeholder,
+                                kind: .line(LineData(start: Vector(0, 0), end: Vector(10, 0))))
+        let item = EntityRecord(id: .placeholder,
+                                kind: .point(PointData(position: Vector(0, 0))))
+        let transforms = ArrayPathTool.copyTransforms(
+            captured: [item], path: path, config: tool.config)
+        #expect(transforms.count == 3)
+    }
+
+    @Test("plumbing: a Leader configured with text commits an annotation; empty ⇒ bare")
+    func plumbingLeaderText() {
+        guard var withText = ToolKind.leader.makeTool() as? LeaderTool,
+              var bare = ToolKind.leader.makeTool() as? LeaderTool else {
+            Issue.record("leader makeTool did not produce a LeaderTool"); return
+        }
+        // Mirror of the applyToolConfig arm: "" ⇒ nil annotation; non-empty ⇒ that text.
+        withText.annotationText = "R5"
+        withText.textHeight = 3
+        bare.annotationText = nil
+        let labeled = committedLeader(buildLeader(&withText))
+        let plain = committedLeader(buildLeader(&bare))
+        #expect(labeled?.annotation != nil, "leader with text must carry an annotation")
+        #expect(plain?.annotation == nil, "bare leader must carry no annotation")
+    }
+
+    @Test("plumbing: a BaselineDim re-minted with a custom spacing carries it")
+    func plumbingBaselineSpacing() {
+        // Mirror of the applyToolConfig arm: BaselineDimTool is re-minted with the spacing.
+        let tool = BaselineDimTool(baselineSpacing: 12.5)
+        #expect(tool.baselineSpacing == 12.5)
+        // And the default mint uses the documented DIMDLI fallback.
+        let dflt = ToolKind.baselineDim.makeTool() as? BaselineDimTool
+        #expect(dflt?.baselineSpacing == BaselineDimTool.defaultBaselineSpacing)
+    }
+
+    /// Drives a LeaderTool through two vertices + commit and extracts the LeaderData.
+    private func buildLeader(_ tool: inout LeaderTool) -> ToolOutcome {
+        _ = tool.handle(.click(Vector(0, 0)), context: .empty)
+        _ = tool.handle(.click(Vector(5, 5)), context: .empty)
+        return tool.handle(.commit, context: .empty)
+    }
+
+    private func committedLeader(_ outcome: ToolOutcome) -> LeaderData? {
+        guard case .commit(let edits) = outcome, edits.count == 1,
+              case .add(let record) = edits[0],
+              case .leader(let d) = record.kind else { return nil }
+        return d
+    }
 }

@@ -242,6 +242,35 @@ struct InspectorView: View {
             Section("Divide Options") {
                 intRow("Pieces", $model.divideCount) { reapplyTool() }
             }
+
+        // MARK: Wire-wave-3 configurable tools
+
+        case .align:
+            Section("Align Options") {
+                Toggle("Scale to fit", isOn: $model.alignScaleToFit)
+                    .onChange(of: model.alignScaleToFit) { _, _ in reapplyTool() }
+            }
+        case .arrayPath:
+            Section("Array Along Path Options") {
+                intRow("Count", $model.arrayPathCount) { reapplyTool() }
+                Toggle("Align to path", isOn: $model.arrayPathAlignToTangent)
+                    .onChange(of: model.arrayPathAlignToTangent) { _, _ in reapplyTool() }
+            }
+        case .leader:
+            Section("Leader Options") {
+                LabeledContent("Text") {
+                    TextField("Annotation", text: $model.leaderText)
+                        .frame(width: 140)
+                        .onSubmit { reapplyTool() }
+                        .onChange(of: model.leaderText) { _, _ in reapplyTool() }
+                }
+                numberRow("Text height", $model.leaderTextHeight) { reapplyTool() }
+            }
+        case .baselineDim:
+            Section("Baseline Dimension Options") {
+                numberRow("Spacing", $model.baselineSpacing) { reapplyTool() }
+            }
+
         default:
             EmptyView()
         }

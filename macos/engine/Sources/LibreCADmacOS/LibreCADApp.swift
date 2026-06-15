@@ -283,6 +283,16 @@ struct LibreCADApp: App {
                 Button("Insert Block") { activateTool?(.insert) }
                     .keyboardShortcut("i", modifiers: .shift)
                     .disabled(activateTool == nil)
+                // Wire-wave-3 construction lines. Both pick a base + a direction point;
+                // XLine commits an INFINITE line, Ray a SEMI-infinite one. They take free
+                // OPTION chords (⌥I / ⌥Y) — the bare/⇧ twins of I are taken (I Aligned dim
+                // / ⇧I Insert Block) and Y is unassigned.
+                Button("Construction Line") { activateTool?(.xline) }
+                    .keyboardShortcut("i", modifiers: .option)
+                    .disabled(activateTool == nil)
+                Button("Ray") { activateTool?(.ray) }
+                    .keyboardShortcut("y", modifiers: .option)
+                    .disabled(activateTool == nil)
 
                 Divider()
                 // Modify tools (act on the current selection).
@@ -344,6 +354,16 @@ struct LibreCADApp: App {
                 Button("Explode Text") { activateTool?(.explodeText) }
                     .keyboardShortcut("e", modifiers: .shift)
                     .disabled(activateTool == nil)
+                // Wire-wave-3 modify tools. Align (⌥A) maps the selection onto a 2-point
+                // source→destination reference; Array Along Path (⌥P) distributes copies
+                // along a picked path. Free OPTION chords (bare/⇧ A and P are taken —
+                // A Arc / ⇧A Array, P Polyline / ⇧P Edit Polyline).
+                Button("Align") { activateTool?(.align) }
+                    .keyboardShortcut("a", modifiers: .option)
+                    .disabled(activateTool == nil)
+                Button("Array Along Path") { activateTool?(.arrayPath) }
+                    .keyboardShortcut("p", modifiers: .option)
+                    .disabled(activateTool == nil)
 
                 Divider()
                 // Edit tools (pick entities under the cursor; no pre-selection).
@@ -401,6 +421,22 @@ struct LibreCADApp: App {
                         .disabled(activateTool == nil)
                     Button("Angular Dimension (3-point)") { activateTool?(.angular3pDim) }
                         .keyboardShortcut("n", modifiers: .option)
+                        .disabled(activateTool == nil)
+
+                    Divider()
+                    // Wire-wave-3 annotate tools. Leader (⌥L) is a callout (arrow + path
+                    // + optional attached text); Baseline (⌥D) stacks linear dims from a
+                    // common origin; Continue (⌥C) chains them end-to-start in line. Free
+                    // OPTION chords (the bare/⇧ twins of L/D/C are taken — L Line / ⇧L
+                    // Lengthen, D Linear dim / ⇧D Divide, C Circle / ⇧C Copy).
+                    Button("Leader") { activateTool?(.leader) }
+                        .keyboardShortcut("l", modifiers: .option)
+                        .disabled(activateTool == nil)
+                    Button("Baseline Dimension") { activateTool?(.baselineDim) }
+                        .keyboardShortcut("d", modifiers: .option)
+                        .disabled(activateTool == nil)
+                    Button("Continue Dimension") { activateTool?(.continueDim) }
+                        .keyboardShortcut("c", modifiers: .option)
                         .disabled(activateTool == nil)
                 }
 

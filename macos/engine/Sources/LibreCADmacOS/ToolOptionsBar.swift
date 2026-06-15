@@ -80,7 +80,9 @@ struct ToolOptionsBar: View {
     private var hasOptions: Bool {
         switch model.activeToolKind {
         case .polygon, .rectangle, .circle, .arc, .point, .text,
-             .fillet, .chamfer, .array, .divide:
+             .fillet, .chamfer, .array, .divide,
+             // Wire-wave-3 configurable tools.
+             .align, .arrayPath, .leader, .baselineDim:
             return true
         default:
             return false
@@ -183,12 +185,47 @@ struct ToolOptionsBar: View {
         case .divide:
             stepperField("Pieces", value: $model.divideCount, range: 2...1000, width: 56)
 
+        // MARK: Wire-wave-3 configurable tools
+
+        case .align:
+            Toggle("Scale to fit", isOn: $model.alignScaleToFit)
+                .toggleStyle(.checkbox)
+                .onChange(of: model.alignScaleToFit) { _, _ in apply() }
+
+        case .arrayPath:
+            stepperField("Count", value: $model.arrayPathCount, range: 1...1000, width: 56)
+            Toggle("Align to path", isOn: $model.arrayPathAlignToTangent)
+                .toggleStyle(.checkbox)
+                .onChange(of: model.arrayPathAlignToTangent) { _, _ in apply() }
+
+        case .leader:
+            textField("Text", value: $model.leaderText, width: 160)
+            numberField("Height", value: $model.leaderTextHeight, width: 64)
+
+        case .baselineDim:
+            numberField("Spacing", value: $model.baselineSpacing, width: 70)
+
         default:
             EmptyView()
         }
     }
 
     // MARK: - Small control builders (compact, inline — sized for a single row)
+
+    /// A labeled plain-text `String` field (e.g. the Leader annotation text).
+    /// Re-applies the tool config on every change so the live tool tracks the value.
+    @ViewBuilder
+    private func textField(_ label: String, value: Binding<String>, width: CGFloat) -> some View {
+        HStack(spacing: 4) {
+            Text(label).font(.callout).foregroundStyle(.secondary)
+            TextField(label, text: value)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: width)
+                .labelsHidden()
+                .onChange(of: value.wrappedValue) { _, _ in apply() }
+                .onSubmit { apply() }
+        }
+    }
 
     /// A labeled numeric `Double` field. Re-applies the tool config on every change
     /// so the live tool / preview tracks the value as it is typed.

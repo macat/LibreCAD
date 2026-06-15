@@ -149,6 +149,28 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     /// The Explode-Insert modify tool (`ExplodeInsertTool`) — replace a selected block
     /// reference (`.insert`) with its block's member entities (per MINSERT cell).
     case explodeInsert
+    // --- Wire-wave-3 tools (wired into the UI in this wave) ---
+    /// The infinite construction-line tool (`XLineTool`) — pick a base + a direction
+    /// point, commit an infinite `.xline` (Draw ▸ construction-line subgroup).
+    case xline
+    /// The semi-infinite construction-line tool (`RayTool`) — pick a base + a
+    /// direction point, commit a `.ray` (Draw ▸ construction-line subgroup).
+    case ray
+    /// The Align modify tool (`AlignTool`) — map the selection onto a 2-point
+    /// source→destination reference (translate + rotate + optional scale-to-fit).
+    case align
+    /// The Array-along-path modify tool (`ArrayPathTool`) — distribute N copies of the
+    /// selection at equal arc-length stations along a picked path entity.
+    case arrayPath
+    /// The Leader annotation tool (`LeaderTool`) — click callout vertices (arrow at the
+    /// first), commit a `.leader` with an optional attached text annotation.
+    case leader
+    /// The Baseline linear-dimension tool (`BaselineDimTool`) — chain dims from a
+    /// common baseline origin, each stepped one DIMDLI further out (a stacked run).
+    case baselineDim
+    /// The Continue linear-dimension tool (`ContinueDimTool`) — chain dims end-to-start
+    /// along one shared dimension-line level (a running, in-line chain).
+    case continueDim
     // Append new draw tools here (one `case` per tool) — see the collision note.
 
     /// A short title for the UI (toolbar button / menu).
@@ -200,6 +222,13 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .angular3pDim:    return "Angular Dimension (3-point)"
         case .createBlock:     return "Create Block"
         case .explodeInsert:   return "Explode Block"
+        case .xline:           return "Construction Line"
+        case .ray:             return "Ray"
+        case .align:           return "Align"
+        case .arrayPath:       return "Array Along Path"
+        case .leader:          return "Leader"
+        case .baselineDim:     return "Baseline Dimension"
+        case .continueDim:     return "Continue Dimension"
         // Append a title arm per new case.
         }
     }
@@ -266,6 +295,17 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         // injects the real `blockMembers` provider in `CanvasModel.applyToolConfig`
         // (the same construction-injection InsertTool uses for its preview members).
         case .explodeInsert:   return ExplodeInsertTool()
+        // Wire-wave-3 construction-line / annotate / chained-dim tools. Each is minted
+        // with its default config; the app pushes the user's options-bar values onto the
+        // configurable ones (Align scale-to-fit, ArrayPath count/tangent, Leader text,
+        // Baseline spacing) via `CanvasModel.applyToolConfig`.
+        case .xline:           return XLineTool()
+        case .ray:             return RayTool()
+        case .align:           return AlignTool()
+        case .arrayPath:       return ArrayPathTool()
+        case .leader:          return LeaderTool()
+        case .baselineDim:     return BaselineDimTool()
+        case .continueDim:     return ContinueDimTool()
         // Append a `case <kind>: return <Name>Tool()` arm per new tool.
         }
     }

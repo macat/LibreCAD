@@ -79,6 +79,9 @@ struct ToolKindWiringTests {
             .join, .explodeText,                                   // wire-wave-1 (modify)
             .ordinateDim, .arcLengthDim, .angular3pDim,            // wire-wave-2 (dimension subtypes)
             .createBlock, .explodeInsert,                          // wire-wave-2 (blocks)
+            .xline, .ray,                                          // wire-wave-3 (construction lines)
+            .align, .arrayPath,                                    // wire-wave-3 (modify)
+            .leader, .baselineDim, .continueDim,                   // wire-wave-3 (annotate)
         ]
         #expect(Set(ToolKind.allCases) == expected,
                 "ToolKind.allCases (\(ToolKind.allCases)) != expected roster")
@@ -252,6 +255,30 @@ struct ToolKindWiringTests {
         }
     }
 
+    /// The seven wire-wave-3 additions: the two construction-line tools (XLine / Ray),
+    /// the two modify tools (Align / Array Along Path), and the three annotate tools
+    /// (Leader / Baseline / Continue). Each mints a non-nil tool whose own title matches
+    /// the kind's UI title, so the toolbar/menu label and the HUD prompt agree.
+    @Test func waveThreeKindsAreWiredWithMatchingTitles() {
+        let wave3: [ToolKind: String] = [
+            .xline:       "Construction Line",
+            .ray:         "Ray",
+            .align:       "Align",
+            .arrayPath:   "Array Along Path",
+            .leader:      "Leader",
+            .baselineDim: "Baseline Dimension",
+            .continueDim: "Continue Dimension",
+        ]
+        for (kind, title) in wave3 {
+            #expect(kind.title == title,
+                    "ToolKind.\(kind).title (\(kind.title)) != \(title)")
+            let tool = kind.makeTool()
+            #expect(tool != nil, "ToolKind.\(kind) minted a nil Tool")
+            #expect(tool?.title == title,
+                    "ToolKind.\(kind) tool.title (\(tool?.title ?? "nil")) != \(title)")
+        }
+    }
+
     /// `.createBlock` mints a CreateBlockTool that starts with NO pending request
     /// (nothing is created until a base point is committed) — a freshly-activated tool
     /// applies nothing. Guards the "request is captured on commit, not on mint"
@@ -344,6 +371,17 @@ struct ToolKindWiringTests {
             (.angular3pDim, "n", false, true),
             (.createBlock, "b", false, true),
             (.explodeInsert, "x", false, true),
+            // wire-wave-3 — two construction lines, two modify tools, three annotate
+            // tools, all on free OPTION chords (the bare/⇧ twins of I/Y/A/P/L/D/C are
+            // taken, except bare Y which is unassigned). These are menu shortcuts
+            // (LibreCADApp Tools menu); the canvas keymap is unchanged this wave.
+            (.xline, "i", false, true),
+            (.ray, "y", false, true),
+            (.align, "a", false, true),
+            (.arrayPath, "p", false, true),
+            (.leader, "l", false, true),
+            (.baselineDim, "d", false, true),
+            (.continueDim, "c", false, true),
         ]
         // No two entries share a (key, shift, option) chord.
         let chords = keymap.map { "\($0.1)\($0.2 ? "+shift" : "")\($0.3 ? "+option" : "")" }
@@ -375,6 +413,10 @@ struct ToolKindWiringTests {
         // Every wire-wave-2 kind (3 dimension subtypes + 2 block tools) has a chord.
         for k in [ToolKind.ordinateDim, .arcLengthDim, .angular3pDim, .createBlock, .explodeInsert] {
             #expect(kinds.contains(k), "wire-wave-2 kind \(k) has no keyboard shortcut")
+        }
+        // Every wire-wave-3 kind (2 construction lines + 2 modify + 3 annotate) has a chord.
+        for k in [ToolKind.xline, .ray, .align, .arrayPath, .leader, .baselineDim, .continueDim] {
+            #expect(kinds.contains(k), "wire-wave-3 kind \(k) has no keyboard shortcut")
         }
     }
 }

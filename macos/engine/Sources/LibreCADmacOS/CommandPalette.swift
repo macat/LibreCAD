@@ -135,6 +135,15 @@ enum CommandRegistry {
         case .angular3pDim:    return ("angle", "⌥N")
         case .createBlock:     return ("square.on.square.dashed", "⌥B")
         case .explodeInsert:   return ("square.split.2x2", "⌥X")
+        // Wire-wave-3: construction lines (⌥I/⌥Y), Align (⌥A) + Array Along Path (⌥P),
+        // and the annotate tools — Leader (⌥L), Baseline (⌥D), Continue (⌥C).
+        case .xline:           return ("line.diagonal.arrow", "⌥I")
+        case .ray:             return ("arrow.up.right", "⌥Y")
+        case .align:           return ("arrow.up.and.down.righttriangle.up.righttriangle.down", "⌥A")
+        case .arrayPath:       return ("point.topleft.down.to.point.bottomright.curvepath", "⌥P")
+        case .leader:          return ("text.bubble", "⌥L")
+        case .baselineDim:     return ("arrow.up.and.line.horizontal.and.arrow.down", "⌥D")
+        case .continueDim:     return ("arrow.left.and.line.vertical.and.arrow.right", "⌥C")
         }
     }
 

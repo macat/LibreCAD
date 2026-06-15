@@ -236,6 +236,29 @@ final class CanvasModel {
     /// Text tool: the default cap height (world units) new text is authored at.
     var textHeight: Double = TextTool.defaultHeight
 
+    // MARK: Wire-wave-3 tool options (surfaced by the Tool Options bar / Inspector)
+
+    /// Align tool: whether the align map uniformly scales the selection so the source
+    /// segment's length matches the destination segment's (the AutoCAD default), vs a
+    /// rotate-only map that preserves size. `applyToolConfig` pushes it onto `AlignTool`.
+    var alignScaleToFit: Bool = true
+
+    /// Array-along-path tool: how many copies to distribute along the picked path, and
+    /// whether each copy is rotated to the local path tangent (vs axis-aligned).
+    /// `applyToolConfig` maps these onto `ArrayPathTool.Config`.
+    var arrayPathCount: Int = 5
+    var arrayPathAlignToTangent: Bool = true
+
+    /// Leader tool: the optional attached annotation text (empty ⇒ a bare leader) and
+    /// its cap height (world units). `applyToolConfig` pushes them onto `LeaderTool`.
+    var leaderText: String = ""
+    var leaderTextHeight: Double = 2.5
+
+    /// Baseline dimension tool: the DIMDLI spacing (world units) each successive
+    /// dimension line is stepped further out by. `applyToolConfig` maps it onto
+    /// `BaselineDimTool.baselineSpacing`.
+    var baselineSpacing: Double = BaselineDimTool.defaultBaselineSpacing
+
     // MARK: Layer defaults (Document Settings — app policy for new layers)
 
     /// The default color a NEW layer is born with (Document Settings ▸ Layers).
@@ -623,6 +646,29 @@ final class CanvasModel {
             let members = blockMembersSnapshot()
             tool = ExplodeInsertTool(blockMembers: { name in members[name] })
 
+        // MARK: Wire-wave-3 tool options
+
+        case var t as AlignTool:
+            t.scaleToFit = alignScaleToFit
+            tool = t
+        case var t as ArrayPathTool:
+            // Preserve any path already picked this run; only update the dialog params.
+            t.config = ArrayPathTool.Config(
+                count: Swift.max(1, arrayPathCount),
+                alignToTangent: arrayPathAlignToTangent,
+                path: t.config.path
+            )
+            tool = t
+        case var t as LeaderTool:
+            // Empty text ⇒ a bare leader (the tool maps "" to no annotation).
+            t.annotationText = leaderText.isEmpty ? nil : leaderText
+            t.textHeight = Swift.max(InspectorEdits.minTextHeight, leaderTextHeight)
+            tool = t
+        case is BaselineDimTool:
+            // BaselineDimTool clamps/stores `baselineSpacing` at construction, so
+            // re-mint with the configured spacing (mirrors the DivideTool/ArcTool pattern).
+            tool = BaselineDimTool(baselineSpacing: baselineSpacing)
+
         default:
             break
         }
@@ -637,11 +683,14 @@ final class CanvasModel {
         let savedStatus = toolStatus
         applyToolConfig()
         // Some tools are RE-MINTED by `applyToolConfig` (DivideTool's count, ArcTool's
-        // mode are fixed at construction), which resets their state/status to the
-        // initial prompt. For those, take the fresh tool's status; for the in-place
-        // tools (which keep their state) restore the prior prompt text.
-        if tool is DivideTool || tool is ArcTool { toolStatus = tool?.status ?? "" }
-        else { toolStatus = savedStatus }
+        // mode, BaselineDimTool's spacing are fixed at construction), which resets their
+        // state/status to the initial prompt. For those, take the fresh tool's status;
+        // for the in-place tools (which keep their state) restore the prior prompt text.
+        if tool is DivideTool || tool is ArcTool || tool is BaselineDimTool {
+            toolStatus = tool?.status ?? ""
+        } else {
+            toolStatus = savedStatus
+        }
     }
 
     /// Forwards a snapped world point as a tool input, applying any committed
