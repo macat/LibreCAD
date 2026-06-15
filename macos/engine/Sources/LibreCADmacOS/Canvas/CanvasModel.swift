@@ -149,6 +149,45 @@ final class CanvasModel {
     /// like `1,,2` shows "Expected x,y" instead of silently doing nothing.
     private(set) var lastCommandError: String?
 
+    // MARK: Command bar state (the bottom AutoCAD-style tool launcher)
+
+    /// The live text typed into the bottom command BAR's tool-filter field. While
+    /// empty the bar shows the adaptive default chip set; as it fills, the chips
+    /// narrow to the fuzzy matches (see `ToolSuggester`). Distinct from the
+    /// coordinate/command-line text the view owns for `submitCommandText` — this one
+    /// drives ONLY the tool-launcher filter (Phase 1). Observed so the chip row
+    /// recomputes as the user types.
+    var commandBarQuery: String = ""
+
+    /// The most-recently-used tools, MOST-RECENT FIRST, that bias the adaptive chip
+    /// set toward the user's habits. Seeded from `@AppStorage` by the view on appear
+    /// and re-persisted by it whenever this changes (the persistence lives in the
+    /// view because `@AppStorage` is a SwiftUI-only wrapper); the LIST and its
+    /// promote-on-use logic live here (via the pure `ToolSuggester.updatedMRU`) so the
+    /// "activation updates MRU" behavior is unit-testable on the model. Observed so
+    /// the chip row reflects a freshly-used tool.
+    var commandBarMRU: [ToolKind] = []
+
+    /// The ordered tools the command bar should show as chips right now — the pure
+    /// `ToolSuggester` applied to the live query, the current selection state, and
+    /// the MRU. Empty query ⇒ the adaptive default set; otherwise the fuzzy matches.
+    /// A derived, side-effect-free read the chip row binds to.
+    var commandBarSuggestions: [ToolKind] {
+        ToolSuggester.suggestions(
+            query: commandBarQuery,
+            hasSelection: !selection.isEmpty,
+            mru: commandBarMRU
+        )
+    }
+
+    /// The top-ranked suggestion for the current query — what ⏎ activates. `nil` when
+    /// the query is empty (⏎ on an empty launcher does nothing) or nothing matches.
+    var commandBarTopMatch: ToolKind? {
+        let trimmed = commandBarQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return commandBarSuggestions.first
+    }
+
     // MARK: Selection interaction state (UX-plan U5 — marquee + hover)
 
     /// The entity currently UNDER the cursor in select mode (the hover-highlight
@@ -660,6 +699,29 @@ final class CanvasModel {
         imagePixelWidth = pixelWidth > 0 ? pixelWidth : 1
         imagePixelHeight = pixelHeight > 0 ? pixelHeight : 1
         activateTool(.image)
+    }
+
+    /// Activates `kind` FROM the command bar: it activates the tool through the SAME
+    /// `activateTool` path the toolbar/menu/palette use (so behavior is identical),
+    /// promotes `kind` to the front of the MRU (the pure `ToolSuggester.updatedMRU`,
+    /// deduping + capping), and clears the launcher query so the chip row returns to
+    /// the adaptive set. It does NOT handle `.image` (that needs the View-layer
+    /// file-picker — the bar special-cases `.image` to its own picker closure and
+    /// records the MRU via `recordCommandBarUse` instead), so callers route `.image`
+    /// separately to keep modals out of the model (headless-test-safe).
+    func activateToolFromCommandBar(_ kind: ToolKind) {
+        recordCommandBarUse(kind)
+        activateTool(kind)
+        commandBarQuery = ""
+    }
+
+    /// Promotes `kind` to the front of the command bar's MRU (most-recent first,
+    /// deduped, capped) via the pure `ToolSuggester.updatedMRU`. Split out from
+    /// `activateToolFromCommandBar` so the `.image` flow — which activates via the
+    /// View-layer file-picker, NOT `activateTool(.image)` — can still record its use
+    /// in the MRU. The view persists the updated list to `@AppStorage`.
+    func recordCommandBarUse(_ kind: ToolKind) {
+        commandBarMRU = ToolSuggester.updatedMRU(commandBarMRU, used: kind)
     }
 
     /// Pushes the Inspector's stored tool options onto the live tool value. The
