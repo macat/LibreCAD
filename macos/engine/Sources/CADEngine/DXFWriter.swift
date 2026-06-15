@@ -26,9 +26,13 @@
 //  resolve() regenerates the visual on read. MTEXT writes the preserved raw inline-coded string
 //  (or, when the run tree was edited and no raw is stored, a reconstruction of
 //  the MTEXT codes from the run tree). MTEXT only exists for R2000+; at R12 it is
-//  dropped (counted as skipped) by the C bridge. HATCH writes its boundary loops as edge (line)
-//  boundaries (libdxfrw's polyline-boundary writer is an unimplemented stub), so
-//  boundary-arc bulges are not preserved across the round-trip — see backlog.md.
+//  dropped (counted as skipped) by the C bridge. HATCH writes its boundary loops as edge
+//  boundaries (libdxfrw's polyline-boundary writer is an unimplemented stub): a zero-bulge
+//  boundary vertex becomes a straight LINE edge, and a NON-ZERO-bulge vertex becomes a real
+//  DRW_Arc edge (G6a) — so a bulged (arc) boundary loop is written as a TRUE DXF arc, not a
+//  flattened chord, and other CAD tools read a real curved boundary. (On OUR re-read the C
+//  bridge currently tessellates an ARC edge back into boundary sample points — the arc
+//  GEOMETRY round-trips; exact-bulge read-back is a documented follow-up.) See G6a.
 //
 //  The per-attribute mapping (ACI color, linetype name, lineweight) is the
 //  inverse of DXFReader.swift's, which is itself ported from LibreCAD's
@@ -214,7 +218,20 @@ extension CADEngine {
         // Build the flat POD model. `Builder` owns every C string / vertex array
         // the PODs borrow; it must outlive the write call below.
         let builder = PODBuilder()
-        let entityPODs = entities.map { builder.makeEntity($0) }
+        // Each entity maps to one POD; a `.leader` carrying an attached annotation
+        // ALSO emits the annotation as a SECOND, top-level DXF entity (TEXT/MTEXT)
+        // so other CAD tools can SEE the leader's text — see `leaderAnnotationPOD`
+        // for the libdxfrw code-340 hard-reference limit. The annotation POD
+        // inherits the leader's layer/pen.
+        var entityPODs: [LCEntity] = []
+        entityPODs.reserveCapacity(entities.count)
+        for record in entities {
+            entityPODs.append(builder.makeEntity(record))
+            if case .leader(let d) = record.kind,
+               let annotationPOD = builder.leaderAnnotationPOD(d, from: record) {
+                entityPODs.append(annotationPOD)
+            }
+        }
         let layerPODs = layers.layers.map { builder.makeLayer($0) }
         // The HEADER var POD (units + $DIM* incl. ext-line offsets) + the DIMSTYLE
         // table PODs, so a Save preserves units / dim styles / ext offsets.
@@ -652,12 +669,14 @@ private final class PODBuilder {
             // Emitted as a DXF LEADER (the C side writes DRW_Leader). The path
             // vertices map to the flat vertex array (bulge unused); the arrow flag
             // and arrow size (carried as the annotation text height, code 40) and
-            // the dim-style name round-trip. The attached annotation is NOT written
-            // as part of the LEADER (it round-trips via the Codable value model —
-            // DXF stores a leader's annotation as a separate hard-referenced
-            // entity, which our writer does not author). LEADER needs R2000+; at R12
-            // / on DWG (no DWG leader writer) the C side drops it (counted skipped),
-            // matching MTEXT/DIMENSION.
+            // the dim-style name round-trip. The attached annotation is NOT carried
+            // inside the LEADER POD: DXF stores a leader's annotation as a SEPARATE
+            // entity hard-referenced by code 340, and libdxfrw's writeLeader cannot
+            // emit 340 (see `leaderAnnotationPOD`). Instead the writer emits the
+            // annotation as an INDEPENDENT top-level TEXT/MTEXT (so other tools see
+            // the text) — that expansion happens in `writeEntities`, not here. LEADER
+            // needs R2000+; at R12 / on DWG (no DWG leader writer) the C side drops
+            // it (counted skipped), matching MTEXT/DIMENSION.
             e.kind = Int32(LC_ENT_LEADER.rawValue)
             e.leaderHasArrow = d.hasArrow ? 1 : 0
             // Carry the arrow size as the LEADER text-height (code 40) so it
@@ -694,6 +713,44 @@ private final class PODBuilder {
             e.textValue = intern(d.imageDef.path)
         }
         return e
+    }
+
+    /// Builds the POD for a leader's ATTACHED ANNOTATION as a standalone, top-level
+    /// DXF entity (TEXT/MTEXT), inheriting the leader's layer + pen, or `nil` if the
+    /// leader has no annotation (or the annotation is not a text kind).
+    ///
+    /// G6b — best-effort leader annotation persistence. DXF models a leader's text
+    /// as a SEPARATE entity HARD-REFERENCED from the LEADER via group code 340
+    /// (`DRW_Leader::annotHandle`). libdxfrw's DXF leader writer
+    /// (`dxfRW::writeLeader`) does NOT emit code 340 — it writes only the path,
+    /// arrow, style and text height, never the annotation hard reference — and we do
+    /// not modify the vendored libdxfrw. So we cannot author the TRUE LEADER→
+    /// annotation hard reference through the library. What we CAN do (and do here):
+    /// emit the annotation as an INDEPENDENT top-level TEXT/MTEXT so OTHER CAD tools
+    /// SEE the leader's text, rather than losing it entirely (today an imported
+    /// leader's annotation is dropped on DXF read, surviving only via the engine's
+    /// Codable document path). The trade-off: on re-read the annotation comes back
+    /// as a plain standalone TEXT/MTEXT, NOT re-attached to the leader (re-attachment
+    /// needs code 340, which libdxfrw cannot write). The annotation keeps its own
+    /// intrinsic position (anchored at the leader's last vertex by whoever authored
+    /// it), so it renders in the right place. Pinned by a test in
+    /// DXFWriteFidelityTests.
+    func leaderAnnotationPOD(_ d: LeaderData, from leader: EntityRecord) -> LCEntity? {
+        guard let annotation = d.annotation else { return nil }
+        switch annotation {
+        case .text, .mtext:
+            // Re-wrap the annotation kind as a real EntityRecord so it goes through
+            // the SAME TEXT/MTEXT POD mapping as a standalone text entity, inheriting
+            // the leader's layer + pen so it draws in the leader's context.
+            let record = EntityRecord(
+                id: leader.id, layer: leader.layer, pen: leader.pen,
+                flags: leader.flags, kind: annotation)
+            return makeEntity(record)
+        default:
+            // A leader annotation is only ever a text/mtext kind; ignore anything
+            // else (the value model bounds the recursion to text kinds).
+            return nil
+        }
     }
 
     /// Builds an `LCBlock` POD from a `Block` definition + the offset/count window
