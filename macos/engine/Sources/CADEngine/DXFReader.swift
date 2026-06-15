@@ -645,7 +645,11 @@ extension CADEngine {
     }
 
     /// Copies a HATCH's flat vertex array, sliced by its per-loop (offset,count)
-    /// windows, into an array of `PolylineVertex` rings.
+    /// windows, into an array of `PolylineVertex` rings. The bridge recovers a
+    /// curved (ARC) boundary edge as a single bulged vertex (DXF bulge =
+    /// tan(includedAngle/4), sign per CCW/CW), so a bulged boundary loop reads back
+    /// at its minimal vertex count with the arc geometry preserved — the bulge is
+    /// carried straight through here so `resolve()` re-expands the exact arc.
     private static func hatchLoops(_ e: LCEntity) -> [[PolylineVertex]] {
         guard e.loopCount > 0, let loopBase = e.loops,
               e.vertexCount > 0, let vertBase = e.vertices else { return [] }

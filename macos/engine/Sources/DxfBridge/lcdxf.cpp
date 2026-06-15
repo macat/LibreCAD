@@ -672,12 +672,14 @@ private:
     // (offset,count) windows are stored in `loops`. Ported from addHatch in
     // rs_filterdxfrw.cpp: a polyline boundary (type & 2) walks its vertlist with
     // bulges; otherwise each edge entity (LINE/ARC/ELLIPSE/SPLINE) contributes
-    // its vertices. Arc/ellipse edges are tessellated into straight segments here
-    // so the boundary reads back as a sampled ring (the arc GEOMETRY survives — the
-    // writer emits real DRW_Arc edges, see WritingInterface::writeHatch + G6a — but
-    // the read collapses them to points; exact-bulge read-back is a documented
-    // follow-up, see DXFWriter.swift G6a note). Bulges on polyline edges are carried
-    // through. solidFill and the pattern name round-trip.
+    // its vertices. A LINE edge becomes a single straight vertex; an ARC edge is
+    // recovered EXACTLY as a single bulged vertex (the inverse of the writer's
+    // WritingInterface::appendBulgeArcEdge, see appendBulgeArcVertex), so a curved
+    // boundary round-trips as one bulged PolylineVertex rather than a sampled chord
+    // run — preserving both the arc geometry and the DXF bulge encoding. Ellipse
+    // and spline edges are still tessellated into straight segments (no bulge for
+    // those primitives). Bulges on polyline-boundary edges are carried through.
+    // solidFill and the pattern name round-trip.
     void emitHatch(const DRW_Hatch *data) {
         ++m_out->geometryCount;
         LCEntity e = makeEntity(LC_ENT_HATCH);
@@ -804,9 +806,11 @@ private:
             }
             return;
         }
-        // Edge boundary: walk each edge entity, appending its start point (and,
-        // for arcs/ellipses, tessellated intermediate points) so the chained
-        // edges form one ring.
+        // Edge boundary: walk each edge entity, appending its start point so the
+        // chained edges form one ring. A LINE contributes a plain (zero-bulge)
+        // start vertex; an ARC contributes a single bulged start vertex (its arc
+        // geometry recovered exactly, see appendBulgeArcVertex); ellipse/spline
+        // edges still tessellate into intermediate points.
         for (const auto &ent : loop.objlist) {
             if (!ent) continue;
             switch (ent->eType) {
@@ -816,9 +820,15 @@ private:
                 break;
             }
             case DRW::ARC: {
+                // A curved boundary edge round-trips as a SINGLE bulged vertex
+                // (the exact inverse of WritingInterface::appendBulgeArcEdge),
+                // not a tessellated chord run: emit the edge's START point
+                // carrying the recovered DXF bulge. The next edge contributes the
+                // end point, so the chained ring is preserved with the minimal
+                // vertex count and the arc geometry survives losslessly.
                 const auto *a = dynamic_cast<DRW_Arc *>(ent.get());
-                if (a) tessellateArc(a->basePoint.x, a->basePoint.y, a->radious,
-                                     a->staangle, a->endangle, a->isccw != 0, verts);
+                if (a) appendBulgeArcVertex(a->basePoint.x, a->basePoint.y, a->radious,
+                                            a->staangle, a->endangle, a->isccw != 0, verts);
                 break;
             }
             case DRW::CIRCLE: {
@@ -847,6 +857,40 @@ private:
                 break;
             }
         }
+    }
+
+    // Recover a hatch boundary ARC edge as ONE bulged boundary vertex — the exact
+    // inverse of WritingInterface::appendBulgeArcEdge. The writer encoded a bulged
+    // segment a->b as a DRW_Arc with staangle at a, endangle at b, and
+    // isccw = (bulge <= 0); the traversal a->b therefore sweeps -included radians
+    // around the center (see Resolve.expandPolyline / appendBulgeArcEdge). We
+    // recover the arc START point a (at staangle), measure the SIGNED a->b angular
+    // sweep around the center (CCW positive), and invert:
+    //   included = -sweep,  bulge = tan(included / 4).
+    // The sign falls out naturally: a left-bowing (CCW-bowing) apex gives a
+    // positive bulge and isccw == 0, matching the writer and Resolve. We push only
+    // the START vertex (carrying the bulge); the next edge in the loop supplies
+    // the end point, so the ring is preserved with the minimal vertex count.
+    static void appendBulgeArcVertex(double cx, double cy, double r,
+                                     double staang, double endang, bool ccw,
+                                     std::vector<LCVertex> &verts) {
+        const double ax = cx + r * std::cos(staang);
+        const double ay = cy + r * std::sin(staang);
+        // Signed a->b angular sweep around the center (CCW positive). The
+        // magnitude is the traversal sweep in the isccw direction, normalized to
+        // (0, 2π]; CW traversals carry a negative sign.
+        double mag;
+        if (ccw) {
+            mag = endang - staang;
+            while (mag <= 0.0) mag += 2.0 * M_PI;
+        } else {
+            mag = staang - endang;
+            while (mag <= 0.0) mag += 2.0 * M_PI;
+        }
+        const double signedSweep = ccw ? mag : -mag;
+        const double included = -signedSweep;       // inverse of expandPolyline's -included
+        const double bulge = std::tan(included / 4.0);
+        verts.push_back(LCVertex{ax, ay, bulge});
     }
 
     // Tessellate an arc (center cx,cy; radius r; staang..endang radians) into
@@ -1898,10 +1942,11 @@ private:
     // DRW_Line for a zero-bulge segment, a DRW_Arc for a bulged one (so a curved
     // boundary round-trips as a true arc). libdxfrw's writeHatch only supports
     // edge boundaries (its polyline-boundary branch is an unimplemented stub).
-    // On read, readHatchLoop picks up each LINE edge's basePoint and tessellates
-    // each ARC edge, recovering the ring (arcs come back as sample points, not a
-    // single bulge — the GEOMETRY round-trips; the exact bulge encoding is a
-    // documented follow-up). solidFill, the pattern name and the pattern
+    // On read, readHatchLoop picks up each LINE edge's basePoint as a plain vertex
+    // and recovers each ARC edge as a SINGLE bulged vertex (the exact inverse of
+    // appendBulgeArcEdge, see appendBulgeArcVertex), so a bulged boundary
+    // round-trips losslessly — both the arc geometry AND the DXF bulge encoding.
+    // solidFill, the pattern name and the pattern
     // scale/angle (codes 41/52) round-trip. HATCH only exists for R2000+; for
     // R12 writeHatch is a no-op in libdxfrw, so the entity is silently dropped at
     // that version (rare export).

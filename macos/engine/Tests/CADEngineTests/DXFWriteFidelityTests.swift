@@ -88,13 +88,24 @@ struct DXFWriteFidelityTests {
         #expect(codes.contains("40"),
                 "expected a HATCH arc-edge radius (group 40) — a DRW_Arc edge")
 
-        // …and the arc GEOMETRY round-trips on re-read (the semicircle bow ~y=5
-        // survives as boundary sample points — geometry preserved).
+        // …and the arc GEOMETRY round-trips on re-read. The bridge now recovers the
+        // arc edge EXACTLY as a single bulged boundary vertex (the inverse of the
+        // DRW_Arc encoding above), so the raw loop reads back at its minimal vertex
+        // count with the DXF bulge preserved (bulge ≈ +1 for the CCW semicircle).
+        // The bow is verified by RESOLVING the recovered loop — its tessellation
+        // reaches the radius-5 apex (~y=5) — mirroring the sibling
+        // `bulgedHatchStillResolves` test.
         let back = try await CADEngine.shared.readEntities(dxfPath: path)
         let d = try #require(firstHatch(back.records), "hatch missing after round-trip")
-        let pts = d.loops.first?.map(\.point) ?? []
-        let maxY = pts.map(\.y).max() ?? 0
-        #expect(maxY > 4, "expected the arc bow (~y=5) geometry to survive the round-trip")
+        let loop = try #require(d.loops.first, "boundary loop missing after round-trip")
+        let arcVertex = try #require(
+            loop.first { abs($0.bulge) > 1e-6 },
+            "expected the arc edge to read back as a single bulged vertex")
+        #expect(abs(arcVertex.bulge - 1) < 1e-6,
+                "expected the semicircle bulge (≈ 1) to round-trip, got \(arcVertex.bulge)")
+        let geo = EntityRecord(id: EntityID(2), kind: .hatch(d)).resolve(ResolveContext())
+        let apexY = geo.fills.flatMap { $0.loops }.flatMap { $0 }.map(\.y).max() ?? 0
+        #expect(apexY > 4, "expected the arc bow (~y=5) geometry to survive the round-trip, got \(apexY)")
     }
 
     @Test("G6a: a re-read bulged hatch still resolves to a filled region")
