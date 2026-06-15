@@ -34,6 +34,30 @@
 
 import Foundation
 
+/// The corner treatment of a drawn rectangle, mirroring LibreCAD's
+/// `RS_ActionDrawRectangle` corner options (square / rounded / bevel). The
+/// tool-options bar (UX-plan U2) would surface this as a segmented control plus a
+/// numeric field for the radius / chamfer distance; the app sets it on a
+/// freshly-minted tool (like `fixedWidth`/`sides`) before the user draws.
+///
+/// All variants still commit a SINGLE closed `.polyline` of the SAME entity kind —
+/// only the per-vertex shape changes: `.square` keeps the 4 sharp corners (the
+/// original behavior); `.rounded` replaces each corner with two tangent vertices
+/// joined by a quarter-circle **bulge** arc; `.chamfer` replaces each corner with
+/// two tangent vertices joined by a straight bevel segment (8 sharp vertices).
+public enum RectangleCorner: Sendable, Hashable {
+    /// Sharp 90° corners — the default, identical to the original 4-vertex rect.
+    case square
+    /// Rounded corners: each corner is cut back by `radius` along both edges and
+    /// joined by a convex quarter-circle arc (a bulge edge). A non-positive radius,
+    /// or one too large to fit half the shorter side, falls back to `.square`.
+    case rounded(radius: Double)
+    /// Chamfered (beveled) corners: each corner is cut back by `distance` along
+    /// both edges and joined by a straight bevel segment. A non-positive distance,
+    /// or one too large to fit half the shorter side, falls back to `.square`.
+    case chamfer(distance: Double)
+}
+
 /// The interactive Rectangle tool. Click two opposite corners to draw an
 /// axis-aligned rectangle as a single closed polyline; it then resets to draw the
 /// next rectangle until `.commit`/`.cancel`.
@@ -79,6 +103,14 @@ public struct RectangleTool: Tool {
         return w > Tolerance.distance && h > Tolerance.distance
     }
 
+    /// The corner treatment for committed (and previewed) rectangles, surfaced by
+    /// the tool-options bar (UX-plan U2). Defaults to `.square` so the original
+    /// 4-vertex sharp rectangle is unchanged; `.rounded(radius:)` / `.chamfer(
+    /// distance:)` reshape every corner at commit + preview time. Fully orthogonal
+    /// to `fixedWidth`/`fixedHeight` — an exact-size single-click box is rounded /
+    /// chamfered too.
+    public var corner: RectangleCorner = .square
+
     public init() {}
 
     // MARK: - Tool
@@ -113,7 +145,11 @@ public struct RectangleTool: Tool {
         guard case .settingSecond(let first) = state, cursor.valid, first.valid else {
             return []
         }
-        return [ResolvedPolyline(points: Self.corners(first, cursor), closed: true, pen: .toolPreview)]
+        // The preview shows the corner treatment too: a rounded/chamfered rect
+        // previews its shaped outline (rounded corners are tessellated here so the
+        // overlay shows the arc, since a `ResolvedPolyline` carries no bulge).
+        return [ResolvedPolyline(points: Self.previewPoints(first, cursor, corner: corner),
+                                 closed: true, pen: .toolPreview)]
     }
 
     /// A draw tool: it IGNORES `context` (it needs only the snapped world points)
@@ -176,11 +212,7 @@ public struct RectangleTool: Tool {
     /// drag commit and the exact-size single-click commit.
     private mutating func commitRect(from a: Vector, to b: Vector) -> ToolOutcome {
         guard a.valid, b.valid, !Self.isDegenerate(a, b) else { return .none }
-        let corners = Self.corners(a, b)
-        let data = PolylineData(
-            vertices: corners.map { PolylineVertex(point: $0, bulge: 0) },
-            closed: true
-        )
+        let data = PolylineData(vertices: Self.vertices(a, b, corner: corner), closed: true)
         let record = EntityRecord(id: .placeholder, kind: .polyline(data))
         reset()
         return .commit([.add(record)])
@@ -230,5 +262,146 @@ public struct RectangleTool: Tool {
     /// check.
     static func isDegenerate(_ a: Vector, _ b: Vector) -> Bool {
         abs(a.x - b.x) <= Tolerance.distance || abs(a.y - b.y) <= Tolerance.distance
+    }
+
+    // MARK: - Corner-treatment geometry (rounded / chamfer variants)
+
+    /// The DXF bulge of a quarter-circle (90°) corner arc: `tan(90° / 4)`. A corner
+    /// of an axis-aligned rectangle turns exactly 90°, so a rounded corner is a
+    /// quarter circle whose bulge magnitude is this constant. The sign is chosen
+    /// per-corner from the winding so the arc always bulges OUTWARD (convex).
+    static let quarterBulge = tan(Double.pi / 8)   // ≈ 0.41421356
+
+    /// Builds the closed-polyline VERTICES for the rectangle spanned by opposite
+    /// corners `a`/`b`, applying the `corner` treatment:
+    ///   - `.square`  → the 4 sharp corners, all bulges 0 (UNCHANGED original).
+    ///   - `.rounded` → 8 vertices: each corner becomes two tangent points; the
+    ///                  FIRST of the pair carries the quarter-circle bulge to the
+    ///                  second (a convex arc), the rest bulge 0.
+    ///   - `.chamfer` → 8 vertices: each corner becomes two tangent points joined by
+    ///                  a straight bevel; all bulges 0.
+    /// A non-positive or too-large cut clamps back to `.square` (so a stray config
+    /// never collapses the rectangle). The corner order follows the picked corners
+    /// (same winding as `corners`), so the bulge sign is derived per-corner.
+    static func vertices(_ a: Vector, _ b: Vector, corner: RectangleCorner) -> [PolylineVertex] {
+        let base = corners(a, b)
+        switch corner {
+        case .square:
+            return base.map { PolylineVertex(point: $0, bulge: 0) }
+        case .rounded(let radius):
+            guard let cut = clampedCut(radius, a, b) else {
+                return base.map { PolylineVertex(point: $0, bulge: 0) }
+            }
+            return cornerVertices(base, cut: cut, rounded: true)
+        case .chamfer(let distance):
+            guard let cut = clampedCut(distance, a, b) else {
+                return base.map { PolylineVertex(point: $0, bulge: 0) }
+            }
+            return cornerVertices(base, cut: cut, rounded: false)
+        }
+    }
+
+    /// Validates a requested corner cut (radius / chamfer distance) against the
+    /// rectangle spanned by `a`/`b`: it must be positive and no larger than HALF the
+    /// shorter side (so opposite corners' cuts never overlap). Returns the usable
+    /// cut, or `nil` to fall back to square corners.
+    static func clampedCut(_ cut: Double, _ a: Vector, _ b: Vector) -> Double? {
+        guard cut > Tolerance.distance else { return nil }
+        let w = abs(b.x - a.x), h = abs(b.y - a.y)
+        let maxCut = Swift.min(w, h) / 2
+        guard cut <= maxCut + Tolerance.distance else { return nil }
+        return Swift.min(cut, maxCut)
+    }
+
+    /// Replaces each sharp corner of `base` (in order) with two tangent points cut
+    /// back by `cut` along the incoming/outgoing edges. When `rounded`, the first
+    /// tangent point of each corner carries the per-corner convex bulge to the
+    /// second; otherwise all bulges are 0 (a straight chamfer). Produces
+    /// `2 * base.count` vertices (8 for a rectangle).
+    static func cornerVertices(_ base: [Vector], cut: Double, rounded: Bool) -> [PolylineVertex] {
+        let n = base.count
+        var out: [PolylineVertex] = []
+        out.reserveCapacity(n * 2)
+        for i in 0..<n {
+            let prev = base[(i + n - 1) % n]
+            let curr = base[i]
+            let next = base[(i + 1) % n]
+            let dIn = unit(curr - prev)
+            let dOut = unit(next - curr)
+            let t1 = curr - dIn * cut          // back along the incoming edge
+            let t2 = curr + dOut * cut         // forward along the outgoing edge
+            if rounded {
+                // Convex quarter-circle: bulge LEFT for CW turns, RIGHT for CCW
+                // turns, so the arc always bows toward the original corner (outward).
+                let cross = dIn.x * dOut.y - dIn.y * dOut.x   // >0 ⇒ CCW (left) turn
+                let bulge = -copysign(quarterBulge, cross)
+                out.append(PolylineVertex(point: t1, bulge: bulge))
+                out.append(PolylineVertex(point: t2, bulge: 0))
+            } else {
+                out.append(PolylineVertex(point: t1, bulge: 0))
+                out.append(PolylineVertex(point: t2, bulge: 0))
+            }
+        }
+        return out
+    }
+
+    /// A unit vector in the direction of `v` (zero-safe: returns `v` unchanged for a
+    /// degenerate length, which only arises on an already-degenerate rectangle).
+    private static func unit(_ v: Vector) -> Vector {
+        let m = v.magnitude
+        return m > Tolerance.distance ? v / m : v
+    }
+
+    /// The PREVIEW outline points for the rectangle spanned by `a`/`b` under the
+    /// `corner` treatment. A `ResolvedPolyline` carries no bulge, so a rounded
+    /// corner is tessellated into short chords here (a 9-sample quarter arc) so the
+    /// rubber-band shows the curve; chamfer/square are the exact vertices.
+    static func previewPoints(_ a: Vector, _ b: Vector, corner: RectangleCorner) -> [Vector] {
+        let verts = vertices(a, b, corner: corner)
+        // Fast path: no bulges ⇒ the points ARE the outline (square / chamfer).
+        if verts.allSatisfy({ abs($0.bulge) < Tolerance.distance }) {
+            return verts.map(\.point)
+        }
+        // Tessellate each bulged edge into a small chord run for the overlay.
+        var pts: [Vector] = []
+        let n = verts.count
+        for i in 0..<n {
+            let v = verts[i]
+            let next = verts[(i + 1) % n].point
+            pts.append(v.point)
+            if abs(v.bulge) >= Tolerance.distance {
+                pts.append(contentsOf: arcChords(from: v.point, to: next, bulge: v.bulge))
+            }
+        }
+        return pts
+    }
+
+    /// Interior chord points of the bulge arc from `start` to `end` (the endpoints
+    /// themselves are added by the caller), for the preview overlay only. 8 interior
+    /// samples give a smooth quarter-circle rubber-band.
+    private static func arcChords(from start: Vector, to end: Vector, bulge: Double) -> [Vector] {
+        let included = 4 * atan(bulge)                 // signed sweep
+        let chord = end - start
+        let chordLen = chord.magnitude
+        guard chordLen > Tolerance.distance else { return [] }
+        let radius = abs(chordLen / (2 * sin(included / 2)))
+        let mid = (start + end) * 0.5
+        let half = chordLen / 2
+        let apothem = (Swift.max(0, radius * radius - half * half)).squareRoot()
+        let dir = chord / chordLen
+        let leftNormal = Vector(-dir.y, dir.x)
+        let apexSide = bulge >= 0 ? 1.0 : -1.0
+        let centerSign = -copysign(1.0, cos(included / 2))
+        let center = mid + leftNormal * (apexSide * centerSign * apothem)
+        let startA = (start - center).angle
+        let samples = 8
+        var pts: [Vector] = []
+        pts.reserveCapacity(samples)
+        for s in 1...samples {
+            let t = Double(s) / Double(samples + 1)
+            let ang = startA + (-included) * t
+            pts.append(center + Vector.polar(radius: radius, angle: ang))
+        }
+        return pts
     }
 }

@@ -55,6 +55,28 @@ public enum PolygonFit: Sendable, Hashable, CaseIterable {
     case circumscribed
 }
 
+/// How the two picked points define the regular polygon, mirroring LibreCAD's
+/// two N-gon construction actions plus the star variant. The tool-options bar
+/// (UX-plan U2) would surface this as a segmented control (and a ratio field for
+/// star), set on a freshly-minted tool (like `sides`/`fit`) before drawing. Every
+/// mode still commits a SINGLE closed `.polyline`.
+public enum PolygonMode: Sendable, Hashable {
+    /// CENTER → CORNER (default, `RS_ActionDrawPolygonCenCor`): the first click is
+    /// the CENTER, the second is a vertex on (or an edge midpoint of, per `fit`) the
+    /// reference circle. The original behavior — unchanged.
+    case centerCorner
+    /// CORNER → CORNER (`RS_ActionDrawPolygonCorCor`): the two clicks are two
+    /// ADJACENT corners, i.e. they define ONE EDGE of the regular N-gon. The polygon
+    /// is built on the LEFT of the directed first→second edge (CCW), with the first
+    /// vertex at the first click.
+    case edge
+    /// STAR: like `centerCorner` (first click center, second a vertex) but the
+    /// committed polyline is a 2·N-point star — N OUTER vertices on the clicked
+    /// circle alternating with N INNER vertices at `outerRadius · ratio`, the inner
+    /// ring rotated half a step. `ratio` is clamped to `(0, 1)`.
+    case star(ratio: Double)
+}
+
 /// The interactive regular-polygon (N-gon) tool, center + vertex. Click the
 /// center, then click (or move to preview) a vertex; the polygon is the regular
 /// `sides`-gon built around the circle through that vertex (inscribed by default,
@@ -94,8 +116,15 @@ public struct PolygonTool: Tool {
     /// Whether the polygon is inscribed in (default) or circumscribed about the
     /// reference circle through the clicked vertex. Surfaced by the tool-options bar
     /// (UX-plan U2). Back-compatible: the default `.inscribed` keeps the original
-    /// vertex-on-circle behavior.
+    /// vertex-on-circle behavior. Honored by `.centerCorner` / `.star`; ignored by
+    /// `.edge` (which is defined purely by the two corner clicks).
     public var fit: PolygonFit = .inscribed
+
+    /// How the two clicks define the polygon, surfaced by the tool-options bar
+    /// (UX-plan U2). Defaults to `.centerCorner` so the original center→vertex flow
+    /// (and every existing test) is unchanged; `.edge` reinterprets the two clicks
+    /// as one EDGE, and `.star(ratio:)` commits a 2·N-point star.
+    public var mode: PolygonMode = .centerCorner
 
     public init() {}
 
@@ -104,9 +133,14 @@ public struct PolygonTool: Tool {
     public var title: String { "Polygon" }
 
     public var status: String {
-        switch state {
-        case .settingCenter: return "Specify center point"
-        case .settingVertex: return "Specify a vertex (N=\(_sides))"
+        switch (state, mode) {
+        // `.edge` reinterprets the two clicks as two adjacent corners.
+        case (.settingCenter, .edge): return "Specify first corner"
+        case (.settingVertex, .edge): return "Specify second corner (N=\(_sides))"
+        // `.centerCorner` (default) and `.star` are both center→vertex; keep the
+        // ORIGINAL prompts for `.centerCorner` so existing tests are unchanged.
+        case (.settingCenter, _): return "Specify center point"
+        case (.settingVertex, _): return "Specify a vertex (N=\(_sides))"
         }
     }
 
@@ -115,13 +149,14 @@ public struct PolygonTool: Tool {
     /// cursor). Empty before the center is set, before the cursor has moved, or
     /// while the radius is still degenerate (zero).
     public var preview: [ResolvedPolyline] {
-        guard case .settingVertex(let center) = state, cursor.valid, center.valid else {
+        guard case .settingVertex(let first) = state, cursor.valid, first.valid else {
             return []
         }
-        guard let corners = Self.corners(center: center, vertex: cursor, sides: _sides, fit: fit) else {
+        guard let pts = Self.shape(first: first, second: cursor,
+                                   sides: _sides, fit: fit, mode: mode) else {
             return []
         }
-        return [ResolvedPolyline(points: corners, closed: true, pen: .toolPreview)]
+        return [ResolvedPolyline(points: pts, closed: true, pen: .toolPreview)]
     }
 
     /// A draw tool: it IGNORES `context` (it needs only the snapped world points)
@@ -159,19 +194,22 @@ public struct PolygonTool: Tool {
     private mutating func handleClick(_ p: Vector) -> ToolOutcome {
         switch state {
         case .settingCenter:
-            // Center fixed; now rubber-band the polygon toward the next click.
+            // First point fixed (center for centerCorner/star, first corner for
+            // edge); now rubber-band the polygon toward the second click.
             state = .settingVertex(center: p)
             cursor = p
             return .none
 
-        case .settingVertex(let center):
-            // Commit one closed regular polygon (center, vertex = p), then re-arm.
-            guard let corners = Self.corners(center: center, vertex: p, sides: _sides, fit: fit) else {
-                // Degenerate (zero-radius) pick — ignore it, keep waiting.
+        case .settingVertex(let first):
+            // Commit one closed polygon defined by the two points under `mode`,
+            // then re-arm. A degenerate pick (zero radius / zero-length edge) is
+            // ignored — keep waiting for the second point.
+            guard let pts = Self.shape(first: first, second: p,
+                                       sides: _sides, fit: fit, mode: mode) else {
                 return .none
             }
             let data = PolylineData(
-                vertices: corners.map { PolylineVertex(point: $0, bulge: 0) },
+                vertices: pts.map { PolylineVertex(point: $0, bulge: 0) },
                 closed: true
             )
             let record = EntityRecord(
@@ -239,6 +277,93 @@ public struct PolygonTool: Tool {
         pts.reserveCapacity(sides)
         for i in 0..<sides {
             pts.append(center + Vector.polar(radius: radius, angle: baseAngle + step * Double(i)))
+        }
+        return pts
+    }
+
+    // MARK: - Mode dispatch + variant geometry (edge / star)
+
+    /// The outline points for the polygon defined by the two picked points `first`
+    /// / `second` under `mode`, the single entry point used by both `preview` and
+    /// the commit. Returns `nil` for a degenerate pick (so the caller ignores it):
+    ///   - `.centerCorner` → `corners(center: first, vertex: second, …)` (UNCHANGED).
+    ///   - `.edge`         → `edgeCorners(first, second, sides:)` — the two points
+    ///                       are one EDGE of the N-gon.
+    ///   - `.star(ratio:)` → `starPoints(center: first, vertex: second, …)` — a
+    ///                       2·N-point star.
+    /// The ring never duplicates the first vertex (the `closed` flag carries the
+    /// closing edge — same convention as `corners`).
+    static func shape(first: Vector, second: Vector, sides: Int,
+                      fit: PolygonFit, mode: PolygonMode) -> [Vector]? {
+        switch mode {
+        case .centerCorner:
+            return corners(center: first, vertex: second, sides: sides, fit: fit)
+        case .edge:
+            return edgeCorners(first, second, sides: sides)
+        case .star(let ratio):
+            return starPoints(center: first, vertex: second, sides: sides,
+                              fit: fit, ratio: ratio)
+        }
+    }
+
+    /// The `sides` corners of the regular N-gon for which the directed segment
+    /// `p0`→`p1` is exactly ONE EDGE (two ADJACENT corners). The polygon is built on
+    /// the LEFT of `p0`→`p1` (CCW winding, interior on the left), with the first
+    /// corner at `p0` and the second at `p1`. Every side then has the same length
+    /// `|p1 − p0|`. Returns `nil` for a degenerate (zero-length) edge.
+    ///
+    /// Construction: the circumradius of a regular N-gon with side `s` is
+    /// `R = s / (2·sin(π/N))`; the center is the edge midpoint offset by the apothem
+    /// `R·cos(π/N)` along the edge's LEFT normal. Corners are then `R`-radius points
+    /// spaced `2π/N` CCW starting at the angle from the center to `p0`.
+    static func edgeCorners(_ p0: Vector, _ p1: Vector, sides: Int) -> [Vector]? {
+        guard p0.valid, p1.valid, sides >= 3 else { return nil }
+        let edge = p1 - p0
+        let side = edge.magnitude
+        guard side > Tolerance.distance else { return nil }
+        let half = Double.pi / Double(sides)
+        let circumradius = side / (2 * sin(half))
+        let apothem = circumradius * cos(half)
+        let dir = edge / side
+        let leftNormal = Vector(-dir.y, dir.x)          // interior side of p0→p1
+        let center = (p0 + p1) * 0.5 + leftNormal * apothem
+        let baseAngle = (p0 - center).angle             // first corner at p0
+        let step = 2 * Double.pi / Double(sides)
+        var pts: [Vector] = []
+        pts.reserveCapacity(sides)
+        for i in 0..<sides {
+            pts.append(center + Vector.polar(radius: circumradius,
+                                             angle: baseAngle + step * Double(i)))
+        }
+        return pts
+    }
+
+    /// A `2·sides`-point STAR centered on `center` with its first OUTER point at the
+    /// clicked `vertex`. Outer points lie on the reference circle (radius / `fit`
+    /// resolved exactly like `corners`); inner points lie at `outerRadius · ratio`,
+    /// rotated half a step so each inner point sits BETWEEN two outer points. The
+    /// returned ring alternates outer, inner, outer, inner, … (so `pts[even]` are the
+    /// outer tips and `pts[odd]` the inner valleys). Returns `nil` for a degenerate
+    /// pick (zero radius) or a `ratio` outside `(0, 1)`.
+    static func starPoints(center: Vector, vertex: Vector, sides: Int,
+                           fit: PolygonFit, ratio: Double) -> [Vector]? {
+        guard ratio > Tolerance.distance, ratio < 1 - Tolerance.distance else { return nil }
+        // Reuse the regular-polygon corners for the OUTER ring (honors `fit` and the
+        // zero-radius guard); the outer circumradius is the first corner's distance.
+        guard let outer = corners(center: center, vertex: vertex, sides: sides, fit: fit),
+              let firstOuter = outer.first else { return nil }
+        let outerRadius = (firstOuter - center).magnitude
+        let innerRadius = outerRadius * ratio
+        let step = 2 * Double.pi / Double(sides)
+        let baseAngle = (firstOuter - center).angle
+        var pts: [Vector] = []
+        pts.reserveCapacity(sides * 2)
+        for i in 0..<sides {
+            // Outer tip (reuse the exact regular-polygon corner).
+            pts.append(outer[i])
+            // Inner valley, half a step past the outer tip.
+            let innerAngle = baseAngle + step * (Double(i) + 0.5)
+            pts.append(center + Vector.polar(radius: innerRadius, angle: innerAngle))
         }
         return pts
     }
