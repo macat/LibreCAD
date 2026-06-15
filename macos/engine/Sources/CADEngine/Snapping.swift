@@ -63,11 +63,29 @@ public struct SnapMode: OptionSet, Sendable, Hashable {
     /// Snap the current segment (reference → cursor) to be parallel to a hovered
     /// reference entity's direction. Inert without a reference point.
     public static let parallel     = SnapMode(rawValue: 1 << 10)
+    /// Snap to equidistant points spaced `distanceAlong` apart along a hovered
+    /// entity (line / arc / polyline), measured from the entity end nearest the
+    /// cursor. LibreCAD's "Snap distance" / equidistant snap. The spacing is
+    /// carried alongside the mode set (see `Snapping.snap(distanceAlong:)`); a
+    /// non-positive spacing makes the mode inert.
+    public static let distanceAlong = SnapMode(rawValue: 1 << 11)
+    /// Two-pick "manual middle": snap to the midpoint of two user-picked
+    /// references (LibreCAD `RS_ActionSnapMiddleManual`). The two picks are armed
+    /// by the UI; the engine primitive is `SnapGeometry.manualMiddle(a:b:)`.
+    /// Inert in the auto pipeline (it has no single-cursor candidate).
+    public static let manualMiddle = SnapMode(rawValue: 1 << 12)
+    /// Two-pick "manual intersection": snap to the intersection of two
+    /// user-picked entities even when the auto intersection snap wouldn't surface
+    /// it (LibreCAD `RS_ActionSnapIntersectionManual`). The two picks are armed by
+    /// the UI; the engine primitive is `Snapping.manualIntersection(entityA:entityB:near:)`.
+    /// Inert in the auto pipeline.
+    public static let manualIntersection = SnapMode(rawValue: 1 << 13)
 
     /// The common default set (endpoint + center + middle + intersection +
     /// onEntity + grid), with `.free` always available as the fallback. The new
-    /// constructive modes (nearest / perpendicular / tangent / parallel) are
-    /// OFF by default — opt-in like LibreCAD's RS2::SnapMode.
+    /// constructive / equidistant / manual modes (nearest / perpendicular /
+    /// tangent / parallel / distanceAlong / manualMiddle / manualIntersection)
+    /// are OFF by default — opt-in like LibreCAD's RS2::SnapMode.
     public static let standard: SnapMode = [
         .endpoint, .center, .middle, .intersection, .onEntity, .grid, .free,
     ]
@@ -92,6 +110,21 @@ public enum SnapKind: Sendable, Hashable {
     /// Point keeping the reference→cursor segment parallel to a hovered entity.
     case parallel
 }
+
+// NOTE on the new modes' result kinds (distanceAlong / manualMiddle /
+// manualIntersection): they intentionally do NOT add `SnapKind` cases. Adding a
+// case would force every exhaustive `switch snap.kind` in the (non-owned)
+// renderer/overlay layer (`OverlayGeometry.swift`, `CADBench/_SharedOverlayGeometry.swift`)
+// to grow a marker-glyph arm — a UI change outside this engine change's owned
+// surface. Instead:
+//   • distance-along auto-snap results reuse the existing `.onEntity` kind for
+//     `SnapResult.kind` (the point IS on the entity), so the marker renders with
+//     no UI edit; the dedicated `distanceAlongPoints(...)` primitive remains the
+//     testable source of truth and a future UI can relabel/redraw it.
+//   • the two-pick manual primitives never flow through the single-cursor
+//     `snap(...)` pipeline at all (they are armed by a later two-pick UI step), so
+//     they need no `SnapResult.kind`. They are exposed as the pure functions
+//     `SnapGeometry.manualMiddle(a:b:)` and `Snapping.manualIntersection(...)`.
 
 /// The chosen snap: the snapped world point, what kind of snap it is, and the
 /// entity it snapped to (`nil` for free/grid, or for an intersection where two
@@ -129,22 +162,47 @@ public enum Snapping {
     /// kind are broken by distance.
     ///
     /// endpoint > center > middle > intersection > perpendicular > tangent >
-    /// parallel > onEntity > nearest > grid > free.
+    /// parallel > distanceAlong > onEntity > nearest > grid > free.
     ///
     /// The constructive snaps (perpendicular / tangent / parallel) require an
     /// explicit reference point and an intentional toggle, so they rank above the
     /// passive `onEntity` / `nearest` "anywhere on the curve" snaps but below the
     /// discrete defining-geometry snaps (endpoint / center / middle / intersection).
-    static let priority: [SnapKind] = [
-        .endpoint, .center, .middle, .intersection,
-        .perpendicular, .tangent, .parallel,
-        .onEntity, .nearest, .grid, .free,
+    /// `distanceAlong` is a discrete equidistant snap with a configured spacing;
+    /// it ranks just above the passive `onEntity`/`nearest` snaps so an equidistant
+    /// tick beats a mere closest-point, but below the defining-geometry and
+    /// reference-point snaps. It is tracked by an internal priority kind
+    /// (`InternalKind.distanceAlong`) yet reported to callers as `.onEntity` (the
+    /// point IS on the entity) so no new public `SnapKind` / renderer arm is needed.
+    static let priority: [InternalKind] = [
+        .public(.endpoint), .public(.center), .public(.middle), .public(.intersection),
+        .public(.perpendicular), .public(.tangent), .public(.parallel),
+        .distanceAlong,
+        .public(.onEntity), .public(.nearest), .public(.grid), .public(.free),
     ]
 
-    /// An internal candidate before priority resolution.
+    /// The internal priority key: either a public `SnapKind`, or the engine-only
+    /// `distanceAlong` rank (which is reported to callers as `.onEntity`). Kept
+    /// internal so the public `SnapKind` enum — and the renderer switches over it —
+    /// stay untouched while distance-along still gets its own resolution rank.
+    enum InternalKind: Hashable {
+        case `public`(SnapKind)
+        case distanceAlong
+
+        /// The public kind reported in `SnapResult` for this internal rank.
+        var resultKind: SnapKind {
+            switch self {
+            case .public(let k): return k
+            case .distanceAlong: return .onEntity
+            }
+        }
+    }
+
+    /// An internal candidate before priority resolution. `kind` is the internal
+    /// priority key; the public result kind is `kind.resultKind`.
     private struct Candidate {
         let point: Vector
-        let kind: SnapKind
+        let kind: InternalKind
         let entity: EntityID?
         let distance: Double
     }
@@ -178,6 +236,11 @@ public enum Snapping {
     ///     relative-zero). Required by the constructive modes (`.perpendicular`,
     ///     `.tangent`, `.parallel`); when `nil` those modes contribute no
     ///     candidates, so existing callers that omit it are unaffected.
+    ///   - distanceAlong: the equidistant spacing (world units) for the
+    ///     `.distanceAlong` snap. When `nil` or non-positive (or `.distanceAlong`
+    ///     not enabled) the equidistant snap contributes no candidates, so existing
+    ///     callers that omit it are unaffected. The UI sets this from the tool's
+    ///     "Snap distance" field.
     @MainActor
     public static func snap(worldPoint: Vector,
                             modes: SnapMode,
@@ -186,7 +249,8 @@ public enum Snapping {
                             in drawing: CADDrawing,
                             using quadtree: Quadtree,
                             ctx: ResolveContext? = nil,
-                            referencePoint: Vector? = nil) -> SnapResult {
+                            referencePoint: Vector? = nil,
+                            distanceAlong: Double? = nil) -> SnapResult {
         let freeResult = SnapResult(point: worldPoint, kind: .free, entity: nil)
         guard worldPoint.valid else { return freeResult }
         let tol = Swift.max(worldTolerance, 0)
@@ -232,6 +296,14 @@ public enum Snapping {
                 let np = nearestOnEntity(worldPoint, entity: e, ctx: context)
                 appendIfNear(&candidates, point: np, kind: .nearest, entity: e.id,
                              cursor: worldPoint, tol: tol)
+            }
+            // Equidistant ("Snap distance") points along the entity, from the end
+            // nearest the cursor. Inert without a positive spacing.
+            if modes.contains(.distanceAlong), let spacing = distanceAlong, spacing > Tolerance.distance {
+                for p in distanceAlongPoints(of: e, spacing: spacing, near: worldPoint, ctx: context) {
+                    appendIfNear(&candidates, point: p, internalKind: .distanceAlong, entity: e.id,
+                                 cursor: worldPoint, tol: tol)
+                }
             }
             // Constructive modes need the tool's reference ("from") point.
             if let ref = referencePoint, ref.valid {
@@ -281,7 +353,7 @@ public enum Snapping {
         for kind in priority {
             let ofKind = candidates.filter { $0.kind == kind }
             if let best = ofKind.min(by: { $0.distance < $1.distance }) {
-                return SnapResult(point: best.point, kind: best.kind, entity: best.entity)
+                return SnapResult(point: best.point, kind: best.kind.resultKind, entity: best.entity)
             }
         }
 
@@ -291,9 +363,19 @@ public enum Snapping {
 
     // MARK: - Candidate gathering helpers
 
-    /// Appends a candidate iff it is within `tol` of the cursor.
+    /// Appends a candidate iff it is within `tol` of the cursor. `kind` is given
+    /// as a public `SnapKind` (wrapped into the internal priority key); the
+    /// `internalKind:` overload is used for the engine-only `distanceAlong` rank.
     private static func appendIfNear(_ out: inout [Candidate],
                                      point: Vector, kind: SnapKind, entity: EntityID?,
+                                     cursor: Vector, tol: Double) {
+        appendIfNear(&out, point: point, internalKind: .public(kind), entity: entity,
+                     cursor: cursor, tol: tol)
+    }
+
+    /// Appends a candidate keyed by an explicit internal priority `kind`.
+    private static func appendIfNear(_ out: inout [Candidate],
+                                     point: Vector, internalKind kind: InternalKind, entity: EntityID?,
                                      cursor: Vector, tol: Double) {
         guard point.valid else { return }
         let d = (point - cursor).magnitude
@@ -654,6 +736,74 @@ public enum Snapping {
         default:
             return nil
         }
+    }
+
+    // MARK: - Distance-along-entity ("Snap distance" / equidistant)
+
+    /// The equidistant points `1·spacing, 2·spacing, …` along `entity`, measured
+    /// from the entity end nearest `near` (so the snap "starts counting" from the
+    /// closest endpoint, matching LibreCAD's "Snap distance"). Defined analytically
+    /// for line and arc; polylines walk their resolved chord path. Other kinds have
+    /// no canonical "distance along" and return `[]`.
+    ///
+    /// - Parameters:
+    ///   - entity:  the hovered entity.
+    ///   - spacing: world-unit step between successive points (> 0).
+    ///   - near:    the cursor — only used to pick which end is the reference end.
+    ///   - ctx:     resolve context for polyline/curve chord points.
+    static func distanceAlongPoints(of entity: EntityRecord, spacing: Double,
+                                    near: Vector, ctx: ResolveContext) -> [Vector] {
+        switch entity.kind {
+        case .line(let d):
+            let fromStart = (near - d.start).squared <= (near - d.end).squared
+            return SnapGeometry.pointsAlongLine(start: d.start, end: d.end,
+                                                spacing: spacing, fromStart: fromStart)
+
+        case .arc(let d):
+            let startPt = d.center + Vector.polar(radius: abs(d.radius), angle: d.startAngle)
+            let endPt   = d.center + Vector.polar(radius: abs(d.radius), angle: d.endAngle)
+            let fromStart = (near - startPt).squared <= (near - endPt).squared
+            return SnapGeometry.pointsAlongArc(center: d.center, radius: d.radius,
+                                               startAngle: d.startAngle, endAngle: d.endAngle,
+                                               reversed: d.reversed,
+                                               spacing: spacing, fromStart: fromStart)
+
+        case .polyline:
+            // Walk the resolved chord path (bulge arcs become chord points), so the
+            // distance is along the drawn path. Pick the nearer overall end.
+            let geo = entity.resolve(ctx)
+            var out: [Vector] = []
+            for pl in geo.polylines where pl.points.count >= 2 {
+                let first = pl.points.first!, last = pl.points.last!
+                let fromStart = (near - first).squared <= (near - last).squared
+                out += SnapGeometry.pointsAlongPolyline(points: pl.points, closed: pl.closed,
+                                                        spacing: spacing, fromStart: fromStart)
+            }
+            return out
+
+        default:
+            return []
+        }
+    }
+
+    // MARK: - Manual (two-pick) intersection primitive
+
+    /// The intersection point of two **user-picked** entities, returned even when
+    /// the passive auto-intersection snap wouldn't surface it (LibreCAD
+    /// `RS_ActionSnapIntersectionManual`). Reuses the same `Intersections` adapter
+    /// as the auto snap, then — when several crossings exist — returns the one
+    /// nearest `near` (the cursor / second pick); `near` invalid returns the first.
+    /// Returns `.invalid` when the pair does not intersect.
+    ///
+    /// This is the engine primitive for the two-pick UI flow (arming the two picks
+    /// is a later UI step); it is intentionally NOT part of the single-cursor
+    /// `snap(...)` auto pipeline.
+    static func manualIntersection(entityA: EntityRecord, entityB: EntityRecord,
+                                   near: Vector = .invalid) -> Vector {
+        let pts = intersections(entityA, entityB).filter(\.valid)
+        guard !pts.isEmpty else { return .invalid }
+        guard near.valid else { return pts[0] }
+        return pts.min(by: { ($0 - near).squared < ($1 - near).squared }) ?? pts[0]
     }
 
     /// Rounds `point` to the nearest grid node at `spacing` (origin-anchored).
