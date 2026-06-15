@@ -35,9 +35,14 @@ to `Resolve.swift`. Regression pinned by `ConstraintDimHeaderTests.swift` +
 `Resources/dim_constraint_header.dxf` (a shippable DXF: $DIMTXT=0.125, $DIMSCALE=1.0, a
 formula `textOverride`; asserts the open codec carries $DIMTXT and the constraint glyphs
 resolve at ~0.125 through the full bytes→codec→`make(from:)` app path). All 1188 tests green;
-imperial_dim (0.18) + dimScaleMultiplies unchanged. (NOTE: the DXF/DWG **write** path still
-drops blocks + graphicVariables — `data(from:)` writes only entities+layers — a separate
-round-trip gap, out of scope for this fix.)
+imperial_dim (0.18) + dimScaleMultiplies unchanged.
+
+(~~NOTE: the DXF/DWG **write** path still drops blocks + graphicVariables~~ — **CORRECTED 2026-06-15:**
+this note was STALE. A round-trip verification test (`SaveRoundTripTests.swift`, 2026-06-15) PROVES the
+**DXF (R2000) write path has full fidelity** — blocks, INSERT, graphicVariables ($DIMTXT/$INSUNITS),
+named DIMSTYLE tables, and custom layers all save→reload correctly via `DXFDocumentCodec.data(from:)`.
+The remaining gap is **DWG write only** (libdxfrw `dwgWriter15` limitation: custom layers/DIMSTYLE
+tables/block-member geometry don't round-trip to `.dwg`) — pinned by the test, not a DXF regression.)
 
 ---
 
