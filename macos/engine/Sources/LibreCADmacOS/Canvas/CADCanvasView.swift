@@ -345,12 +345,30 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
 
     override func scrollWheel(with event: NSEvent) {
         let loc = locationInView(event)
+        // Device-aware mapping (owner-chosen): a TRACKPAD two-finger scroll PANS the
+        // canvas (content follows the fingers); a MOUSE WHEEL ZOOMS toward the cursor
+        // (a single notch in/out, the standard CAD wheel-zoom). We distinguish the two
+        // via `hasPreciseScrollingDeltas`: a trackpad/Magic-Mouse reports *precise*
+        // (sub-line, pixel-granular) deltas; a classic notched wheel mouse reports
+        // *coarse* line-granular deltas (false).
+        //
+        // Heuristic caveat: a few high-resolution / "smart" wheel mice ALSO report
+        // precise deltas and would therefore pan rather than zoom under the bare
+        // gate. We accept that as the lesser evil (those devices also support smooth
+        // two-axis scrolling, where panning is the natural feel) AND give every device
+        // an explicit, unambiguous escape hatch: ⌥+scroll ALWAYS zooms-to-cursor,
+        // regardless of the device, so a precise-delta mouse can still zoom on demand.
         if event.modifierFlags.contains(.option) {
-            // ⌥+scroll → zoom about the cursor.
+            // ⌥+scroll → zoom about the cursor (device-independent override).
             controller?.zoom(byWheelDelta: event.scrollingDeltaY, at: loc)
-        } else {
-            // Plain scroll → pan. Natural-direction handled by the sign of delta.
+        } else if event.hasPreciseScrollingDeltas {
+            // Trackpad (precise deltas) → pan. Content follows the fingers; the
+            // natural-direction sign is already baked into `scrollingDeltaX/Y`.
             controller?.scrollPan(deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY)
+        } else {
+            // Mouse wheel (coarse deltas) → zoom toward the cursor. The world point
+            // under the pointer stays under the pointer (Viewport.zoom anchors it).
+            controller?.zoom(byWheelDelta: event.scrollingDeltaY, at: loc)
         }
     }
 
@@ -694,9 +712,8 @@ final class CADCanvasController {
         // The zoom anchor `point` is in the view's local space, so the viewport must
         // match that view's size for the cursor to stay put (same invariant as click).
         syncViewSizeFromView()
-        // Map wheel delta to a multiplicative zoom factor (clamped per tick).
-        let step = 1.0 + Double(delta) * 0.01
-        let factor = Swift.min(Swift.max(step, 0.5), 2.0)
+        // Map the raw scroll delta to a multiplicative zoom factor (pure + tested).
+        let factor = ViewportNav.zoomFactor(forWheelDelta: Double(delta))
         model.zoom(by: factor, about: point)
         endGestureSoon()
         redraw()
@@ -1371,10 +1388,31 @@ final class CADCanvasController {
                 cancelMarquee()
                 return true
             }
-            // Cancel any in-progress run, then drop to select mode.
-            if model.isToolActive { model.handleToolInput(.cancel) }
+            // Standard CAD Esc: it first CANCELS any in-progress operation, and only
+            // when nothing is in progress does it CLEAR the selection — so the canvas
+            // unwinds one step at a time to a clean idle state.
+            if model.isToolActive {
+                // A draw/edit tool is mid-run: cancel the run + drop to select mode
+                // (the in-progress operation is the thing Esc unwinds; the selection
+                // is left alone, matching "Esc cancels the current op first").
+                model.handleToolInput(.cancel)
+                model.activateTool(.select)
+                // Dropping to select mode hides the crosshair + restores the arrow.
+                refreshCrosshair()
+                redraw()
+                return true
+            }
+            // Already idle in select mode: Esc clears the current selection, returning
+            // the canvas to a clean idle state (CanvasModel.deselectAll). Re-glue the
+            // gizmo (which is selection-bound) and repaint the highlight.
+            if model.deselectAll() {
+                refreshGizmo()
+                redraw()
+                return true
+            }
+            // Nothing to cancel and nothing selected: Esc is a harmless no-op but we
+            // still claim it (re-asserting select mode) so it never beeps mid-canvas.
             model.activateTool(.select)
-            // Dropping to select mode hides the crosshair + restores the arrow.
             refreshCrosshair()
             redraw()
             return true
