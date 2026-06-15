@@ -6,6 +6,17 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-15 — PARITY WAVE 2 landed + NAVIGATION/Esc in progress
+
+**Parity wave 2 LANDED** (`native-macos @ 3ce54129b`, **1816 tests**):
+- **G6** `a52d930ba` — leader annotation now authored to DXF as an independent entity (other CAD sees the text; libdxfrw can't write the 340 hard-ref → standalone, documented+test-pinned); hatch boundary-arc WRITE confirmed already emitting real `DRW_Arc` (regression test added, stale comments fixed). *Follow-up:* exact-bulge hatch READ-back (currently tessellates) is blocked by a locked test's old assertions — flip them to enable.
+- **G4** `eedffae77` — distance-along-entity snap (line/arc-by-arc-length/polyline) + manual middle/intersection primitives, additive (no new `SnapKind` to avoid non-owned renderer-switch edits). *Follow-up:* UI for the snap-distance field + two-pick manual arming.
+- **G7** `4554a55` — application **Preferences window (⌘,)** (General/Appearance/Snapping/Rendering/Text, `@AppStorage`). Only theme drives behavior live; other keys stored with `// READ-SITE:` markers. *Follow-up:* wire each pref to its read-site (new-doc seeding, CanvasTheme, snap defaults, renderer, text tool).
+
+**NAVIGATION + Esc-deselect — IN PROGRESS** (DC.13-nav, owner-directed). Owner chose **device-aware scroll**: mouse wheel → zoom-to-cursor; trackpad two-finger → pan; pinch → zoom; middle-mouse-drag → pan (`NSEvent.hasPreciseScrollingDeltas` heuristic). Keep zoom-window/fit/previous. **Esc → deselect** (clears selection + cancels in-progress tool). Pure zoom-about-point/pan math in `Viewport` (unit-tested); GUI plumbing in `CADCanvasView`. Owns CADCanvasView+CanvasModel+Viewport.
+
+---
+
 ## 2026-06-15 — QUEUED NEXT (owner-directed): viewport navigation — scroll-zoom + middle-drag-pan
 
 Owner: "after all of that [parity wave G6/G4/G7] is done, work on zoom and movement — scroll should zoom, middle mouse should drag, etc." Priority: **after the current parity wave merges, BEFORE the big-ticket projects.**
