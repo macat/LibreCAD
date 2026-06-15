@@ -117,8 +117,9 @@ public:
     // size) by the code-340 handle, then push the finished POD into its target (the
     // block it was read in, or the top-level entity list). A missing/unknown
     // IMAGEDEF still yields a valid `.image` (empty path → placeholder on render),
-    // so an IMAGE never silently vanishes. Call AFTER finalizeBlocks so block PODs
-    // captured here land before the block members are flattened.
+    // so an IMAGE never silently vanishes. Call BEFORE finalizeBlocks so any
+    // block-embedded IMAGE is linked and pushed into its block's members here,
+    // before finalizeBlocks() flattens those members.
     void finalizeImages() {
         for (auto &pi : m_pendingImages) {
             LCEntity e = pi.e;

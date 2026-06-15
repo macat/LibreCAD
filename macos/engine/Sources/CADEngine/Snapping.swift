@@ -396,10 +396,10 @@ public enum Snapping {
             return d.vertices.filter(\.valid)
 
         case .image(let d):
-            // The four quad corners + the insertion (lower-left) point are the
-            // snappable defining points of a placed image (the center is offered by
-            // `centers(of:)` below).
-            return (d.corners + [d.insertion]).filter(\.valid)
+            // The four quad corners are the snappable defining points of a placed
+            // image — `corners[0]` IS the lower-left insertion point, so it is not
+            // listed again (the quad center is offered by `centers(of:)` below).
+            return d.corners.filter(\.valid)
         }
     }
 

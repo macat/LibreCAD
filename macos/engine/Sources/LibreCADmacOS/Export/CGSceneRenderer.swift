@@ -78,18 +78,21 @@ enum CGSceneRenderer {
         let ty = page.height - transform.offsetY + s * transform.worldOrigin.y
         ctx.concatenate(CGAffineTransform(a: s, b: 0, c: 0, d: -s, tx: tx, ty: ty))
 
-        // Raster images first (UNDER fills + strokes, so a frame outline overlays
-        // them — matching the on-screen renderer's order). A missing/unloadable file
-        // (or a hidden image) draws a placeholder outline instead, so export never
-        // crashes and the placement stays visible.
         let strokeWorld = s > 1e-12 ? 1.0 / s : 1.0
-        for image in scene.images {
-            drawImage(image, in: ctx, strokeWorld: strokeWorld)
-        }
 
-        // Fills next (even-odd, holes cut out).
+        // Fills first (even-odd, holes cut out).
         for fill in scene.fills {
             drawFill(fill, in: ctx)
+        }
+
+        // Raster images next — OVER fills, UNDER strokes: a fill never hides the
+        // picture, while the frame outline (a stroke) still overlays it. This mirrors
+        // the on-screen renderer's grid → fills → images → lines order so PDF/PNG
+        // export composites identically. A missing/unloadable (or hidden) image draws
+        // a placeholder outline instead, so export never crashes and the placement
+        // stays visible.
+        for image in scene.images {
+            drawImage(image, in: ctx, strokeWorld: strokeWorld)
         }
 
         // Strokes on top. Stroke width is in WORLD units (scaled by the CTM) so a
