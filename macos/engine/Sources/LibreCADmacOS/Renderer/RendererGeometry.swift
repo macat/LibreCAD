@@ -38,6 +38,15 @@ import CADEngine
 /// (ADR-003). `halfWidthPx` is the line half-width in *device pixels* (so 1px
 /// logical lines stay crisp on Retina); the shader expands perpendicular in
 /// screen space using it.
+///
+/// ## Dash pattern (linetype) — SCREEN-SPACE, fixed-on-zoom
+/// `dashPeriodPx` (one full ON+OFF cycle, in DEVICE PIXELS) is `0` for a SOLID
+/// segment; the fragment shader then strokes continuously. When `> 0` the shader
+/// computes the along-segment distance (using `startOffsetPx` as the running
+/// per-polyline arc-length so the pattern is CONTINUOUS across a polyline's
+/// segments) modulo `dashPeriodPx` and discards fragments in the gap
+/// (`[dashOnPx, dashPeriodPx)`). Because the periods are device pixels (like
+/// `halfWidthPx`), dashes are a FIXED SIZE on screen, unchanged by zoom.
 struct LineInstance: Equatable {
     /// Segment start, `f32(worldStart - renderOrigin)`.
     var p0: SIMD2<Float>
@@ -47,6 +56,16 @@ struct LineInstance: Equatable {
     var color: SIMD4<Float>
     /// Half-width in device pixels.
     var halfWidthPx: Float
+    /// Full dash CYCLE length (ON + OFF) in device pixels. `0` ⇒ solid.
+    var dashPeriodPx: Float
+    /// The ON (drawn) length within each cycle, in device pixels (`<= dashPeriodPx`).
+    var dashOnPx: Float
+    /// Running arc-length of this segment's START from the polyline's first point, in
+    /// RENDER-SPACE (world) units. The shader converts it to device pixels with the
+    /// per-segment world→pixel ratio (a uniform 2D affine scale) and adds it to the
+    /// local along-distance, so the dash phase is CONTINUOUS across a polyline's
+    /// segments while the period itself stays fixed in device pixels (zoom-fixed).
+    var startOffsetWorld: Float
 }
 
 // MARK: - The textured-quad vertex (matches `TexturedVertex` in the Metal source)
@@ -409,6 +428,55 @@ enum RendererGeometry {
         }
     }
 
+    /// The screen-space dash parameters (DEVICE PIXELS) for a resolved pen line type:
+    /// `(periodPx, onPx)` where `periodPx` is one full ON+OFF cycle and `onPx` is the
+    /// drawn portion. A SOLID line (and any residual `.byLayer`/`.byBlock` the resolve
+    /// could not reduce) returns `(0, 0)` ⇒ the shader strokes continuously.
+    ///
+    /// The periods are device pixels (like `halfWidthPx`), so dashes are a FIXED size
+    /// on screen — they do NOT grow/shrink with zoom. A base ON-dash length is taken
+    /// in POINTS and multiplied by `backingScale` (Retina 2×) to device pixels; the
+    /// other styles are proportional to it. A `.dotted` "dot" is a short ON pip
+    /// (rounded by the shader's existing cap AA) rather than a zero-length stall.
+    ///
+    /// Pure value math (no Metal/AppKit) → unit-testable in `RendererGeometryTests`.
+    ///
+    /// - Returns: `(periodPx, onPx)` — `(0, 0)` for solid, else `periodPx > onPx > 0`.
+    static func dashParamsPx(for lineType: PenLineType, backingScale: CGFloat) -> (period: Float, on: Float) {
+        let s = Float(backingScale > 0 ? backingScale : 1)
+        // Base dash unit: ~5 points of ON dash → device pixels.
+        let dashPt: Float = 5.0
+        let dash = dashPt * s          // long ON dash (device px)
+        let gap = dash * 0.6           // OFF gap between marks
+        let dot = max(1.5 * s, dash * 0.18)   // short ON pip (a "dot")
+
+        switch lineType {
+        case .solid, .byLayer, .byBlock:
+            return (0, 0)
+        case .dashed:
+            // ─ ─ ─ : one ON dash + one gap.
+            return (dash + gap, dash)
+        case .dotted:
+            // · · · : one ON dot + one gap.
+            return (dot + gap, dot)
+        case .dashDot:
+            // ─ · ─ · : dash, gap, dot, gap. The shader supports ONE on/off split
+            // per cycle, so the cycle is [ON = dash, OFF = (gap + dot + gap)] which
+            // reads as a long dash separated by a short dot-gap-dot rhythm.
+            return (dash + gap + dot + gap, dash)
+        case .center:
+            // ─── · ─── : long dash, gap (the long-dash/short-dash centerline reads
+            // as a long ON with a proportional gap at this single-split granularity).
+            return (dash * 1.5 + gap, dash * 1.5)
+        case .border:
+            // ── ── · : medium dash + gap.
+            return (dash * 0.9 + gap, dash * 0.9)
+        case .divide:
+            // ─── · · : long dash + a longer gap (the dot run reads as gap here).
+            return (dash * 1.3 + gap * 1.4, dash * 1.3)
+        }
+    }
+
     /// Light-mode "automatic color" auto-invert: a pen whose RGB is near-white
     /// (the CAD color-7 / "automatic" default the engine resolves to white for a
     /// dark canvas) is flipped to near-black so it stays legible on a light canvas
@@ -478,31 +546,47 @@ enum RendererGeometry {
         let halfWidthPx = self.halfWidthPx(
             for: polyline.pen, fallback: halfWidthPx, backingScale: backingScale)
 
-        // Degenerate single point → zero-length segment (drawn as a dot).
+        // Per-polyline dash params (device pixels, fixed on zoom). `(0, 0)` ⇒ solid,
+        // so an existing solid polyline packs `dashPeriodPx == 0` (unchanged render).
+        let (dashPeriodPx, dashOnPx) = dashParamsPx(for: polyline.pen.lineType,
+                                                    backingScale: backingScale)
+
+        // Degenerate single point → zero-length segment (drawn as a dot). A point is
+        // always solid (a dash pattern on a zero-length stub is meaningless).
         if pts.count == 1 {
             let p = offset(pts[0], from: renderOrigin)
-            instances.append(LineInstance(p0: p, p1: p, color: color, halfWidthPx: halfWidthPx))
+            instances.append(LineInstance(
+                p0: p, p1: p, color: color, halfWidthPx: halfWidthPx,
+                dashPeriodPx: 0, dashOnPx: 0, startOffsetWorld: 0))
             return
         }
 
+        // Running arc-length (RENDER-SPACE / world units) from the polyline's first
+        // point, so the dash phase stays CONTINUOUS across segments. The shader
+        // converts this to device pixels via the per-segment world→pixel ratio.
+        var offsetWorld: Float = 0
+
         // Consecutive segments.
         for i in 0..<(pts.count - 1) {
+            let a = offset(pts[i], from: renderOrigin)
+            let b = offset(pts[i + 1], from: renderOrigin)
             instances.append(LineInstance(
-                p0: offset(pts[i], from: renderOrigin),
-                p1: offset(pts[i + 1], from: renderOrigin),
-                color: color,
-                halfWidthPx: halfWidthPx
+                p0: a, p1: b, color: color, halfWidthPx: halfWidthPx,
+                dashPeriodPx: dashPeriodPx, dashOnPx: dashOnPx,
+                startOffsetWorld: offsetWorld
             ))
+            offsetWorld += simd.length(b - a)
         }
 
         // Closing edge for closed polylines (last → first).
         if polyline.closed, pts.count >= 3,
            let first = pts.first, let last = pts.last {
+            let a = offset(last, from: renderOrigin)
+            let b = offset(first, from: renderOrigin)
             instances.append(LineInstance(
-                p0: offset(last, from: renderOrigin),
-                p1: offset(first, from: renderOrigin),
-                color: color,
-                halfWidthPx: halfWidthPx
+                p0: a, p1: b, color: color, halfWidthPx: halfWidthPx,
+                dashPeriodPx: dashPeriodPx, dashOnPx: dashOnPx,
+                startOffsetWorld: offsetWorld
             ))
         }
     }

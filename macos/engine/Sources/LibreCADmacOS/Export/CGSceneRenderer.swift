@@ -227,6 +227,19 @@ enum CGSceneRenderer {
             return
         }
 
+        // Per-pen dash pattern: a non-solid resolved line type strokes with a dash
+        // array (in WORLD units, since the CTM maps world→page). `.solid` (or a
+        // residual `.byLayer`/`.byBlock` the resolve left, treated as solid) clears
+        // any dash so the stroke is continuous. The pattern is scaled to a stroke
+        // proportional to `width`, so a thicker pen gets proportionally longer dashes
+        // and the gaps never collapse to nothing at a thin width.
+        let dash = dashLengths(for: poly.pen.lineType, scale: scale, strokeWorld: width)
+        if dash.isEmpty {
+            ctx.setLineDash(phase: 0, lengths: [])
+        } else {
+            ctx.setLineDash(phase: 0, lengths: dash)
+        }
+
         let path = CGMutablePath()
         path.move(to: CGPoint(x: pts[0].x, y: pts[0].y))
         for p in pts.dropFirst() {
@@ -238,6 +251,61 @@ enum CGSceneRenderer {
         ctx.addPath(path)
         ctx.strokePath()
         ctx.restoreGState()
+    }
+
+    // MARK: - Line-type dash patterns
+
+    /// The CG dash-length array (alternating ON, OFF, ON, … in WORLD units) for a
+    /// resolved pen line type, or an EMPTY array for a continuous (solid) stroke.
+    ///
+    /// The patterns mirror the standard CAD line types (ACAD ISO / LibreCAD): a
+    /// base "page" length (the dash unit) is expressed in PAGE POINTS and divided by
+    /// the world→page `scale` so the dashes are a FIXED PHYSICAL size on paper,
+    /// independent of the fit-to-page zoom — exactly like the explicit-lineweight
+    /// stroke-width derivation. `strokeWorld` (the rendered stroke width in world
+    /// units) sets the dot length so a `.dotted` / `.dashDot` dot is a round pip
+    /// sized to the pen, never a zero-length gap.
+    ///
+    /// Pure value math (no CGContext) → unit-testable in `CGDashTests`.
+    ///
+    /// - Returns: `[]` for `.solid` (and any residual `.byLayer`/`.byBlock`),
+    ///   otherwise a non-empty even-count alternating array.
+    static func dashLengths(for lineType: PenLineType,
+                            scale: Double,
+                            strokeWorld: Double) -> [CGFloat] {
+        // The dash UNIT in world units: a ~3.5 pt page length per "dash", scaled by
+        // the world→page transform so it is a fixed paper size. Guard a degenerate
+        // scale so we never divide by ~0.
+        let unitPage = 3.5            // page points for one base dash segment
+        let u = scale > 1e-12 ? unitPage / scale : strokeWorld * 8
+        // A dot's drawn length: at least the stroke width (a round cap renders it as
+        // a pip), capped small so dots stay dots.
+        let dot = Swift.max(strokeWorld, u * 0.12)
+        // A small gap unit.
+        let gap = u * 0.5
+
+        switch lineType {
+        case .solid, .byLayer, .byBlock:
+            return []
+        case .dashed:
+            // ─ ─ ─ : long dash, medium gap.
+            return [u, gap]
+        case .dotted:
+            // · · · : tiny dot, small gap.
+            return [dot, gap]
+        case .dashDot:
+            // ─ · ─ · : dash, gap, dot, gap.
+            return [u, gap, dot, gap]
+        case .center:
+            // ─── · ─── · : long dash, gap, short dash, gap.
+            return [u * 1.6, gap, u * 0.4, gap]
+        case .border:
+            // ── ── · : two dashes then a dot (heavy boundary line).
+            return [u, gap, u, gap, dot, gap]
+        case .divide:
+            // ─── · · ─── : long dash then two dots.
+            return [u * 1.4, gap, dot, gap, dot, gap]
+        }
     }
 
     /// The stroke width in WORLD units for a resolved pen, consistent with the
