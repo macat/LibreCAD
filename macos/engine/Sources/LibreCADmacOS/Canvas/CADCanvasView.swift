@@ -1102,8 +1102,10 @@ final class CADCanvasController {
     ///
     /// Order matters: the text edit-in-place check runs FIRST (a text entity sitting
     /// over an insert still opens the text editor), then the insert → enter-editor
-    /// check. Entering an editor is a no-op while one is already open (the engine
-    /// guards re-entry), so a double-click inside the editor doesn't nest.
+    /// check. Double-clicking an insert WHILE a block-edit session is already open
+    /// PUSHES a nested session for that insert's block (STAGE 3 — nested editing); the
+    /// engine rejects a cyclic open (a block already in the stack) so the double-click
+    /// is then a no-op.
     @discardableResult
     func handleDoubleClick(at screenPoint: CGPoint) -> Bool {
         syncViewSizeFromView()

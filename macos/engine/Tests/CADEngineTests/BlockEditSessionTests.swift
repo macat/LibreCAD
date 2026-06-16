@@ -759,4 +759,180 @@ struct BlockEditSessionTests {
         #expect(contains(p1, Vector(30, 25)))          // (20,20)+(10,5)
         #expect(contains(p2, Vector(10, 105)))         // (0,100)+(10,5)
     }
+
+    // MARK: - STAGE 3 — NESTED block editing (push / pop, cyclic-guarded, per-level)
+    //
+    // Owner decision: support nested block editing now. A block A whose members include an
+    // INSERT of block B can be edited; double-clicking that insert pushes a session for B
+    // nested inside A. Each level keeps its own entry snapshot + undo group, so a level's
+    // Save&Close persists that block (visible in the parent via resolve) and a level's
+    // Discard reverts only that level. Cyclic opens (a block already in the stack) are
+    // rejected.
+
+    /// Builds a model with TWO blocks:
+    ///  - "B": one member line local (0,0)->(2,0).
+    ///  - "A": one member line local (0,0)->(20,0) PLUS one INSERT of B at local (5,5).
+    /// Plus one top-level INSERT of A at world (100,100). Returns the model + the key ids.
+    /// No undo registered during seeding (the drawing has no undo manager yet).
+    private func seededNestedModel() -> (
+        model: CanvasModel,
+        bMemberID: EntityID, aMemberID: EntityID,
+        aInnerInsertID: EntityID, topInsertID: EntityID
+    ) {
+        let drawing = CADDrawing()
+        // Block B.
+        let bMember = drawing.add(line(Vector(0, 0), Vector(2, 0)))
+        drawing.mutateBlocks { _ = $0.add(Block(name: "B", entityIDs: [bMember])) }
+        // Block A: a line + an insert of B (B's insert is a MEMBER of A).
+        let aMember = drawing.add(line(Vector(0, 0), Vector(20, 0)))
+        let aInner = drawing.add(EntityRecord(
+            id: .placeholder,
+            kind: .insert(InsertData(blockName: "B", insertionPoint: Vector(5, 5)))))
+        drawing.mutateBlocks { _ = $0.add(Block(name: "A", entityIDs: [aMember, aInner])) }
+        // A top-level insert of A.
+        let topInsert = drawing.add(EntityRecord(
+            id: .placeholder,
+            kind: .insert(InsertData(blockName: "A", insertionPoint: Vector(100, 100)))))
+
+        let model = CanvasModel(drawing: drawing, viewSize: CGSize(width: 800, height: 600))
+        model.undoManager.groupsByEvent = false
+        model.undoManager.removeAllActions()
+        return (model, bMember, aMember, aInner, topInsert)
+    }
+
+    @Test("Open A → open nested B → edit B → close B pops to A; B's edits persist + show in A")
+    func nestedOpenEditPopPersists() {
+        let (m, bMemberID, _, _, topInsertID) = seededNestedModel()
+
+        // Open A (outermost).
+        #expect(m.enterBlockEditing(name: "A") == true)
+        #expect(m.editingBlockStack == ["A"])
+        #expect(m.editingBlock == "A")
+
+        // While editing A, open the nested insert's block B → PUSH a level.
+        #expect(m.enterBlockEditing(name: "B") == true)
+        #expect(m.editingBlockStack == ["A", "B"])     // breadcrumb A ▸ B
+        #expect(m.editingBlock == "B")
+        // The scoped subset is now B's members.
+        #expect(m.activeSpaceEntities.map(\.id) == [bMemberID])
+
+        // Edit B's member: (0,0)->(2,0) becomes (0,0)->(2,9).
+        var editedB = m.drawing.entity(bMemberID)!
+        editedB.kind = .line(LineData(start: Vector(0, 0), end: Vector(2, 9)))
+        m.applyInspectorEdits([editedB])
+
+        // Close B (Save&Close) → pops to A; we are back editing A.
+        #expect(m.exitBlockEditing(save: true) == true)
+        #expect(m.editingBlockStack == ["A"])
+        #expect(m.editingBlock == "A")
+
+        // B's edit persisted to block B's member.
+        #expect(lineEnds(m.drawing.entity(bMemberID))!.1 == Vector(2, 9))
+
+        // Close A.
+        #expect(m.exitBlockEditing(save: true) == true)
+        #expect(m.isEditingBlock == false)
+
+        // The top-level insert of A resolves to include B's NEW geometry: B's insert sits
+        // at A-local (5,5); B's edited endpoint is local (2,9); A's insert is at world
+        // (100,100). So the deep-resolved point is (100,100)+(5,5)+(2,9) = (107,114).
+        let pts = resolvedPoints(m.drawing.entity(topInsertID)!, m.drawing)
+        #expect(contains(pts, Vector(107, 114)))
+    }
+
+    @Test("Cyclic nested open is rejected (a block already in the stack)")
+    func cyclicNestedOpenRejected() {
+        let (m, _, _, _, _) = seededNestedModel()
+
+        m.enterBlockEditing(name: "A")
+        // Re-opening A (the same block) while it is in the stack is rejected.
+        #expect(m.enterBlockEditing(name: "A") == false)
+        #expect(m.editingBlockStack == ["A"])
+
+        // Open B nested, then attempt to open A again from within B → still rejected (A is
+        // already an ancestor in the stack → would be infinite).
+        #expect(m.enterBlockEditing(name: "B") == true)
+        #expect(m.enterBlockEditing(name: "A") == false)
+        #expect(m.editingBlockStack == ["A", "B"])
+
+        // Balance the open levels.
+        m.exitBlockEditing(save: true)
+        m.exitBlockEditing(save: true)
+        #expect(m.isEditingBlock == false)
+    }
+
+    @Test("Each nested level's Discard reverts only THAT level")
+    func nestedPerLevelDiscard() {
+        let (m, bMemberID, aMemberID, _, _) = seededNestedModel()
+
+        // Open A, edit A's own member.
+        m.enterBlockEditing(name: "A")
+        var editedA = m.drawing.entity(aMemberID)!
+        editedA.kind = .line(LineData(start: Vector(0, 0), end: Vector(20, 4)))
+        m.applyInspectorEdits([editedA])
+        #expect(lineEnds(m.drawing.entity(aMemberID))!.1 == Vector(20, 4))
+
+        // Open B nested, edit B's member.
+        m.enterBlockEditing(name: "B")
+        var editedB = m.drawing.entity(bMemberID)!
+        editedB.kind = .line(LineData(start: Vector(0, 0), end: Vector(2, 7)))
+        m.applyInspectorEdits([editedB])
+        #expect(lineEnds(m.drawing.entity(bMemberID))!.1 == Vector(2, 7))
+
+        // Discard B ONLY → B reverts to entry (2,0); A's edit (20,4) is untouched.
+        #expect(m.exitBlockEditing(save: false) == true)
+        #expect(m.editingBlockStack == ["A"])
+        #expect(lineEnds(m.drawing.entity(bMemberID))!.1 == Vector(2, 0))   // B reverted
+        #expect(lineEnds(m.drawing.entity(aMemberID))!.1 == Vector(20, 4))  // A kept
+
+        // Now Discard A → A reverts to entry (20,0).
+        #expect(m.exitBlockEditing(save: false) == true)
+        #expect(m.isEditingBlock == false)
+        #expect(lineEnds(m.drawing.entity(aMemberID))!.1 == Vector(20, 0))  // A reverted
+    }
+
+    @Test("Drawing in a nested level adds a member to the NESTED block, not the parent")
+    func nestedDrawAddsToNestedBlock() {
+        let (m, _, _, _, _) = seededNestedModel()
+        m.enterBlockEditing(name: "A")
+        m.enterBlockEditing(name: "B")          // nested
+
+        let aIDsBefore = m.drawing.blocks.block(named: "A")!.entityIDs
+        let bCountBefore = m.drawing.blocks.block(named: "B")!.entityIDs.count
+
+        // Draw a new line while editing B (nested).
+        m.applyToolEdits([.add(line(Vector(0, 0), Vector(0, 3)))])
+
+        // B grew by one; A is unchanged.
+        #expect(m.drawing.blocks.block(named: "B")!.entityIDs.count == bCountBefore + 1)
+        #expect(m.drawing.blocks.block(named: "A")!.entityIDs == aIDsBefore)
+        let newID = m.drawing.blocks.block(named: "B")!.entityIDs.last!
+        #expect(m.drawing.blockMemberIDs.contains(newID))
+
+        m.exitBlockEditing(save: true)          // close B (keep)
+        m.exitBlockEditing(save: true)          // close A
+        #expect(m.isEditingBlock == false)
+        // The new member is in B, not loose model space.
+        let modelIDs = Set(m.activeSpaceEntities.map(\.id))
+        #expect(!modelIDs.contains(newID))
+    }
+
+    @Test("finishBlockEditingIfNeeded auto-saves and pops ALL nested levels")
+    func finishPopsAllNestedLevels() {
+        let (m, bMemberID, _, _, _) = seededNestedModel()
+        m.enterBlockEditing(name: "A")
+        m.enterBlockEditing(name: "B")
+        var editedB = m.drawing.entity(bMemberID)!
+        editedB.kind = .line(LineData(start: Vector(0, 0), end: Vector(2, 6)))
+        m.applyInspectorEdits([editedB])
+        #expect(m.editingBlockStack == ["A", "B"])
+
+        // A document-close / tab-switch finishes the WHOLE stack (Save&Close each level).
+        #expect(m.finishBlockEditingIfNeeded() == true)
+        #expect(m.isEditingBlock == false)
+        // B's edit was kept (auto Save&Close, not Discard).
+        #expect(lineEnds(m.drawing.entity(bMemberID))!.1 == Vector(2, 6))
+        // A second call is a no-op.
+        #expect(m.finishBlockEditingIfNeeded() == false)
+    }
 }
