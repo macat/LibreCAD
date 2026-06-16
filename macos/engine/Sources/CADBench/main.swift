@@ -265,6 +265,37 @@ func blackHole<T>(_ value: T) {
     withExtendedLifetime(value) {}
 }
 
-MainActor.assumeIsolated {
-    run()
+// MARK: - Subcommand dispatch
+//
+// CADBench is the project's offline executable. Besides the default scale
+// benchmark it hosts the AUTHOR-TIME starter-symbol generator (backlog #6):
+//     swift run ... CADBench gen-symbols [output-dir]
+// which writes the bundled symbol-library `.dxf` files (committed, never run at
+// app runtime). With no subcommand it runs the benchmark exactly as before.
+
+let _args = CommandLine.arguments
+if _args.count > 1, _args[1] == "gen-symbols" {
+    // Author-time symbol generation. Writing goes through the (non-MainActor)
+    // `CADEngine` actor, so we drive an async Task and pump the main run loop
+    // until it completes — NOT a bare semaphore `.wait()` (that would park the
+    // main thread and deadlock a MainActor-isolated continuation).
+    let outDir: URL = _args.count > 2
+        ? URL(fileURLWithPath: _args[2], isDirectory: true)
+        : SymbolGenerator.defaultOutputDirectory()
+    FileHandle.standardError.write("generating starter symbols…\n".data(using: .utf8)!)
+
+    let done = DispatchSemaphore(value: 0)
+    Task { @MainActor in
+        _ = await SymbolGenerator.generate(into: outDir)
+        done.signal()
+    }
+    // Pump the main run loop so the MainActor task can make progress, polling the
+    // semaphore (timeout 0) each tick rather than parking the thread on `.wait()`.
+    while done.wait(timeout: .now()) == .timedOut {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+    }
+} else {
+    MainActor.assumeIsolated {
+        run()
+    }
 }
