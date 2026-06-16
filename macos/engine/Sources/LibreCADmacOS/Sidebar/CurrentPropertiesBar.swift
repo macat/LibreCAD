@@ -41,35 +41,42 @@ struct CurrentPropertiesBar: View {
     let controllerBox: CADCanvasView.ControllerBox
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: DS.Space.lg) {
             Label("Current", systemImage: "paintpalette")
-                .font(.callout.weight(.medium))
+                .font(DS.Font.barLabel)
                 .foregroundStyle(.secondary)
                 .labelStyle(.titleAndIcon)
 
-            Divider().frame(height: 16)
+            Divider().frame(height: DS.Size.barDivider)
 
-            layerControl
+            captioned("Layer") { layerControl }
 
-            Divider().frame(height: 16)
+            Divider().frame(height: DS.Size.barDivider)
 
-            colorControl
-            LineTypePicker(selection: lineTypeBinding, label: "")
-                .labelsHidden()
-                .frame(maxWidth: 130)
-                .help("Current line type (By Layer = inherit from the layer)")
-            LineWidthPicker(selection: lineWidthBinding, label: "")
-                .labelsHidden()
-                .frame(maxWidth: 130)
-                .help("Current line width (By Layer = inherit from the layer)")
+            // Each of the three pen controls SELF-IDENTIFIES (§3b — they were three
+            // identical "By Layer" dropdowns): Color carries the swatch + mode word,
+            // Type a leading dash preview, Width a leading weight-bar preview, each
+            // under a micro-caption. All four controls share the `DS.Field.wide` width.
+            captioned("Color") { colorControl }
+            captioned("Type")  { typeControl }
+            captioned("Width") { widthControl }
 
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.bar)
-        .overlay(alignment: .bottom) { Divider() }
+        .barStrip()
+    }
+
+    /// Wraps a control with a small `DS.Font.secondaryLabel` micro-caption above it, so
+    /// the three look-alike "By Layer" pickers each announce what they set.
+    @ViewBuilder
+    private func captioned<Content: View>(_ caption: String,
+                                          @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: DS.Space.xxs) {
+            Text(caption)
+                .font(DS.Font.secondaryLabel)
+                .foregroundStyle(.secondary)
+            content()
+        }
     }
 
     // MARK: - Active-layer quick picker (CLAYER)
@@ -84,7 +91,7 @@ struct CurrentPropertiesBar: View {
             }
         }
         .labelsHidden()
-        .frame(maxWidth: 150)
+        .frame(width: DS.Field.wide)
         .help("Active layer — new geometry is drawn on this layer")
     }
 
@@ -101,21 +108,13 @@ struct CurrentPropertiesBar: View {
 
     // MARK: - Current pen color (CECOLOR)
 
-    /// The color control: a "By Layer / By Block / Explicit" mode menu plus, when
-    /// Explicit, a color well. Mirrors the Inspector's pen-color model but writes to
+    /// The color control: a leading 16pt swatch (only meaningful when Explicit) plus a
+    /// "By Layer / By Block / Explicit" mode menu. The swatch is the visual identifier
+    /// that distinguishes this from the type/width pickers. Writes to
     /// `model.currentPen.lineColor`.
     @ViewBuilder
     private var colorControl: some View {
-        HStack(spacing: 6) {
-            Picker("Color", selection: colorModeBinding) {
-                Text("By Layer").tag(PenColorMode.byLayer)
-                Text("By Block").tag(PenColorMode.byBlock)
-                Text("Explicit").tag(PenColorMode.explicit)
-            }
-            .labelsHidden()
-            .frame(maxWidth: 110)
-            .help("Current pen color mode")
-
+        HStack(spacing: DS.Space.sm) {
             if case .explicit = model.currentPen.lineColor {
                 // A SMALL 16pt chip (ColorSwatchPicker), not the stock ~44×22pt
                 // NSColorWell pill — it opens the real ColorPicker in a popover and
@@ -123,7 +122,36 @@ struct CurrentPropertiesBar: View {
                 ColorSwatchPicker(color: explicitColorBinding,
                                   help: "Current explicit pen color")
             }
+            Picker("Color", selection: colorModeBinding) {
+                Text("By Layer").tag(PenColorMode.byLayer)
+                Text("By Block").tag(PenColorMode.byBlock)
+                Text("Explicit").tag(PenColorMode.explicit)
+            }
+            .labelsHidden()
+            .help("Current pen color mode")
         }
+        .frame(width: DS.Field.wide)
+    }
+
+    /// The line-TYPE control: the shared `LineTypePicker` (its rows now carry dash
+    /// previews) sized to the shared field width. Its leading preview reads like the
+    /// dash pattern, distinguishing it from the color/width controls (§3b).
+    @ViewBuilder
+    private var typeControl: some View {
+        LineTypePicker(selection: lineTypeBinding, label: "")
+            .labelsHidden()
+            .frame(width: DS.Field.wide)
+            .help("Current line type (By Layer = inherit from the layer)")
+    }
+
+    /// The line-WIDTH control: the shared `LineWidthPicker` (its rows now carry
+    /// weight-bar previews) sized to the shared field width.
+    @ViewBuilder
+    private var widthControl: some View {
+        LineWidthPicker(selection: lineWidthBinding, label: "")
+            .labelsHidden()
+            .frame(width: DS.Field.wide)
+            .help("Current line width (By Layer = inherit from the layer)")
     }
 
     /// Pen color mode (the sentinels vs an explicit color).

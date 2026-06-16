@@ -49,14 +49,25 @@ struct LineTypePicker: View {
     var body: some View {
         Picker(label, selection: $selection) {
             if includeByLayer {
-                Text("By Layer").tag(PenLineType.byLayer)
+                Self.row(.byLayer).tag(PenLineType.byLayer)
             }
             if includeByBlock {
-                Text("By Block").tag(PenLineType.byBlock)
+                Self.row(.byBlock).tag(PenLineType.byBlock)
             }
             ForEach(Self.concreteCases, id: \.self) { lt in
-                Text(Self.displayName(lt)).tag(lt)
+                Self.row(lt).tag(lt)
             }
+        }
+    }
+
+    /// One dropdown row: a leading dash-pattern preview that READS like the line type,
+    /// then its name — so the menu items are visually legible, not just words (§3b).
+    /// The sentinels (`.byLayer`/`.byBlock`) render the solid "inherit" baseline.
+    @ViewBuilder
+    private static func row(_ lt: PenLineType) -> some View {
+        HStack(spacing: DS.Space.sm) {
+            LinetypePreview(lineType: lt, color: .primary, length: 24)
+            Text(displayName(lt))
         }
     }
 
@@ -101,17 +112,28 @@ struct LineWidthPicker: View {
     var body: some View {
         Picker(label, selection: $selection) {
             if includeByLayer {
-                Text("By Layer").tag(PenLineWidth.byLayer)
+                Self.row(.byLayer).tag(PenLineWidth.byLayer)
             }
             if includeByBlock {
-                Text("By Block").tag(PenLineWidth.byBlock)
+                Self.row(.byBlock).tag(PenLineWidth.byBlock)
             }
             if includeDefault {
-                Text("Default").tag(PenLineWidth.default)
+                Self.row(.default).tag(PenLineWidth.default)
             }
             ForEach(Self.standardMillimeters, id: \.self) { mm in
-                Text(Self.millimeterLabel(mm)).tag(PenLineWidth.millimeters(mm))
+                Self.row(.millimeters(mm)).tag(PenLineWidth.millimeters(mm))
             }
+        }
+    }
+
+    /// One dropdown row: a leading weight-bar preview whose THICKNESS reads like the
+    /// lineweight, then its label — so the menu shows what each weight looks like, not
+    /// just "0.25 mm" text (§3b). The sentinels render the thin "inherit/default" bar.
+    @ViewBuilder
+    private static func row(_ w: PenLineWidth) -> some View {
+        HStack(spacing: DS.Space.sm) {
+            LineweightPreview(width: w, color: .primary, length: 24)
+            Text(displayName(w))
         }
     }
 

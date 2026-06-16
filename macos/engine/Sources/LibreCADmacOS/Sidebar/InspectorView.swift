@@ -53,7 +53,8 @@ struct InspectorView: View {
             toolOptionsSection
         }
         .formStyle(.grouped)
-        .frame(minWidth: 260, idealWidth: 300)
+        // The host inspector column owns the width (ContentView's
+        // `.inspectorColumnWidth`); a self `.frame(minWidth:)` here only fought it.
     }
 
     // MARK: Selection-driven editors
@@ -69,14 +70,11 @@ struct InspectorView: View {
         let records = selectedRecords
         switch records.count {
         case 0:
-            Section("Selection") {
-                ContentUnavailableView(
-                    "No Selection",
-                    systemImage: "cursorarrow.rays",
-                    description: Text("Select an entity on the canvas to edit its properties.")
-                )
-                .frame(maxWidth: .infinity)
-            }
+            // Nothing selected: instead of a big decorative empty state, put the prime
+            // real estate to work with DRAWING-LEVEL properties (units / counts /
+            // extents — §3c "No Selection → drawing-level properties"). The bare
+            // "select something" hint only shows when there is genuinely no document.
+            drawingPropertiesSection
         case 1:
             singleSelectionEditor(records[0])
         default:
@@ -84,13 +82,90 @@ struct InspectorView: View {
         }
     }
 
+    // MARK: Drawing-level properties (shown when nothing is selected)
+
+    /// The drawing-level summary the Inspector shows when no entity is selected — units,
+    /// dimension scale, entity + layer counts, and the drawing extents — read from the
+    /// live `CADDrawing` via the pure `DrawingSummary`. When the drawing is genuinely
+    /// empty (no entities AND only the default layer) we add a tiny one-line hint so a
+    /// blank document still tells the user the next move.
+    @ViewBuilder
+    private var drawingPropertiesSection: some View {
+        let summary = DrawingSummary(drawing: model.drawing)
+        Section("Drawing") {
+            LabeledContent("Units") {
+                Text(unitsValue(summary))
+                    .font(DS.Font.rowValue)
+            }
+            .lineLimit(1)
+
+            LabeledContent("Scale") {
+                Text("1 : \(formatted(summary.dimScale))")
+                    .font(DS.Font.rowValue)
+            }
+            .lineLimit(1)
+            .help("Overall dimension scale ($DIMSCALE) — LibreCAD's only drawing-wide scale")
+
+            LabeledContent("Entities", value: "\(summary.entityCount)")
+                .lineLimit(1)
+
+            LabeledContent("Layers", value: "\(summary.layerCount)")
+                .lineLimit(1)
+
+            LabeledContent("Extents") {
+                Text(extentsValue(summary))
+                    .font(DS.Font.rowValue)
+            }
+            .lineLimit(1)
+            .help("Bounding box of all geometry (width × height)")
+
+            if summary.entityCount == 0 {
+                Label("Select an entity on the canvas to edit its properties.",
+                      systemImage: "cursorarrow")
+                    .font(DS.Font.hint)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// The "Units" row value — the long name plus the sign in parens (e.g.
+    /// "Millimeters (mm)"), or just the name when there is no sign (`.none`).
+    private func unitsValue(_ summary: DrawingSummary) -> String {
+        summary.unitSign.isEmpty ? summary.unitName
+                                 : "\(summary.unitName) (\(summary.unitSign))"
+    }
+
+    /// The "Extents" row value: `W × H` in the drawing's unit sign, or "—" when the
+    /// drawing has no geometry (`DrawingSummary.extents == nil`).
+    private func extentsValue(_ summary: DrawingSummary) -> String {
+        guard let e = summary.extents else { return "—" }
+        let sign = summary.unitSign.isEmpty ? "" : " \(summary.unitSign)"
+        return "\(formatted(e.width)) × \(formatted(e.height))\(sign)"
+    }
+
+    /// A compact numeric format for the drawing summary rows (up to 3 fractional
+    /// digits, trailing zeros trimmed).
+    private func formatted(_ value: Double) -> String {
+        let s = String(format: "%.3f", value)
+        // Trim trailing zeros (and a dangling dot) so "10.000" reads as "10".
+        if s.contains(".") {
+            var t = s
+            while t.hasSuffix("0") { t.removeLast() }
+            if t.hasSuffix(".") { t.removeLast() }
+            return t
+        }
+        return s
+    }
+
     // MARK: Single selection
 
     @ViewBuilder
     private func singleSelectionEditor(_ record: EntityRecord) -> some View {
         Section("Entity") {
-            LabeledContent("Kind", value: kindTitle(record.kind))
-            LabeledContent("ID", value: "\(record.id.rawValue)")
+            LabeledContent("Kind", value: kindTitle(record.kind)).lineLimit(1)
+            LabeledContent("ID", value: "\(record.id.rawValue)").lineLimit(1)
         }
 
         EntityCommonEditor(
@@ -145,7 +220,7 @@ struct InspectorView: View {
                         Text(state.name).tag(state.name)
                     }
                 }
-                LabeledContent("Block", value: data.blockName)
+                LabeledContent("Block", value: data.blockName).lineLimit(1)
             }
         }
     }
@@ -230,51 +305,70 @@ struct InspectorView: View {
     private func multiSelectionEditor(_ records: [EntityRecord]) -> some View {
         Section("Selection") {
             LabeledContent("Entities", value: "\(records.count) selected")
+                .lineLimit(1)
         }
         // Common fields that apply to ALL: layer + pen color/mode/type/width. Each
-        // picker writes the chosen value onto every selected record in one undo step;
-        // a "Reset Pen to Layer" action routes through the painter path.
+        // picker writes the chosen value onto every selected record in one undo step.
+        // (The "Reset Pen to Layer" action lives in the Match Properties section.)
         MultiCommonEditor(
             records: records,
             layerNames: model.drawing.layers.layers.map(\.name),
-            onCommitAll: commit,
-            onResetPenToLayer: {
-                if model.resetSelectionPenToLayer() { requestRedraw() }
-            }
+            onCommitAll: commit
         )
     }
 
-    // MARK: Property painter (F20 — match properties / eyedropper)
+    // MARK: Match Properties (F20 — AutoCAD MATCHPROP / eyedropper)
 
-    /// The property-painter controls: pick up pen + layer from the current single
-    /// selection (the brush), then apply it to a later selection. Always visible so
-    /// the affordance is discoverable; the buttons enable/disable on context (one
-    /// entity to pick up; a brush loaded + a selection to apply). Routes entirely
-    /// through `CanvasModel`'s undoable painter ops.
+    /// The Match-Properties controls (renamed from "Property Painter" — AutoCAD's
+    /// MATCHPROP): pick up pen + layer from the current single selection (the brush),
+    /// then apply it to a later selection, or reset the selection's pen back to its
+    /// layer. Always visible so the affordance is discoverable; each action enables on
+    /// context via the pure `MatchPropertiesAvailability` predicate. When NOTHING is
+    /// actionable the section collapses to a single hint line (not three greyed
+    /// buttons). Routes entirely through `CanvasModel`'s undoable painter ops.
     @ViewBuilder
     private var propertyPainterSection: some View {
-        Section("Property Painter") {
-            LabeledContent("Brush") {
-                Text(model.hasPaintBrush ? "Loaded" : "Empty")
-                    .foregroundStyle(model.hasPaintBrush ? .primary : .secondary)
+        let avail = MatchPropertiesAvailability(hasBrush: model.hasPaintBrush,
+                                                selectionCount: model.selection.ids.count)
+        Section("Match Properties") {
+            LabeledContent("Source") {
+                Text(avail.statusWord)
+                    .foregroundStyle(avail.hasBrush ? .primary : .secondary)
             }
-            Button("Pick Up Properties") {
-                _ = model.loadPaintBrushFromSelection()
-            }
-            .disabled(model.selection.ids.count != 1)
-            .help("Copy the selected entity's pen + layer into the brush")
+            .lineLimit(1)
 
-            Button("Apply to Selection") {
-                if model.applyPaintBrushToSelection() { requestRedraw() }
-            }
-            .disabled(!model.hasPaintBrush || model.selection.isEmpty)
-            .help("Stamp the brush's pen + layer onto every selected entity")
+            if avail.isAllUnavailable {
+                // One hint instead of three disabled buttons.
+                Label(avail.unavailableHint, systemImage: "eyedropper")
+                    .font(DS.Font.hint)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Button {
+                    _ = model.loadPaintBrushFromSelection()
+                } label: {
+                    Label("Pick Up", systemImage: "eyedropper")
+                }
+                .disabled(!avail.canPickUp)
+                .help("Copy the selected entity's pen + layer into the brush")
 
-            Button("Reset Pen to Layer") {
-                if model.resetSelectionPenToLayer() { requestRedraw() }
+                Button {
+                    if model.applyPaintBrushToSelection() { requestRedraw() }
+                } label: {
+                    Label("Apply", systemImage: "paintbrush.pointed")
+                }
+                .disabled(!avail.canApply)
+                .help("Stamp the brush's pen + layer onto every selected entity")
+
+                Button {
+                    if model.resetSelectionPenToLayer() { requestRedraw() }
+                } label: {
+                    Label("Reset", systemImage: "arrow.uturn.backward")
+                }
+                .disabled(!avail.canReset)
+                .help("Make the selection inherit each layer's pen again")
             }
-            .disabled(model.selection.isEmpty)
-            .help("Make the selection inherit each layer's pen again")
         }
     }
 
@@ -283,19 +377,43 @@ struct InspectorView: View {
     @ViewBuilder
     private var snapGridSection: some View {
         Section("Snap & Grid") {
+            // Master snap on/off — pulled OUT of the grid (the old "Free (no snap)"
+            // mode, inverted) so it reads as the section's primary switch (AutoCAD
+            // DSETTINGS ▸ Object Snap "Object Snap On"). When snapping is OFF the
+            // per-mode grid below is disabled (it has no effect anyway).
+            Toggle("Snap on", isOn: snapEnabledBinding)
+                .help("Master object-snap toggle — off = free cursor (no snap)")
+
+            // The per-mode toggles as a 2-column checkbox grid so the long labels
+            // (Endpoint…Parallel) stop clipping in a single tall column (§3c).
+            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading),
+                                GridItem(.flexible(), alignment: .leading)],
+                      alignment: .leading, spacing: DS.Space.xs) {
+                ForEach(SnapModeOption.gridModes, id: \.label) { option in
+                    Toggle(option.label, isOn: snapBinding(option.mode))
+                        .toggleStyle(.checkbox)
+                        .lineLimit(1)
+                }
+            }
+            .disabled(!snapEnabledBinding.wrappedValue)
+
+            Divider()
+
             Toggle("Show grid", isOn: $model.gridVisible)
                 .onChange(of: model.gridVisible) { _, _ in requestRedraw() }
 
-            LabeledContent("Grid spacing") {
-                TextField("Spacing",
+            LabeledContent {
+                TextField("",
                           value: $model.preferredGridSpacing,
                           format: .number)
-                    .frame(width: 80)
+                    .frame(width: DS.Field.narrow)
                     .multilineTextAlignment(.trailing)
-            }
-
-            ForEach(SnapModeOption.all, id: \.label) { option in
-                Toggle(option.label, isOn: snapBinding(option.mode))
+            } label: {
+                // The wrap-to-"Spaci\nng" bug: keep the label on ONE line and let it
+                // size to its content so it never folds (§3c confirmed bug).
+                Text("Grid spacing")
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
         }
     }
@@ -305,6 +423,16 @@ struct InspectorView: View {
         Binding(
             get: { model.isSnapModeOn(mode) },
             set: { model.setSnapMode(mode, $0) }
+        )
+    }
+
+    /// The master "Snap on" toggle — the INVERSE of the `.free` (no-snap) mode, so the
+    /// section reads as a primary switch over the per-mode grid. ON ⇒ `.free` cleared
+    /// (object snap active); OFF ⇒ `.free` set (free cursor).
+    private var snapEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { !model.isSnapModeOn(.free) },
+            set: { model.setSnapMode(.free, !$0) }
         )
     }
 
@@ -333,11 +461,13 @@ struct InspectorView: View {
 
                 if model.arrayPolar {
                     intRow("Count", $model.arrayPolarCount) { reapplyTool() }
-                    LabeledContent("Total angle") {
-                        TextField("Degrees", value: degreesBinding($model.arrayPolarTotalAngle),
+                    LabeledContent {
+                        TextField("", value: degreesBinding($model.arrayPolarTotalAngle),
                                   format: .number)
-                            .frame(width: 80).multilineTextAlignment(.trailing)
+                            .frame(width: DS.Field.narrow).multilineTextAlignment(.trailing)
                             .onSubmit { reapplyTool() }
+                    } label: {
+                        Text("Total angle (°)").lineLimit(1)
                     }
                     Toggle("Rotate items", isOn: $model.arrayPolarRotateItems)
                         .onChange(of: model.arrayPolarRotateItems) { _, _ in reapplyTool() }
@@ -368,11 +498,13 @@ struct InspectorView: View {
             }
         case .leader:
             Section("Leader Options") {
-                LabeledContent("Text") {
+                LabeledContent {
                     TextField("Annotation", text: $model.leaderText)
-                        .frame(width: 140)
+                        .frame(width: DS.Field.wide)
                         .onSubmit { reapplyTool() }
                         .onChange(of: model.leaderText) { _, _ in reapplyTool() }
+                } label: {
+                    Text("Text").lineLimit(1)
                 }
                 numberRow("Text height", $model.leaderTextHeight) { reapplyTool() }
             }
@@ -391,22 +523,26 @@ struct InspectorView: View {
     @ViewBuilder
     private func numberRow(_ label: String, _ value: Binding<Double>,
                            onCommit: @escaping () -> Void) -> some View {
-        LabeledContent(label) {
+        LabeledContent {
             TextField(label, value: value, format: .number)
-                .frame(width: 90).multilineTextAlignment(.trailing)
+                .frame(width: DS.Field.std).multilineTextAlignment(.trailing)
                 .onSubmit(onCommit)
                 .onChange(of: value.wrappedValue) { _, _ in onCommit() }
+        } label: {
+            Text(label).lineLimit(1)
         }
     }
 
     @ViewBuilder
     private func intRow(_ label: String, _ value: Binding<Int>,
                         onCommit: @escaping () -> Void) -> some View {
-        LabeledContent(label) {
+        LabeledContent {
             TextField(label, value: value, format: .number)
-                .frame(width: 90).multilineTextAlignment(.trailing)
+                .frame(width: DS.Field.std).multilineTextAlignment(.trailing)
                 .onSubmit(onCommit)
                 .onChange(of: value.wrappedValue) { _, _ in onCommit() }
+        } label: {
+            Text(label).lineLimit(1)
         }
     }
 
@@ -528,4 +664,8 @@ private struct SnapModeOption {
         SnapModeOption(label: "Grid", mode: .grid),
         SnapModeOption(label: "Free (no snap)", mode: .free),
     ]
+
+    /// The per-mode toggles shown in the 2-column grid — every mode EXCEPT `.free`,
+    /// which is surfaced as the master "Snap on" toggle above the grid (§3c).
+    static let gridModes: [SnapModeOption] = all.filter { $0.mode != .free }
 }

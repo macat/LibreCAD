@@ -63,11 +63,13 @@ struct EntityCommonEditor: View {
                 Text("Explicit").tag(PenColorMode.explicit)
             }
 
-            LabeledContent("Line width (mm)") {
+            LabeledContent {
                 TextField("Width", value: $widthMM, format: .number)
-                    .frame(width: 90).multilineTextAlignment(.trailing)
+                    .frame(width: DS.Field.std).multilineTextAlignment(.trailing)
                     .onSubmit(commitWidth)
                     .onChange(of: widthMM) { _, _ in commitWidth() }
+            } label: {
+                Text("Line width (mm)").lineLimit(1)
             }
         }
         .onAppear(perform: seed)
@@ -225,6 +227,7 @@ struct GeometryEditor: View {
         LabeledContent("Control points") {
             Text("\(d.controlPoints.count)").foregroundStyle(.secondary)
         }
+        .lineLimit(1)
         IndexedPointEditor(label: "Control pt", points: d.controlPoints) { idx, pt in
             onCommit([replacing(InspectorEdits.setSplineControlPoint(record.kind, index: idx, pt))])
         }
@@ -241,6 +244,7 @@ struct GeometryEditor: View {
         LabeledContent("Control points") {
             Text("\(d.controlPoints.count)").foregroundStyle(.secondary)
         }
+        .lineLimit(1)
         IndexedPointEditor(label: "Control pt", points: d.controlPoints) { idx, pt in
             onCommit([replacing(InspectorEdits.setSplinePointsControlPoint(record.kind, index: idx, pt))])
         }
@@ -257,6 +261,7 @@ struct GeometryEditor: View {
         LabeledContent("Vertices") {
             Text("\(d.vertices.count)").foregroundStyle(.secondary)
         }
+        .lineLimit(1)
         IndexedPointEditor(label: "Vertex", points: d.vertices.map(\.point)) { idx, pt in
             onCommit([replacing(InspectorEdits.setPolylineVertex(record.kind, index: idx, pt))])
         }
@@ -266,12 +271,14 @@ struct GeometryEditor: View {
 
     @ViewBuilder
     private func hatchEditor(_ d: HatchData) -> some View {
-        LabeledContent("Pattern") {
+        LabeledContent {
             TextField("Pattern", text: Binding(
                 get: { d.patternName ?? "" },
                 set: { onCommit([replacing(InspectorEdits.setHatchPatternName(record.kind, $0.isEmpty ? nil : $0))]) }
             ))
-            .frame(width: 120).multilineTextAlignment(.trailing)
+            .frame(width: DS.Field.wide).multilineTextAlignment(.trailing)
+        } label: {
+            Text("Pattern").lineLimit(1)
         }
         Toggle("Solid fill", isOn: Binding(
             get: { d.solidFill },
@@ -303,19 +310,23 @@ struct GeometryEditor: View {
         PointFields(label: "Definition pt", point: d.definitionPoint) {
             onCommit([replacing(InspectorEdits.setDimDefinitionPoint(record.kind, $0))])
         }
-        LabeledContent("Dim style") {
+        LabeledContent {
             TextField("Style", text: Binding(
                 get: { d.styleName ?? "" },
                 set: { onCommit([replacing(InspectorEdits.setDimStyleName(record.kind, $0.isEmpty ? nil : $0))]) }
             ))
-            .frame(width: 120).multilineTextAlignment(.trailing)
+            .frame(width: DS.Field.wide).multilineTextAlignment(.trailing)
+        } label: {
+            Text("Dim style").lineLimit(1)
         }
-        LabeledContent("Text override") {
+        LabeledContent {
             TextField("Measured", text: Binding(
                 get: { d.textOverride ?? "" },
                 set: { onCommit([replacing(InspectorEdits.setDimTextOverride(record.kind, $0))]) }
             ))
-            .frame(width: 120).multilineTextAlignment(.trailing)
+            .frame(width: DS.Field.wide).multilineTextAlignment(.trailing)
+        } label: {
+            Text("Text override").lineLimit(1)
         }
     }
 
@@ -323,9 +334,11 @@ struct GeometryEditor: View {
 
     @ViewBuilder
     private func insertEditor(_ d: InsertData) -> some View {
-        LabeledContent("Block") {
+        LabeledContent {
             Text(d.blockName.isEmpty ? "—" : d.blockName)
                 .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+        } label: {
+            Text("Block").lineLimit(1)
         }
         PointFields(label: "Insertion", point: d.insertionPoint) {
             onCommit([replacing(InspectorEdits.setInsertPosition(record.kind, $0))])
@@ -372,6 +385,7 @@ struct GeometryEditor: View {
         LabeledContent("Vertices") {
             Text("\(d.vertices.count)").foregroundStyle(.secondary)
         }
+        .lineLimit(1)
         Toggle("Arrowhead", isOn: Binding(
             get: { d.hasArrow },
             set: { onCommit([replacing(InspectorEdits.setLeaderHasArrow(record.kind, $0))]) }
@@ -379,12 +393,14 @@ struct GeometryEditor: View {
         ScalarField(label: "Arrow size", value: d.arrowSize) {
             onCommit([replacing(InspectorEdits.setLeaderArrowSize(record.kind, $0))])
         }
-        LabeledContent("Text") {
+        LabeledContent {
             TextField("Annotation", text: Binding(
                 get: { InspectorEdits.leaderText(record.kind) },
                 set: { onCommit([replacing(InspectorEdits.setLeaderText(record.kind, $0))]) }
             ))
-            .frame(width: 140).multilineTextAlignment(.trailing)
+            .frame(width: DS.Field.wide).multilineTextAlignment(.trailing)
+        } label: {
+            Text("Text").lineLimit(1)
         }
     }
 
@@ -430,12 +446,14 @@ struct GeometryEditor: View {
         ScalarField(label: "Fade", value: Double(d.display.fade)) {
             onCommit([replacing(InspectorEdits.setImageFade(record.kind, Int($0.rounded())))])
         }
-        LabeledContent("File") {
+        LabeledContent {
             Text(d.imageDef.path.isEmpty ? "—" : (d.imageDef.path as NSString).lastPathComponent)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .help(d.imageDef.path)   // full path on hover (read-only)
+        } label: {
+            Text("File").lineLimit(1)
         }
     }
 
@@ -658,9 +676,6 @@ struct MultiCommonEditor: View {
     let records: [EntityRecord]
     let layerNames: [String]
     let onCommitAll: ([EntityRecord]) -> Void
-    /// Resets every selected entity's pen to `.byLayer` (one undo step). Supplied by
-    /// the Inspector (routes through `CanvasModel.resetSelectionPenToLayer`).
-    var onResetPenToLayer: (() -> Void)?
 
     @State private var layer: String = ""
     @State private var color: Color = .green
@@ -739,15 +754,15 @@ struct MultiCommonEditor: View {
                 commit { $0.pen.lineType = lt }
             }
 
-            LabeledContent("Line width (mm)") {
+            LabeledContent {
                 TextField("Width", value: $widthMM, format: .number)
-                    .frame(width: 90).multilineTextAlignment(.trailing)
+                    .frame(width: DS.Field.std).multilineTextAlignment(.trailing)
                     .onSubmit(commitWidth)
+            } label: {
+                Text("Line width (mm)").lineLimit(1)
             }
-
-            if let reset = onResetPenToLayer {
-                Button("Reset Pen to Layer", action: reset)
-            }
+            // NOTE: the "Reset Pen to Layer" action lives ONLY in the Match Properties
+            // section now (it applied to the same selection — this was a duplicate).
         }
         .onAppear(perform: seed)
         .onChange(of: records.map(\.id)) { _, _ in seed() }
@@ -822,15 +837,17 @@ struct PointFields: View {
     @State private var y: Double = 0
 
     var body: some View {
-        LabeledContent(label) {
-            HStack(spacing: 6) {
+        LabeledContent {
+            HStack(spacing: DS.Space.sm) {
                 TextField("x", value: $x, format: .number)
-                    .frame(width: 70).multilineTextAlignment(.trailing)
+                    .frame(width: DS.Field.xy).multilineTextAlignment(.trailing)
                     .onSubmit(commit)
                 TextField("y", value: $y, format: .number)
-                    .frame(width: 70).multilineTextAlignment(.trailing)
+                    .frame(width: DS.Field.xy).multilineTextAlignment(.trailing)
                     .onSubmit(commit)
             }
+        } label: {
+            Text(label).lineLimit(1)
         }
         .onAppear(perform: seed)
         .onChange(of: point) { _, _ in seed() }
@@ -849,10 +866,12 @@ struct ScalarField: View {
     @State private var draft: Double = 0
 
     var body: some View {
-        LabeledContent(label) {
+        LabeledContent {
             TextField(label, value: $draft, format: .number)
-                .frame(width: 90).multilineTextAlignment(.trailing)
+                .frame(width: DS.Field.std).multilineTextAlignment(.trailing)
                 .onSubmit { onCommit(draft) }
+        } label: {
+            Text(label).lineLimit(1)
         }
         .onAppear { draft = value }
         .onChange(of: value) { _, newValue in draft = newValue }
