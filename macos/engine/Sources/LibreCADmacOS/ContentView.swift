@@ -407,6 +407,12 @@ struct ContentView: View {
             // (which runs BEFORE the canvas `keyDown`), so ⌫ falls through to the
             // canvas, where the tool consumes it as `.backspace`. See MUST-FIX 1.
             .focusedSceneValue(\.isToolActive, model.isToolActive)
+            // Match Properties (#2): PICK-UP (load the brush from the single selected
+            // entity) + APPLY (paint the brush onto the whole selection, then redraw),
+            // grouped into one `ViewModifier` so `canvasDetail`'s modifier chain stays
+            // under the Swift type-checker's complexity budget (gotcha #2). Both consume
+            // the P0-D `CanvasModel` ops (no model API added here).
+            .modifier(matchPropHandlers)
             // Let the canvas hand focus to the command line on Space (D1). The
             // controller calls this closure from `handleKey` when Space is pressed
             // and a tool is active, so a typed length goes to the field, not a tool.
@@ -483,6 +489,20 @@ struct ContentView: View {
             insertFromFile: { insertBlockFromFile() },
             saveToFile: { name in saveBlockToFile(named: name) },
             saveTargetName: saveBlockTargetName
+        )
+    }
+
+    /// The Match-Properties focused-scene-value handlers (#2 — Pick Up / Apply), pulled
+    /// into one `ViewModifier` so `canvasDetail`'s modifier chain stays under the Swift
+    /// type-checker's complexity budget (gotcha #2). Pick Up loads the property brush
+    /// from the single selected entity; Apply paints it onto the whole selection (one
+    /// undoable group) and redraws on a change.
+    private var matchPropHandlers: some ViewModifier {
+        MatchPropHandlersModifier(
+            pickUp: { _ = model.loadPaintBrushFromSelection() },
+            apply: {
+                if model.applyPaintBrushToSelection() { controllerBox.controller?.requestRedraw() }
+            }
         )
     }
 
@@ -728,9 +748,20 @@ struct ContentView: View {
 
     /// The trailing toolbar item: a toggle for the Inspector pane (the standard Mac
     /// inspector affordance). Placed in the trailing group so it sits at the far
-    /// right, next to where the inspector opens.
+    /// right, next to where the inspector opens. Also hosts the Match-Properties
+    /// PICK-UP button (#2 — `eyedropper`): clicking it loads the property brush from the
+    /// single selected entity (then ⌘⇧V / the menu applies it to the next selection).
     @ToolbarContentBuilder
     private var inspectorToolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                _ = model.loadPaintBrushFromSelection()
+            } label: {
+                Label("Match Properties", systemImage: "eyedropper")
+            }
+            .help("Match Properties — pick up the selected object's properties (⌘⇧C), "
+                  + "then apply to a new selection (⌘⇧V)")
+        }
         ToolbarItem(placement: .primaryAction) {
             Button {
                 showInspector.toggle()
@@ -1741,6 +1772,23 @@ extension FocusedValues {
         set { self[DuplicateSelectionKey.self] = newValue }
     }
 
+    /// Match Properties — PICK UP (⌘⇧C): load the property brush from the single selected
+    /// entity (`CanvasModel.loadPaintBrushFromSelection`). The focused window publishes
+    /// this; LibreCADApp's "Match Properties ▸ Pick Up Properties" item + the toolbar
+    /// `eyedropper` button fire it. `nil` when no canvas is focused (disables the item).
+    var matchPropPickUp: (() -> Void)? {
+        get { self[MatchPropPickUpKey.self] }
+        set { self[MatchPropPickUpKey.self] = newValue }
+    }
+
+    /// Match Properties — APPLY (⌘⇧V): paint the loaded brush onto the whole current
+    /// selection (`CanvasModel.applyPaintBrushToSelection`) as one undoable group, then
+    /// redraw. `nil` when no canvas is focused (disables the menu item).
+    var matchPropApply: (() -> Void)? {
+        get { self[MatchPropApplyKey.self] }
+        set { self[MatchPropApplyKey.self] = newValue }
+    }
+
     /// Whether the focused window has a draw tool mid-run. Used by LibreCADApp to
     /// disable the Edit ▸ Delete item (so its bare-⌫ shortcut does not pre-empt the
     /// tool's `.backspace` — MUST-FIX 1). `nil` when no canvas is focused; the
@@ -1870,6 +1918,21 @@ private struct BlockFileHandlersModifier: ViewModifier {
     }
 }
 
+/// Groups the Match-Properties focused-scene-value handlers (#2 — Pick Up / Apply) into
+/// one `ViewModifier`, so `ContentView.canvasDetail`'s modifier chain stays under the
+/// Swift type-checker's expression-complexity limit (gotcha #2). Each closure is the
+/// same action the Edit menu chords (⌘⇧C / ⌘⇧V) + the toolbar `eyedropper` fire.
+private struct MatchPropHandlersModifier: ViewModifier {
+    let pickUp: () -> Void
+    let apply: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .focusedSceneValue(\.matchPropPickUp) { pickUp() }
+            .focusedSceneValue(\.matchPropApply) { apply() }
+    }
+}
+
 private struct UndoActionKey: FocusedValueKey {
     typealias Value = () -> Void
 }
@@ -1883,6 +1946,14 @@ private struct DeleteSelectionKey: FocusedValueKey {
 }
 
 private struct DuplicateSelectionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct MatchPropPickUpKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct MatchPropApplyKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 

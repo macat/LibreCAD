@@ -90,6 +90,12 @@ struct LibreCADApp: App {
     /// Delete item is disabled so its bare-⌫ shortcut does NOT pre-empt the tool's
     /// `.backspace` (see the Delete button below and MUST-FIX 1).
     @FocusedValue(\.isToolActive) private var isToolActive
+    /// Match Properties — Pick Up (⌘⇧C) / Apply (⌘⇧V) actions published by the focused
+    /// window (#2). Pick Up loads the property brush from the single selected entity;
+    /// Apply paints it onto the whole current selection. `nil` ⇒ no canvas focused ⇒
+    /// the matching menu item is disabled.
+    @FocusedValue(\.matchPropPickUp) private var matchPropPickUp
+    @FocusedValue(\.matchPropApply) private var matchPropApply
 
     var body: some Scene {
         // The document scene: a brand-new document is the empty `LibreCADDocument()`;
@@ -231,6 +237,23 @@ struct LibreCADApp: App {
                 Button("Select Contour") {
                     NSApp.sendAction(Selector(("selectContourAction:")), to: nil, from: nil)
                 }
+
+                Divider()
+                // Edit ▸ Match Properties (#2) — the AutoCAD MATCHPROP / format-painter
+                // pair. Pick Up (⌘⇧C) loads the property brush from the single selected
+                // entity; Apply (⌘⇧V) paints it onto the whole current selection (one
+                // undoable group). Routed to the focused window via focused values
+                // (`CanvasModel.loadPaintBrushFromSelection` / `applyPaintBrushToSelection`,
+                // P0-D). ⌘⇧C / ⌘⇧V are FREE in the app menus (system Copy/Paste are bare
+                // ⌘C/⌘V; verified no other menu item binds the shifted chords). The toolbar
+                // `eyedropper` button (ContentView) also fires Pick Up. Each is disabled
+                // when its focused value is `nil` (no canvas focused).
+                Button("Pick Up Properties") { matchPropPickUp?() }
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+                    .disabled(matchPropPickUp == nil)
+                Button("Apply Properties") { matchPropApply?() }
+                    .keyboardShortcut("v", modifiers: [.command, .shift])
+                    .disabled(matchPropApply == nil)
             }
             CommandGroup(after: .toolbar) {
                 // ⌘K — the command palette: fuzzy-find and run any tool/app action.
