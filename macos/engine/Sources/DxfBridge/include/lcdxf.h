@@ -478,6 +478,42 @@ typedef struct LCHeader {
     const char *dimStyle;
 } LCHeader;
 
+/* ------------------------------------------------------------------------- *
+ *  Generic HEADER variable pass-through (R4b)
+ *
+ *  The fixed `LCHeader` POD only carries the curated subset of header vars the
+ *  renderer needs. To preserve ARBITRARY document-settings header vars across a
+ *  Save → reopen (e.g. $GRIDUNIT, $PDMODE, $PDSIZE, $ANGBASE, $ANGDIR, $PINSBASE)
+ *  without a fixed field per var, the reader ALSO exposes a generic extra-var bag,
+ *  and the writer accepts one. Each record is a name + a tagged value. The 7
+ *  standard targets the doc-settings sheet uses are in libdxfrw's curated emit
+ *  list, so once they ride in `DRW_Header.vars` they emit for free; a purely
+ *  custom `$`-var (e.g. $LC_SNAPMODE) would NOT emit under stock libdxfrw and is
+ *  intentionally NOT round-tripped through the FILE here.
+ * ------------------------------------------------------------------------- */
+
+/** The value type tag of an `LCHeaderVar` (mirrors DRW_Variant's numeric/coord
+ *  kinds; STRING is not used by the doc-settings vars so it is omitted). */
+typedef enum LCHeaderVarType {
+    LC_HVAR_INT    = 0,   /**< use the `i` field. */
+    LC_HVAR_DOUBLE = 1,   /**< use the `d` field. */
+    LC_HVAR_COORD  = 2    /**< use the `coord[3]` field (codes 10/20/30). */
+} LCHeaderVarType;
+
+/**
+ * One generic header variable carried verbatim across the read/write bridge. The
+ * `name` is the `$`-prefixed DXF key (e.g. "$GRIDUNIT"); on a READ POD it borrows
+ * the owning list's string pool, on a WRITE POD it borrows the caller's storage.
+ * `type` selects which value field is meaningful.
+ */
+typedef struct LCHeaderVar {
+    const char *name;     /**< `$`-prefixed DXF key; borrows owner storage. */
+    int32_t type;         /**< an LCHeaderVarType. */
+    long i;               /**< value when type == LC_HVAR_INT. */
+    double d;             /**< value when type == LC_HVAR_DOUBLE. */
+    double coord[3];      /**< value (x,y,z) when type == LC_HVAR_COORD. */
+} LCHeaderVar;
+
 /**
  * One captured DIMSTYLE table entry (a flat POD copy of the subset of
  * `DRW_Dimstyle` the renderer needs). libdxfrw defaults the imperial standard
@@ -655,6 +691,16 @@ const LCEntity *lc_block_entities(const LCEntityList *list);
  *  `lc_entity_list_free`. NULL-safe. */
 const LCHeader *lc_header(const LCEntityList *list);
 
+/** Number of generic extra HEADER vars captured (R4b; >= 0). These are the header
+ *  vars NOT already mapped into the fixed `LCHeader` POD — the document-settings
+ *  vars ($GRIDUNIT/$PDMODE/$PDSIZE/$ANGBASE/$ANGDIR/$PINSBASE, etc.). NULL-safe. */
+int lc_header_var_count(const LCEntityList *list);
+
+/** Returns the `idx`-th generic extra HEADER var (R4b) by VALUE, or a zeroed
+ *  record (name == NULL) for an out-of-range index or a NULL list. The returned
+ *  `name` borrows the list's string pool — valid until `lc_entity_list_free`. */
+LCHeaderVar lc_header_var(const LCEntityList *list, int idx);
+
 /** Number of captured DIMSTYLE table entries (>= 0). NULL-safe. */
 int lc_dimstyle_count(const LCEntityList *list);
 
@@ -764,6 +810,13 @@ LCStatus lc_dxf_count_entities(const char *path, int *out_count);
  *                      written as a real viewport (vpID/vpStatus forced > 1) so a
  *                      round-trip read keeps it. NULL / 0 ⇒ no viewports written.
  * @param viewportCount Number of viewports (>= 0).
+ * @param headerVars    Optional pointer to `headerVarCount` LCHeaderVar records —
+ *                      generic extra HEADER vars to emit verbatim (R4b: the
+ *                      document-settings vars $GRIDUNIT/$PDMODE/$PDSIZE/$ANGBASE/
+ *                      $ANGDIR/$PINSBASE etc.). Added to `DRW_Header.vars` so the
+ *                      libdxfrw-curated standard targets emit for free. NULL / 0 ⇒
+ *                      none. Additive — pre-R4b callers pass NULL, 0.
+ * @param headerVarCount Number of generic extra HEADER vars (>= 0).
  * @return LC_OK on success; LC_ERR_INVALID_PATH for a null/empty path or a
  *         negative count with a NULL array; LC_ERR_WRITE_FAILED if libdxfrw
  *         fails to write (also covers any exception escaping the export).
@@ -777,7 +830,8 @@ LCStatus lc_dxf_write(const char *path,
                       int *out_skipped,
                       const LCHeader *header,
                       const LCDimStyle *dimStyles, int dimStyleCount,
-                      const LCViewport *viewports, int viewportCount);
+                      const LCViewport *viewports, int viewportCount,
+                      const LCHeaderVar *headerVars, int headerVarCount);
 
 /**
  * Write a DWG file from flat POD entity + layer arrays. The DWG counterpart of
@@ -838,6 +892,14 @@ LCStatus lc_dxf_write(const char *path,
  *                      DWG table gap, like user blocks / dim styles). Use DXF for a
  *                      viewport round-trip.
  * @param viewportCount Number of viewports (>= 0).
+ * @param headerVars    Optional pointer to `headerVarCount` LCHeaderVar records (the
+ *                      generic extra HEADER vars; see `lc_dxf_write`). Added to
+ *                      `DRW_Header.vars`, but NOTE: libdxfrw's dwgWriter15 emits its
+ *                      own DEFAULT header and does NOT honor these, so they do NOT
+ *                      round-trip on DWG (the documented DWG header gap, like layers /
+ *                      dim styles). Use DXF for a header-var round-trip. NULL / 0 ⇒
+ *                      none. Additive — pre-R4b callers pass NULL, 0.
+ * @param headerVarCount Number of generic extra HEADER vars (>= 0).
  * @return LC_OK on success; LC_ERR_INVALID_PATH for a null/empty path or a
  *         negative count with a NULL array; LC_ERR_WRITE_FAILED if libdxfrw
  *         fails to write (also covers any exception escaping the export).
@@ -851,7 +913,8 @@ LCStatus lc_dwg_write(const char *path,
                       int *out_skipped,
                       const LCHeader *header,
                       const LCDimStyle *dimStyles, int dimStyleCount,
-                      const LCViewport *viewports, int viewportCount);
+                      const LCViewport *viewports, int viewportCount,
+                      const LCHeaderVar *headerVars, int headerVarCount);
 
 #ifdef __cplusplus
 }

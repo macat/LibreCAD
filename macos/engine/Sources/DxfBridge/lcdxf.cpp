@@ -67,6 +67,12 @@ struct LCEntityList {
     LCHeader header{};
     std::vector<LCDimStyle> dimStyles;
 
+    // R4b: generic extra HEADER vars (the document-settings vars NOT mapped into the
+    // fixed `LCHeader` POD — $GRIDUNIT/$PDMODE/$PDSIZE/$ANGBASE/$ANGDIR/$PINSBASE,
+    // etc.). Filled by the FlatteningReader's addHeader hook from DRW_Header.vars;
+    // each record's `name` borrows the `strings` pool (stable for the handle's life).
+    std::vector<LCHeaderVar> headerVars;
+
     // RECONSTRUCTED paper-space layouts (paper-space P1). Built by the reader's
     // `finalizeLayouts()` from observed paper-space content (`*Paper_Space` block
     // members and/or a PLOTSETTINGS object). At most one entry on stock libdxfrw
@@ -378,6 +384,55 @@ public:
         std::string styleName;
         if (getHdrStr(*data, "DIMSTYLE", styleName)) {
             h.dimStyle = intern(styleName);
+        }
+        // R4b: capture the GENERIC document-settings header vars (the ones NOT in the
+        // fixed POD above) into the extra-var bag so they round-trip verbatim. We key
+        // off a fixed whitelist of doc-settings vars: $GRIDMODE/$GRIDUNIT (grid),
+        // $PDMODE/$PDSIZE (points), $ANGBASE/$ANGDIR (angles), $PINSBASE (paper base).
+        // Coord-typed vars ($GRIDUNIT/$PINSBASE — codes 10/20/30) preserve all three
+        // components. The DXF reader keys $-prefixed, the DWG reader un-prefixed; both
+        // spellings are tried (findHdrVar). A missing var simply yields no record.
+        static const char *kExtraInt[]    = { "GRIDMODE", "PDMODE", "ANGDIR" };
+        static const char *kExtraDouble[] = { "PDSIZE", "ANGBASE" };
+        static const char *kExtraCoord[]  = { "GRIDUNIT", "PINSBASE" };
+        for (const char *key : kExtraInt) {
+            const DRW_Variant *v = findHdrVar(*data, key);
+            if (v == nullptr) continue;
+            if (v->type() != DRW_Variant::INTEGER &&
+                v->type() != DRW_Variant::DOUBLE) continue;
+            LCHeaderVar hv{};
+            hv.name = intern(std::string("$") + key);
+            hv.type = LC_HVAR_INT;
+            hv.i = (v->type() == DRW_Variant::INTEGER)
+                       ? static_cast<long>(v->i_val())
+                       : static_cast<long>(v->d_val());
+            m_out->headerVars.push_back(hv);
+        }
+        for (const char *key : kExtraDouble) {
+            const DRW_Variant *v = findHdrVar(*data, key);
+            if (v == nullptr) continue;
+            if (v->type() != DRW_Variant::DOUBLE &&
+                v->type() != DRW_Variant::INTEGER) continue;
+            LCHeaderVar hv{};
+            hv.name = intern(std::string("$") + key);
+            hv.type = LC_HVAR_DOUBLE;
+            hv.d = (v->type() == DRW_Variant::DOUBLE)
+                       ? v->d_val()
+                       : static_cast<double>(v->i_val());
+            m_out->headerVars.push_back(hv);
+        }
+        for (const char *key : kExtraCoord) {
+            const DRW_Variant *v = findHdrVar(*data, key);
+            if (v == nullptr || v->type() != DRW_Variant::COORD) continue;
+            const DRW_Coord *c = v->coord();
+            if (c == nullptr) continue;
+            LCHeaderVar hv{};
+            hv.name = intern(std::string("$") + key);
+            hv.type = LC_HVAR_COORD;
+            hv.coord[0] = c->x;
+            hv.coord[1] = c->y;
+            hv.coord[2] = c->z;
+            m_out->headerVars.push_back(hv);
         }
     }
     void addLType(const DRW_LType &data) override { (void)data; }
@@ -1428,7 +1483,8 @@ public:
                      const LCEntity *blockEntities, int blockEntityCount,
                      const LCHeader *header,
                      const LCDimStyle *dimStyles, int dimStyleCount,
-                     const LCViewport *viewports, int viewportCount)
+                     const LCViewport *viewports, int viewportCount,
+                     const LCHeaderVar *headerVars, int headerVarCount)
         : m_dxf(dxf),
           m_entities(entities), m_entityCount(entityCount < 0 ? 0 : entityCount),
           m_layers(layers), m_layerCount(layerCount < 0 ? 0 : layerCount),
@@ -1439,7 +1495,9 @@ public:
           m_dimStyles(dimStyles),
           m_dimStyleCount(dimStyleCount < 0 ? 0 : dimStyleCount),
           m_viewports(viewports),
-          m_viewportCount(viewportCount < 0 ? 0 : viewportCount) {}
+          m_viewportCount(viewportCount < 0 ? 0 : viewportCount),
+          m_headerVars(headerVars),
+          m_headerVarCount(headerVarCount < 0 ? 0 : headerVarCount) {}
 
     // DWG mode: drive the DWG writer (`dwgRW`). The SAME per-kind geometry
     // mapping runs; the only differences are routed through the `emit*` helpers
@@ -1453,7 +1511,8 @@ public:
                      const LCEntity *blockEntities, int blockEntityCount,
                      const LCHeader *header,
                      const LCDimStyle *dimStyles, int dimStyleCount,
-                     const LCViewport *viewports, int viewportCount)
+                     const LCViewport *viewports, int viewportCount,
+                     const LCHeaderVar *headerVars, int headerVarCount)
         : m_dwg(dwg),
           m_entities(entities), m_entityCount(entityCount < 0 ? 0 : entityCount),
           m_layers(layers), m_layerCount(layerCount < 0 ? 0 : layerCount),
@@ -1464,7 +1523,9 @@ public:
           m_dimStyles(dimStyles),
           m_dimStyleCount(dimStyleCount < 0 ? 0 : dimStyleCount),
           m_viewports(viewports),
-          m_viewportCount(viewportCount < 0 ? 0 : viewportCount) {}
+          m_viewportCount(viewportCount < 0 ? 0 : viewportCount),
+          m_headerVars(headerVars),
+          m_headerVarCount(headerVarCount < 0 ? 0 : headerVarCount) {}
 
     int skipped() const { return m_skipped; }
 
@@ -1602,6 +1663,31 @@ public:
         if (h.hasDimGap)    data.addDouble("$DIMGAP", h.dimGap, 40);
         if (h.dimStyle != nullptr && h.dimStyle[0] != '\0')
             data.addStr("$DIMSTYLE", std::string(h.dimStyle), 2);
+        // R4b: emit the GENERIC extra HEADER vars (the document-settings vars the
+        // fixed POD above does not carry). Each rides into DRW_Header.vars; the 7
+        // standard targets ($GRIDMODE/$GRIDUNIT/$PDMODE/$PDSIZE/$ANGBASE/$ANGDIR/
+        // $PINSBASE) are in libdxfrw's curated emit list, so they write for free.
+        // Coord vars ($GRIDUNIT/$PINSBASE) preserve all three components. The `code`
+        // arg only tags the variant TYPE (DRW_Header::write hardcodes the per-key DXF
+        // group code), so 70=int, 40=double, 10=coord are conventional placeholders.
+        for (int i = 0; i < m_headerVarCount; ++i) {
+            const LCHeaderVar &hv = m_headerVars[i];
+            if (hv.name == nullptr || hv.name[0] == '\0') continue;
+            const std::string key(hv.name);
+            switch (hv.type) {
+            case LC_HVAR_INT:
+                data.addInt(key, static_cast<int>(hv.i), 70);
+                break;
+            case LC_HVAR_DOUBLE:
+                data.addDouble(key, hv.d, 40);
+                break;
+            case LC_HVAR_COORD:
+                data.addCoord(key, DRW_Coord{hv.coord[0], hv.coord[1], hv.coord[2]}, 10);
+                break;
+            default:
+                break;
+            }
+        }
     }
 
     // ----- block records + block definitions --------------------------------
@@ -1772,6 +1858,9 @@ private:
     const LCHeader *m_header = nullptr;
     const LCDimStyle *m_dimStyles = nullptr;
     int m_dimStyleCount = 0;
+    // R4b: generic extra HEADER vars to emit verbatim (optional / NULL).
+    const LCHeaderVar *m_headerVars = nullptr;
+    int m_headerVarCount = 0;
     // Paper-space VIEWPORT entities to emit (paper-space P3; optional / NULL).
     const LCViewport *m_viewports = nullptr;
     int m_viewportCount = 0;
@@ -2561,6 +2650,19 @@ extern "C" const LCHeader *lc_header(const LCEntityList *list) {
     return list ? &list->header : nullptr;
 }
 
+extern "C" int lc_header_var_count(const LCEntityList *list) {
+    return list ? static_cast<int>(list->headerVars.size()) : 0;
+}
+
+extern "C" LCHeaderVar lc_header_var(const LCEntityList *list, int idx) {
+    LCHeaderVar empty{};   // name == NULL signals out-of-range / NULL list.
+    if (list == nullptr || idx < 0 ||
+        idx >= static_cast<int>(list->headerVars.size())) {
+        return empty;
+    }
+    return list->headerVars[static_cast<size_t>(idx)];
+}
+
 extern "C" int lc_dimstyle_count(const LCEntityList *list) {
     return list ? static_cast<int>(list->dimStyles.size()) : 0;
 }
@@ -2626,7 +2728,8 @@ extern "C" LCStatus lc_dxf_write(const char *path,
                                  int *out_skipped,
                                  const LCHeader *header,
                                  const LCDimStyle *dimStyles, int dimStyleCount,
-                                 const LCViewport *viewports, int viewportCount) {
+                                 const LCViewport *viewports, int viewportCount,
+                                 const LCHeaderVar *headerVars, int headerVarCount) {
     if (out_skipped != nullptr) {
         *out_skipped = 0;
     }
@@ -2640,7 +2743,8 @@ extern "C" LCStatus lc_dxf_write(const char *path,
         (blockCount  > 0 && blocks   == nullptr) ||
         (blockEntityCount > 0 && blockEntities == nullptr) ||
         (dimStyleCount > 0 && dimStyles == nullptr) ||
-        (viewportCount > 0 && viewports == nullptr)) {
+        (viewportCount > 0 && viewports == nullptr) ||
+        (headerVarCount > 0 && headerVars == nullptr)) {
         return LC_ERR_INVALID_PATH;
     }
     // try/catch keeps any libdxfrw exception (or std::bad_alloc) from crossing
@@ -2651,7 +2755,8 @@ extern "C" LCStatus lc_dxf_write(const char *path,
         WritingInterface iface(&dxf, entities, entityCount, layers, layerCount,
                                blocks, blockCount, blockEntities, blockEntityCount,
                                header, dimStyles, dimStyleCount,
-                               viewports, viewportCount);
+                               viewports, viewportCount,
+                               headerVars, headerVarCount);
         // bin=false -> ASCII DXF (matches the reader and rs_filterdxfrw).
         const bool ok = dxf.write(&iface, toDrwVersion(version), /*bin=*/false);
         if (!ok) {
@@ -2675,7 +2780,8 @@ extern "C" LCStatus lc_dwg_write(const char *path,
                                  int *out_skipped,
                                  const LCHeader *header,
                                  const LCDimStyle *dimStyles, int dimStyleCount,
-                                 const LCViewport *viewports, int viewportCount) {
+                                 const LCViewport *viewports, int viewportCount,
+                                 const LCHeaderVar *headerVars, int headerVarCount) {
     (void)version;   // DWG write is R2000-only; the arg is accepted for ABI symmetry.
     if (out_skipped != nullptr) {
         *out_skipped = 0;
@@ -2688,7 +2794,8 @@ extern "C" LCStatus lc_dwg_write(const char *path,
         (blockCount  > 0 && blocks   == nullptr) ||
         (blockEntityCount > 0 && blockEntities == nullptr) ||
         (dimStyleCount > 0 && dimStyles == nullptr) ||
-        (viewportCount > 0 && viewports == nullptr)) {
+        (viewportCount > 0 && viewports == nullptr) ||
+        (headerVarCount > 0 && headerVars == nullptr)) {
         return LC_ERR_INVALID_PATH;
     }
     // The DWG counterpart of lc_dxf_write: same PODs, same WritingInterface, but
@@ -2699,7 +2806,8 @@ extern "C" LCStatus lc_dwg_write(const char *path,
         WritingInterface iface(&dwg, entities, entityCount, layers, layerCount,
                                blocks, blockCount, blockEntities, blockEntityCount,
                                header, dimStyles, dimStyleCount,
-                               viewports, viewportCount);
+                               viewports, viewportCount,
+                               headerVars, headerVarCount);
         // bin is ignored by dwgRW (DWG is always binary); pass false for symmetry.
         const bool ok = dwg.write(&iface, DRW::AC1015, /*bin=*/false);
         if (!ok) {

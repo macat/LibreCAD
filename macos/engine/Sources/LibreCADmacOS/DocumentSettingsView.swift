@@ -259,7 +259,8 @@ private struct DimensionsSettingsTab: View {
 /// dot / none / plus / cross / tick), the circle/square enclosure bits, and the
 /// marker size (`$PDSIZE`). These feed the `ResolveContext.pointStyleProvider`
 /// hook so a point WITHOUT an explicit per-entity style picks them up (the D4
-/// inherit pattern), and they round-trip via the `$PDMODE`/`$PDSIZE` header vars.
+/// inherit pattern). `$PDMODE`/`$PDSIZE` are standard AutoCAD header vars, so they
+/// survive a .dxf Save → reopen via the header extra-var bag (R4b).
 ///
 /// Each edit live-applies through the same undoable header-var funnel the other
 /// tabs use (`CADDrawing.mutateGraphicVariables`), bumping the model version so the
@@ -404,8 +405,9 @@ private struct LayersSettingsTab: View {
 /// used by Print and scale-aware PDF export — plus the paper insertion base
 /// (`$PINSBASE`). Paper size/orientation are app-side print defaults stored on the
 /// model; the scale/margin/page-setup is mirrored into the shared `PrintLayoutStore`
-/// (read by `DrawingPrinter`) so the print/export flow honors the chosen scale. The
-/// insertion base round-trips via the header var.
+/// (read by `DrawingPrinter`) so the print/export flow honors the chosen scale.
+/// `$PINSBASE` is a standard AutoCAD header var (a COORD), so the insertion base
+/// survives a .dxf Save → reopen via the header extra-var bag (R4b).
 private struct PaperSettingsTab: View {
     let model: CanvasModel
 

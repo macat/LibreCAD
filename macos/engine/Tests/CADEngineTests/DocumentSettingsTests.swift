@@ -7,9 +7,15 @@
 //  testable surface that the `DocumentSettingsView` sheet drives through `CanvasModel`
 //  (which lives in the un-importable executable target):
 //
-//   1. The new `GraphicVariables` typed accessors round-trip (set → write → read):
-//      `$GRIDUNIT`, `$DIMTXT`, `$DIMASZ`, `$DIMSCALE`, `$DIMLUNIT`, `$DIMDEC`, and
-//      the private `$LC_SNAPMODE` (D5).
+//   1. The new `GraphicVariables` typed accessors round-trip IN MEMORY (set →
+//      read, and through `CADDrawing.load`): `$GRIDUNIT`, `$DIMTXT`, `$DIMASZ`,
+//      `$DIMSCALE`, `$DIMLUNIT`, `$DIMDEC`, and the private `$LC_SNAPMODE` (D5).
+//      NOTE: these tests exercise ONLY the in-memory accessor + the value-snapshot
+//      `CADDrawing.load` path — NOT a DXF-FILE round-trip (write to .dxf bytes and
+//      re-read). The DXF save→reopen round-trip for the standard header vars is
+//      covered by `SaveRoundTripTests` (the codec write→read path); `$LC_SNAPMODE`
+//      is in-memory-only and does NOT survive a .dxf file write (libdxfrw drops
+//      non-curated `$`-vars).
 //   2. A settings edit applies to the drawing AND is undoable — through the
 //      undoable `CADDrawing.mutateGraphicVariables` value-snapshot mutator that
 //      `CanvasModel`'s settings setters funnel through (D3: one undo step per field).
@@ -97,7 +103,11 @@ struct DocumentSettingsVariableTests {
         #expect(!v.has("$LC_SNAPMODE"))
     }
 
-    @Test("settings survive a CADDrawing.load round-trip (payload persistence)")
+    // NOTE: this checks the IN-MEMORY value-snapshot path only (`CADDrawing.load`
+    // replaces the whole `graphicVariables` value). It does NOT write to a .dxf file
+    // and re-read it — the DXF FILE save→reopen round-trip for the standard header
+    // vars lives in `SaveRoundTripTests` (the codec write→read path).
+    @Test("settings survive a CADDrawing.load value-snapshot round-trip (in-memory, not a DXF file)")
     func settingsSurviveLoadRoundTrip() {
         var v = GraphicVariables()
         v.unit = .inch

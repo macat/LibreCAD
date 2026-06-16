@@ -312,6 +312,27 @@ extension CADEngine {
             if h.hasDimDec != 0 { gv.dimLinearPrecision = Int(h.dimDec) }
         }
 
+        // 3) R4b: the GENERIC extra HEADER vars (the document-settings vars the fixed
+        //    POD does not carry — $GRIDMODE/$GRIDUNIT/$PDMODE/$PDSIZE/$ANGBASE/$ANGDIR/
+        //    $PINSBASE). Set each back into the bag under its `$`-prefixed key so the
+        //    typed accessors (gridSpacing/pointDisplayMode/pointSize/...) read them on
+        //    reopen. COORD vars round-trip as the full vector.
+        let varCount = Int(lc_header_var_count(list))
+        for i in 0..<varCount {
+            let hv = lc_header_var(list, Int32(i))
+            guard let name = string(hv.name), !name.isEmpty else { continue }
+            switch hv.type {
+            case Int32(LC_HVAR_INT.rawValue):
+                gv.setInt(name, Int(hv.i))
+            case Int32(LC_HVAR_DOUBLE.rawValue):
+                gv.setDouble(name, hv.d)
+            case Int32(LC_HVAR_COORD.rawValue):
+                gv.setVector(name, Vector(hv.coord.0, hv.coord.1))
+            default:
+                break
+            }
+        }
+
         return gv
     }
 
