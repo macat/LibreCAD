@@ -6,6 +6,20 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-16 — DYNAMIC-BLOCK program critic-clean GO + building (visibility states first)
+
+Block UX (asks #1–4) **acceptance GO** (`90633e3d0`/`be4db5e23`): edit-propagation verified (1 member edit → all 3 inserts re-resolve on Save&Close; Discard reverts, undo coherent), ATTRIB DXF round-trip, thumbnails, collision-safe import, `dim_sample.dxf` sane, `.app` smoke clean. GUI-only bits (name sheet, double-click-edit, BlockEditBar, viewport drag, thumbnail render) await owner GUI verification.
+
+Dynamic-block program (`dynamic-blocks-plan.md`) planned → **critic GO-WITH-FIXES, all 6 folded**: dual-overlay arbitration (single dynamic insert → suppress gizmo, show dynamic-grip overlay only); bake export uses a **regular non-`*` name** (`<Block>_eval_<n>`) so `DXFWriter.swift:263`'s `*`-skip doesn't drop it; `evaluate` purity contract + isolation tests; DB-0 = one solo engine agent; `parameterValues: [String: Double]` keyed by `BlockParameterID.raw`.
+
+**Architecture (no `EntityKind` case):** `Block.dynamic: DynamicBlockDef?` + `InsertData.dynamic: InsertDynamicState?` (both additive, `decodeIfPresent`); union enums in NEW files; a pure `BlockEvaluator.evaluate(def, members, instanceState) -> [EntityRecord]` threaded into `resolveInsert` (returns the same shape → MINSERT/recursion-guard/byBlock/ATTRIB unchanged); dynamic grips clone `GizmoTransform`/`GizmoOverlayView`.
+
+**Owner sign-off items — adopted best-guess (owner said "keep going"; reversible):** (1) **DB-1 = visibility states FIRST** (cheapest, self-contained, click-dropdown grip — de-risks the instance-aware-resolve seam before the live-drag layer); (2) v1 grip scope = Point/Linear/Rotation/Flip + Visibility; (3) v1 DXF export = **bake to static** (regular name) — native Codable round-trip is lossless; AutoCAD `*U##`/eval-graph DXF interop is a deferred subproject.
+
+**NUMBERING RECONCILIATION:** the authoritative order is now `dynamic-blocks-plan.md`'s — **DB-1 visibility · DB-2 params/actions/grips · DB-3 value-sets/lookup · DB-4 polar/XY/array/chain · DB-5 extended** (this supersedes `block-ux-plan.md` §7's earlier DB-1=params labeling). Building **DB-VIS-ENGINE** now (DB-0 data model + DB-1 evaluator + visibility resolve, combined, UNWIRED), then DB-VIS-WIRE (state authoring in the Block Editor + instance dropdown).
+
+---
+
 ## 2026-06-16 — BLOCK UX + paper-space WIRE-WAVES LANDED + owner's AutoCAD spec adopted (`native-macos @ 90633e3d0`, **2069 tests**)
 
 Owner feedback: "blocks don't work as well as AutoCAD — convert selection→block, edit a block + reinsert, and show the block as visual content (a text name is hard to see)"; then authored `macos/docs/block-features.md` (1798-line AutoCAD-LT block spec w/ an Appendix-B P0–P7 matrix) — now the authoritative reference; `block-ux-plan.md` aligned to it. Owner decisions (AskUserQuestion): Create-Block uses a **name sheet**; dynamic blocks = **full authoring** (params/actions/grips), sequenced DB-1..DB-5 per Appendix B (P6 constraints/BTABLE deferred = full-AutoCAD-only).

@@ -6,7 +6,16 @@ Owner chose **full authoring** (parameters / actions / grips). Authoritative fea
 (near-term asks 1–4; this plan is ask 5).
 
 Synthesized 2026-06-16 from a code audit of the engine value model + the existing on-canvas
-live-drag (gizmo) machinery.
+live-drag (gizmo) machinery. **Critic-reviewed 2026-06-16 (verdict GO-WITH-FIXES); all six findings
+folded in below.**
+
+> **NUMBERING RECONCILIATION (read first).** `decision-log.md` (the "NEXT" line) records the
+> sequence as *DB-1 = params/actions/grips → DB-2 = visibility states*. **This plan deliberately
+> INVERTS that order on the merits** — visibility states are self-contained (no grip-drag), so they
+> are the cheapest slice that de-risks the instance-aware resolve seam + overlay hosting. Here:
+> **DB-1 = visibility states; DB-2 = params/actions/grips.** Before DB-0 dispatches, the coordinator
+> MUST add a decision-log entry recording this reorder + rationale (so the two DB-1 definitions in
+> the repo don't contradict each other). Do not leave the conflict unresolved.
 
 ---
 
@@ -220,15 +229,16 @@ NEW file holds the type; `InsertData` (`Entity.swift`) gains one field:
 ```swift
 /// Per-instance dynamic state. Optional ⇒ a plain insert (and every old file) carries nil. Additive.
 public struct InsertDynamicState: Sendable, Hashable, Codable {
-    /// Parameter values by parameter id. A linear/polar value is the DISTANCE; rotation is the ANGLE
-    /// (radians); flip is 0/1; point/xy store an offset vector serialized as two scalars (".x"/".y").
-    public var parameterValues: [BlockParameterID: Double]
-    /// Per-parameter flip flags (flip parameter id → flipped?). §5.2.7.
-    public var flipStates: [BlockParameterID: Bool]
+    /// Parameter values keyed by `BlockParameterID.raw` (String — see DECIDED note below). A
+    /// linear/polar value is the DISTANCE; rotation is the ANGLE (radians); flip is 0/1; point/xy
+    /// store an offset vector as two scalars (".x"/".y" suffixed keys).
+    public var parameterValues: [String: Double]
+    /// Per-parameter flip flags (param id raw → flipped?). §5.2.7.
+    public var flipStates: [String: Bool]
     /// The active visibility state NAME, or nil ⇒ the block's default (state 0). §9.4.
     public var activeVisibilityState: String?
-    public init(parameterValues: [BlockParameterID: Double] = [:],
-                flipStates: [BlockParameterID: Bool] = [:],
+    public init(parameterValues: [String: Double] = [:],
+                flipStates: [String: Bool] = [:],
                 activeVisibilityState: String? = nil) { … }
 }
 ```
@@ -240,10 +250,13 @@ public var dynamic: InsertDynamicState?
 dynamic = try c.decodeIfPresent(InsertDynamicState.self, forKey: .dynamic)   // additive
 ```
 
-> NOTE on `[BlockParameterID: Double]` Codable: a dictionary with a struct key needs a stable JSON
-> form. Make `BlockParameterID` a `RawRepresentable`/`CodingKeyRepresentable` String wrapper (or
-> store `parameterValues` as `[String: Double]` keyed by `.raw`). The instance-side agent owns this
-> choice; the simplest is `[String: Double]` + a typed accessor.
+> **DECIDED (was an open question; the critic flagged that an indecision here risks reworking the
+> SERIALIZED hot field): `parameterValues`/`flipStates` are `[String: Double]` / `[String: Bool]`
+> keyed by `BlockParameterID.raw`, with a typed accessor.** A dictionary with a struct key needs a
+> custom CodingKey form; the raw-String map is the simplest stable JSON and is the one the A1/A2
+> agent ships. `BlockParameterID` stays a `String` wrapper (`Codable`/`Hashable`) for typed APIs;
+> the on-the-wire instance state uses raw String keys. The struct definitions in §2a/§2b above are
+> updated to `[String: Double]` accordingly.
 
 ---
 
@@ -266,6 +279,15 @@ enum BlockEvaluator {
                          state: InsertDynamicState) -> [EntityRecord]
 }
 ```
+
+**PURITY CONTRACT (critic Fix 3 — testable, not just asserted):** `evaluate` MUST treat `members`
+as immutable input and return a FRESH array — `var m = members; m[i].kind = …` is fine (Swift CoW
+copies on write), but it must never alias sub-arrays across MINSERT cells or mutate shared state.
+Because `blockMembersSnapshot` (`CADDrawing.swift:1434`) value-copies into a by-NAME map, per-instance
+isolation depends entirely on `evaluate` being pure: instance identity is carried by `d.dynamic`, not
+the provider. This is enforced by a done-criterion test (see DB-1): the SAME dynamic block resolved
+at two different `InsertDynamicState` values in ONE drawing yields two correct, independent results
+(no cross-contamination), and a MINSERT grid of a dynamic block yields identical, non-mutated cells.
 
 **Where it hooks:** `resolveInsert` (`Resolve.swift:1313`) gains ONE branch — after
 `members = ctx.blockProvider?(name) ?? []`, if the block is dynamic (consult a new
@@ -335,9 +357,13 @@ hot field-insertion slots, so nothing else can run concurrently on those files).
   `BlockParameter*`, `BlockAction*`, `BlockVisibilityState`, `BlockValueSet`, `BlockLookupTable`),
   `InsertDynamicState.swift`, + `Tests/CADEngineTests/DynamicBlockModelTests.swift` (Codable
   round-trip, `isEmpty`, accessors).
-- **Agent A2 (SERIALIZED hot fields — solo):** add `Block.dynamic` + decode (`Block.swift`); add
-  `InsertData.dynamic` + decode (`Entity.swift`). **Depends on A1's types existing** → run A2 after
-  A1 merges (or A1+A2 as one solo agent if you prefer a single hot-file touch).
+- **Agent A2 (SERIALIZED hot fields):** add `Block.dynamic` + decode (`Block.swift`); add
+  `InsertData.dynamic` + decode (`Entity.swift`). **Depends on A1's types compiling.**
+- **DECIDED (critic Fix 5): run A1 + A2 as ONE solo engine agent**, not two. A2 cannot compile
+  without A1's types, and the field edits are ~4 lines total — splitting them forces a merge between
+  two agents for zero parallelism gain. One agent owns the new files AND the two hot-field touches in
+  a single PR. (Note: DB-0 and DB-1 touch DISJOINT hot files — DB-0 = `Block.swift`/`Entity.swift`;
+  DB-1 = `Resolve.swift`/`CADDrawing.swift` — so they stay separate sequential waves, no collision.)
 - **Done:** types compile; both additive fields decode `nil` for old files; serial suite green; a
   test proves a plain `Block`/`InsertData` is byte-identical (no `dynamic` key emitted when nil — or
   if emitted, decodes back to nil).
@@ -359,9 +385,24 @@ feature + proves the instance-aware resolve seam. (Spec §9.)
   Owns: `CanvasModel.swift` (a `setInsertVisibilityState` undoable funnel + `singleSelectedInsert`),
   `CADCanvasView.swift` (host the overlay), `ContentView.swift`/`ToolOptionsBar.swift`/
   authoring-palette files.
+- **CRITICAL — dual-overlay arbitration (critic Fix 1):** the existing gizmo shows for ANY non-empty
+  selection (`refreshGizmo` → shown iff `!isToolActive && textEditor == nil`,
+  `CADCanvasView.swift:651`; `GizmoOverlay.swift:125-127`). A single selected dynamic insert would
+  otherwise activate BOTH the gizmo (move/scale/rotate the whole insert) AND the new
+  `DynamicGripOverlayView` — both transparent flipped NSViews, so on a spatial handle overlap the
+  topmost-non-nil `hitTest` wins (order-dependent, undefined). **DB-1W MUST define the arbitration in
+  `CADCanvasView.refreshGizmo` (already a hot wire-wave file — no new collision):** when the single
+  selection is a dynamic insert, SUPPRESS the gizmo (`gizmo.isHidden = true` + `clearGizmoPreview`)
+  and show ONLY the dynamic-grip overlay. (Rationale: dynamic grips ARE the insert's manipulation
+  affordance; the user re-positions the whole insert by dragging the insertion-point grip or via the
+  Inspector, not the bounding-box gizmo.) This arbitration is established in DB-1W and reused by
+  DB-2W unchanged.
 - **Done:** import or author a multi-state block; the dropdown grip switches the visible geometry of
   ONE insert without affecting siblings; round-trips through Codable. Serial suite green; `.app`
-  rebuilt.
+  rebuilt. **REQUIRED isolation tests (critic Fix 3):** (a) the SAME dynamic block resolved at two
+  different `InsertDynamicState` values in ONE drawing yields two correct, INDEPENDENT results (no
+  cross-contamination from the by-name `blockMembersSnapshot`); (b) a MINSERT grid of a dynamic
+  block yields identical, non-mutated cells. These prove `evaluate`'s purity contract (§3).
 
 ### WAVE DB-2 — **Parameters + actions + grips** (the foundation; biggest) — **L**
 The grip live-drag layer is the cost. Point/Linear/Rotation/Flip params; Move/Stretch/Rotate/Flip
@@ -383,6 +424,13 @@ actions; param↔action association + per-action selection sets. (Spec §5.2.1�
   files + the authoring-palette + `DynamicGripOverlayView`.
 - **Done:** author a linear-stretch door + a flip; drag the grip on a placed insert and watch the
   geometry update live; ⌘Z reverts the whole drag. Serial suite green; `.app` rebuilt.
+- **Test-plumbing note (critic Fix 6, applies to DB-1W + DB-2W):** any test of the new
+  `DynamicGripOverlayView` or new `CanvasModel` methods from `CADEngineTests` needs a `_Shared*`
+  symlink into the app sources (the established pattern — e.g.
+  `Tests/CADEngineTests/_SharedCanvasModel.swift` → `Sources/LibreCADmacOS/Canvas/CanvasModel.swift`).
+  Add `_SharedDynamicGripOverlay.swift` (and any new app file under test) as a symlink so the builder
+  doesn't rediscover it. Keep ALL modals (NSOpenPanel/sheets) in the View layer — a test reaching a
+  modal hangs the headless suite forever (decision-log: the NSOpenPanel hang).
 
 ### WAVE DB-3 — Value sets + lookup tables — **M**
 List/increment value sets (grip SNAPPING, spec §8); lookup param + table forward+reverse (§10).
@@ -423,9 +471,14 @@ libdxfrw's stable surface**.
   `InsertDynamicState` fields) — the native document format round-trips losslessly with zero extra
   work (it is just more JSON on `Block`/`InsertData`).
 - **DXF EXPORT of a dynamic insert = BAKE:** write the EVALUATED member geometry as a plain
-  (static) block + a plain INSERT (optionally an anonymous `*U`-style name), so other CAD apps see
-  the correct current configuration but not the dynamism. This reuses `BlockEvaluator.evaluate`'s
-  output — trivial once evaluation exists.
+  (static) block + a plain INSERT, so other CAD apps see the correct current configuration but not
+  the dynamism. This reuses `BlockEvaluator.evaluate`'s output — trivial once evaluation exists.
+  **CRITICAL (critic Fix 2): the baked block MUST use a regular NON-`*`-prefixed generated name**
+  (e.g. `"<BlockName>_eval_<n>"`). The DXF writer explicitly SKIPS anonymous blocks —
+  `for block in blocks.blocks where !block.name.hasPrefix("*")` (`DXFWriter.swift:263`) — so a
+  `*U##`-named baked block would be silently dropped and the insert would export empty. AutoCAD's
+  own `*U##` convention is internal; on export we use a real name (the alternative — special-casing
+  baked blocks past the `*` filter — is NOT chosen, to keep the writer's invariant simple).
 - **DXF IMPORT:** read AutoCAD dynamic blocks as their *static current geometry* only (which is what
   libdxfrw already surfaces — the visible block). Do NOT attempt to reconstruct parameters/actions.
 - Defer full AutoCAD dynamic-block DXF read/write as an explicit backlog item (its own subproject).
@@ -485,23 +538,31 @@ touched.
 `DB-4 polar/XY/array/chain` → `DB-5 extended`. DXF = native round-trip throughout; bake-on-export
 once DB-2 evaluation exists; AutoCAD dynamic-DXF deferred.
 
-**Concurrency:** within DB-0, A1 (new files) ‖ later phases' new-file scaffolding is safe, but the
-hot-field edits (A2) and every resolve/CADDrawing edit are **single-owner, serialized**. Each wire-
-wave is **one solo agent** owning all UI hot files for that phase. Never fan out onto
+**Concurrency:** DB-0 is ONE solo engine agent (A1 new files + A2 hot-field touches — merged per
+critic Fix 5). Every resolve/`CADDrawing` edit and each wire-wave is **single-owner, serialized**;
+a wire-wave is one solo agent owning all UI hot files for that phase. Never fan out onto
 `Entity.swift`/`Block.swift`/`Resolve.swift`/`CADDrawing.swift`/`CanvasModel.swift` concurrently.
 
 ---
 
 ## 10. Open questions for the owner (resolve before building)
 
+> The critic review settled the two engineering choices (Q2 Codable key form; Q5/Fix-1 overlay
+> arbitration) — those are now DECIDED in §2b/§3/§5. The COORDINATOR action (not the owner) is to
+> record the DB-1/DB-2 reorder in `decision-log.md` before DB-0 dispatches (see the header note).
+> The remaining items below need OWNER sign-off.
+
 1. **First feature: visibility states (DB-1) vs params+grips (DB-2)?** This plan RECOMMENDS DB-1
    first (self-contained, no drag, de-risks the resolve seam + overlay hosting with the easiest
-   grip). DB-2 is the bigger "wow" but the bigger risk. Confirm DB-1-first.
-2. **`parameterValues` Codable key form** — typed `BlockParameterID` dict (needs CodingKey wrapper)
-   vs `[String: Double]` keyed by raw id. Recommend `[String: Double]` for Codable simplicity.
+   grip). DB-2 is the bigger "wow" but the bigger risk. **Confirm DB-1-first** (note: this inverts
+   the decision-log's prior numbering — see header).
+2. **[DECIDED] `parameterValues` Codable key form** — `[String: Double]` keyed by
+   `BlockParameterID.raw` (critic Fix 7; simplest stable JSON, avoids reworking the hot field). No
+   owner action needed.
 3. **Scope of v1 grip types** — confirm Point/Linear/Rotation/Flip + Visibility for the first shipped
    slice (DB-1+DB-2); Polar/XY/Array/Lookup/Alignment/BasePoint follow (DB-3..DB-5).
-4. **DXF export of dynamic inserts** — confirm BAKE-to-static (this plan's recommendation) is the
-   acceptable v1 behavior (vs writing nothing dynamic / vs blocking on full AutoCAD encoding).
+4. **DXF export of dynamic inserts** — confirm BAKE-to-static with a REGULAR (non-`*`) block name
+   (critic Fix 2; a `*`-named block is dropped by `DXFWriter.swift:263`) is the acceptable v1 behavior
+   (vs writing nothing dynamic / vs blocking on full AutoCAD encoding).
 5. **Stretch member-kind coverage** — confirm v1 stretch is bounded to line/polyline/arc/circle/point
    (whole-entity-move fallback for text/hatch/nested-insert members).
