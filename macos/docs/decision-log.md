@@ -6,6 +6,27 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-16 — UI-redesign §6 BACKLOG shipped (8 items, phased parallel) (`native-macos @ 3bd268100`, **2614 tests**, `.app` rebuilt)
+
+**Owner:** "do the backlog, parallel." Ran the `backlog-wave-plan` workflow (5 investigators → synthesis → disjointness critic, APPROVE-WITH-FIXES) → `macos/docs/backlog-wave-plan.md`. Executed engine/state-first then region-partitioned parallel UI waves (every file single-owner per phase; merge by hash; serial gate each). Critic fixes applied: W4 polar-canvas-hook made explicit; W3 folded into W1 (App+toolbar one owner) to kill a cross-wave compile dep; reduced scopes (POLAR fixed 15°/ortho-exclusive/no tracking-ray, ~12 generated symbols, Page-Setup editor deferred).
+
+**Phase 0 (engine/state, UNWIRED), all reviewed/merged:**
+- P0-A `ca1df5c6f` — `CoordinateDisplayMode{absolute,relative,polar}` + engine angle/polar formatter (#5).
+- P0-B `0d8704750` — pure `PolarConstraint` kernel (cloned from ortho; no SnapKind case) (#7).
+- P0-C `b53efc8e8` — 12 generated DXF starter symbols (`macos/assets/symbols/`) + `CADBench gen-symbols` generator + `BlockLibrary.bundledSymbolsDirectory()` + make-app copy (#6).
+- P0-E `b520796b7` — `CADDrawing.duplicateLayout`/`setLayoutPage` (undoable; re-tags entities; no EntityKind) (#4c).
+- P0-D `68f6aa161` (after A/B/E; reviewed APPROVE) — `CanvasModel` arms: coord-mode + `cycleCoordinateDisplayMode` (cursorReadout switch, absolute byte-identical), `polarEnabled`/`togglePolar`/`polarConstrained` (ortho/polar mutually exclusive), layout wrappers w/ active-tab fixup.
+
+**Phase 1 (parallel UI wire-waves), all reviewed/merged:**
+- W2 `fc0e73a83` — status-bar OSNAP+POLAR chips, coord click-to-cycle (a11y), Snap&Grid gear popover, doc-unit segment (#3,#5,#7,#4a).
+- W4 `242b72bfb` (reviewed REVISE→fixed) — UCS axis L-gizmo overlay (click-through), POLAR canvas hook at both input sites, F7 grid responder. **Fixed a ⇧-hijack:** polar applies only when `polarEnabled && !shiftHeld` (SHIFT forces ortho); `contextToggleGrid`→`model.toggleGrid()` for live chip refresh (#4b,#7,#8).
+- W5 `7365a454c` — Parts Library shows the 12 bundled symbols on first launch ("Built-in") + Finder .dxf drop + exported drag UTI (#6).
+- W1 `3bd268100` (reviewed APPROVE) — Draw toolbar flyouts (Line▸{XLine,Ray}, Rect▸{Polygon}, Circle/Arc construction-mode flyouts; no new kind), Match Properties eyedropper toolbar button + ⌘⇧C/⌘⇧V chords, layout-tab context menu (Rename sheet/Duplicate/Page-Setup stub/Delete), removed the canvas "New drawing (mm)" label, View▸Show-Grid+F7 menu, canvas `.dropDestination` for parts (#1,#2,#4a,#4c,#6,#8).
+
+**Deferred (noted):** per-layout Page Setup editor (engine `setLayoutPage` ready; menu stubs to Document Settings) · POLAR configurable increments + on-screen tracking ray · engine `duplicateLayout` returning the new name (wrapper replicates the naming rule — lockstep comment + test). **`.app` rebuilt for GUI verification** — toolbar flyouts (hold to open), Match-Props chords, OSNAP/POLAR chips + the 15° polar lock, UCS gizmo, F7, the Built-in symbol library + drag-to-canvas. **Next:** owner-requested whole-system architecture review.
+
+---
+
 ## 2026-06-16 — UI REDESIGN ("seamless & beautiful") shipped end-to-end + move/scale dashed guide (`native-macos @ 30b4903f2`, **2527 tests**, `.app` rebuilt)
 
 **Owner:** "make the color picker smaller" + "analyze the UI and create a plan to make it seamless & beautiful (modern macOS + AutoCAD)." Ran an 11-agent design workflow (5 source readers → 4 critique lenses [HIG/CAD/tokens/interaction] → synthesis → hardening audit) → `macos/docs/ui-redesign-plan.md`. A 2nd independent review (owner-supplied) corroborated the conclusions; its new ideas folded into the plan §6 (drawing-level inspector empty state taken now; flyouts/Match-Properties-as-command/canvas-chrome/starter-library backlogged). Owner chose: keep the two-tone (intentional) · drop the bottom chip mirror · demote layer printer/construction flags · build Waves 1–4.
