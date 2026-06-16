@@ -2154,6 +2154,17 @@ final class CanvasModel {
                 let id = drawing.add(added)            // undoable; mints a real id
                 let box = drawing.entity(id)?.boundingBox() ?? added.boundingBox()
                 if !box.isEmpty { quadtree.insert(id, bounds: box) }
+                // BLOCK EDITOR: any geometry drawn (or copied) while a block-edit
+                // session is open becomes a MEMBER of the editing block — not a loose
+                // top-level document entity. We thread the freshly-minted id into the
+                // editing block's `entityIDs` in this SAME undo group (the
+                // `addEntityToBlock` registration nests with the add's), and BEFORE the
+                // `modelVersion` bump below so `exitBlockEditing`'s `sessionChanged`
+                // detection counts it. The new member is then excluded from model space
+                // via `blockMemberIDs` and drawn only through the block's inserts.
+                if let editing = editingBlock {
+                    drawing.addEntityToBlock(name: editing, entityID: id)
+                }
 
             case .replace(let id, let newKind):
                 // Preserve the entity's layer/pen/flags; swap only its geometry.
@@ -2164,6 +2175,15 @@ final class CanvasModel {
                 if box.isEmpty { quadtree.remove(id) } else { quadtree.update(id, bounds: box) }
 
             case .remove(let id):
+                // BLOCK EDITOR: deleting a member must also drop its id from the editing
+                // block's `entityIDs` (same undo group as the entity removal) so the
+                // block's membership stays in sync — otherwise the block would keep a
+                // stale id that resolves to nothing. Do this BEFORE `drawing.remove` so
+                // the member record still exists for any membership checks, and inside
+                // the same group so one ⌘Z restores both the entity and its membership.
+                if let editing = editingBlock {
+                    drawing.removeEntityFromBlock(name: editing, entityID: id)
+                }
                 drawing.remove(id)                     // undoable (no-op if absent)
                 quadtree.remove(id)
                 selection.remove(id)
@@ -3772,6 +3792,12 @@ final class CanvasModel {
             let id = drawing.add(added)             // undoable; mints a real id
             let box = drawing.entity(id)?.boundingBox() ?? added.boundingBox()
             if !box.isEmpty { quadtree.insert(id, bounds: box) }
+            // BLOCK EDITOR: paste/duplicate INSIDE a block-edit session targets the
+            // BLOCK — the pasted/duplicated geometry joins the editing block's members
+            // (same undo group, before the `modelVersion` bump), not the document.
+            if let editing = editingBlock {
+                drawing.addEntityToBlock(name: editing, entityID: id)
+            }
             newIDs.insert(id)
         }
         selection = Selection(ids: newIDs)

@@ -417,4 +417,199 @@ struct BlockEditSessionTests {
         m.exitBlockEditing(save: false)
         #expect(m.canUndo == false)
     }
+
+    // MARK: - STAGE 1 — every edit in the editor mutates the BLOCK (not the document)
+    //
+    // The owner's #1 complaint: drawing in the Block Editor used to add LOOSE document
+    // objects, not block members. These pin the fix: an `.add` (draw), a paste/duplicate,
+    // and a `.remove` (delete) made WHILE a session is open route into the editing block's
+    // `entityIDs` — excluded from model space (`blockMemberIDs`), drawn via inserts — and
+    // a Discard reverts an added member from BOTH `entities` and `entityIDs`.
+
+    /// Engine-level membership/undo of the two new `CADDrawing` seams (no CanvasModel).
+    @Test("addEntityToBlock / removeEntityFromBlock mutate membership and are undoable")
+    func addRemoveEntityToBlockUndoable() {
+        let d = CADDrawing()
+        let a = d.add(line(Vector(0, 0), Vector(1, 0)))
+        let b = d.add(line(Vector(2, 0), Vector(3, 0)))
+        d.mutateBlocks { _ = $0.add(Block(name: "B", entityIDs: [a])) }
+
+        let um = testUndoManager()
+        d.undoManager = um
+
+        um.beginUndoGrouping()
+        d.addEntityToBlock(name: "B", entityID: b)
+        um.endUndoGrouping()
+        #expect(d.blocks.block(named: "B")?.entityIDs == [a, b])
+        // The new id is now a block member → excluded from model space.
+        #expect(d.blockMemberIDs.contains(b))
+
+        um.undo()
+        #expect(d.blocks.block(named: "B")?.entityIDs == [a])
+
+        um.redo()
+        #expect(d.blocks.block(named: "B")?.entityIDs == [a, b])
+
+        // Remove the second member (undoable).
+        um.beginUndoGrouping()
+        d.removeEntityFromBlock(name: "B", entityID: b)
+        um.endUndoGrouping()
+        #expect(d.blocks.block(named: "B")?.entityIDs == [a])
+        um.undo()
+        #expect(d.blocks.block(named: "B")?.entityIDs == [a, b])
+
+        // A duplicate id / unknown block registers nothing.
+        let um2 = testUndoManager()
+        d.undoManager = um2
+        d.addEntityToBlock(name: "B", entityID: a)        // already a member
+        #expect(um2.canUndo == false)
+        d.addEntityToBlock(name: "NOPE", entityID: a)     // unknown block
+        #expect(um2.canUndo == false)
+    }
+
+    @Test("Draw in the editor → new entity is a BLOCK MEMBER, not a loose document object")
+    func drawInEditorAddsBlockMember() {
+        let (m, memberID, insertID) = seededBlockModel()
+
+        #expect(m.enterBlockEditing(name: "WIDGET") == true)
+        // Draw a NEW line via the public tool-edit funnel (what the inline tools commit
+        // through). A vertical segment from local (0,0) to (0,10).
+        let memberCountBefore = m.drawing.blocks.block(named: "WIDGET")!.entityIDs.count
+        m.applyToolEdits([.add(line(Vector(0, 0), Vector(0, 10)))])
+
+        // The block grew by exactly one member; find the freshly-minted id.
+        let idsAfter = m.drawing.blocks.block(named: "WIDGET")!.entityIDs
+        #expect(idsAfter.count == memberCountBefore + 1)
+        let newID = idsAfter.last!
+        #expect(newID != memberID)
+        // It is a real entity in the drawing AND is recorded as a block member.
+        #expect(m.drawing.entity(newID) != nil)
+        #expect(m.drawing.blockMemberIDs.contains(newID))
+
+        m.exitBlockEditing(save: true)
+
+        // It did NOT leak as a loose model-space object: after exit (back in model space)
+        // the active subset excludes the new member (it is block-only).
+        let modelIDs = Set(m.activeSpaceEntities.map(\.id))
+        #expect(!modelIDs.contains(newID))
+        #expect(modelIDs.contains(insertID))           // the insert is still loose model geo
+
+        // The resolved INSERT now includes the NEW geometry: the insert sits at (20,20),
+        // so the new local (0,10) resolves to (20,30).
+        let pts = resolvedPoints(m.drawing.entity(insertID)!, m.drawing)
+        #expect(contains(pts, Vector(20, 30)))
+    }
+
+    @Test("Discard after a draw removes the added entity from BOTH entities and entityIDs")
+    func discardAfterDrawRevertsAddedMember() {
+        let (m, _, _) = seededBlockModel()
+        #expect(m.canUndo == false)
+
+        m.enterBlockEditing(name: "WIDGET")
+        m.applyToolEdits([.add(line(Vector(0, 0), Vector(0, 10)))])
+        let newID = m.drawing.blocks.block(named: "WIDGET")!.entityIDs.last!
+        #expect(m.drawing.entity(newID) != nil)        // present mid-session
+
+        m.exitBlockEditing(save: false)                // Discard
+
+        // The added member is gone from BOTH the entity store and the block's id list.
+        #expect(m.drawing.entity(newID) == nil)
+        #expect(m.drawing.blocks.block(named: "WIDGET")!.entityIDs.contains(newID) == false)
+        // The block is back to exactly its entry member.
+        #expect(m.drawing.blocks.block(named: "WIDGET")?.entityIDs.count == 1)
+        // Undo stack coherent (Discard dropped its net-identity group).
+        #expect(m.canUndo == false)
+    }
+
+    @Test("Paste/duplicate in the editor joins the BLOCK, not the document")
+    func duplicateInEditorJoinsBlock() {
+        let (m, memberID, insertID) = seededBlockModel()
+
+        m.enterBlockEditing(name: "WIDGET")
+        // Select the member and duplicate it in place (the ⌘D funnel). The duplicate must
+        // join the block's members — not leak to the document.
+        m.selection = Selection(ids: [memberID])
+        #expect(m.duplicateSelection(offset: Vector(0, 5)) == true)
+
+        let idsAfter = m.drawing.blocks.block(named: "WIDGET")!.entityIDs
+        #expect(idsAfter.count == 2)
+        let dupID = idsAfter.first { $0 != memberID }!
+        #expect(m.drawing.blockMemberIDs.contains(dupID))
+
+        m.exitBlockEditing(save: true)
+        // Not a loose model-space object after exit.
+        let modelIDs = Set(m.activeSpaceEntities.map(\.id))
+        #expect(!modelIDs.contains(dupID))
+        // The resolved insert now shows the duplicate's geometry (member (0,0)->(10,0)
+        // duplicated by (0,5) → (0,5)->(10,5); at the insert (20,20) → (20,25)->(30,25)).
+        let pts = resolvedPoints(m.drawing.entity(insertID)!, m.drawing)
+        #expect(contains(pts, Vector(30, 25)))
+    }
+
+    @Test("Delete a member in the editor drops its id from the block's entityIDs")
+    func deleteMemberInEditorDropsFromBlock() {
+        // Seed a block with TWO members so deleting one leaves a non-empty block.
+        let drawing = CADDrawing()
+        let m1 = drawing.add(line(Vector(0, 0), Vector(10, 0)))
+        let m2 = drawing.add(line(Vector(0, 0), Vector(0, 10)))
+        drawing.mutateBlocks { _ = $0.add(Block(name: "WIDGET", entityIDs: [m1, m2])) }
+        let insertID = drawing.add(EntityRecord(
+            id: .placeholder,
+            kind: .insert(InsertData(blockName: "WIDGET", insertionPoint: Vector(20, 20)))))
+
+        let m = CanvasModel(drawing: drawing, viewSize: CGSize(width: 800, height: 600))
+        m.undoManager.groupsByEvent = false
+        m.undoManager.removeAllActions()
+
+        m.enterBlockEditing(name: "WIDGET")
+        // Delete the second member through the selection-delete funnel.
+        m.selection = Selection(ids: [m2])
+        #expect(m.deleteSelection() == true)
+
+        // The block dropped m2 from its member list; m1 remains.
+        #expect(m.drawing.blocks.block(named: "WIDGET")?.entityIDs == [m1])
+        // The underlying entity is gone too.
+        #expect(m.drawing.entity(m2) == nil)
+
+        m.exitBlockEditing(save: true)
+        // The resolved insert no longer carries the deleted member's geometry (the
+        // vertical (0,10) local → (20,30) world is gone); the kept member still resolves.
+        let pts = resolvedPoints(m.drawing.entity(insertID)!, m.drawing)
+        #expect(!contains(pts, Vector(20, 30)))
+        #expect(contains(pts, Vector(30, 20)))         // m1 → (20,20)+(10,0)
+
+        // One ⌘Z restores the deleted member to the block.
+        m.undo()
+        #expect(m.drawing.blocks.block(named: "WIDGET")?.entityIDs.contains(m2) == true)
+        #expect(m.drawing.entity(m2) != nil)
+    }
+
+    @Test("Move a member in the editor updates all inserts (regression)")
+    func moveMemberUpdatesInserts() {
+        // Two inserts of the same block — moving the member updates BOTH live.
+        let drawing = CADDrawing()
+        let mID = drawing.add(line(Vector(0, 0), Vector(10, 0)))
+        drawing.mutateBlocks { _ = $0.add(Block(name: "WIDGET", entityIDs: [mID])) }
+        let i1 = drawing.add(EntityRecord(
+            id: .placeholder,
+            kind: .insert(InsertData(blockName: "WIDGET", insertionPoint: Vector(20, 20)))))
+        let i2 = drawing.add(EntityRecord(
+            id: .placeholder,
+            kind: .insert(InsertData(blockName: "WIDGET", insertionPoint: Vector(0, 100)))))
+
+        let m = CanvasModel(drawing: drawing, viewSize: CGSize(width: 800, height: 600))
+        m.undoManager.groupsByEvent = false
+        m.undoManager.removeAllActions()
+
+        m.enterBlockEditing(name: "WIDGET")
+        var edited = m.drawing.entity(mID)!
+        edited.kind = .line(LineData(start: Vector(0, 0), end: Vector(10, 5)))
+        m.applyInspectorEdits([edited])
+        m.exitBlockEditing(save: true)
+
+        let p1 = resolvedPoints(m.drawing.entity(i1)!, m.drawing)
+        let p2 = resolvedPoints(m.drawing.entity(i2)!, m.drawing)
+        #expect(contains(p1, Vector(30, 25)))          // (20,20)+(10,5)
+        #expect(contains(p2, Vector(10, 105)))         // (0,100)+(10,5)
+    }
 }

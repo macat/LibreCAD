@@ -1031,6 +1031,29 @@ public final class CADDrawing {
         mutateBlocks { $0.setEntityIDs(name, ids) }
     }
 
+    /// Appends a single member-entity id to a block's ordered member list (undoable,
+    /// one ⌘Z reverts; a duplicate id or an unknown block registers nothing). This is
+    /// the explicit seam the Block Editor's `.add` path uses: after `add(_:)` mints a
+    /// new entity inside an editing session, the entity's id is threaded into the
+    /// editing block via this call (ideally in the SAME undo group as the add), so the
+    /// newly-drawn geometry becomes a real BLOCK MEMBER — excluded from model space via
+    /// `blockMemberIDs`, drawn only through the block's inserts — rather than leaking as
+    /// a loose top-level entity. Wraps `BlockTable.addEntityID(_:to:)`; routed through
+    /// the `mutateBlocks` value-snapshot funnel.
+    public func addEntityToBlock(name: String, entityID: EntityID) {
+        mutateBlocks { $0.addEntityID(entityID, to: name) }
+    }
+
+    /// Drops a single member-entity id from a block's member list (undoable; a missing
+    /// id or unknown block registers nothing). The companion to `addEntityToBlock`: when
+    /// a member is deleted inside the Block Editor, its id is removed from the editing
+    /// block's `entityIDs` (ideally in the same undo group as the entity removal) so the
+    /// block's membership stays in sync. Does NOT remove the underlying entity record —
+    /// the caller's delete path handles that. Wraps `BlockTable.removeEntityID(_:from:)`.
+    public func removeEntityFromBlock(name: String, entityID: EntityID) {
+        mutateBlocks { $0.removeEntityID(entityID, from: name) }
+    }
+
     // MARK: - Dynamic-block mutations (visibility states; undoable via mutateBlocks)
 
     /// Replaces a block's entire DYNAMIC bundle (`Block.dynamic` — visibility states
