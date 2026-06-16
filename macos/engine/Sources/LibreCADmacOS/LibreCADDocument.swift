@@ -296,6 +296,27 @@ enum DXFDocumentCodec {
         }
     }
 
+    /// Resolves a stored DXF-export-version raw string to the engine `DXFVersion` the
+    /// writer accepts. PURE — no `UserDefaults`, no I/O — so it is fully unit-testable:
+    /// it forwards to the app-settings forgiving decoder (`DXFExportVersion(rawValue:)` →
+    /// fall back to the R2000 default on a blank / unknown / legacy string), then maps the
+    /// settings tier to the engine type. An empty/absent string therefore resolves to the
+    /// writer's existing default (`.r2000`), keeping legacy save behavior unchanged.
+    static func dxfVersion(fromRaw raw: String?) -> DXFVersion {
+        AppSettings.dxfExportVersion(fromRaw: raw ?? "").engineVersion
+    }
+
+    /// The DXF version the save path should write, resolved from the persisted
+    /// `app.general.dxfExportVersion` preference. Reads `UserDefaults.standard` — which is
+    /// reachable off-main (the codec runs on a background queue, never a `@MainActor`
+    /// type) — and falls back to `.r2000` when the key is unset/garbage via the pure
+    /// `dxfVersion(fromRaw:)` resolver. The defaults read is the ONLY side effect; the
+    /// mapping itself is the pure helper above (which the tests exercise directly).
+    static func resolvedDXFExportVersion() -> DXFVersion {
+        let raw = UserDefaults.standard.string(forKey: AppSettings.Key.dxfExportVersion)
+        return dxfVersion(fromRaw: raw)
+    }
+
     /// Serializes a `Sendable` payload to drawing bytes (DXF or DWG per `format`),
     /// OFF the main actor. Writes to a temp file through the shared engine actor's
     /// matching write path (path-only C API), reads the bytes back, then removes
@@ -317,6 +338,11 @@ enum DXFDocumentCodec {
         let blockMembers: [String: [EntityRecord]] = payload.blocks.blocks.reduce(into: [:]) {
             $0[$1.name] = $1.entityIDs.compactMap { entitiesByID[$0] }
         }
+        // The DXF format version to write, resolved from the persisted Preference
+        // (`app.general.dxfExportVersion`) off-main here on the codec's background queue;
+        // defaults to .r2000 (unchanged behavior) when unset. DWG is R2000-only (the
+        // library gap), so this only affects the .dxf branch below.
+        let dxfVersion = resolvedDXFExportVersion()
         do {
             _ = try runBlocking {
                 switch format {
@@ -329,7 +355,10 @@ enum DXFDocumentCodec {
                         // Paper-space P3: persist each layout's viewports as DXF
                         // VIEWPORT entities (symmetric to the read path).
                         layouts: payload.layouts,
-                        toPath: tmp.path
+                        toPath: tmp.path,
+                        // The user-chosen DXF version (Settings ▸ General ▸ Files);
+                        // .r2000 default keeps the prior hardcoded behavior.
+                        version: dxfVersion
                     )
                 case .dwg:
                     return try await CADEngine.shared.writeEntities(
