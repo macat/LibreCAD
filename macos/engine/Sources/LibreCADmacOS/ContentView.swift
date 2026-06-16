@@ -230,6 +230,15 @@ struct ContentView: View {
             .safeAreaInset(edge: .top, spacing: 0) {
                 ToolOptionsBar(model: model, controllerBox: controllerBox)
             }
+            // STAGE 2 (current-properties): the PERSISTENT current-properties bar —
+            // active layer + current pen (color / line type / width). Applied AFTER the
+            // contextual ToolOptionsBar so it stacks ABOVE it (closest to the toolbar);
+            // always visible (it never collapses) because the current properties apply
+            // to every draw tool. New geometry adopts these via Stage 1's applyCommit
+            // stamp.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                CurrentPropertiesBar(model: model, controllerBox: controllerBox)
+            }
             // WAVE BW (Ask #2): the contextual Block-Editor bar, pinned at the very top
             // of the canvas while an in-place block-edit session is active. Shows
             // "Editing block: <name>" + Save & Close / Discard; renders nothing

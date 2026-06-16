@@ -209,4 +209,55 @@ struct PenPropertiesTests {
         #expect(LineWidthPicker.displayName(.default) == "Default")
         #expect(LineWidthPicker.displayName(.millimeters(0.25)) == "0.25 mm")
     }
+
+    // MARK: - 4. STAGE 2: top-bar current-properties control contract
+    //
+    // The CurrentPropertiesBar only mutates two pieces of LIVE model state — the
+    // active layer (via `setActiveLayer`) and `model.currentPen` (its color/type/width
+    // bindings). It reaches NO modal and touches no existing geometry. These tests
+    // exercise that exact contract: a state change made the way the bar's bindings make
+    // it flows into the next drawn entity through the Stage-1 stamp, and an existing
+    // entity is left untouched.
+
+    @Test("the bar's currentPen color binding flows into newly drawn geometry")
+    func currentPenColorBindingDrivesNewGeometry() {
+        let model = modelWithActiveLayer("Walls")
+        // Exactly what the color control's bindings write: switch to explicit, set color.
+        model.currentPen.lineColor = .explicit(.black)          // mode → explicit
+        model.currentPen.lineColor = .explicit(RGBAColor(0, 0, 1))  // pick blue
+        model.applyToolEdits([.add(defaultDrawnLine())])
+        #expect(soleRecord(model)?.pen.lineColor == .explicit(RGBAColor(0, 0, 1)))
+    }
+
+    @Test("the bar's layer picker changes where the NEXT entity is drawn, not prior ones")
+    func currentLayerPickerAffectsOnlyFutureGeometry() {
+        let model = CanvasModel()
+        #expect(model.drawing.addLayer(Layer(name: "A")))
+        #expect(model.drawing.addLayer(Layer(name: "B")))
+
+        // Draw one on A.
+        model.drawing.setActiveLayer("A")
+        model.applyToolEdits([.add(defaultDrawnLine())])
+        let firstID = model.drawing.entities.first?.id
+
+        // The bar's layer binding switches the active layer to B.
+        model.drawing.setActiveLayer("B")
+        model.applyToolEdits([.add(EntityRecord(id: .placeholder,
+                                                kind: .line(LineData(start: Vector(1, 1), end: Vector(2, 2)))))])
+
+        // The first entity stayed on A; the second landed on B.
+        let onA = model.drawing.entities.first { $0.id == firstID }
+        let onB = model.drawing.entities.first { $0.id != firstID }
+        #expect(onA?.layer == LayerID("A"))
+        #expect(onB?.layer == LayerID("B"))
+    }
+
+    @Test("currentPen defaults to a fully .byLayer pen (the bar's default state)")
+    func currentPenDefaultsToByLayer() {
+        let model = CanvasModel()
+        #expect(model.currentPen == .byLayer)
+        #expect(model.currentPen.lineColor == .byLayer)
+        #expect(model.currentPen.lineType == .byLayer)
+        #expect(model.currentPen.lineWidth == .byLayer)
+    }
 }
