@@ -72,6 +72,10 @@ enum CommandRegistry {
         /// kind needs a file chosen up front, so its palette entry routes here instead
         /// of through the bare `activateTool`.
         var placeImage: () -> Void
+        /// Raise the "Create Block from Selection…" name sheet (WAVE BW, Ask #1). The
+        /// `.createBlock` kind asks for a NAME first (spec §2.1), so its palette entry
+        /// routes here instead of through the bare `activateTool`.
+        var createBlockFromSelection: () -> Void
         var open: () -> Void
         var save: () -> Void
         var saveAs: () -> Void
@@ -165,12 +169,20 @@ enum CommandRegistry {
         // arm an inert tool with no file chosen).
         for kind in ToolKind.allCases {
             let g = glyph(for: kind)
-            let run: () -> Void = (kind == .image)
-                ? actions.placeImage
-                : { actions.activateTool(kind) }
+            // `.image` routes to the file-picker flow; `.createBlock` routes to the
+            // name sheet (spec §2.1) — both need a View-layer step a bare activate skips.
+            let run: () -> Void
+            switch kind {
+            case .image:       run = actions.placeImage
+            case .createBlock: run = actions.createBlockFromSelection
+            default:           run = { actions.activateTool(kind) }
+            }
+            // Give the create-block entry the clear AutoCAD verb (its `ToolKind.title`
+            // stays "Create Block"; the palette surfaces the discoverable phrasing).
+            let title = (kind == .createBlock) ? "Create Block from Selection…" : kind.title
             list.append(PaletteCommand(
                 id: "tool.\(kind.rawValue)",
-                title: kind.title,
+                title: title,
                 systemImage: g.symbol,
                 shortcut: g.shortcut,
                 run: run

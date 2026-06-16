@@ -75,6 +75,7 @@ struct BlocksSection: View {
                         block: block,
                         thumbnail: thumbnail(for: block.name, context: ctx),
                         onInsert: { insert(block.name) },
+                        onEdit: { edit(block.name) },
                         onRename: { rename(block.name, to: $0) },
                         onDelete: { delete(block.name) }
                     )
@@ -83,6 +84,8 @@ struct BlocksSection: View {
                     .draggable(BlockDragItem(blockName: block.name))
                     .contextMenu {
                         Button("Insert at View Center") { insert(block.name) }
+                        // WAVE BW (Ask #2): open the in-place Block Editor (BEDIT).
+                        Button("Edit Block") { edit(block.name) }
                         Divider()
                         Button("Delete Block", role: .destructive) { delete(block.name) }
                     }
@@ -106,6 +109,16 @@ struct BlocksSection: View {
 
     private func insert(_ name: String) {
         if model.insertBlockAtViewCenter(named: name) {
+            controllerBox.controller?.requestRedraw()
+        }
+    }
+
+    /// WAVE BW (Ask #2): enter the in-place Block Editor for `name` (BEDIT). The model
+    /// re-scopes the canvas/index/camera to the block's members; the `BlockEditBar`
+    /// (Save & Close / Discard) appears via `isEditingBlock`. No-op if a session is
+    /// already open or the block is unknown.
+    private func edit(_ name: String) {
+        if model.enterBlockEditing(name: name) {
             controllerBox.controller?.requestRedraw()
         }
     }
@@ -134,6 +147,7 @@ private struct BlockRow: View {
     /// icon (unknown / empty / degenerate block). Computed + cached by the section.
     let thumbnail: NSImage?
     let onInsert: () -> Void
+    let onEdit: () -> Void
     let onRename: (String) -> Void
     let onDelete: () -> Void
 
@@ -168,6 +182,13 @@ private struct BlockRow: View {
             }
             .buttonStyle(.borderless)
             .help("Insert this block at the view center")
+
+            // WAVE BW (Ask #2): open the in-place Block Editor (BEDIT).
+            Button(action: onEdit) {
+                Image(systemName: "pencil")
+            }
+            .buttonStyle(.borderless)
+            .help("Edit this block — changes update every reference")
 
             Button(action: onDelete) {
                 Image(systemName: "trash")

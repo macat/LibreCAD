@@ -161,6 +161,11 @@ final class CanvasModel {
     /// The current selection (toggled by click → hitTest).
     var selection = Selection()
 
+    /// Whether anything is currently selected — the gate the "Create Block from
+    /// Selection…" command (WAVE BW, Ask #1) and the context menu read (the verb is
+    /// meaningless with nothing selected). A thin, observed accessor over `selection`.
+    var hasSelection: Bool { !selection.isEmpty }
+
     /// The latest snap result under the cursor (drives the snap marker overlay).
     var snap: SnapResult?
 
@@ -467,6 +472,23 @@ final class CanvasModel {
         guard let imagePath, !imagePath.isEmpty else { return nil }
         return (imagePath as NSString).lastPathComponent
     }
+
+    /// Create-Block tool (WAVE BW, Ask #1): the block name the next `CreateBlockTool`
+    /// run uses, supplied by the View-layer name sheet (`BlockNamePrompt`) before it
+    /// activates `.createBlock`. `ToolKind.makeTool()` mints a `CreateBlockTool` with
+    /// the default "Block" name; `applyToolConfig` RE-MINTS it with this so the new
+    /// block carries the user's chosen name. `nil`/empty ⇒ the default name (the model
+    /// op de-duplicates on a clash, so a default is always safe). Set via
+    /// `beginCreateBlock(name:)`.
+    var pendingCreateBlockName: String?
+
+    /// Insert tool (WAVE BW, Ask #3 optional): the block name the next `InsertTool`
+    /// run places, supplied by the View-layer block-picker before it activates
+    /// `.insert`. `ToolKind.makeTool()` mints a bare (inert) `InsertTool`;
+    /// `applyToolConfig` RE-MINTS it with this name + the block's member snapshot (for
+    /// the rubber-band preview). `nil`/empty ⇒ inert (the picker sets it first). Set
+    /// via `beginInsert(name:)`.
+    var pendingInsertBlockName: String?
 
     /// Circle tool: whether numeric size entry is a radius (default) or diameter, and
     /// an optional EXACT size (0 ⇒ unset → two-click center+radius).
@@ -1690,6 +1712,31 @@ final class CanvasModel {
             let members = blockMembersSnapshot()
             tool = ExplodeInsertTool(blockMembers: { name in members[name] })
 
+        // MARK: Create-Block tool — chosen name injected at construction (WAVE BW)
+
+        case is CreateBlockTool:
+            // CreateBlockTool's name is fixed at construction (the View-layer name sheet
+            // supplies it via `pendingCreateBlockName` before activating `.createBlock`).
+            // Re-mint with the chosen name so the new block carries it; an absent name
+            // falls back to the tool's default ("Block"), which the model op de-dups.
+            let name = (pendingCreateBlockName?.isEmpty == false)
+                ? pendingCreateBlockName! : "Block"
+            tool = CreateBlockTool(blockName: name)
+
+        // MARK: Insert tool — chosen block name + member snapshot injected (WAVE BW)
+
+        case is InsertTool:
+            // InsertTool's target block name + the member records for its rubber-band
+            // preview are fixed at construction. Re-mint with the picked block (from the
+            // View-layer block-picker via `pendingInsertBlockName`) + a value snapshot of
+            // its members. With no name chosen the tool stays inert (a safe no-op).
+            if let name = pendingInsertBlockName, !name.isEmpty {
+                let members = blockMembersSnapshot()
+                tool = InsertTool(blockName: name, previewMembers: members[name] ?? [])
+            } else {
+                tool = InsertTool()
+            }
+
         // MARK: Image tool — file path + source pixel size injected at construction
 
         case is ImageTool:
@@ -2243,6 +2290,71 @@ final class CanvasModel {
     func insertBlockAtViewCenter(named name: String) -> Bool {
         let centerScreen = CGPoint(x: viewport.size.width / 2, y: viewport.size.height / 2)
         return insertBlock(named: name, at: viewport.screenToWorld(centerScreen))
+    }
+
+    // MARK: - WAVE BW (block UI wiring): create / insert / double-click-to-edit
+
+    /// Begins a Create-Block-from-selection run with the chosen `name` (WAVE BW, Ask #1).
+    /// The View-layer name sheet (`BlockNamePrompt`) calls this after the user confirms a
+    /// name (gated on a non-empty selection): it stores the name in `pendingCreateBlockName`
+    /// and activates the `.createBlock` tool, which `applyToolConfig` then re-mints as a
+    /// `CreateBlockTool(blockName:)`. The user then picks a base point on the canvas; the
+    /// out-of-band CreateBlock path (`applyPendingBlockCreationIfAny`) folds the selection
+    /// into the named block and replaces it with one insert. A blank/whitespace name falls
+    /// back to the default (de-duplicated by the model op). Returns `true` if there is a
+    /// selection to block (else a no-op — the sheet should not appear without one).
+    @discardableResult
+    func beginCreateBlock(name: String) -> Bool {
+        guard !selection.isEmpty else { return false }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        pendingCreateBlockName = trimmed.isEmpty ? nil : trimmed
+        activateTool(.createBlock)
+        return true
+    }
+
+    /// Begins an Insert run that places references to the existing block `name` (WAVE BW,
+    /// Ask #3 optional): stores it in `pendingInsertBlockName` and activates the `.insert`
+    /// tool, which `applyToolConfig` re-mints as `InsertTool(blockName:previewMembers:)`
+    /// (so the rubber-band preview shows the block). The user then clicks the placement
+    /// point. A blank name / unknown block leaves the tool inert. Returns `true` if the
+    /// block exists.
+    @discardableResult
+    func beginInsert(name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, drawing.blocks.contains(trimmed) else {
+            pendingInsertBlockName = nil
+            return false
+        }
+        pendingInsertBlockName = trimmed
+        activateTool(.insert)
+        return true
+    }
+
+    /// The block name of an `.insert` entity under `world` (within the selection-hit
+    /// tolerance), or `nil` if no block reference is there (WAVE BW, Ask #2). The pure,
+    /// testable core of the double-click-to-edit gesture: the canvas converts the cursor
+    /// to a world point, calls this, and — if non-nil — enters that block's editor. Uses
+    /// the SAME hit-test the click/selection path uses (so a double-click resolves the
+    /// same entity a single click would select), then keeps only `.insert` records.
+    func blockNameOfInsert(at world: Vector) -> String? {
+        guard let id = selection.hitTest(
+            worldPoint: world,
+            worldTolerance: worldTolerance,
+            in: drawing,
+            using: quadtree
+        ), let record = drawing.entity(id),
+            case .insert(let data) = record.kind else { return nil }
+        return data.blockName
+    }
+
+    /// A default suggested name for a NEW block, of the form `Block-N` where `N` is the
+    /// smallest positive integer making the name unique in the block table (WAVE BW,
+    /// Ask #1). Seeds the `BlockNamePrompt` sheet so the user gets a sensible, unique
+    /// prefilled name they can accept or override.
+    func suggestedBlockName() -> String {
+        var n = drawing.blocks.blocks.count + 1
+        while drawing.blocks.contains("Block-\(n)") { n += 1 }
+        return "Block-\(n)"
     }
 
     /// Renames a block definition (undoable). Existing `.insert`s referencing the old
