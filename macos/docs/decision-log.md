@@ -25,7 +25,35 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 - **A3 — P1/P2 test backfill**: new `PaperSpaceDXFRoundTripTests.swift` + `PaperSpaceLayoutHelperTests.swift` (read-only on source; pure `PaperSpaceLayout` helpers via existing `_SharedCanvasModel` symlink).
 - **A4 — draw variants**: `Tools/{CircleTool,ArcTool,LineTool}.swift` (Circle 2P/3P, Arc tangential, Line by-angle) + tests, additive Mode enums, UNWIRED.
 
-**Merge order:** A4 → A2 → A1 → A3, batch-merge by hash + ONE serial-gate (expect 1887 + new). Then code-reviewer per non-trivial diff, acceptance-tester on a real paper-space DXF + `.app` smoke, then a wire-wave to surface viewports/plot/variants. *(In progress — this entry will be amended with landed hashes + counts.)*
+**Merge order:** A4 → A2 → A1 → A3, batch-merge by hash + ONE serial-gate. Then code-reviewer per non-trivial diff, acceptance-tester, then a wire-wave to surface viewports/plot/variants.
+
+**— LANDED** (`native-macos @ 135346d72`, **1989 tests** green, build clean, 4 worktrees pruned). All 4 reviewed (A2/A4/A1 APPROVE-WITH-NITS; A3 tests-only). Merged commits:
+- **A4 variants** `ec06a4328` (+34) — `CircleConstructionMode{.centerRadius/.twoPoint/.threePoint}` (circumcircle via perpendicular-bisector determinant), `ArcCreationMode.tangential` (start-tangent-to-pick, through end), `LineAngleMode{.free/.absolute/.relative}`. Additive, UNWIRED. Reviewer numerically verified the tangential-arc sense.
+- **A2 P4 plot** `994b1242e` (+21) — per-layout sheet-accurate PDF/print at plot scale; engine`PageDescriptor`/`LayoutPlotScale`→app`PrintLayout` converters; pure `layoutPDFData`/`makeLayout(for:)` (panel-free, test-reachable). UNWIRED. Review SHOULD-FIX applied (print job binds the LAYOUT's sheet, not the printer default). *Known cut:* the sheet plots 1:1 for a fixed `.ratio`; scaling model-behind-a-viewport at resolve time is a follow-up.
+- **A1 P3 viewports** `449a33f52` (+27) — `LayoutViewport`(paperRect/viewCenter/viewHeight, off `EntityKind`, in `Layout.viewports`); pure child-camera/affine/Cohen–Sutherland-clip math; `CADDrawing.add/remove/updateViewport` via `mutateLayouts` (undoable); DXF read+write round-trip via new `LC_ENT_VIEWPORT` bridge POD + **two 1-line vendored libdxfrw patches** (code-45 `viewHeight` write in `dxfRW::writeViewport` + parse in `DRW_Viewport::parseCode`; reviewer confirmed minimal/scoped/no-regression) + a 3rd polish patch (`DRW_Viewport()` ctor inits `viewHeight` for foreign DXFs); clipped viewport-content render pass; `ViewportTool` 2-click value type (UNWIRED). **Also fixed a real bug:** `LibreCADDocument` was dropping `result.layouts` on DXF open → opened paper-space DXFs now show their layout tabs + paper entities; Save now persists layouts+viewports to disk.
+- **A3 P1/P2 test backfill** `be2367a7c` (+20) — live DXF/DWG code-67 round-trip + single-Layout1 reconstruction + pure `PaperSpaceLayout` helpers (filter/sheetRect/marginRect) + CanvasModel space-switching. Documented 3 real losses with flip-when-fixed asserts: per-entity `layoutName` not reattached (needs LAYOUT-dict patch), PLOTSETTINGS margin/size not written, DWG drops paper space entirely.
+- **polish** `135346d72` — libdxfrw ctor init + comment fix + `block-editing-plan.md`.
+
+**Infra note:** A4 (variants) died once on an infra socket error very early (only a partial untested `CircleTool` edit) → discarded the worktree + re-dispatched fresh (`16c62e50f`), which landed clean. A1 ran ~14 min (the wave's long pole).
+
+**REMAINING follow-ups (paper space):** wire-wave (surface `ViewportTool` + the plot menu + the new draw-tool variant modes in `ToolKind`/`ToolOptionsBar`/`CommandPalette`); the 3 documented DXF losses (LAYOUT-dict + PLOTSETTINGS write = multi-layout fidelity); viewport-content plot scaling; per-viewport render cull (perf). Tracked.
+
+---
+
+## 2026-06-16 — BLOCK EDITING project APPROVED (owner: "AutoCAD opens & edits blocks well — essential") → full scope
+
+**Owner answers (AskUserQuestion):** scope = **Everything (Block Editor MVP + attributes ATTDEF/ATTRIB + parts library/import)**; save model = **Save & Close + Discard** (BCLOSE-style; a whole edit session is one undoable step).
+
+**Design (planner `block-editing-plan.md` + investigator):** the keystone is DONE — `EntityKind.insert`, `CreateBlockTool`/`ExplodeInsertTool`/`InsertTool`, and a LIVE blocks sidebar all exist + are wired (the catalog "stub" rows are STALE). **Crux confirmed:** block members are SHARED — a `Block` holds `entityIDs` into `CADDrawing.entities`, and `resolve(.insert)` looks the block up by name + transforms the live members each resolve → **editing a member instantly updates every insert; the edit IS the save-back** (no per-insert copy). So the Block Editor = a transient edit SCOPE reusing the proven paper-space active-space machinery (`CanvasModel.setActiveSpace`-style enter/re-frame/re-index/exit) + the existing undoable `applyCommit`/`mutateBlocks` funnels. Genuinely missing: in-place editor, ATTDEF/ATTRIB (not read/written; model as an additive `InsertData` field + `Block` attr-defs, **no new `EntityKind` case**), DWG block-member round-trip (intentionally lossy), and a parts library/import.
+
+**Planned wave (block project is mostly serial on hot files — fan out only the disjoint engine halves, then a wire-wave):**
+- **B0 editor scope (engine)** — `CanvasModel.swift` + `CADDrawing.swift` (`editingBlock` scope, enter/Save&Close/Discard snapshot, `setBlockMembers` convenience). SOLO hot.
+- **B-ATTR attributes (engine)** — `Entity.swift` (additive `InsertData` attributes field, NOT a new EntityKind case), `Block.swift` (attr-defs), `Resolve.swift` (render ATTRIB text), `lcdxf.{cpp,h}` + `DXFReader/Writer.swift` (ATTDEF/ATTRIB round-trip). Disjoint from B0.
+- **B-LIB library (engine)** — new `BlockLibrary.swift` + import-block-from-`.dxf` (reuse existing `readEntities` + `makeBlockFromEntities`). New files only.
+- **B-WIRE wire-wave** — `ContentView`/`CADCanvasView`/`BlocksSidebar`/`ToolKind` etc.: BlockEditBar + double-click-insert-to-edit + sidebar "Edit", attribute display/edit UI, library browser panel. After the 3 engine waves merge.
+Critic-gating the disjointness before dispatch; launches as the paper-space hot files are now free.
+
+---
 
 ---
 
