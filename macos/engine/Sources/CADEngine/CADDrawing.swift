@@ -1054,6 +1054,59 @@ public final class CADDrawing {
         mutateBlocks { $0.removeEntityID(entityID, from: name) }
     }
 
+    // MARK: - Block freeze / visibility (RS_Block::freeze / toggle; undoable via mutateBlocks)
+    //
+    // A frozen block is invisible: `blockMembersSnapshot()` excludes `where !isFrozen`,
+    // so every `.insert` of a frozen block resolves to EMPTY geometry (it doesn't draw
+    // or snap). These wrappers mirror the existing block wrappers — each routes through
+    // the `mutateBlocks` value-snapshot funnel, so it is exactly ONE undoable step and a
+    // genuine no-op (no flag change) registers nothing. The model-version bump that drives
+    // re-resolve follows `mutateBlocks` like every other block edit; no view code here
+    // (the sidebar eye-toggle + Freeze-all menu are a later wire-wave). Engine-pure.
+
+    /// Sets a block's frozen flag (`RS_Block::freeze`). Undoable. No-op (no undo) if the
+    /// block is unknown or already at `frozen` (`BlockTable.setFrozen` is itself a no-op
+    /// for an unknown name, and `mutateBlocks` skips the undo when the table is unchanged).
+    public func setBlockFrozen(_ name: String, _ frozen: Bool) {
+        mutateBlocks { $0.setFrozen(name, frozen) }
+    }
+
+    /// Flips a block's frozen flag (`RS_Block::toggle`). Undoable. No-op (no undo) if the
+    /// block is unknown (nothing to toggle).
+    public func toggleBlockFrozen(_ name: String) {
+        mutateBlocks { table in
+            guard let block = table.block(named: name) else { return }
+            table.setFrozen(name, !block.isFrozen)
+        }
+    }
+
+    /// Freezes every NAMED block in one undoable step (`RS_BlockList::freezeAll(true)` —
+    /// the sidebar's "Freeze all" affordance). Anonymous `*`-blocks (dimension / hatch
+    /// regeneration geometry, matching the `DXFWriter`'s `!hasPrefix("*")` author filter)
+    /// are skipped — they're system blocks the user can't toggle. A no-op (every named
+    /// block already frozen, or no named blocks) registers no undo.
+    public func freezeAllBlocks() {
+        setAllNamedBlocksFrozen(true)
+    }
+
+    /// Thaws every NAMED block in one undoable step (`RS_BlockList::freezeAll(false)` —
+    /// the "Defreeze all" affordance). Anonymous `*`-blocks are skipped (see
+    /// `freezeAllBlocks`). A no-op (every named block already thawed) registers no undo.
+    public func thawAllBlocks() {
+        setAllNamedBlocksFrozen(false)
+    }
+
+    /// Sets the frozen flag on every named (non-`*`) block as ONE undoable step via the
+    /// `mutateBlocks` value-snapshot funnel — a single ⌘Z reverts the whole batch, and a
+    /// batch that changes nothing registers no undo.
+    private func setAllNamedBlocksFrozen(_ frozen: Bool) {
+        mutateBlocks { table in
+            for block in table.blocks where !block.name.hasPrefix("*") {
+                table.setFrozen(block.name, frozen)
+            }
+        }
+    }
+
     // MARK: - Dynamic-block mutations (visibility states; undoable via mutateBlocks)
 
     /// Replaces a block's entire DYNAMIC bundle (`Block.dynamic` — visibility states
