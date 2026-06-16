@@ -23,6 +23,104 @@ import CoreGraphics
 import Observation
 import CADEngine
 
+// MARK: - Paper-space layout math (PURE, GPU-/view-free, unit-tested)
+
+/// The pure, side-effect-free helpers the paper-space UI (P2) needs: partitioning
+/// entities by the space currently on screen, deriving a layout's paper sheet
+/// rectangle (and its printable/margin border) from the engine `PageDescriptor`,
+/// and fitting the camera to a sheet. They take only value types (no `CanvasModel`,
+/// no `Viewport` mutation, no Metal) so the whole "which entities render / where is
+/// the sheet / how does the camera frame it" contract is testable headlessly
+/// (`PaperSpaceUITests`).
+///
+/// ## Coordinate convention for the sheet
+/// A `PageDescriptor` is paper geometry in MILLIMETERS. The sheet is placed in
+/// model-world units with its LOWER-LEFT corner at the origin `(0, 0)` and extends
+/// to `(widthMM, heightMM)` — i.e. paper millimeters map 1:1 to world units on the
+/// layout (the AutoCAD paper-space convention: 1 paper unit == 1 mm). Viewports
+/// (which scale model geometry onto the sheet) are a later phase (P3); here the
+/// sheet is just a rectangle the camera frames and the renderer outlines.
+enum PaperSpaceLayout {
+
+    /// The subset of `entities` that belongs on screen for the given active space.
+    ///
+    /// - `.model`: every model-space record (`space == .model`). Paper-space records
+    ///   are hidden (they live on a sheet, not in the world).
+    /// - `.paper`: only the records on the NAMED active layout — `space == .paper`
+    ///   AND `layoutName` matching `layoutName` (case-insensitively, mirroring the
+    ///   engine's case-insensitive LAYOUT names). A `nil` `layoutName` (no active
+    ///   layout) yields nothing on a paper space.
+    ///
+    /// Pure filter over a value snapshot — the single source of truth for both the
+    /// quadtree rebuild (snapping/selection) and the render pack.
+    static func entities(
+        in entities: [EntityRecord],
+        space: EntitySpace,
+        layoutName: String?
+    ) -> [EntityRecord] {
+        entities.filter { isInActiveSpace($0, space: space, layoutName: layoutName) }
+    }
+
+    /// Whether one record belongs in the given active space — the per-entity form of
+    /// `entities(in:space:layoutName:)`, so the renderer's pack loop and the array
+    /// filter share ONE predicate (no drift between "what's indexed" and "what's
+    /// drawn"). Model space ⇒ model records; a named layout ⇒ paper records on that
+    /// (case-insensitive) layout; a blank/nil layout on paper ⇒ nothing.
+    static func isInActiveSpace(
+        _ record: EntityRecord,
+        space: EntitySpace,
+        layoutName: String?
+    ) -> Bool {
+        switch space {
+        case .model:
+            return record.space == .model
+        case .paper:
+            guard let layoutName, !layoutName.isEmpty else { return false }
+            return record.space == .paper
+                && (record.layoutName?.caseInsensitiveCompare(layoutName) == .orderedSame)
+        }
+    }
+
+    /// The paper sheet rectangle in world units (mm) for a page: lower-left at the
+    /// origin, extending to `(widthMM, heightMM)`. A non-positive / non-finite
+    /// dimension collapses that axis to 0, so the rect is always valid (never NaN);
+    /// a fully-degenerate page yields a zero-size box at the origin.
+    static func sheetRect(for page: PageDescriptor) -> AABB {
+        let w = (page.widthMM.isFinite && page.widthMM > 0) ? page.widthMM : 0
+        let h = (page.heightMM.isFinite && page.heightMM > 0) ? page.heightMM : 0
+        return AABB(min: Vector(0, 0), max: Vector(w, h))
+    }
+
+    /// The printable-area (margin) rectangle: the sheet inset by `marginMM` on every
+    /// edge. The inset is clamped so it never inverts the rect — a margin at least
+    /// half the smaller dimension collapses the printable area to a centered zero-
+    /// width/height line rather than a negative box. A non-positive / non-finite
+    /// margin returns the full sheet rect (no border inset).
+    static func marginRect(for page: PageDescriptor) -> AABB {
+        let sheet = sheetRect(for: page)
+        guard page.marginMM.isFinite, page.marginMM > 0, !sheet.isEmpty else { return sheet }
+        let w = sheet.size.x
+        let h = sheet.size.y
+        // Clamp the inset so left<=right and bottom<=top (a huge margin collapses to
+        // the sheet center, not an inverted box).
+        let mx = Swift.min(page.marginMM, w * 0.5)
+        let my = Swift.min(page.marginMM, h * 0.5)
+        return AABB(
+            min: Vector(sheet.min.x + mx, sheet.min.y + my),
+            max: Vector(sheet.max.x - mx, sheet.max.y - my)
+        )
+    }
+
+    /// A viewport that frames a layout's paper sheet in the given view size — the
+    /// camera re-frame applied when a layout becomes active. Builds the sheet rect
+    /// from the page and delegates to the shared `Viewport.fit` (which centers it
+    /// with a padding margin and is robust to a degenerate sheet). Pure: returns a
+    /// new `Viewport`, mutating nothing.
+    static func cameraFit(for page: PageDescriptor, in size: CGSize) -> Viewport {
+        Viewport.fit(sheetRect(for: page), in: size)
+    }
+}
+
 /// Observable canvas state. SwiftUI observes `entityCount`/`cursorWorld` for the
 /// HUD; the renderer reads `drawing`/`viewport`/`quadtree`/`selection`/`snap`.
 @MainActor
@@ -38,6 +136,22 @@ final class CanvasModel {
     /// The viewport transform. Pan/zoom mutate ONLY this (matrix-only; the f32
     /// instance buffers are never rebuilt for a view change — ADR-003).
     var viewport: Viewport
+
+    // MARK: Active space (paper-space P2 — Model / Layout tab)
+
+    /// Which space is currently ON SCREEN — model (the implicit world drawing, the
+    /// default) or paper (a layout sheet). The renderer packs only this space's
+    /// entities, the quadtree indexes only them (so snapping/selection are scoped),
+    /// and — for paper — the sheet rectangle + margin border are drawn. Defaults to
+    /// `.model` so nothing changes until the user picks a Layout tab. Observed so the
+    /// tab strip + chrome reflect the active space live. Purely a live VIEW policy
+    /// (which space the canvas shows) — not document content, so not undoable.
+    private(set) var activeSpace: EntitySpace = .model
+
+    /// WHICH layout is active when `activeSpace == .paper` — the `Layout.name` whose
+    /// sheet is on screen. `nil` in model space. The render filter / quadtree scope
+    /// key off this so only the named layout's paper-space entities participate.
+    private(set) var activeLayout: String?
 
     /// The shared spatial index over entity AABBs (culling + snapping). Rebuilt
     /// when the model is replaced; incrementally updated on edits.
@@ -459,6 +573,11 @@ final class CanvasModel {
         drawing = newDrawing
         drawing.undoManager = undoManager
         undoManager.removeAllActions()
+        // A freshly-loaded drawing always starts in MODEL space (paper-space P2): the
+        // prior window's active layout does not carry into a new document, and model
+        // space is the safe default that frames + indexes the world drawing below.
+        activeSpace = .model
+        activeLayout = nil
         // Adopt the document's persisted grid/snap settings into the live model
         // flags so a loaded file (Save→Open) restores the user's grid + snap state
         // (Document Settings round-trip). Header vars are the source of truth.
@@ -490,18 +609,163 @@ final class CanvasModel {
         }
     }
 
-    /// Rebuilds the quadtree from the current drawing's per-entity AABBs. Text uses
-    /// the TIGHT font-aware box (via the drawing's ResolveContext) so glyph culling/
-    /// snapping match the real ink extent; all other kinds use the analytic box.
+    /// Rebuilds the quadtree from the per-entity AABBs of the ACTIVE space's entities
+    /// (paper-space P2): in model space, every model-space record; on a layout, only
+    /// that layout's paper-space records (via the pure `PaperSpaceLayout.entities`).
+    /// Scoping the index here is what makes snapping + selection operate ONLY on the
+    /// space currently on screen — a model-space line is never snappable while a sheet
+    /// is shown, and vice versa. Text uses the TIGHT font-aware box (via the drawing's
+    /// ResolveContext) so glyph culling/snapping match the real ink extent; all other
+    /// kinds use the analytic box. Called on model replace, on every space switch, and
+    /// on edits.
     func rebuildIndex() {
         quadtree.removeAll()
         let ctx = drawing.makeResolveContext()
-        let box = drawing.boundingBox()
+        let scoped = activeSpaceEntities
+        var box = AABB.empty
+        for e in scoped { box = box.union(e.boundingBox(ctx: ctx)) }
         if !box.isEmpty { quadtree.reserveWorld(box) }
-        for e in drawing.entities {
+        for e in scoped {
             let b = e.boundingBox(ctx: ctx)
             if !b.isEmpty { quadtree.insert(e.id, bounds: b) }
         }
+    }
+
+    /// The entities of the ACTIVE space — the single subset both the index rebuild and
+    /// the renderer's pack key off (the pure `PaperSpaceLayout.entities` filter applied
+    /// to the live drawing's records for the current `activeSpace` / `activeLayout`).
+    /// Model space (the default) returns the model-space records — identical to the
+    /// whole drawing for a drawing with no paper entities, so existing behavior is
+    /// preserved.
+    var activeSpaceEntities: [EntityRecord] {
+        PaperSpaceLayout.entities(
+            in: drawing.entities, space: activeSpace, layoutName: activeLayout)
+    }
+
+    /// The `Layout` currently active (paper space), or `nil` in model space / when the
+    /// active name no longer resolves. The renderer reads its `page` to draw the sheet.
+    var activeLayoutRecord: Layout? {
+        guard activeSpace == .paper, let name = activeLayout else { return nil }
+        return drawing.layout(named: name)
+    }
+
+    /// The drawing's layouts in tab order (the tab strip's source). Already sorted by
+    /// `tabOrder` on the engine side; re-sorted here defensively so the UI never
+    /// depends on storage order.
+    var orderedLayouts: [Layout] {
+        drawing.layouts.sorted { $0.tabOrder < $1.tabOrder }
+    }
+
+    // MARK: - Active-space switching (paper-space P2 — Model / Layout tabs)
+
+    /// Switches the canvas to `space` (optionally a named `layoutName` for paper).
+    /// On a CHANGE it re-frames the camera (model space → fit the whole model; a
+    /// layout → fit its paper sheet), rebuilds the spatial index over ONLY the new
+    /// active space's entities (so snapping/selection follow), clears the transient
+    /// selection/snap/hover (they referenced the prior space's entities), and marks
+    /// the GPU buffer dirty + bumps `modelVersion` so the renderer repacks and the
+    /// canvas redraws. A no-op (no work) when the requested space/layout is already
+    /// active. Switching to `.paper` with an absent/blank layout name falls back to
+    /// model space (there is no sheet to show). Purely a view change — not undoable.
+    func setActiveSpace(_ space: EntitySpace, layoutName: String? = nil) {
+        // Resolve the request: paper needs a real, existing layout; otherwise model.
+        let resolvedSpace: EntitySpace
+        let resolvedLayout: String?
+        if space == .paper, let name = layoutName, drawing.hasLayout(name) {
+            // Canonicalize to the stored name's casing so the filter matches exactly.
+            resolvedSpace = .paper
+            resolvedLayout = drawing.layout(named: name)?.name ?? name
+        } else {
+            resolvedSpace = .model
+            resolvedLayout = nil
+        }
+
+        guard resolvedSpace != activeSpace
+            || resolvedLayout?.caseInsensitiveCompare(activeLayout ?? "") != .orderedSame
+            || (resolvedLayout == nil) != (activeLayout == nil) else {
+            return   // already on this space/layout — nothing to do
+        }
+
+        activeSpace = resolvedSpace
+        activeLayout = resolvedLayout
+
+        // Re-frame the camera to the new space.
+        if resolvedSpace == .paper, let page = activeLayoutRecord?.page {
+            viewport = PaperSpaceLayout.cameraFit(for: page, in: viewport.size)
+        } else {
+            viewport = Viewport.fit(modelSpaceBoundingBox, in: viewport.size)
+        }
+        // Re-home the floating origin near the new content so f32 offsets stay small.
+        renderOrigin = RendererGeometry.renderOrigin(for: activeSpaceBoundingBox)
+
+        // Scope the index to the new space; drop transient interaction state that
+        // referenced the prior space's entities.
+        rebuildIndex()
+        selection.clear()
+        snap = nil
+        hoverID = nil
+        modelDirty = true
+        modelVersion &+= 1
+    }
+
+    /// Activates the named layout's paper sheet (a tab pick). No-op if the layout is
+    /// absent. Convenience over `setActiveSpace(.paper, layoutName:)`.
+    func activateLayout(name: String) {
+        setActiveSpace(.paper, layoutName: name)
+    }
+
+    /// Returns to model space (the "Model" tab). Convenience over `setActiveSpace`.
+    func activateModel() {
+        setActiveSpace(.model)
+    }
+
+    /// The bounding box of the ACTIVE space's entities (model or the active layout's
+    /// paper entities) — used to re-home the floating origin on a switch.
+    private var activeSpaceBoundingBox: AABB {
+        var box = AABB.empty
+        for e in activeSpaceEntities { box = box.union(e.boundingBox()) }
+        return box
+    }
+
+    /// The bounding box of only the MODEL-space entities — what model space frames on
+    /// a switch back (so a layout's paper geometry never skews the model fit).
+    private var modelSpaceBoundingBox: AABB {
+        var box = AABB.empty
+        for e in drawing.entities where e.space == .model {
+            box = box.union(e.boundingBox())
+        }
+        return box
+    }
+
+    // MARK: - New layout (paper-space P2 — the "+" tab)
+
+    /// Creates a fresh layout with a sensible default page (ISO A4 portrait, the
+    /// engine `PageDescriptor` default) and a unique auto-numbered name ("Layout1",
+    /// "Layout2", …), appended after the existing tabs, then ACTIVATES it (so the "+"
+    /// button both adds and switches to the new sheet, the AutoCAD behavior). Returns
+    /// the created layout's name, or `nil` if (defensively) the add failed. Undoable
+    /// via the engine `addLayout` (value-snapshot of the layout table). Model space
+    /// stays the default for every OTHER window — this only affects the active model.
+    @discardableResult
+    func newLayout(page: PageDescriptor = .a4Portrait) -> String? {
+        let name = nextLayoutName()
+        let order = (drawing.layouts.map(\.tabOrder).max() ?? -1) + 1
+        let layout = Layout(name: name, tabOrder: order, page: page)
+        guard drawing.addLayout(layout) else { return nil }
+        // A new layout changes the document (the layout table) — keep the canvas in
+        // sync and switch to the fresh sheet.
+        modelVersion &+= 1
+        activateLayout(name: name)
+        return name
+    }
+
+    /// The next free auto-numbered layout name ("Layout1", "Layout2", …) — the lowest
+    /// `LayoutN` not already taken (case-insensitively). Mirrors AutoCAD's default
+    /// new-layout naming so created tabs read naturally.
+    private func nextLayoutName() -> String {
+        var n = 1
+        while drawing.hasLayout("Layout\(n)") { n += 1 }
+        return "Layout\(n)"
     }
 
     // MARK: - Viewport history (F23 — Zoom Previous)
