@@ -903,6 +903,13 @@ public struct InsertData: Sendable, Hashable, Codable {
     /// born without it — and every old saved file — decodes to `[]`, so a plain
     /// insert is 100% unaffected.
     public var attributes: [BlockAttributeValue]
+    /// Per-INSTANCE dynamic state (the active visibility state this wave; parameter
+    /// values forward-compat — see `InsertDynamicState`). ADDITIVE optional field:
+    /// a plain insert — and every old saved file — carries `nil`, so a record born
+    /// without it is byte-identical (dynamic-blocks-plan §2b). Evaluated inside the
+    /// existing `resolveInsert` via `BlockEvaluator.evaluate`; a `nil` here makes
+    /// the insert resolve exactly as a static insert.
+    public var dynamic: InsertDynamicState?
 
     public init(
         blockName: String,
@@ -913,7 +920,8 @@ public struct InsertData: Sendable, Hashable, Codable {
         cols: Int = 1,
         rowSpacing: Double = 0,
         colSpacing: Double = 0,
-        attributes: [BlockAttributeValue] = []
+        attributes: [BlockAttributeValue] = [],
+        dynamic: InsertDynamicState? = nil
     ) {
         self.blockName = blockName
         self.insertionPoint = insertionPoint
@@ -924,6 +932,7 @@ public struct InsertData: Sendable, Hashable, Codable {
         self.rowSpacing = rowSpacing
         self.colSpacing = colSpacing
         self.attributes = attributes
+        self.dynamic = dynamic
     }
 
     /// Whether this insert repeats over a grid (more than one cell).
@@ -936,6 +945,7 @@ extension InsertData {
     private enum CodingKeys: String, CodingKey {
         case blockName, insertionPoint, scale, rotation, rows, cols, colSpacing, rowSpacing
         case attributes
+        case dynamic
     }
 
     public init(from decoder: any Decoder) throws {
@@ -950,6 +960,8 @@ extension InsertData {
         rowSpacing = try c.decodeIfPresent(Double.self, forKey: .rowSpacing) ?? 0
         // ADDITIVE: old files (no `attributes` key) decode to an empty list.
         attributes = try c.decodeIfPresent([BlockAttributeValue].self, forKey: .attributes) ?? []
+        // ADDITIVE: old files (no `dynamic` key) decode to nil — a plain insert.
+        dynamic = try c.decodeIfPresent(InsertDynamicState.self, forKey: .dynamic)
     }
 }
 

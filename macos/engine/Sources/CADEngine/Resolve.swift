@@ -306,6 +306,17 @@ public struct ResolveContext: Sendable {
     /// geometry rather than crash (the brief's "missing block resolves to empty").
     public var blockProvider: (@Sendable (String) -> [EntityRecord]?)? = nil
 
+    /// Resolves a block NAME to that block's DYNAMIC authoring bundle
+    /// (`Block.dynamic`) — the per-definition visibility states (parameters /
+    /// actions later). Parallel to `blockProvider`: wired by
+    /// `CADDrawing.makeResolveContext` from the drawing's `BlockTable`.
+    /// `resolveInsert` consults it (alongside the insert's own
+    /// `InsertData.dynamic`) and runs `BlockEvaluator.evaluate` so an insert places
+    /// only its active visibility state's members. A `nil` provider — or a `nil`
+    /// return (a plain, non-dynamic block) — makes the insert resolve EXACTLY as a
+    /// static insert (the evaluator returns the members unchanged).
+    public var blockDynamic: (@Sendable (String) -> DynamicBlockDef?)? = nil
+
     /// The remaining recursion budget when expanding nested `.insert`s. Each block
     /// expansion decrements it; at `0` a further `.insert` resolves to empty. This
     /// is the **cyclic-block depth guard** (a block that references itself, or a
@@ -357,6 +368,7 @@ public struct ResolveContext: Sendable {
         namedDimStyleProvider: (@Sendable (String) -> ResolvedDimStyle?)? = nil,
         pointStyleProvider: (@Sendable () -> (mode: PointDisplayMode, size: Double))? = nil,
         blockProvider: (@Sendable (String) -> [EntityRecord]?)? = nil,
+        blockDynamic: (@Sendable (String) -> DynamicBlockDef?)? = nil,
         blockRecursionDepth: Int = ResolveContext.maxBlockRecursionDepth,
         clipBounds: AABB? = nil
     ) {
@@ -371,6 +383,7 @@ public struct ResolveContext: Sendable {
         self.namedDimStyleProvider = namedDimStyleProvider
         self.pointStyleProvider = pointStyleProvider
         self.blockProvider = blockProvider
+        self.blockDynamic = blockDynamic
         self.blockRecursionDepth = blockRecursionDepth
         self.clipBounds = clipBounds
     }
@@ -1315,7 +1328,18 @@ extension EntityKind {
         // is empty / missing but whose ATTRIBs should still draw). So only the
         // recursion-depth guard fully bails; a missing block just skips the members.
         guard ctx.blockRecursionDepth > 0 else { return ResolvedGeometry() }
-        let members = ctx.blockProvider?(d.blockName) ?? []
+        let rawMembers = ctx.blockProvider?(d.blockName) ?? []
+        // DYNAMIC EVALUATION (dynamic-blocks-plan §3): pass the block's members
+        // through the pure evaluator, which (this wave) filters to the insert's
+        // active VISIBILITY STATE. A non-dynamic block / a `nil` provider / a
+        // plain insert → the members are returned UNCHANGED, so the rest of this
+        // function (the cell loop, `transformed(by:)`, recursion, ATTRIBs) is
+        // byte-for-byte identical to a static insert. `evaluate` is PURE: it never
+        // mutates `rawMembers` and returns a fresh array, so MINSERT cells and
+        // sibling inserts stay independent (critic Fix 3).
+        let members = BlockEvaluator.evaluate(ctx.blockDynamic?(d.blockName),
+                                              members: rawMembers,
+                                              instanceState: d.dynamic)
         if members.isEmpty && d.attributes.isEmpty { return ResolvedGeometry() }
 
         // Thread the insert's pen as the current block pen so member `.byBlock`

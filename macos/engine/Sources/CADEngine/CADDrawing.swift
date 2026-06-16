@@ -1031,6 +1031,78 @@ public final class CADDrawing {
         mutateBlocks { $0.setEntityIDs(name, ids) }
     }
 
+    // MARK: - Dynamic-block mutations (visibility states; undoable via mutateBlocks)
+
+    /// Replaces a block's entire DYNAMIC bundle (`Block.dynamic` — visibility states
+    /// this wave). Pass `nil` to clear it back to a plain block. Undoable through the
+    /// `mutateBlocks` value-snapshot funnel — one ⌘Z reverts it; a no-op (same value,
+    /// or an unknown block) registers nothing. Because `blockDynamicSnapshot()` reads
+    /// `Block.dynamic` live at every `makeResolveContext` call, this immediately
+    /// changes how every dynamic `.insert` of the block evaluates. Engine-pure (no UI).
+    public func setBlockDynamic(name: String, _ def: DynamicBlockDef?) {
+        mutateBlocks { table in
+            guard var block = table.block(named: name) else { return }
+            guard block.dynamic != def else { return }
+            block.dynamic = def
+            table.upsert(block)
+        }
+    }
+
+    /// Appends a new EMPTY visibility state (no visible members) to a block,
+    /// creating the block's dynamic bundle if absent. Undoable. No-op (no undo) if
+    /// the block is unknown or already has a state with this name (state names are
+    /// the per-instance key, so they must be unique within a block — §9.4).
+    /// Returns the created state's id, or `nil` if it was a no-op.
+    @discardableResult
+    public func addVisibilityState(toBlock name: String, named stateName: String) -> UUID? {
+        var created: UUID?
+        mutateBlocks { table in
+            guard var block = table.block(named: name) else { return }
+            var def = block.dynamic ?? DynamicBlockDef()
+            guard def.visibilityState(named: stateName) == nil else { return }
+            let state = BlockVisibilityState(name: stateName)
+            def.visibilityStates.append(state)
+            block.dynamic = def
+            table.upsert(block)
+            created = state.id
+        }
+        return created
+    }
+
+    /// Adds (`visible == true`) or removes (`false`) a member id from a block's
+    /// named visibility state's visible set. Undoable. No-op (no undo) if the block,
+    /// its dynamic bundle, or the named state is absent, or the change is redundant
+    /// (already present / already absent).
+    public func setMemberVisibility(block name: String, state stateName: String,
+                                    memberID: EntityID, visible: Bool) {
+        mutateBlocks { table in
+            guard var block = table.block(named: name), var def = block.dynamic,
+                  let idx = def.visibilityStates.firstIndex(where: { $0.name == stateName })
+            else { return }
+            var state = def.visibilityStates[idx]
+            let contained = state.visibleMemberIDs.contains(memberID)
+            guard contained != visible else { return } // redundant → no-op, no undo
+            if visible { state.visibleMemberIDs.insert(memberID) }
+            else { state.visibleMemberIDs.remove(memberID) }
+            def.visibilityStates[idx] = state
+            block.dynamic = def
+            table.upsert(block)
+        }
+    }
+
+    /// Removes a block's named visibility state. Undoable. No-op (no undo) if the
+    /// block, its dynamic bundle, or the named state is absent.
+    public func removeVisibilityState(block name: String, named stateName: String) {
+        mutateBlocks { table in
+            guard var block = table.block(named: name), var def = block.dynamic,
+                  let idx = def.visibilityStates.firstIndex(where: { $0.name == stateName })
+            else { return }
+            def.visibilityStates.remove(at: idx)
+            block.dynamic = def
+            table.upsert(block)
+        }
+    }
+
     // MARK: - Create block from a selection (CreateBlockTool's model op)
 
     /// The outcome of a `makeBlockFromEntities` call: the (possibly de-duplicated)
@@ -1410,6 +1482,13 @@ public final class CADDrawing {
         // name→[EntityRecord] map once here keeps the per-insert lookup O(1) and
         // the closure `@Sendable` (it captures only value types, no `self`).
         let blockMembers = blockMembersSnapshot()
+        // Snapshot the block table → DYNAMIC-bundle map (value copies) so an
+        // `.insert` can evaluate its block's visibility states (dynamic-blocks-plan
+        // §3). Only blocks that actually carry a dynamic bundle appear; a plain
+        // block has no entry and `BlockEvaluator.evaluate(nil, …)` returns its
+        // members unchanged. `DynamicBlockDef` is a value type, so the closure stays
+        // `@Sendable` (captures values, no `self`).
+        let blockDynamics = blockDynamicSnapshot()
         return ResolveContext(
             tessellationTolerance: tessellationTolerance,
             layerAttributes: { layerID in
@@ -1422,8 +1501,22 @@ public final class CADDrawing {
             dimStyleProvider: { docDimStyle },
             namedDimStyleProvider: { name in dimStyleTable.style(named: name)?.style },
             pointStyleProvider: { (mode: docPointMode, size: docPointSize) },
-            blockProvider: { name in blockMembers[name] }
+            blockProvider: { name in blockMembers[name] },
+            blockDynamic: { name in blockDynamics[name] }
         )
+    }
+
+    /// Builds a `blockName → DynamicBlockDef` snapshot (value copies) from the block
+    /// table — only the blocks that carry a dynamic bundle (`Block.dynamic != nil`).
+    /// Backs the resolve context's `blockDynamic` so an `.insert` can evaluate its
+    /// block's visibility states. A plain block has no entry (the evaluator returns
+    /// its members unchanged). Returns an empty map when no block is dynamic.
+    func blockDynamicSnapshot() -> [String: DynamicBlockDef] {
+        var map: [String: DynamicBlockDef] = [:]
+        for block in blocks.blocks {
+            if let dyn = block.dynamic { map[block.name] = dyn }
+        }
+        return map
     }
 
     /// Builds a `blockName → [member EntityRecord]` snapshot (value copies) from the
