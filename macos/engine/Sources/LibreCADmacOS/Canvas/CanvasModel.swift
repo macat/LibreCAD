@@ -490,6 +490,39 @@ final class CanvasModel {
     /// via `beginInsert(name:)`.
     var pendingInsertBlockName: String?
 
+    // MARK: Insert tool placement options (Tool Options bar — INSERT scale / rotation / array)
+
+    /// Insert tool: whether the placement scale is UNIFORM (one factor applied to both
+    /// axes) or independent per-axis. When uniform, `insertScaleX` is the single factor
+    /// and `insertScaleY` is ignored (mirrored into the assembled `Vector`). Default
+    /// uniform ⇒ the current behavior (no per-axis distortion).
+    var insertScaleUniform: Bool = true
+    /// Insert tool: the X placement scale (the single factor when uniform). Default 1.
+    var insertScaleX: Double = 1
+    /// Insert tool: the Y placement scale (used only when `insertScaleUniform == false`).
+    /// Default 1.
+    var insertScaleY: Double = 1
+    /// Insert tool: the placement ROTATION (RADIANS, CCW). The options bar edits a
+    /// friendlier degrees value over this (mirroring the Line/Array angle fields).
+    /// Default 0 ⇒ unrotated.
+    var insertRotation: Double = 0
+    /// Insert tool: the MINSERT rectangular array — rows × cols and their spacing
+    /// (world units). Default 1×1 with zero spacing ⇒ a plain single insert (current
+    /// behavior). `applyToolConfig` clamps rows/cols to ≥ 1 (the tool clamps too).
+    var insertRows: Int = 1
+    var insertCols: Int = 1
+    var insertRowSpacing: Double = 0
+    var insertColSpacing: Double = 0
+
+    /// Assembles the Insert tool's placement `scale` from the split UI state
+    /// (`insertScaleUniform` + `insertScaleX` / `insertScaleY`). The single mapping the
+    /// live tool + the wiring test share, so the options bar and `applyToolConfig` never
+    /// drift. Uniform ⇒ `(X, X)`; per-axis ⇒ `(X, Y)`.
+    var insertScaleValue: Vector {
+        insertScaleUniform ? Vector(insertScaleX, insertScaleX)
+                           : Vector(insertScaleX, insertScaleY)
+    }
+
     /// Circle tool: whether numeric size entry is a radius (default) or diameter, and
     /// an optional EXACT size (0 ⇒ unset → two-click center+radius).
     var circleSizeMode: CircleSizeMode = .radius
@@ -1833,15 +1866,25 @@ final class CanvasModel {
 
         case is InsertTool:
             // InsertTool's target block name + the member records for its rubber-band
-            // preview are fixed at construction. Re-mint with the picked block (from the
-            // View-layer block-picker via `pendingInsertBlockName`) + a value snapshot of
-            // its members. With no name chosen the tool stays inert (a safe no-op).
-            if let name = pendingInsertBlockName, !name.isEmpty {
-                let members = blockMembersSnapshot()
-                tool = InsertTool(blockName: name, previewMembers: members[name] ?? [])
-            } else {
-                tool = InsertTool()
-            }
+            // preview are fixed at construction, as are its placement scale / rotation /
+            // MINSERT array. Re-mint with the picked block (from the View-layer
+            // block-picker via `pendingInsertBlockName`) + a value snapshot of its
+            // members + the Tool Options bar's scale / rotation / rows / cols / spacing.
+            // With no name chosen the tool stays inert (a safe no-op) but STILL carries
+            // the configured placement options, so they apply the instant a block is
+            // chosen. The tool clamps rows/cols to ≥ 1.
+            let members = (pendingInsertBlockName?.isEmpty == false)
+                ? blockMembersSnapshot() : [:]
+            tool = InsertTool(
+                blockName: pendingInsertBlockName,
+                scale: insertScaleValue,
+                rotation: insertRotation,
+                rows: insertRows,
+                cols: insertCols,
+                rowSpacing: insertRowSpacing,
+                colSpacing: insertColSpacing,
+                previewMembers: members[pendingInsertBlockName ?? ""] ?? []
+            )
 
         // MARK: Image tool — file path + source pixel size injected at construction
 
@@ -1892,12 +1935,16 @@ final class CanvasModel {
         applyToolConfig()
         // Some tools are RE-MINTED by `applyToolConfig` (DivideTool's count, Circle's
         // construction mode, ArcTool's mode, Line's angle mode, EllipseTool's mode,
-        // BaselineDimTool's spacing, ImageTool's file are fixed at construction), which
-        // resets their state/status to the initial prompt. For those, take the fresh
-        // tool's status; for the in-place tools (which keep their state) restore the
-        // prior prompt text.
+        // BaselineDimTool's spacing, ImageTool's file, InsertTool's block + placement
+        // options are fixed at construction), which resets their state/status to the
+        // initial prompt. For those, take the fresh tool's status; for the in-place tools
+        // (which keep their state) restore the prior prompt text. (InsertTool's status is
+        // a pure function of its block name — preserved across the re-mint — so this is a
+        // no-op for it today, but listing it keeps the set correct if it gains mid-run
+        // state, per the review NIT.)
         if tool is DivideTool || tool is CircleTool || tool is ArcTool || tool is LineTool
-            || tool is EllipseTool || tool is BaselineDimTool || tool is ImageTool {
+            || tool is EllipseTool || tool is BaselineDimTool || tool is ImageTool
+            || tool is InsertTool {
             toolStatus = tool?.status ?? ""
         } else {
             toolStatus = savedStatus
@@ -2538,6 +2585,75 @@ final class CanvasModel {
         modelDirty = true
         modelVersion &+= 1
         return true
+    }
+
+    // MARK: - Block freeze / visibility (sidebar eye-toggle + Freeze-all/Thaw-all)
+    //
+    // Thin model wrappers over the engine's undoable `CADDrawing` freeze ops
+    // (`setBlockFrozen` / `toggleBlockFrozen` / `freezeAllBlocks` / `thawAllBlocks`).
+    // A frozen block's `.insert` resolves to EMPTY geometry, so every reference of it
+    // disappears from the canvas + becomes un-snappable.
+    //
+    // Each wrapper GATES on an actual change FIRST (mirroring `renameBlock`/`deleteBlock`):
+    // a no-op returns before any work, so it opens no undo group, registers no undo, and
+    // skips the index rebuild. On a real change it opens an explicit undo group when the
+    // host undo manager is not auto-grouping by event (the test/headless config) so the
+    // engine op's `registerUndo` is legal, runs the op, then rebuilds the spatial index
+    // (a frozen insert's ctx-aware bounding box collapses to its insertion point, so the
+    // quadtree must resync) and bumps `modelVersion` so the sidebar AND the renderer
+    // recompute. The post-op index/version work is view-side state, not undoable.
+
+    /// Toggles a block's frozen flag (undoable; the sidebar's per-row eye toggle). A
+    /// frozen block becomes invisible (its inserts resolve empty). No-op (no undo, no
+    /// redraw) for an unknown block. Rebuilds the index + bumps `modelVersion`.
+    func toggleBlockFrozen(_ name: String) {
+        guard let block = drawing.blocks.block(named: name) else { return }
+        applyBlockFreezeChange { $0.setBlockFrozen(name, !block.isFrozen) }
+    }
+
+    /// Sets a block's frozen flag explicitly (undoable). No-op (no undo, no redraw) for
+    /// an unknown block or a redundant value (already at `frozen`).
+    func setBlockFrozen(_ name: String, _ frozen: Bool) {
+        guard let block = drawing.blocks.block(named: name), block.isFrozen != frozen
+        else { return }
+        applyBlockFreezeChange { $0.setBlockFrozen(name, frozen) }
+    }
+
+    /// Freezes every NAMED block in ONE undoable step (the Blocks panel ⋯ "Freeze All
+    /// Blocks"). Anonymous `*`-blocks are skipped by the engine op. No-op (no undo, no
+    /// redraw) when every named block is already frozen (or there are none).
+    func freezeAllBlocks() {
+        guard hasNamedBlock(frozen: false) else { return }   // something to freeze
+        applyBlockFreezeChange { $0.freezeAllBlocks() }
+    }
+
+    /// Thaws every NAMED block in ONE undoable step ("Thaw All Blocks"). No-op (no undo,
+    /// no redraw) when every named block is already thawed (or there are none).
+    func thawAllBlocks() {
+        guard hasNamedBlock(frozen: true) else { return }    // something to thaw
+        applyBlockFreezeChange { $0.thawAllBlocks() }
+    }
+
+    /// Whether any NAMED (non-`*`) block is currently at the given frozen state — the
+    /// change-gate for `freezeAllBlocks`/`thawAllBlocks` (anonymous `*`-blocks are the
+    /// system blocks the engine op skips, so they don't count toward "something to do").
+    private func hasNamedBlock(frozen: Bool) -> Bool {
+        drawing.blocks.blocks.contains { !$0.name.hasPrefix("*") && $0.isFrozen == frozen }
+    }
+
+    /// Runs a guaranteed-changing block-freeze op through the engine in ONE undoable step
+    /// (opening an explicit group when the undo manager is not auto-grouping by event),
+    /// then resyncs the spatial index + bumps the model/render version. Callers MUST gate
+    /// on an actual change before calling (so this never opens an empty group / registers
+    /// a stray undo for a no-op).
+    private func applyBlockFreezeChange(_ op: (CADDrawing) -> Void) {
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        op(drawing)
+        rebuildIndex()
+        modelDirty = true
+        modelVersion &+= 1
     }
 
     // MARK: - Dynamic blocks — visibility states (DB-1W wiring)

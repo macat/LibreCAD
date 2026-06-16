@@ -67,6 +67,14 @@ struct BlocksSectionContent: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
         } else {
+            // The Freeze-all / Thaw-all overflow menu (also exposable in the panel
+            // header by the next wire-wave via `BlocksPanelMenu`). Embedded at the top
+            // of the body so per-document freeze-all is reachable today.
+            HStack(spacing: 6) {
+                Spacer(minLength: 0)
+                BlocksPanelMenu(onFreezeAll: { freezeAll() },
+                                onThawAll: { thawAll() })
+            }
             // Build ONE ResolveContext for the whole list (shared across rows)
             // so each thumbnail miss doesn't re-snapshot the layer/style/block
             // tables. Captured by `thumbnail(for:)` below.
@@ -77,6 +85,7 @@ struct BlocksSectionContent: View {
                     thumbnail: thumbnail(for: block.name, context: ctx),
                     onInsert: { insert(block.name) },
                     onEdit: { edit(block.name) },
+                    onToggleFrozen: { toggleFrozen(block.name) },
                     onRename: { rename(block.name, to: $0) },
                     onDelete: { delete(block.name) }
                 )
@@ -87,6 +96,10 @@ struct BlocksSectionContent: View {
                     Button("Insert at View Center") { insert(block.name) }
                     // WAVE BW (Ask #2): open the in-place Block Editor (BEDIT).
                     Button("Edit Block") { edit(block.name) }
+                    // Per-block freeze/visibility (a frozen block's inserts vanish).
+                    Button(block.isFrozen ? "Show Block" : "Hide Block") {
+                        toggleFrozen(block.name)
+                    }
                     Divider()
                     Button("Delete Block", role: .destructive) { delete(block.name) }
                 }
@@ -134,6 +147,53 @@ struct BlocksSectionContent: View {
             controllerBox.controller?.requestRedraw()
         }
     }
+
+    /// Toggle a block's frozen flag (the per-row eye). A frozen block's inserts resolve
+    /// to nothing, so the canvas must redraw. Undoable via the model wrapper.
+    private func toggleFrozen(_ name: String) {
+        model.toggleBlockFrozen(name)
+        controllerBox.controller?.requestRedraw()
+    }
+
+    /// Freeze every named block (the ⋯ menu). Undoable; redraw so frozen inserts vanish.
+    private func freezeAll() {
+        model.freezeAllBlocks()
+        controllerBox.controller?.requestRedraw()
+    }
+
+    /// Thaw every named block (the ⋯ menu). Undoable; redraw so the inserts reappear.
+    private func thawAll() {
+        model.thawAllBlocks()
+        controllerBox.controller?.requestRedraw()
+    }
+}
+
+// MARK: - Blocks panel overflow menu (Freeze All / Thaw All)
+
+/// The Blocks panel's `⋯` overflow menu: Freeze All Blocks / Thaw All Blocks (the
+/// document-wide visibility batch, undoable as one ⌘Z step each). Exposed as a small
+/// reusable view so it sits at the top of the live `BlocksSectionContent` body today
+/// AND can be relocated into the panel HEADER's trailing action slot by the next
+/// sidebar wire-wave (which owns `LayersSidebar`/`SidebarPanelStack`) without
+/// re-implementing the actions. The host supplies the closures so this view stays
+/// model-agnostic and headless-safe (no model reference, no modal of its own — just an
+/// `NSMenu`, which is View-layer only).
+struct BlocksPanelMenu: View {
+    let onFreezeAll: () -> Void
+    let onThawAll: () -> Void
+
+    var body: some View {
+        Menu {
+            Button("Freeze All Blocks", action: onFreezeAll)
+            Button("Thaw All Blocks", action: onThawAll)
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Freeze or thaw all blocks at once")
+    }
 }
 
 // MARK: - One block row
@@ -148,6 +208,7 @@ private struct BlockRow: View {
     let thumbnail: NSImage?
     let onInsert: () -> Void
     let onEdit: () -> Void
+    let onToggleFrozen: () -> Void
     let onRename: (String) -> Void
     let onDelete: () -> Void
 
@@ -169,6 +230,16 @@ private struct BlockRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            // Per-block visibility (eye / eye.slash). A frozen block's inserts vanish
+            // from the canvas; its row reads dimmed (below).
+            Button(action: onToggleFrozen) {
+                Image(systemName: block.isFrozen ? "eye.slash" : "eye")
+                    .foregroundStyle(block.isFrozen ? AnyShapeStyle(.tertiary)
+                                                     : AnyShapeStyle(.secondary))
+            }
+            .buttonStyle(.borderless)
+            .help(block.isFrozen ? "Show this block (thaw)" : "Hide this block (freeze)")
+
             preview
 
             TextField("Block name", text: $draftName)
@@ -197,6 +268,8 @@ private struct BlockRow: View {
             .help("Delete this block definition")
         }
         .padding(.vertical, 2)
+        // A frozen (hidden) block reads dimmed so the list communicates visibility.
+        .opacity(block.isFrozen ? 0.45 : 1)
         .onAppear { draftName = block.name }
         .onChange(of: block.name) { _, newName in
             if draftName != newName { draftName = newName }

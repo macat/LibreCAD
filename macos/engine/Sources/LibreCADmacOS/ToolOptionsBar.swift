@@ -89,7 +89,9 @@ struct ToolOptionsBar: View {
              .line,
              .fillet, .chamfer, .array, .divide,
              // Wire-wave-3 configurable tools.
-             .align, .arrayPath, .leader, .baselineDim:
+             .align, .arrayPath, .leader, .baselineDim,
+             // Block INSERT placement options: scale / rotation / MINSERT array.
+             .insert:
             return true
         default:
             return false
@@ -335,9 +337,43 @@ struct ToolOptionsBar: View {
         case .baselineDim:
             numberField("Spacing", value: $model.baselineSpacing, width: 70)
 
+        // MARK: Block Insert — scale / rotation / MINSERT array
+        case .insert:
+            insertScaleControls
+            Divider().frame(height: 16)
+            numberField("Rotation°", value: degreesBinding($model.insertRotation), width: 70)
+            Divider().frame(height: 16)
+            insertArrayControls
+
         default:
             EmptyView()
         }
+    }
+
+    // MARK: - Insert tool option groups (decomposed to keep the body type-checkable)
+
+    /// The Insert tool's SCALE controls: a uniform toggle plus the X (and, when
+    /// per-axis, Y) scale field. Uniform hides the Y field (one factor for both axes).
+    @ViewBuilder
+    private var insertScaleControls: some View {
+        Toggle("Uniform scale", isOn: $model.insertScaleUniform)
+            .toggleStyle(.checkbox)
+            .onChange(of: model.insertScaleUniform) { _, _ in apply() }
+        numberField(model.insertScaleUniform ? "Scale" : "Scale X",
+                    value: $model.insertScaleX, width: 64)
+        if !model.insertScaleUniform {
+            numberField("Scale Y", value: $model.insertScaleY, width: 64)
+        }
+    }
+
+    /// The Insert tool's MINSERT ARRAY controls: rows × cols and their world-unit
+    /// spacing. Default 1×1 / zero spacing ⇒ a plain single insert.
+    @ViewBuilder
+    private var insertArrayControls: some View {
+        stepperField("Rows", value: $model.insertRows, range: 1...1000, width: 52)
+        stepperField("Cols", value: $model.insertCols, range: 1...1000, width: 52)
+        numberField("Row sp.", value: $model.insertRowSpacing, width: 64)
+        numberField("Col sp.", value: $model.insertColSpacing, width: 64)
     }
 
     // MARK: - Small control builders (compact, inline — sized for a single row)
