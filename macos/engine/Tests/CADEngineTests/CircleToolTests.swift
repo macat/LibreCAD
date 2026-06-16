@@ -89,7 +89,12 @@ struct CircleToolTests {
         }
         #expect(record.id == .placeholder)
         #expect(record.id == EntityID(0))
-        // Common attrs match the LineTool/EntityRecord defaults (consistency).
+        // A draw tool emits the EntityRecord INIT defaults — layer "0" + a fully
+        // `.byLayer` pen. This is the tool's *raw* output BEFORE the app applies it:
+        // `CanvasModel.applyCommit` STAMPS such a default record with the active layer
+        // + the model's `currentPen` (so drawn geometry lands on the active layer, not
+        // always "0" — the post-stamp behavior is covered by `PenPropertiesTests`).
+        // The stamp keys off exactly these defaults, so the tool MUST keep emitting them.
         #expect(record.layer == .zero)
         #expect(record.pen == .byLayer)
         #expect(record.flags == .default)

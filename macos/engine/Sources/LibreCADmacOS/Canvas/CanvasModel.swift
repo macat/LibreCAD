@@ -227,6 +227,16 @@ final class CanvasModel {
     /// the cursor mode, not drawing content).
     var orthoEnabled: Bool = false
 
+    /// The CURRENT drawing pen — AutoCAD's CECOLOR / CELTYPE / CELWEIGHT trio
+    /// (color / line type / line width). NEW geometry drawn by a tool adopts this
+    /// pen (and the active layer) when the freshly-committed record still carries the
+    /// init defaults — see the stamp in `applyCommit`'s `.add` arm. Defaults to a
+    /// fully `.byLayer` pen, so out of the box a drawn entity inherits everything from
+    /// its layer (the LibreCAD/AutoCAD default). The top-bar current-properties
+    /// control and (indirectly) the Inspector bind to this; it is a live drafting
+    /// policy, not document content, so it is not undoable and not persisted.
+    var currentPen: Pen = .byLayer
+
     /// The grid step (world units) last seen via `updateSnap`/`snappedWorldPoint`.
     /// The renderer owns the live grid spacing and the canvas view passes it down
     /// on every cursor event; we cache the latest here so `handleToolInput` can put
@@ -2288,6 +2298,24 @@ final class CanvasModel {
                 // regardless; clearing the flag keeps the persisted state honest too.
                 var added = record
                 added.flags.remove(.selected)
+                // CURRENT-PROPERTIES STAMP (AutoCAD CECOLOR/CELTYPE/CELWEIGHT + CLAYER):
+                // a freshly DRAWN record arrives with the EntityRecord init defaults —
+                // `layer == .zero` (DXF "0") and a fully `.byLayer` `pen` — because draw
+                // tools build `EntityRecord(id:.placeholder, kind:…)` without setting
+                // either. We stamp such a record with the ACTIVE layer and the CURRENT
+                // pen so new geometry lands on the layer the user picked (this also fixes
+                // the long-standing bug where every drawn entity went to layer "0"
+                // regardless of the active layer) and adopts the top-bar current pen.
+                // The gate is deliberately narrow: a MODIFY tool that clones a source
+                // entity (CopyTool/array) copies the original's `layer`+`pen` verbatim,
+                // so any clone with a non-default layer or a non-`.byLayer` pen FAILS the
+                // gate and is left untouched. (A clone of a bare layer-"0"/`.byLayer`
+                // source has no distinguishing attributes to preserve, so re-stamping it
+                // with the same active layer / current pen is a no-op in spirit.)
+                if added.layer == .zero && added.pen == Pen.byLayer {
+                    added.layer = LayerID(drawing.layers.activeLayerName)
+                    added.pen = currentPen
+                }
                 let id = drawing.add(added)            // undoable; mints a real id
                 let box = drawing.entity(id)?.boundingBox() ?? added.boundingBox()
                 if !box.isEmpty { quadtree.insert(id, bounds: box) }

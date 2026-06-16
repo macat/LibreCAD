@@ -181,6 +181,8 @@ struct LayersSidebar: View {
                 onTogglePrintable: { setPrintable(layer.name, $0) },
                 onToggleConstruction: { setConstruction(layer.name, $0) },
                 onColorChange: { setColor(layer.name, $0) },
+                onLineTypeChange: { setLineType(layer.name, $0) },
+                onLineWidthChange: { setLineWidth(layer.name, $0) },
                 onRename: { rename(layer.name, to: $0) }
             )
             // Per-entity / per-layer ops (F17): right-click a layer row.
@@ -395,6 +397,22 @@ struct LayersSidebar: View {
         syncRenderAfterLayerEdit()
     }
 
+    /// Sets a layer's default line TYPE through the undoable layer funnel (mirrors
+    /// `setColor`): `mutateLayers` + `LayerTable.setLineType`, then the render nudge so
+    /// the renderer re-resolves `.byLayer` entities' dash pattern.
+    private func setLineType(_ name: String, _ lineType: PenLineType) {
+        model.drawing.mutateLayers { $0.setLineType(name, lineType) }
+        syncRenderAfterLayerEdit()
+    }
+
+    /// Sets a layer's default line WIDTH through the undoable layer funnel:
+    /// `mutateLayers` + `LayerTable.setLineWidth`, then the render nudge so the
+    /// renderer re-resolves `.byLayer` entities' lineweight.
+    private func setLineWidth(_ name: String, _ width: PenLineWidth) {
+        model.drawing.mutateLayers { $0.setLineWidth(name, width) }
+        syncRenderAfterLayerEdit()
+    }
+
     private func rename(_ oldName: String, to newName: String) {
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != oldName else { return }
@@ -468,6 +486,8 @@ private struct LayerRow: View {
     let onTogglePrintable: (Bool) -> Void
     let onToggleConstruction: (Bool) -> Void
     let onColorChange: (RGBAColor) -> Void
+    let onLineTypeChange: (PenLineType) -> Void
+    let onLineWidthChange: (PenLineWidth) -> Void
     let onRename: (String) -> Void
 
     /// Local edit buffer for the inline name field (committed on return / blur).
@@ -531,6 +551,13 @@ private struct LayerRow: View {
                     if rgba != layer.color { onColorChange(rgba) }
                 }
 
+            // Line TYPE + WIDTH defaults — behind one compact menu so the row stays
+            // tight at the sidebar's min width. Each picker binds to the layer's
+            // current default and routes a change through the undoable layer mutators.
+            // A layer can't defer its own default to a layer/block, so the sentinels
+            // are excluded; the width picker still offers the drawing "Default".
+            penDefaultsMenu
+
             // Inline-editable name.
             TextField("Layer name", text: $draftName)
                 .textFieldStyle(.plain)
@@ -567,6 +594,54 @@ private struct LayerRow: View {
             let asColor = Color(rgba: newColor)
             if swatch.rgbaColor != newColor { swatch = asColor }
         }
+    }
+
+    /// The compact line-type / line-width default menu for this layer. The two
+    /// reusable pickers (`PenPickers.swift`) bind to the layer's current default and
+    /// commit a change through the undoable callbacks. The trailing help text shows
+    /// the current values so the user can read the row's defaults at a glance.
+    @ViewBuilder
+    private var penDefaultsMenu: some View {
+        Menu {
+            LineTypePicker(
+                selection: lineTypeBinding,
+                includeByLayer: false,
+                includeByBlock: false,
+                label: "Line type"
+            )
+            LineWidthPicker(
+                selection: lineWidthBinding,
+                includeByLayer: false,
+                includeByBlock: false,
+                includeDefault: true,
+                label: "Line width"
+            )
+        } label: {
+            Image(systemName: "line.diagonal")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Layer line type: \(LineTypePicker.displayName(layer.lineType)) · "
+              + "width: \(LineWidthPicker.displayName(layer.lineWidth))")
+    }
+
+    /// A binding to the layer's default line TYPE that routes a change through the
+    /// undoable callback (reads the live layer value, writes via `onLineTypeChange`).
+    private var lineTypeBinding: Binding<PenLineType> {
+        Binding(
+            get: { layer.lineType },
+            set: { if $0 != layer.lineType { onLineTypeChange($0) } }
+        )
+    }
+
+    /// A binding to the layer's default line WIDTH that routes a change through the
+    /// undoable callback.
+    private var lineWidthBinding: Binding<PenLineWidth> {
+        Binding(
+            get: { layer.lineWidth },
+            set: { if $0 != layer.lineWidth { onLineWidthChange($0) } }
+        )
     }
 
     /// A subtle selection highlight behind the selected row (the active row also shows
