@@ -6,6 +6,20 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-16 — Left sidebar → REARRANGEABLE panel stack + block-parity audit (`native-macos @ 36ebbe51c`, **2290 tests**, `.app` rebuilt)
+
+**Owner:** the 3 stacked sidebar sections + bottom-pinned ＋/− were clunky; "rethink it, ergonomic + modern macOS." Chose **#1: reorderable + collapsible + show/hide panels** (over full floating docks — less macOS-idiomatic). LANDED `36ebbe51c` (+16): `SidebarPanelStack` renders `SidebarPanel` descriptors as collapsible disclosure sections, each with controls in its OWN header (Layers ＋/− [gated name!="0" && count>1] + ⋯ freeze/lock-all; Layer States ＋; Blocks ＋ Create-Block via closure→ContentView's `BlockNamePrompt`). Drag-to-reorder (`.onMove`), show/hide via ⋯ Customize, order/collapsed/hidden persisted in one `@AppStorage` `SidebarLayoutConfig` JSON. **Extensible** — a new panel = one `SidebarPanelID` case + descriptor (Parts Library/Attributes drop in later). All prior behavior preserved (toggles/color/rename/active/layer-states/block thumbnail+edit+drag/context-menus/render-sync + selectedLayer↔active mirror). Reviewed APPROVE-WITH-NITS. **Follow-up (NIT1):** layer-list keyboard arrow-nav lost (nested `List(selection:)` can't nest) → restore via a single-`List`-with-movable-Sections restructure.
+
+**Block parity audit (owner: "do we support everything from LibreCAD?"):** the block ENGINE is **at or BEYOND upstream LibreCAD**. We EXCEED it where upstream has nothing: **dynamic blocks** (visibility/stretch/flip), **real ATTDEF/ATTRIB** DXF round-trip (upstream's "Block Attributes" is just a rename dialog — no attribute entities), **block thumbnails**. Remaining gaps are UI-surfacing of built engine capability (prioritized):
+1. **Insert options** — scale/rotation/MINSERT array (engine `InsertTool` + DXF round-trip done; UI throws them away → every insert 1×). S, UI-only.
+2. **Per-block freeze/visibility toggle** in the sidebar (`isFrozen` honored at resolve; need a `CADDrawing.setBlockFrozen` op + an eye toggle). S.
+3. **Block attribute authoring + value-edit UI** (EATTEDIT) — data+DXF done; no UI. M (biggest net-new).
+4. **WBLOCK** — save a block/selection to `.dxf` (absent on BOTH sides — we can import a block but not export). M.
+5. **Parts Library panel + "Insert Block from File"** — `BlockLibrary` engine built but unwired; slots into the new sidebar framework. M.
+Minors: base-point marker render, block list search, insert-time cyclic-insert guard. **NEXT:** engine wave (WBLOCK + block-freeze ops, UNWIRED) → UI wire-wave (insert-options + freeze-toggle + Parts Library panel + WBLOCK/from-file menus); attribute UI after.
+
+---
+
 ## 2026-06-16 — BLOCK-EDITING FLOW rebuilt (owner: "editing a block doesn't edit it; open in a tab") (`native-macos @ 128f7c7f2`, **2274 tests**, `.app` rebuilt)
 
 Owner reported the in-place Block Editor was wrong: (1) drawing in it added LOOSE document objects instead of block members ("editing a block doesn't change the block"); (2) it replaced the document view instead of opening a TAB. Owner directed: **plan the whole flow first** (don't point-fix). Did: full-flow design (`block-edit-flow-plan.md`) → **critic GO-WITH-FIXES** (caught: `applyCommit` mints+discards the new id so the add-to-block needs an explicit seam; tab "active" coupled to `activeSpace`; tab-switch doesn't auto-finish; paste/delete are separate funnels; a small engine helper is required) → owner decisions (auto Save&Close on switch · **support nested now** · per-edit undo · base-point marker deferred) → built in 3 staged commits.
