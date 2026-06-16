@@ -935,4 +935,105 @@ struct BlockEditSessionTests {
         // A second call is a no-op.
         #expect(m.finishBlockEditingIfNeeded() == false)
     }
+
+    // MARK: - STAGE 3 regression — nested SAVE must survive an outer DISCARD (finding #1)
+    //
+    // The data-loss bug the reviewer caught: a nested level that Save&Closes with real
+    // edits folds its committed work into the still-open PARENT undo group. A later Discard
+    // of the parent used to call `undoManager.undo()` on that whole group — reverting the
+    // child's SAVED edits. The fix marks the parent `hasSavedNestedWork` so its Discard
+    // keeps the group (the entry-snapshot restore alone fixes the parent block's geometry,
+    // and it touches only the parent block's members, never the child's).
+
+    @Test("Save&Close inner B, then Discard outer A: B's SAVED edits PERSIST; A reverts")
+    func saveInnerThenDiscardOuterKeepsInnerEdits() {
+        let (m, bMemberID, aMemberID, _, topInsertID) = seededNestedModel()
+
+        // Open A, edit A's own member.
+        m.enterBlockEditing(name: "A")
+        var editedA = m.drawing.entity(aMemberID)!
+        editedA.kind = .line(LineData(start: Vector(0, 0), end: Vector(20, 4)))
+        m.applyInspectorEdits([editedA])
+
+        // Open B nested, edit B's member, then SAVE&CLOSE B (committed).
+        m.enterBlockEditing(name: "B")
+        var editedB = m.drawing.entity(bMemberID)!
+        editedB.kind = .line(LineData(start: Vector(0, 0), end: Vector(2, 9)))
+        m.applyInspectorEdits([editedB])
+        #expect(m.exitBlockEditing(save: true) == true)        // SAVE B
+        #expect(m.editingBlockStack == ["A"])
+        #expect(lineEnds(m.drawing.entity(bMemberID))!.1 == Vector(2, 9))   // saved
+
+        // Now DISCARD A.
+        #expect(m.exitBlockEditing(save: false) == true)
+        #expect(m.isEditingBlock == false)
+
+        // CRITICAL: B's SAVED edit must survive — it was committed, not part of A's edit.
+        #expect(lineEnds(m.drawing.entity(bMemberID))!.1 == Vector(2, 9))
+        // A's own member reverted to its entry geometry (A's edit discarded).
+        #expect(lineEnds(m.drawing.entity(aMemberID))!.1 == Vector(20, 0))
+
+        // The top-level insert of A resolves with B's SAVED geometry: (100,100)+(5,5)+(2,9)
+        // = (107,114) present; A's discarded (20,4) endpoint at world (120,104) is gone.
+        let pts = resolvedPoints(m.drawing.entity(topInsertID)!, m.drawing)
+        #expect(contains(pts, Vector(107, 114)))
+        #expect(!contains(pts, Vector(120, 104)))
+    }
+
+    @Test("Save&Close inner B, then Save&Close outer A: both persist")
+    func saveInnerThenSaveOuterBothPersist() {
+        let (m, bMemberID, aMemberID, _, topInsertID) = seededNestedModel()
+        m.enterBlockEditing(name: "A")
+        var editedA = m.drawing.entity(aMemberID)!
+        editedA.kind = .line(LineData(start: Vector(0, 0), end: Vector(20, 4)))
+        m.applyInspectorEdits([editedA])
+        m.enterBlockEditing(name: "B")
+        var editedB = m.drawing.entity(bMemberID)!
+        editedB.kind = .line(LineData(start: Vector(0, 0), end: Vector(2, 9)))
+        m.applyInspectorEdits([editedB])
+        m.exitBlockEditing(save: true)        // SAVE B
+        m.exitBlockEditing(save: true)        // SAVE A
+        #expect(m.isEditingBlock == false)
+        #expect(lineEnds(m.drawing.entity(bMemberID))!.1 == Vector(2, 9))   // B kept
+        #expect(lineEnds(m.drawing.entity(aMemberID))!.1 == Vector(20, 4))  // A kept
+        let pts = resolvedPoints(m.drawing.entity(topInsertID)!, m.drawing)
+        #expect(contains(pts, Vector(107, 114)))   // B's saved geo via deep resolve
+        #expect(contains(pts, Vector(120, 104)))   // A's saved geo
+    }
+
+    @Test("Delete a member then Discard re-adds it (the restore re-add path)")
+    func deleteMemberThenDiscardReAdds() {
+        // A block with two members; delete one during the session, then Discard — the
+        // deleted member must be re-added (restoreBlockEntrySnapshot's replace→add path)
+        // and the block's member list restored to its entry.
+        let drawing = CADDrawing()
+        let m1 = drawing.add(line(Vector(0, 0), Vector(10, 0)))
+        let m2 = drawing.add(line(Vector(0, 0), Vector(0, 10)))
+        drawing.mutateBlocks { _ = $0.add(Block(name: "WIDGET", entityIDs: [m1, m2])) }
+        let insertID = drawing.add(EntityRecord(
+            id: .placeholder,
+            kind: .insert(InsertData(blockName: "WIDGET", insertionPoint: Vector(20, 20)))))
+
+        let m = CanvasModel(drawing: drawing, viewSize: CGSize(width: 800, height: 600))
+        m.undoManager.groupsByEvent = false
+        m.undoManager.removeAllActions()
+
+        m.enterBlockEditing(name: "WIDGET")
+        m.selection = Selection(ids: [m2])
+        #expect(m.deleteSelection() == true)
+        #expect(m.drawing.entity(m2) == nil)                       // gone mid-session
+        #expect(m.drawing.blocks.block(named: "WIDGET")?.entityIDs == [m1])
+
+        // Discard → the deleted member is re-added and the block restored to entry.
+        #expect(m.exitBlockEditing(save: false) == true)
+        #expect(m.drawing.entity(m2) != nil)                       // re-added
+        #expect(m.drawing.blocks.block(named: "WIDGET")?.entityIDs == [m1, m2])
+        // Its geometry matches the entry record.
+        #expect(lineEnds(m.drawing.entity(m2))! == (Vector(0, 0), Vector(0, 10)))
+
+        // The resolved insert again carries the restored member's geometry: (20,20)+(0,10)
+        // = (20,30).
+        let pts = resolvedPoints(m.drawing.entity(insertID)!, m.drawing)
+        #expect(contains(pts, Vector(20, 30)))
+    }
 }

@@ -783,11 +783,12 @@ final class CanvasModel {
     ///
     /// If a block-edit session is open, picking a Model/Layout tab AUTO Save&Closes it
     /// first (owner decision: switch-away mid-edit keeps the live edits) so the user's
-    /// tab pick sticks. `finishBlockEditingIfNeeded` restores the session's
-    /// `editingPriorView` (the space active when the editor opened); the subsequent
-    /// `setActiveSpace` then applies THIS pick on top — so the pick wins, not the stale
-    /// prior view. (If the pick equals the prior view, `setActiveSpace` is a no-op, which
-    /// is correct: exit already left us there.)
+    /// tab pick sticks. `finishBlockEditingIfNeeded` pops every open level, restoring each
+    /// level's prior view (`BlockEditSession.priorSpace/priorLayout/priorViewport` — the
+    /// space active when that level opened); the subsequent `setActiveSpace` then applies
+    /// THIS pick on top — so the pick wins, not the stale prior view. (If the pick equals
+    /// the prior view, `setActiveSpace` is a no-op, which is correct: exit already left us
+    /// there.)
     func activateLayout(name: String) {
         finishBlockEditingIfNeeded()
         setActiveSpace(.paper, layoutName: name)
@@ -1009,6 +1010,14 @@ final class CanvasModel {
         var priorViewport: Viewport
         /// `modelVersion` captured the instant this level opened (after its enter bump).
         var entryModelVersion: Int
+        /// `true` once a NESTED child level Save&Closed with real edits while THIS level
+        /// was its open parent — i.e. committed child work has folded into this level's
+        /// still-open undo group. A Discard of this level must then NOT drop its group via
+        /// `undoManager.undo()` (that would revert the child's SAVED edits — silent data
+        /// loss); the entry-snapshot restore alone produces correct geometry (it touches
+        /// only THIS block's members, never the child block's). Set on a child's
+        /// Save&Close pop; default `false`.
+        var hasSavedNestedWork: Bool = false
     }
 
     /// The open block-edit sessions, OUTERMOST → innermost. Empty when no session is open;
@@ -1132,7 +1141,10 @@ final class CanvasModel {
     /// - `save == false` (Discard): restore THIS level's entry-state members + member-id
     ///   list (so the block AND every insert return to this level's entry geometry), close
     ///   the level's group, then drop that now-net-identity group off the undo stack so
-    ///   `canUndo` returns to its pre-level value (no stranded half-session steps).
+    ///   `canUndo` returns to its pre-level value (no stranded half-session steps) —
+    ///   EXCEPT when the level absorbed a nested child's SAVED edits (see
+    ///   `hasSavedNestedWork`), in which case the group is kept so those committed edits
+    ///   are not reverted (the snapshot restore alone fixes THIS block's geometry).
     ///
     /// A level that made NO edits drops its empty group on EITHER path so it never strands a
     /// no-op ⌘Z step — detected via `modelVersion` (only the edit funnels bump it).
@@ -1160,6 +1172,14 @@ final class CanvasModel {
         // all bump `modelVersion` between this level's enter and here.)
         let sessionChanged = modelVersion != level.entryModelVersion
 
+        // A Discard MUST NOT drop this level's group via `undo()` when committed nested
+        // child work has folded into it (a child Save&Closed inside this level) — that
+        // would revert the child's SAVED edits (silent data loss). The snapshot restore
+        // alone yields correct geometry (it touches only THIS block's members). So the
+        // group-drop is allowed only when THIS is the outermost level AND it carries no
+        // saved nested work.
+        let mayDropGroup = isOutermost && !level.hasSavedNestedWork
+
         if save && sessionChanged {
             // Keep edits: just close the level's group (one ⌘Z reverts the level).
             undoManager.endUndoGrouping()
@@ -1167,28 +1187,34 @@ final class CanvasModel {
             // Save & Close with NO edits: close the empty group; drop it (outermost only)
             // so the stack stays at its pre-level depth (no stranded no-op step).
             undoManager.endUndoGrouping()
-            if isOutermost && undoManager.canUndo { undoManager.undo() }
+            if mayDropGroup && undoManager.canUndo { undoManager.undo() }
         } else if sessionChanged {
             // Discard: restore THIS level's entry snapshot through the undoable funnels (so
             // the restorations are captured INSIDE the still-open level group), making the
-            // group net-identity. Geometry is now at this level's entry state regardless of
-            // whether we can drop the group.
+            // group net-identity for THIS block's members. Geometry is now at this level's
+            // entry state regardless of whether we can drop the group.
             restoreBlockEntrySnapshot(level)
             undoManager.endUndoGrouping()
-            // Drop the net-identity level group (outermost only) so the stack depth matches
-            // the pre-level state. For an inner level the net-identity work simply folds
-            // into the parent group.
-            if isOutermost && undoManager.canUndo { undoManager.undo() }
+            // Drop the net-identity level group when safe (outermost + no saved nested
+            // work). For an inner level the work folds into the parent group; for an outer
+            // level that absorbed a child's SAVED edits we keep the group (dropping it
+            // would revert that saved work).
+            if mayDropGroup && undoManager.canUndo { undoManager.undo() }
         } else {
-            // Discard with NO edits: nothing to restore — drop the empty group (outermost
-            // only).
+            // Discard with NO edits: nothing to restore — drop the empty group (when safe).
             undoManager.endUndoGrouping()
-            if isOutermost && undoManager.canUndo { undoManager.undo() }
+            if mayDropGroup && undoManager.canUndo { undoManager.undo() }
         }
 
         // Pop THIS level and restore its prior view (parent block-edit framing, or the
         // document view for the outermost level).
         editingSessionStack.removeLast()
+        // If this level Save&Closed with real edits AND a PARENT level remains open, those
+        // committed edits have folded into the parent's still-open undo group — mark the
+        // parent so its own Discard won't `undo()` them away (the finding-#1 data-loss fix).
+        if save && sessionChanged, let parentIdx = editingSessionStack.indices.last {
+            editingSessionStack[parentIdx].hasSavedNestedWork = true
+        }
         activeSpace = level.priorSpace
         activeLayout = level.priorLayout
         viewport = level.priorViewport
