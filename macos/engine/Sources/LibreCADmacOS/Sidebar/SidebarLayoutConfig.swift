@@ -42,23 +42,29 @@ enum SidebarPanelID: String, Codable, CaseIterable, Hashable, Sendable {
     case layerStates
     /// The Blocks panel (block definitions: insert / edit / rename / delete + drag).
     case blocks
+    /// The Parts Library panel (a chosen on-disk folder of `.dxf` symbols, imported
+    /// as blocks on double-click / drag-to-canvas). Newly added — `reconciled` appends
+    /// it to any stored config from an older build (visible + expanded by default).
+    case partsLibrary
 
     /// The default header title for this panel id (used when constructing a descriptor
     /// and as a stable, localizable-later label).
     var defaultTitle: String {
         switch self {
-        case .layers:      return "Layers"
-        case .layerStates: return "Layer States"
-        case .blocks:      return "Blocks"
+        case .layers:       return "Layers"
+        case .layerStates:  return "Layer States"
+        case .blocks:       return "Blocks"
+        case .partsLibrary: return "Parts Library"
         }
     }
 
     /// The default SF Symbol shown in this panel's header.
     var defaultSymbol: String {
         switch self {
-        case .layers:      return "square.3.layers.3d"
-        case .layerStates: return "rectangle.stack"
-        case .blocks:      return "square.on.square"
+        case .layers:       return "square.3.layers.3d"
+        case .layerStates:  return "rectangle.stack"
+        case .blocks:       return "square.on.square"
+        case .partsLibrary: return "books.vertical"
         }
     }
 }

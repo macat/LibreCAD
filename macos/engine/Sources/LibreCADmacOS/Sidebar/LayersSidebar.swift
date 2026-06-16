@@ -83,6 +83,13 @@ struct LayersSidebar: View {
     /// The live layout config the panel stack reads + mutates.
     @State private var config: SidebarLayoutConfig = .default
 
+    /// A toggled "tick" the Parts Library HEADER's "Choose Folder…" button flips to ask
+    /// the panel BODY (`PartsLibrarySectionContent`) to raise its own folder picker. This
+    /// keeps the `NSOpenPanel` inside the body's View layer (which owns the catalog state)
+    /// while still surfacing the chooser in the panel header. The body watches it via
+    /// `onChange`; the value itself is meaningless (only its CHANGES matter).
+    @State private var chooseLibraryFolder = false
+
     var body: some View {
         SidebarPanelStack(panels: panels, config: $config)
             .frame(minWidth: 220, idealWidth: 260)
@@ -111,7 +118,8 @@ struct LayersSidebar: View {
         [
             SidebarPanel(id: .layers, header: { layersHeaderControls }, body: { layersBody }),
             SidebarPanel(id: .layerStates, header: { layerStatesHeaderControls }, body: { layerStatesBody }),
-            SidebarPanel(id: .blocks, header: { blocksHeaderControls }, body: { blocksBody })
+            SidebarPanel(id: .blocks, header: { blocksHeaderControls }, body: { blocksBody }),
+            SidebarPanel(id: .partsLibrary, header: { partsLibraryHeaderControls }, body: { partsLibraryBody })
         ]
     }
 
@@ -270,6 +278,27 @@ struct LayersSidebar: View {
         BlocksSectionContent(model: model,
                              controllerBox: controllerBox,
                              onSaveBlockToFile: onSaveBlockToFile)
+    }
+
+    // MARK: Parts Library panel (a chosen folder of .dxf symbols → import as blocks)
+
+    /// The Parts Library header control: "Choose Folder…" (raises the View-layer folder
+    /// picker inside `PartsLibrarySectionContent`). The panel body owns the picker + the
+    /// catalog + import; the header just exposes the chooser as a compact header button.
+    @ViewBuilder
+    private var partsLibraryHeaderControls: some View {
+        PartsLibraryHeaderControls(onChooseFolder: { chooseLibraryFolder.toggle() })
+    }
+
+    /// The Parts Library body: the chosen-folder row + the scanned symbol list with
+    /// double-click / drag-to-canvas import (delegated to `PartsLibrarySectionContent`).
+    /// `chooseLibraryFolder` is a tick the header toggles to ask the body to raise its
+    /// own folder picker (keeps the `NSOpenPanel` inside the panel content's View layer).
+    @ViewBuilder
+    private var partsLibraryBody: some View {
+        PartsLibrarySectionContent(model: model,
+                                   controllerBox: controllerBox,
+                                   chooseFolderTick: chooseLibraryFolder)
     }
 
     // MARK: - Layers selection / remove gating
