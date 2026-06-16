@@ -893,9 +893,12 @@ LCStatus lc_dxf_write(const char *path,
  *                      viewport round-trip.
  * @param viewportCount Number of viewports (>= 0).
  * @param headerVars    Optional pointer to `headerVarCount` LCHeaderVar records (the
- *                      generic extra HEADER vars; see `lc_dxf_write`). Applied via
- *                      `DRW_Header.vars` where the DWG writer honors them. NULL / 0
- *                      ⇒ none. Additive — pre-R4b callers pass NULL, 0.
+ *                      generic extra HEADER vars; see `lc_dxf_write`). Added to
+ *                      `DRW_Header.vars`, but NOTE: libdxfrw's dwgWriter15 emits its
+ *                      own DEFAULT header and does NOT honor these, so they do NOT
+ *                      round-trip on DWG (the documented DWG header gap, like layers /
+ *                      dim styles). Use DXF for a header-var round-trip. NULL / 0 ⇒
+ *                      none. Additive — pre-R4b callers pass NULL, 0.
  * @param headerVarCount Number of generic extra HEADER vars (>= 0).
  * @return LC_OK on success; LC_ERR_INVALID_PATH for a null/empty path or a
  *         negative count with a NULL array; LC_ERR_WRITE_FAILED if libdxfrw

@@ -100,6 +100,18 @@ struct SaveRoundTripTests {
         gv.dimArrowSize = 0.125
         gv.dimExtensionOffset = 0.0625
 
+        // (b) R4b: the 7 STANDARD document-settings header vars — each set to a
+        // NON-default value so a silent drop on a .dxf write is detectable. These ride
+        // the generic extra-var bag through the bridge. $GRIDUNIT and $PINSBASE are
+        // COORD-typed (must round-trip as a vector, not just a scalar X).
+        gv.gridOn = false                          // $GRIDMODE (default true)
+        gv.gridSpacing = 7.5                        // $GRIDUNIT (COORD; default 1)
+        gv.pointDisplayMode = .cross               // $PDMODE   (default 0/dot)
+        gv.pointSize = 3.25                         // $PDSIZE   (default 0)
+        gv.anglesBase = 1.5                         // $ANGBASE  (radians; default 0)
+        gv.anglesCounterClockwise = false          // $ANGDIR=1 (default 0/CCW)
+        gv.paperInsertionBase = Vector(11, 22)     // $PINSBASE (COORD; default 0,0)
+
         // (b) A named DIMSTYLE table: "Standard" (active) + a distinct "BIG" style.
         var table = DimStyleTable(activeName: "Standard")
         table.upsert(NamedDimStyle(
@@ -176,6 +188,33 @@ struct SaveRoundTripTests {
         #expect(back.graphicVariables.dimTextHeight != 2.5,
                 "$DIMTXT fell back to the 2.5 engine default — the save dropped the header var")
 
+        // --- (b) R4b: the 7 STANDARD document-settings header vars survive ---------
+        // These ride the generic extra-var bag (lcdxf.h LCHeaderVar). Before R4b the
+        // bridge carried header vars only through the fixed POD whitelist, so every
+        // one of these silently dropped on .dxf write AND read — these asserts are the
+        // fail-before/pass-after gate. (The libdxfrw-curated standard targets emit for
+        // free once they ride in DRW_Header.vars; see DXFWriter.makeHeaderVars.)
+        let rgv = back.graphicVariables
+        #expect(rgv.gridOn == false,
+                "$GRIDMODE was dropped on .dxf save→reopen (generic header-var bag)")
+        #expect(rgv.pointDisplayMode.rawMode == PointDisplayMode.cross.rawMode,
+                "$PDMODE was dropped on .dxf save→reopen")
+        #expect(abs(rgv.pointSize - 3.25) < 1e-6,
+                "$PDSIZE was dropped on .dxf save→reopen")
+        #expect(abs(rgv.anglesBase - 1.5) < 1e-6,
+                "$ANGBASE was dropped on .dxf save→reopen")
+        #expect(rgv.anglesCounterClockwise == false,
+                "$ANGDIR was dropped on .dxf save→reopen")
+        // The two COORD-typed vars must round-trip as VECTORS (preserving X and Y),
+        // not collapse to a scalar — int/double-only handling would corrupt them.
+        #expect(abs(rgv.gridSpacing - 7.5) < 1e-6,
+                "$GRIDUNIT (COORD) was dropped or scalar-corrupted on .dxf save→reopen")
+        #expect(rgv.has("$GRIDUNIT") && rgv.vector("$GRIDUNIT").x == 7.5,
+                "$GRIDUNIT did not round-trip as a vector")
+        let pinsBase = rgv.paperInsertionBase
+        #expect(abs(pinsBase.x - 11) < 1e-6 && abs(pinsBase.y - 22) < 1e-6,
+                "$PINSBASE (COORD) lost its vector (x,y) on .dxf save→reopen")
+
         // --- (b) The named DIMSTYLE table survives ---------------------------
         let std = try #require(back.dimStyles.style(named: "Standard"),
                                "the active 'Standard' dim style was dropped on save")
@@ -250,5 +289,17 @@ struct SaveRoundTripTests {
         // Full-fidelity blocks / graphic vars / dim styles round-trip on DXF (above).
         #expect(back.layers.layer(named: "WALLS") == nil,
                 "DWG unexpectedly wrote a custom layer — libdxfrw gained DWG LAYER-table write; promote the DXF-only layer/block/dim-style asserts to DWG too")
+
+        //  - R4b generic header vars are ALSO a DWG gap: libdxfrw's dwgWriter15 emits
+        //    its own DEFAULT header and does NOT honor the DRW_Header.vars we add, so
+        //    the document-settings vars ($GRIDMODE/$GRIDUNIT/$PDMODE/$PDSIZE/$ANGBASE/
+        //    $ANGDIR/$PINSBASE) come back at their defaults on a DWG round-trip (they
+        //    DO round-trip on DXF — the primary full-fidelity format). Pinned here so a
+        //    future libdxfrw DWG header-write upgrade is noticed. The non-default values
+        //    we set in makeFullPayload regress to the engine/file defaults on DWG:
+        #expect(back.graphicVariables.gridOn == true,
+                "DWG unexpectedly preserved $GRIDMODE — libdxfrw gained DWG header-var write; promote the DXF-only R4b header-var asserts to DWG too")
+        #expect(back.graphicVariables.pointDisplayMode.rawMode == 0,
+                "DWG unexpectedly preserved $PDMODE — libdxfrw gained DWG header-var write; promote the DXF-only R4b header-var asserts to DWG too")
     }
 }
