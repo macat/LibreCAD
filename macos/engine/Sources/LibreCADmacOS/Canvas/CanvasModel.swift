@@ -1993,7 +1993,10 @@ final class CanvasModel {
         case .preview:
             return true
         case .commit(let edits):
-            applyCommit(edits)
+            // Only genuine DRAW tools adopt the current properties; DERIVE/CLONE tools
+            // (Copy/Array/Offset/…) preserve their source layer/pen. Keyed off the
+            // active tool kind — see `toolAdoptsCurrentProperties`.
+            applyCommit(edits, adoptsCurrentProperties: toolAdoptsCurrentProperties(activeToolKind))
             return true
         case .finished:
             // CreateBlockTool does NOT emit `.commit` edits — block creation touches
@@ -2262,17 +2265,59 @@ final class CanvasModel {
         )
     }
 
+    /// The DERIVE / CLONE tool kinds — the modify tools whose `.add` edits carry an
+    /// EXISTING source entity's `layer` + `pen` verbatim (Copy/Array/Offset/Explode/
+    /// Join/Divide/Break/Fillet/Chamfer/Duplicate/…). A clone like this must PRESERVE
+    /// its source's layer/pen (AutoCAD COPY/ARRAY/OFFSET preserve the source layer),
+    /// so it must NOT be re-stamped with the active layer / current pen — even when the
+    /// source happens to sit on layer "0" with a `.byLayer` pen (the fresh-document
+    /// default), which is exactly the case the record-content gate alone cannot tell
+    /// apart from a fresh draw. See `toolAdoptsCurrentProperties` and the stamp in
+    /// `applyCommit`'s `.add` arm.
+    ///
+    /// This is the SMALL, well-bounded set; the default (any OTHER kind) is to adopt
+    /// the current properties, so new geometry-from-scratch DRAW tools keep landing on
+    /// the active layer automatically with no edit here. A future tool that emits
+    /// `.add` records COPIED from an existing entity (i.e. that should preserve the
+    /// source layer/pen) MUST add its `ToolKind` to this set.
+    ///
+    /// Kept entirely app-side (keyed off the `ToolKind` the model already holds in
+    /// `activeToolKind`) so no engine `Tool`/`ToolEdit` type needs an intent flag.
+    private static let deriveToolKinds: Set<ToolKind> = [
+        .copy, .move, .rotate, .scale, .mirror, .align, .stretch,
+        .array, .arrayPath, .offset, .divide,
+        .explode, .explodeText, .explodeInsert, .join,
+        .trim, .extend, .fillet, .chamfer, .lengthen, .break, .polylineEdit,
+        .hatch,
+    ]
+
+    /// Whether geometry committed by tool `kind` should adopt the CURRENT properties
+    /// (active layer + `currentPen`). True for genuine geometry-from-scratch DRAW
+    /// tools; false for the DERIVE/CLONE modify tools (`deriveToolKinds`), whose
+    /// `.add` records must preserve the source entity's layer/pen. `.select` and
+    /// `.viewport` never emit `.add` geometry through this path, so their value is
+    /// immaterial (they default to `true`, harmlessly).
+    private func toolAdoptsCurrentProperties(_ kind: ToolKind) -> Bool {
+        !Self.deriveToolKinds.contains(kind)
+    }
+
     /// Applies a tool's committed edits to the drawing as ONE undoable group, so a
     /// single undo reverts the whole tool action. Each edit is applied through the
     /// undoable `CADDrawing` mutations (ADR-002) and mirrored into the quadtree so
     /// the result is immediately snappable/selectable; the GPU model buffer is
     /// marked dirty so the renderer repacks it.
     ///
+    /// `adoptsCurrentProperties` gates the current-properties STAMP in the `.add` arm:
+    /// pass `true` only when the edits come from a genuine DRAW (geometry built from
+    /// scratch, which should land on the active layer + `currentPen`), and `false` for
+    /// DERIVE/CLONE edits (Copy/Array/Offset/…), which must keep their source layer/pen.
+    /// Callers compute it from the originating tool via `toolAdoptsCurrentProperties`.
+    ///
     /// Quadtree consistency: the `add`/`replace`/`remove` here keep the index in
     /// sync directly. On undo/redo the drawing's value-snapshot restore does NOT
     /// touch the quadtree (the undo closures only know about `entities`), so
     /// `undo()`/`redo()` rebuild the whole index — see those methods.
-    private func applyCommit(_ edits: [ToolEdit]) {
+    private func applyCommit(_ edits: [ToolEdit], adoptsCurrentProperties: Bool) {
         guard !edits.isEmpty else { return }
 
         // Make the whole commit ONE undo step. UndoManager's default
@@ -2306,13 +2351,22 @@ final class CanvasModel {
                 // pen so new geometry lands on the layer the user picked (this also fixes
                 // the long-standing bug where every drawn entity went to layer "0"
                 // regardless of the active layer) and adopts the top-bar current pen.
-                // The gate is deliberately narrow: a MODIFY tool that clones a source
-                // entity (CopyTool/array) copies the original's `layer`+`pen` verbatim,
-                // so any clone with a non-default layer or a non-`.byLayer` pen FAILS the
-                // gate and is left untouched. (A clone of a bare layer-"0"/`.byLayer`
-                // source has no distinguishing attributes to preserve, so re-stamping it
-                // with the same active layer / current pen is a no-op in spirit.)
-                if added.layer == .zero && added.pen == Pen.byLayer {
+                //
+                // The gate has TWO conditions and BOTH must hold:
+                //   1. `adoptsCurrentProperties` — the edits came from a genuine DRAW,
+                //      NOT a DERIVE/CLONE tool. This is the TRUE boundary. A clone
+                //      (Copy/Array/Offset/Explode/…) copies its SOURCE's `layer`+`pen`
+                //      verbatim and must keep them — AutoCAD COPY/ARRAY/OFFSET preserve
+                //      the source layer. Crucially this holds EVEN when the source sits
+                //      on layer "0" with a `.byLayer` pen (the fresh-doc default): such a
+                //      clone is content-identical to a fresh draw, so the content check
+                //      below cannot distinguish them — only the originating operation can.
+                //      (Computed app-side from the active `ToolKind`; see
+                //      `toolAdoptsCurrentProperties` / `deriveToolKinds`.)
+                //   2. the record still carries the init defaults (`layer == .zero` &&
+                //      `pen == .byLayer`) — so a DRAW tool that ever set an explicit
+                //      layer/pen itself would be left untouched (none do today).
+                if adoptsCurrentProperties && added.layer == .zero && added.pen == Pen.byLayer {
                     added.layer = LayerID(drawing.layers.activeLayerName)
                     added.pen = currentPen
                 }
@@ -2369,7 +2423,10 @@ final class CanvasModel {
     /// overlay needs this one delegating hook; everything downstream is the existing
     /// `applyCommit` (no behavior fork). No-op on an empty list.
     func applyToolEdits(_ edits: [ToolEdit]) {
-        applyCommit(edits)
+        // The inline text editor is a genuine DRAW (new `.text`/`.mtext` should adopt
+        // the active layer + current pen). Editing existing text emits `.replace`,
+        // which never touches the stamp, so `true` is correct for both sub-cases.
+        applyCommit(edits, adoptsCurrentProperties: true)
     }
 
     // MARK: - Inspector edits (full-record replace; undoable; index-synced)
@@ -3776,7 +3833,9 @@ final class CanvasModel {
         // Snapshot the ids first: `applyCommit`'s `.remove` mutates `selection`
         // while iterating, so we must not iterate `selection.ids` directly.
         let edits: [ToolEdit] = selection.ids.map { .remove($0) }
-        applyCommit(edits)
+        // Pure `.remove` edits — the stamp only touches `.add`, so the flag is
+        // immaterial here; pass `false` (no geometry adopts current properties).
+        applyCommit(edits, adoptsCurrentProperties: false)
         // `applyCommit` removes each id from `selection`; clear any residue so the
         // selection is empty and the highlight overlay disappears.
         selection.clear()
