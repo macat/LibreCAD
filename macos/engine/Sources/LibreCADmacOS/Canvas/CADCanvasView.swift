@@ -307,6 +307,11 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
             menu.addItem(item("Revert Direction", #selector(revertDirectionAction(_:)),
                               enabled: controller.canRevertSelectionDirection))
             menu.addItem(.separator())
+            // WAVE BW (Ask #1): convert the selection to a NAMED block (spec §2.1).
+            // Forwards to the View-layer name sheet via the controller hook.
+            menu.addItem(item("Create Block from Selection…",
+                              #selector(ctxCreateBlockFromSelection(_:))))
+            menu.addItem(.separator())
             menu.addItem(item("Properties…", #selector(ctxProperties(_:))))
             menu.addItem(.separator())
         }
@@ -332,6 +337,7 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
     @objc private func ctxDuplicate(_ sender: Any?)  { controller?.contextDuplicate() }
     @objc private func ctxDelete(_ sender: Any?)     { controller?.contextDelete() }
     @objc private func ctxProperties(_ sender: Any?) { controller?.contextProperties() }
+    @objc private func ctxCreateBlockFromSelection(_ sender: Any?) { controller?.contextCreateBlockFromSelection() }
     @objc private func ctxPaste(_ sender: Any?)      { controller?.contextPaste() }
     @objc private func ctxSelectAll(_ sender: Any?)  { controller?.contextSelectAll() }
     @objc private func ctxZoomToFit(_ sender: Any?)  { controller?.contextZoomToFit() }
@@ -551,6 +557,12 @@ final class CADCanvasController {
     /// A hook ContentView sets so the context menu's "Document Settings…" verb can
     /// raise the per-document settings sheet. `nil` until the view appears.
     var requestDocumentSettings: (() -> Void)?
+
+    /// A hook ContentView sets so the context menu's "Create Block from Selection…"
+    /// verb (WAVE BW, Ask #1) can raise the View-layer block-name sheet. `nil` until
+    /// the view appears. The sheet (a modal) lives in the View layer ONLY; the
+    /// controller merely signals "the user asked to create a block".
+    var requestCreateBlockFromSelection: (() -> Void)?
 
     init(model: CanvasModel) {
         self.model = model
@@ -979,6 +991,10 @@ final class CADCanvasController {
         if ok { refreshGizmo(); redraw() }
     }
     func contextSelectAll() { selectAllEntities() }
+    /// WAVE BW (Ask #1): the user right-clicked → "Create Block from Selection…".
+    /// Signals the View layer (which owns the live `CanvasModel` + the modal sheet) to
+    /// raise the block-name prompt for the current selection.
+    func contextCreateBlockFromSelection() { requestCreateBlockFromSelection?() }
     func contextZoomToFit() { zoomToFit() }
     func contextToggleGrid() { model.gridVisible.toggle(); redraw() }
     func contextToggleOrtho() { toggleOrtho() }
@@ -1038,8 +1054,15 @@ final class CADCanvasController {
     }
 
     /// Double-click handler: if a text/mtext entity is under the cursor, open the
-    /// inline editor pre-filled with its string (edit-in-place). Returns whether a
-    /// text entity was found and the editor opened.
+    /// inline editor pre-filled with its string (edit-in-place); ELSE if a block
+    /// `.insert` is under the cursor, enter its in-place Block Editor (WAVE BW, Ask #2
+    /// — BEDIT). Returns whether a double-click action was taken (so the caller can
+    /// stop normal click classification).
+    ///
+    /// Order matters: the text edit-in-place check runs FIRST (a text entity sitting
+    /// over an insert still opens the text editor), then the insert → enter-editor
+    /// check. Entering an editor is a no-op while one is already open (the engine
+    /// guards re-entry), so a double-click inside the editor doesn't nest.
     @discardableResult
     func handleDoubleClick(at screenPoint: CGPoint) -> Bool {
         syncViewSizeFromView()
@@ -1062,6 +1085,16 @@ final class CADCanvasController {
                              initialText: Self.plainText(of: d))
             redraw()
             return true
+        case .insert(let d):
+            // Double-click a block reference → enter its in-place editor (BEDIT). The
+            // model re-scopes the canvas/index/camera to the block's members; the
+            // BlockEditBar (Save & Close / Discard) becomes visible via `isEditingBlock`.
+            if model.enterBlockEditing(name: d.blockName) {
+                refreshGizmo()
+                redraw()
+                return true
+            }
+            return false
         default:
             return false
         }
@@ -1468,7 +1501,12 @@ final class CADCanvasController {
             case "o": activateTool(.ordinateDim);    return true
             case "g": activateTool(.arcLengthDim);   return true
             case "n": activateTool(.angular3pDim);   return true
-            case "b": activateTool(.createBlock);    return true
+            case "b":
+                // ⌥B "Create Block from Selection…" raises the View-layer NAME sheet
+                // (WAVE BW, Ask #1 — spec §2.1), not a bare `activateTool(.createBlock)`
+                // (which would skip naming). Gated on a selection inside the hook.
+                requestCreateBlockFromSelection?()
+                return true
             case "x": activateTool(.explodeInsert);  return true
             default:  return false
             }

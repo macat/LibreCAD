@@ -80,6 +80,16 @@ struct ContentView: View {
     /// document Open flow uses), so the user gets a pre-populated drawing to edit.
     @State private var showTemplateChooser = false
 
+    /// Whether the "Create Block from Selection…" name sheet is presented (WAVE BW,
+    /// Ask #1). Raised from the canvas context menu / Blocks menu / palette when there
+    /// is a selection; confirming runs `CanvasModel.beginCreateBlock(name:)` and the
+    /// user then picks a base point on the canvas. The sheet (`BlockNamePrompt`) lives
+    /// in the View layer ONLY (modal discipline). The suggested name is captured when
+    /// the sheet is raised so the prompt prefills a unique `Block-N`.
+    @State private var showBlockNamePrompt = false
+    /// The unique suggested name handed to the `BlockNamePrompt` sheet when it opens.
+    @State private var suggestedBlockName = "Block-1"
+
     /// The live text of the bottom command / coordinate input line (UX-plan U1).
     /// Cleared after each successful submit; the field echoes parse errors via the
     /// model's `lastCommandError`.
@@ -207,6 +217,16 @@ struct ContentView: View {
             .safeAreaInset(edge: .top, spacing: 0) {
                 ToolOptionsBar(model: model, controllerBox: controllerBox)
             }
+            // WAVE BW (Ask #2): the contextual Block-Editor bar, pinned at the very top
+            // of the canvas while an in-place block-edit session is active. Shows
+            // "Editing block: <name>" + Save & Close / Discard; renders nothing
+            // otherwise. Save&Close keeps the edits (every insert updates via the
+            // engine's live-member resolve); Discard reverts to entry geometry.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                BlockEditBar(model: model) {
+                    controllerBox.controller?.requestRedraw()
+                }
+            }
             // U3 + U1 bottom chrome, stacked so the persistent STATUS BAR sits just
             // ABOVE the command/coordinate line (both pinned to the bottom, below the
             // canvas). One inset VStack keeps their order deterministic: status bar
@@ -294,8 +314,39 @@ struct ContentView: View {
                     onCancel: { showTemplateChooser = false }
                 )
             }
+            // WAVE BW (Ask #1): the "Create Block from Selection" name sheet. Raised
+            // (only when there is a selection) from the canvas context menu / Blocks
+            // menu / palette; confirming runs `beginCreateBlock`, then the user picks a
+            // base point on the canvas. View-layer modal ONLY (headless-safe).
+            .sheet(isPresented: $showBlockNamePrompt) {
+                BlockNamePrompt(
+                    suggestedName: suggestedBlockName,
+                    existingNames: model.drawing.blocks.blocks.map(\.name),
+                    onConfirm: { name in
+                        showBlockNamePrompt = false
+                        if model.beginCreateBlock(name: name) {
+                            controllerBox.controller?.requestRedraw()
+                        }
+                    },
+                    onCancel: { showBlockNamePrompt = false }
+                )
+            }
+            // WAVE BW (Ask #2) document-close hook: when this window's canvas goes away
+            // (the document closes), auto Save & Close any open block-edit session so
+            // the in-flight edits are kept (the engine presents no modal — a deliberate
+            // last-chance commit). `LibreCADDocument` is a Sendable payload carrier and
+            // cannot reach the @MainActor model, so the hook lives here in the View layer
+            // (the only place that owns the live `CanvasModel`).
+            .onDisappear { _ = model.finishBlockEditingIfNeeded() }
             .focusedSceneValue(\.openDocumentSettings) { showSettings = true }
             .focusedSceneValue(\.newFromTemplate) { showTemplateChooser = true }
+            // WAVE BW (Ask #1): "Create Block from Selection…" raises the name sheet,
+            // gated on a non-empty selection (the verb is meaningless without one). The
+            // value is `nil` when there is no selection — which DISABLES the matching
+            // Blocks-menu item (it reads this focused value). Capturing a fresh unique
+            // suggested name each time the sheet opens.
+            .focusedSceneValue(\.createBlockFromSelection,
+                               model.hasSelection ? { raiseBlockNamePrompt() } : nil)
             .focusedSceneValue(\.commandPalette) { showPalette = true }
             .focusedSceneValue(\.zoomToFit) { controllerBox.controller?.zoomToFit() }
             // Export… (PDF/PNG/SVG): present a save panel whose format follows the
@@ -329,6 +380,10 @@ struct ContentView: View {
                 // "Document Settings…" raises the per-document settings sheet.
                 controllerBox.controller?.requestShowInspector = { showInspector = true }
                 controllerBox.controller?.requestDocumentSettings = { showSettings = true }
+                // WAVE BW (Ask #1): the canvas context menu's "Create Block from
+                // Selection…" verb raises the View-layer name sheet (gated on a
+                // selection inside `raiseBlockNamePrompt`).
+                controllerBox.controller?.requestCreateBlockFromSelection = { raiseBlockNamePrompt() }
             }
             // View ▸ Show Command Line (⇧⌘L) focuses the field from the menu.
             .focusedSceneValue(\.focusCommandLine) { commandFieldFocused = true }
@@ -381,6 +436,17 @@ struct ContentView: View {
             printLayout: model.activeLayoutRecord != nil
                 ? { printActiveLayout() } : nil
         )
+    }
+
+    /// Raises the "Create Block from Selection…" name sheet (WAVE BW, Ask #1) after
+    /// capturing a fresh unique suggested name. Called from the Blocks menu / ⌘K palette
+    /// / canvas context menu (each gated on a non-empty selection). A no-op with nothing
+    /// selected (the model op needs a selection); the sheet's confirm runs
+    /// `beginCreateBlock`. The sheet itself is the only modal — never reached by tests.
+    private func raiseBlockNamePrompt() {
+        guard model.hasSelection else { return }
+        suggestedBlockName = model.suggestedBlockName()
+        showBlockNamePrompt = true
     }
 
     // MARK: - Document ⇄ live model bridge (MAIN ACTOR)
@@ -625,12 +691,14 @@ struct ContentView: View {
 
     /// Routes a tool activation the same way the menus/palette do: the `.image` kind
     /// goes through the file-picker placement flow (a bare activate would arm an inert
-    /// no-file tool); every other kind activates directly on the focused canvas.
+    /// no-file tool); `.createBlock` goes through the name sheet (WAVE BW, Ask #1 — spec
+    /// §2.1: name the block first, gated on a selection inside `raiseBlockNamePrompt`);
+    /// every other kind activates directly on the focused canvas.
     private func activate(_ kind: ToolKind) {
-        if kind == .image {
-            chooseAndPlaceImage()
-        } else {
-            controllerBox.controller?.activateTool(kind)
+        switch kind {
+        case .image:       chooseAndPlaceImage()
+        case .createBlock: raiseBlockNamePrompt()
+        default:           controllerBox.controller?.activateTool(kind)
         }
     }
 
@@ -691,6 +759,7 @@ struct ContentView: View {
         CommandRegistry.commands(.init(
             activateTool: { kind in controllerBox.controller?.activateTool(kind) },
             placeImage: { chooseAndPlaceImage() },
+            createBlockFromSelection: { raiseBlockNamePrompt() },
             open: { sendDocumentAction(#selector(NSDocumentController.openDocument(_:))) },
             save: { sendDocumentAction(#selector(NSDocument.save(_:))) },
             saveAs: { sendDocumentAction(#selector(NSDocument.saveAs(_:))) },
@@ -1243,6 +1312,16 @@ extension FocusedValues {
         set { self[PlaceImageKey.self] = newValue }
     }
 
+    /// Raise the "Create Block from Selection…" name sheet on the focused window
+    /// (WAVE BW, Ask #1 — Tools ▸ Modify ▸ Blocks / ⌘K palette / canvas context menu).
+    /// `nil` when there is no selection, which DISABLES the menu item (the verb needs a
+    /// selection). Distinct from `activateTool(.createBlock)` because creating a block
+    /// asks for a NAME first (spec §2.1).
+    var createBlockFromSelection: (() -> Void)? {
+        get { self[CreateBlockFromSelectionKey.self] }
+        set { self[CreateBlockFromSelectionKey.self] = newValue }
+    }
+
     /// Undo / redo the focused window's drawing (Edit menu, ⌘Z / ⇧⌘Z).
     var undoAction: (() -> Void)? {
         get { self[UndoActionKey.self] }
@@ -1319,6 +1398,10 @@ private struct ActivateToolKey: FocusedValueKey {
 }
 
 private struct PlaceImageKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct CreateBlockFromSelectionKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 

@@ -61,6 +61,10 @@ struct LibreCADApp: App {
     /// The "begin Image placement" action published by the focused window (Tools ▸
     /// Image…) — presents the file-picker, then arms the two-click placement.
     @FocusedValue(\.placeImage) private var placeImage
+    /// The "Create Block from Selection…" action published by the focused window
+    /// (WAVE BW, Ask #1) — raises the block-name sheet, then arms a base-point pick.
+    /// `nil` when there is no selection, which disables the menu item.
+    @FocusedValue(\.createBlockFromSelection) private var createBlockFromSelection
     /// Undo / redo actions published by the focused window.
     @FocusedValue(\.undoAction) private var undoAction
     @FocusedValue(\.redoAction) private var redoAction
@@ -506,11 +510,18 @@ struct LibreCADApp: App {
         }
     }
 
-    /// Blocks subgroup (Create Block / Explode Block).
+    /// Blocks subgroup (Create Block from Selection / Explode Block).
+    ///
+    /// "Create Block from Selection…" (⌥B) raises the NAME sheet (WAVE BW, Ask #1)
+    /// via the focused `createBlockFromSelection` action — `nil` (disabled) when there
+    /// is no selection. It is NOT a bare `activateTool(.createBlock)`: creating a block
+    /// asks for a name first (spec §2.1), then arms the base-point pick.
     @ViewBuilder
     private var blocksMenu: some View {
         Menu("Blocks") {
-            toolItem(.createBlock, "b", .option)
+            Button("Create Block from Selection…") { createBlockFromSelection?() }
+                .keyboardShortcut("b", modifiers: .option)
+                .disabled(createBlockFromSelection == nil)
             toolItem(.explodeInsert, "x", .option)
         }
     }
