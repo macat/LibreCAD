@@ -333,4 +333,67 @@ struct BlockLibraryTests {
         #expect(d.blocks.isEmpty)
         #expect(d.count == 0)
     }
+
+    // MARK: - Bundled starter-symbol library (backlog #6)
+
+    /// Every symbol the offline generator (`CADBench gen-symbols`) is expected to
+    /// have produced and committed under `macos/assets/symbols`. Mirrors
+    /// `SymbolCatalog.all()` in `Sources/CADBench/SymbolGenerator.swift`. Asserting
+    /// the exact set guards against a symbol being silently dropped from the
+    /// committed assets (a regression a "non-empty count" check would miss).
+    private static let expectedStarterSymbols: Set<String> = [
+        "Door", "Double Door", "Window", "Table", "Chair", "Round Table",
+        "Sink", "Duplex Receptacle", "Switch", "Light Fixture",
+        "North Arrow", "Leader Arrow",
+    ]
+
+    @Test("bundledSymbolsDirectory resolves to the in-repo assets dir in the dev/test context")
+    func bundledSymbolsDirectoryResolves() {
+        // In the test process there is no app bundle, so resolution falls through
+        // to the in-repo dev fallback (`macos/assets/symbols`). That directory is
+        // committed alongside this code, so it MUST resolve (non-nil) and exist.
+        let dir = try? #require(BlockLibrary.bundledSymbolsDirectory())
+        let url = try? #require(dir)
+        if let url {
+            #expect(FileManager.default.fileExists(atPath: url.path))
+            #expect(url.lastPathComponent == "symbols")
+        }
+    }
+
+    @Test("the bundled symbol catalog lists exactly the committed starter symbols, name-sorted")
+    func bundledSymbolsCatalogListsCommittedSet() {
+        let items = BlockLibrary.bundledSymbols()
+        // At least the full starter set is present (a stray extra .dxf would still
+        // be a valid symbol, so we assert the starter set is a subset).
+        let names = Set(items.map(\.name))
+        #expect(Self.expectedStarterSymbols.isSubset(of: names),
+                "missing starter symbols: \(Self.expectedStarterSymbols.subtracting(names))")
+        // The scan is name-sorted (case-insensitive); confirm sort order holds.
+        let sorted = items.map(\.name).sorted { $0.caseInsensitiveCompare($1) == .orderedAscending }
+        #expect(items.map(\.name) == sorted)
+    }
+
+    @Test("every bundled starter symbol .dxf round-trips: imports to a block with non-empty geometry")
+    func everyBundledSymbolRoundTrips() async throws {
+        let items = BlockLibrary.bundledSymbols()
+        try #require(!items.isEmpty, "no bundled symbols resolved — check the dev fallback / committed assets")
+
+        for item in items where Self.expectedStarterSymbols.contains(item.name) {
+            let d = CADDrawing()
+            d.undoManager = testUndoManager()
+            let result = try await BlockLibrary.importItem(item, into: d)
+            let r = try #require(result, "\(item.name) imported to nil (empty/unreadable .dxf)")
+
+            // A named block was registered and at least one member came in.
+            #expect(d.blocks.contains(r.blockName), "\(item.name): no block registered")
+            #expect(r.memberCount >= 1, "\(item.name): imported with no members")
+
+            // The placed INSERT resolves to NON-EMPTY geometry (the symbol is
+            // actually drawable, not just a structurally-valid empty block).
+            let insertRec = try #require(d.entity(r.insertID))
+            let geo = insertRec.resolve(d.makeResolveContext())
+            let pointCount = geo.polylines.reduce(0) { $0 + $1.points.count }
+            #expect(pointCount > 0, "\(item.name): insert resolved to no geometry")
+        }
+    }
 }
