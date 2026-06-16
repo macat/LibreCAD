@@ -4185,6 +4185,32 @@ final class CanvasModel {
         modelVersion &+= 1
     }
 
+    // MARK: - Status-bar CAD toggles (Wave 4 — surfaces EXISTING state, no new snap logic)
+
+    /// Toggles the grid's visibility (AutoCAD GRID / F7) — the same `gridVisible` flag
+    /// the Inspector and the canvas context menu drive. Bumps `modelVersion` so the
+    /// status-bar chip + menu state refresh; the renderer reads `gridVisible` on the
+    /// next pack. Additive surface of existing state (no new grid logic).
+    func toggleGrid() {
+        gridVisible.toggle()
+        modelVersion &+= 1
+    }
+
+    /// Toggles GRID SNAP (AutoCAD SNAP / F9) — the `.grid` bit of the existing
+    /// `snapModes` set, routed through `setSnapMode` so it persists (the same undoable
+    /// `$LC_SNAPMODE` path the Inspector's "Grid" snap toggle uses). This is the only
+    /// snap on/off this wave surfaces as a single-flag toggle; the per-osnap object
+    /// snaps stay in the Inspector's detailed list. `modelVersion` is bumped so the
+    /// status chip refreshes immediately.
+    func toggleGridSnap() {
+        setSnapMode(.grid, !isSnapModeOn(.grid))
+        modelVersion &+= 1
+    }
+
+    /// Whether grid snap (the `.grid` snap-mode bit) is currently on — the status
+    /// bar's SNAP chip reads this. Read-only convenience over `isSnapModeOn(.grid)`.
+    var gridSnapEnabled: Bool { isSnapModeOn(.grid) }
+
     /// The EFFECTIVE ortho state for a point input given whether ⇧ is held: the
     /// persistent flag XOR the transient hold-⇧ override (LibreCAD lets ⇧ flip ortho
     /// on-the-fly — ⇧ turns ortho ON when it is off, and OFF when it is on). The canvas
