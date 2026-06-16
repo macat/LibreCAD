@@ -115,8 +115,3 @@ core.*
 # pixi environments
 .pixi
 *.egg-info
-
-# macOS port: track the committed agent suite, but not local .claude state (worktrees, settings)
-!/.claude/
-/.claude/*
-!/.claude/agents/
