@@ -6,6 +6,16 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-16 — DYNAMIC BLOCKS: Stretch + Flip LANDED end-to-end (`native-macos @ b6831f83e`, **2165 tests**, `.app` rebuilt)
+
+Owner picked **Stretch + Flip** as the first DB-2 bite (the two most common dynamic behaviors). Both reviewed APPROVE/-WITH-NITS, fixes folded:
+- **DB-2-ENGINE** `2c677a5b3` (+32) — Linear/Flip `BlockParameter` + Stretch/Flip `BlockAction` (additive on `DynamicBlockDef`); `BlockEvaluator` applies them PURE, after the visibility filter, in definition order (flip = mirror via `Affine2D.mirror`; stretch = move members' defining-points inside the frame by the param delta × multiplier, rotated by offset). v1 member-kind cut: line/polyline(bulges)/point/circle/arc(center) + whole-entity bbox fallback. Undoable `CADDrawing` mutators. No `EntityKind` case.
+- **DB-2-WIRE** `b6831f83e` (+28; staged-commit retry after a startup stall lost the first attempt) — on a selected dynamic insert (gizmo suppressed): **square stretch grip** (live DRAG → `insertEvaluationPreview` re-resolve → one undoable `parameterValues` commit; **scale-correct** via `directionScale`; **Esc cancels**) + **triangle flip grip** (click → toggle `flipStates`, undoable) + DB-1's visibility dropdown, all coexisting. Block Editor `BlockDynamicParametersPanel` authors Linear-Stretch / Flip (geometry derived from the selection bbox — a documented v1 simplification; richer guided-pick authoring is a fast-follow).
+
+**Dynamic-block status:** the **3 highest-frequency behaviors — visibility states, stretch, flip — are DONE end-to-end** (author in the Block Editor + manipulate per-insert via grips). Remaining per Appendix B (lower-frequency): DB-3 value-sets/lookup, DB-4 polar/XY/array/chain, DB-5 extended (scale/alignment/base-point/multiplier). DXF interop still v1 = native Codable round-trip (AutoCAD `*U##` eval-graph deferred). Milestone checkpoint with owner on whether to go deeper vs. attribute-UI/library-browser (BW2) vs. polish.
+
+---
+
 ## 2026-06-16 — DYNAMIC-BLOCK program critic-clean GO + building (visibility states first)
 
 Block UX (asks #1–4) **acceptance GO** (`90633e3d0`/`be4db5e23`): edit-propagation verified (1 member edit → all 3 inserts re-resolve on Save&Close; Discard reverts, undo coherent), ATTRIB DXF round-trip, thumbnails, collision-safe import, `dim_sample.dxf` sane, `.app` smoke clean. GUI-only bits (name sheet, double-click-edit, BlockEditBar, viewport drag, thumbnail render) await owner GUI verification.
