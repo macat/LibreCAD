@@ -48,6 +48,19 @@ enum OverlayStyle {
     /// The in-progress tool rubber-band color (a distinct, brighter green than the
     /// committed geometry so the live preview reads as "not yet placed").
     nonisolated(unsafe) static var toolPreviewColor = SIMD4<Float>(0.45, 1.0, 0.55, 0.9)
+    /// The dashed REFERENCE-line color (Move's base→cursor displacement, Scale's
+    /// center→reference original-size guide): a dimmer, greyer tint near the preview
+    /// color so the dashed guide reads as a "where we started from" hint, distinct
+    /// from the solid live ghost. Drawn dashed (screen-fixed) by `dashedSegments`.
+    nonisolated(unsafe) static var referenceColor = SIMD4<Float>(0.62, 0.78, 0.66, 0.55)
+
+    /// On-screen ON-dash length (points) for the reference guide — mirrors
+    /// `RendererGeometry.dashParamsPx`'s ~5pt base ON unit so the overlay dash visually
+    /// matches the model linetype dashes.
+    static let referenceDashOnPoints: Double = 5
+    /// On-screen OFF-gap length (points) — 0.6× the ON dash, the same ratio
+    /// `dashParamsPx` uses for `gap`.
+    static let referenceDashGapPoints: Double = 3
 
     /// Snap marker radius in screen points (converted to world by the builder).
     static let snapMarkerPointRadius: Double = 6
@@ -312,6 +325,70 @@ enum OverlayGeometry {
             if poly.closed, pts.count >= 3, let first = pts.first, let last = pts.last {
                 v.append(FlatVertex(position: off(last, renderOrigin), color: c))
                 v.append(FlatVertex(position: off(first, renderOrigin), color: c))
+            }
+        }
+        return v
+    }
+
+    // MARK: - Dashed reference segments
+
+    /// Builds a DASHED line list for the active tool's `referenceSegments` — the
+    /// "where we started from" guides (Move's base→cursor displacement, Scale's
+    /// center→reference original-size line). Each world segment is chopped into
+    /// SCREEN-FIXED on/off dash runs using `viewport.worldPerPixel`, so the dash
+    /// rhythm stays a constant on-screen size across zoom (matching the model
+    /// linetype dashes from `RendererGeometry.dashParamsPx`, not a world-fixed step).
+    ///
+    /// The returned vertices are a `.line` primitive (pairs): one pair per ON dash
+    /// run, all in the dimmer reference color so the guide reads as a hint distinct
+    /// from the solid preview ghost. Pure / GPU-free → unit-testable. Empty input
+    /// (no active drag) → no vertices.
+    ///
+    /// - Parameters:
+    ///   - segs: world-coord `(from, to)` segments from `Tool.referenceSegments`.
+    ///   - color: the dash color (defaults to `OverlayStyle.referenceColor`).
+    ///   - viewport: gives `worldPerPixel` for the screen-fixed dash period.
+    ///   - renderOrigin: f64 floating origin to offset against (ADR-003).
+    static func dashedSegments(
+        _ segs: [(Vector, Vector)],
+        color: SIMD4<Float> = OverlayStyle.referenceColor,
+        viewport: Viewport,
+        renderOrigin: Vector
+    ) -> [FlatVertex] {
+        guard !segs.isEmpty else { return [] }
+        let wpp = viewport.worldPerPixel
+        guard wpp > 0, wpp.isFinite else { return [] }
+
+        // Dash geometry in WORLD units (screen points × worldPerPixel) so the dash
+        // size is fixed on screen across zoom.
+        let onW = OverlayStyle.referenceDashOnPoints * wpp
+        let gapW = OverlayStyle.referenceDashGapPoints * wpp
+        let periodW = onW + gapW
+        guard onW > 0, periodW > 0, periodW.isFinite else { return [] }
+
+        var v: [FlatVertex] = []
+        for (a, b) in segs {
+            guard a.valid, b.valid else { continue }
+            let d = b - a
+            let len = d.magnitude
+            // Degenerate (coincident) segment: nothing to dash.
+            guard len > 1e-12 else { continue }
+            let dir = Vector(d.x / len, d.y / len)
+
+            // Walk the segment one period at a time, emitting the ON run [t, t+on]
+            // (clamped to the segment end). Cap the iteration count to stay bounded
+            // at extreme zoom-out (a very long segment vs a tiny period).
+            let maxDashes = 4096
+            var t = 0.0
+            var count = 0
+            while t < len, count < maxDashes {
+                let onEnd = Swift.min(t + onW, len)
+                let p0 = Vector(a.x + dir.x * t, a.y + dir.y * t)
+                let p1 = Vector(a.x + dir.x * onEnd, a.y + dir.y * onEnd)
+                v.append(FlatVertex(position: off(p0, renderOrigin), color: color))
+                v.append(FlatVertex(position: off(p1, renderOrigin), color: color))
+                t += periodW
+                count += 1
             }
         }
         return v

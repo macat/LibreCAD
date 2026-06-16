@@ -206,13 +206,15 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     private var overlayVertexCount = 0
     private var overlayCapacity = 0
     /// Overlay buffer spans, in DRAW (and storage) order: the paper SHEET (paper-
-    /// space P2 — drawn FIRST, under everything), then grid, selection, snap, and the
-    /// tool-preview last. All drawn as `.line` primitives in one buffer.
+    /// space P2 — drawn FIRST, under everything), then grid, selection, snap, the
+    /// tool-preview, and the dashed reference guide LAST. All drawn as `.line`
+    /// primitives in one buffer.
     private var sheetVertexCount = 0
     private var gridVertexCount = 0
     private var selectionVertexCount = 0
     private var snapVertexCount = 0
     private var previewVertexCount = 0
+    private var referenceVertexCount = 0
 
     // MARK: Triple-buffered uniforms (§4.5)
 
@@ -487,6 +489,15 @@ final class LineRenderer: NSObject, MTKViewDelegate {
                     type: .line,
                     vertexStart: afterGrid + selectionVertexCount + snapVertexCount,
                     vertexCount: previewVertexCount)
+            }
+            // Dashed reference guide LAST (over the preview): its span follows the
+            // preview in the buffer, so its start offset includes every prior span.
+            if referenceVertexCount >= 2 {
+                encoder.drawPrimitives(
+                    type: .line,
+                    vertexStart: afterGrid + selectionVertexCount + snapVertexCount
+                        + previewVertexCount,
+                    vertexCount: referenceVertexCount)
             }
         }
 
@@ -887,15 +898,25 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             previewVerts = OverlayGeometry.toolPreview(tool.preview, renderOrigin: origin)
         }
 
+        // The active tool's dashed REFERENCE guides (Move's base→cursor displacement,
+        // Scale's center→reference original-size line). Screen-fixed dashes via the
+        // viewport, in the dimmer reference color. Empty outside the active drag.
+        var referenceVerts: [FlatVertex] = []
+        if let tool = model.tool {
+            referenceVerts = OverlayGeometry.dashedSegments(
+                tool.referenceSegments, viewport: viewport, renderOrigin: origin)
+        }
+
         sheetVertexCount = sheetVerts.count
         gridVertexCount = drawnGridVerts.count
         selectionVertexCount = selVerts.count
         snapVertexCount = snapVerts.count
         previewVertexCount = previewVerts.count
+        referenceVertexCount = referenceVerts.count
 
         // Storage order MUST match the draw order in `draw(in:)`: sheet, grid,
-        // selection, snap, preview.
-        let all = sheetVerts + drawnGridVerts + selVerts + snapVerts + previewVerts
+        // selection, snap, preview, reference.
+        let all = sheetVerts + drawnGridVerts + selVerts + snapVerts + previewVerts + referenceVerts
         overlayVertexCount = all.count
         guard !all.isEmpty else { return }
 

@@ -188,6 +188,75 @@ struct ScaleToolTests {
         }
     }
 
+    // MARK: - Reference segments (dashed center → original-reference guide)
+
+    @Test("referenceSegments is empty before the reference distance is fixed")
+    func referenceEmptyBeforeRef() {
+        var tool = ScaleTool()
+        let ctx = selectionContext()
+        // Only the center is fixed: no reference point yet → no guide.
+        _ = tool.handle(.click(Self.center), context: ctx)
+        _ = tool.handle(.move(Vector(5, 0)), context: ctx)
+        #expect(tool.referenceSegments.isEmpty)
+    }
+
+    @Test("referenceSegments returns the center → original-reference line in pickingTarget")
+    func referenceCenterToReference() {
+        var tool = ScaleTool()
+        let ctx = selectionContext()
+        _ = tool.handle(.click(Self.center), context: ctx)
+        _ = tool.handle(.click(Self.reference), context: ctx)   // fixes the reference point
+
+        // Even as the cursor moves to a new target, the guide marks the ORIGINAL
+        // reference (not the live cursor).
+        _ = tool.handle(.move(Self.target), context: ctx)
+
+        let segs = tool.referenceSegments
+        #expect(segs.count == 1)
+        #expect(segs.first?.0 == Self.center)
+        #expect(segs.first?.1 == Self.reference)
+    }
+
+    @Test("referenceSegments is empty after commit (does not leak past the drag)")
+    func referenceEmptyAfterCommit() {
+        var tool = ScaleTool()
+        let ctx = selectionContext()
+        _ = tool.handle(.click(Self.center), context: ctx)
+        _ = tool.handle(.click(Self.reference), context: ctx)
+        #expect(!tool.referenceSegments.isEmpty)   // present mid-drag
+
+        _ = tool.handle(.click(Self.target), context: ctx)   // commit (factor 2)
+        #expect(tool.referenceSegments.isEmpty)
+    }
+
+    @Test("referenceSegments is empty after cancel and after backspace to ref-pick")
+    func referenceEmptyAfterCancelAndBackspace() {
+        var tool = ScaleTool()
+        let ctx = selectionContext()
+        _ = tool.handle(.click(Self.center), context: ctx)
+        _ = tool.handle(.click(Self.reference), context: ctx)
+        #expect(!tool.referenceSegments.isEmpty)
+
+        // Backspace steps pickingTarget → pickingRef → no reference point → empty.
+        _ = tool.handle(.backspace, context: ctx)
+        #expect(tool.referenceSegments.isEmpty)
+
+        // Re-fix the reference, then cancel → empty.
+        _ = tool.handle(.click(Self.reference), context: ctx)
+        #expect(!tool.referenceSegments.isEmpty)
+        _ = tool.handle(.cancel, context: ctx)
+        #expect(tool.referenceSegments.isEmpty)
+    }
+
+    @Test("empty selection: no reference line")
+    func referenceEmptyWithoutSelection() {
+        var tool = ScaleTool()
+        let ctx = emptyContext()
+        _ = tool.handle(.click(Self.center), context: ctx)
+        _ = tool.handle(.click(Self.reference), context: ctx)
+        #expect(tool.referenceSegments.isEmpty)
+    }
+
     // MARK: - Empty selection no-op
 
     @Test("empty selection: clicks and moves are no-ops, no commit, no preview")

@@ -258,6 +258,32 @@ public protocol Tool: Sendable {
     /// selection / entities / grid; DRAW tools ignore it, MODIFY tools read
     /// `context.selected`. Mutating because the tool owns its state.
     mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome
+
+    /// Optional dashed REFERENCE segments to draw in the overlay alongside the live
+    /// `preview` — straight world-coord lines back to where an operation STARTED, so
+    /// the user can see the original anchor while dragging (e.g. Move's base→cursor
+    /// displacement vector, or Scale's center→reference original radius). Each tuple
+    /// is `(from, to)` in WORLD coordinates; the app draws them DASHED (a dimmer
+    /// guide color) so they read as a guide distinct from the solid ghost preview.
+    ///
+    /// Append-only extension of the frozen contract (the same additive-default
+    /// pattern as `ToolContext`'s closures): a default implementation in the
+    /// protocol extension below returns `[]`, so EVERY existing tool inherits "no
+    /// reference line" with no per-tool change — only tools that opt in (Move /
+    /// Scale) override it. It must be empty outside the active drag phase (before
+    /// the anchor is fixed and after commit) so the line only shows mid-operation
+    /// and never leaks into exports (exports never read a tool's overlay).
+    var referenceSegments: [(Vector, Vector)] { get }
+}
+
+// MARK: - Default reference segments (additive: all tools inherit "none")
+
+public extension Tool {
+    /// Default: tools draw no dashed reference line. Only Move / Scale override this
+    /// to expose their "where we started from" guide (the displacement vector / the
+    /// original reference radius). Keeps the contract append-only — no existing tool
+    /// file needs to change to gain a conforming (empty) `referenceSegments`.
+    var referenceSegments: [(Vector, Vector)] { [] }
 }
 
 // MARK: - Placeholder id convention

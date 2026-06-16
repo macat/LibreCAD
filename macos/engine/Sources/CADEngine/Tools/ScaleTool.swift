@@ -99,8 +99,11 @@ public struct ScaleTool: Tool {
         /// pivot every entity scales about.
         case pickingRef(center: Vector)
         /// Center + reference distance fixed; waiting for the target distance
-        /// point. `refDist` is the "old size" the factor is measured against.
-        case pickingTarget(center: Vector, refDist: Double)
+        /// point. `refDist` is the "old size" the factor is measured against, and
+        /// `refPoint` is the actual picked reference point (`|refPoint − center| ==
+        /// refDist`) — kept so the overlay can draw a dashed `center → refPoint`
+        /// guide marking the ORIGINAL size while the live ghost shows the new size.
+        case pickingTarget(center: Vector, refDist: Double, refPoint: Vector)
 
         // --- .reference mode (scale-by-reference-length, four picks) ---
         /// Waiting for the base / pivot the selection scales about.
@@ -191,7 +194,7 @@ public struct ScaleTool: Tool {
         // share the same "scale the selection about a pivot" rubber-band.
         let pivotFactor: (pivot: Vector, factor: Double)?
         switch normalizedState {
-        case .pickingTarget(let center, let refDist):
+        case .pickingTarget(let center, let refDist, _):
             pivotFactor = validFactor(target: cursor, center: center, refDist: refDist)
                 .map { (center, $0) }
         case .refPickingNew(let base, let refStart, let refLen):
@@ -213,6 +216,21 @@ public struct ScaleTool: Tool {
                 .resolve(pen: .toolPreview, ctx: .default)
                 .polylines
         }
+    }
+
+    /// A dashed guide marking the ORIGINAL reference size: a `center → refPoint`
+    /// line (in `.factor` mode) drawn while picking the target distance, so the user
+    /// sees the size they measured FROM while the live ghost shows the new size.
+    /// Present only in the `.pickingTarget` drag phase; empty before the reference
+    /// distance is fixed and after commit/cancel, so it never shows outside the
+    /// active operation. The `.reference` mode keeps no reference line (its base/
+    /// reference picks are FREE points, not a center→radius the guide would clarify).
+    public var referenceSegments: [(Vector, Vector)] {
+        guard case .pickingTarget(let center, _, let refPoint) = normalizedState,
+              center.valid, refPoint.valid else {
+            return []
+        }
+        return [(center, refPoint)]
     }
 
     /// A MODIFY tool: it reads `context.selected` (the entities to scale) and emits
@@ -278,11 +296,13 @@ public struct ScaleTool: Tool {
             guard center.valid, p.valid, refDist > Tolerance.distance else {
                 return .none
             }
-            state = .pickingTarget(center: center, refDist: refDist)
+            // Keep the actual picked reference point (not just its distance) so the
+            // overlay can draw the dashed `center → refPoint` original-size guide.
+            state = .pickingTarget(center: center, refDist: refDist, refPoint: p)
             cursor = p
             return .none
 
-        case .pickingTarget(let center, let refDist):
+        case .pickingTarget(let center, let refDist, _):
             // factor = |target − center| / refDist. Ignore a degenerate factor
             // (≈ 1 is a no-op; ≈ 0 collapses the geometry to a point).
             guard let factor = validFactor(target: p, center: center, refDist: refDist) else {
@@ -350,7 +370,7 @@ public struct ScaleTool: Tool {
             state = .pickingCenter
             cursor = .invalid
             return .preview
-        case .pickingTarget(let center, _):
+        case .pickingTarget(let center, _, _):
             // Step back to before the reference-distance pick.
             state = .pickingRef(center: center)
             cursor = .invalid
