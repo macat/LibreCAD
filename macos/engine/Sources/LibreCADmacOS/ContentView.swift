@@ -284,7 +284,10 @@ struct ContentView: View {
                             controllerBox.controller?.requestRedraw()
                         }
                     )
-                    StatusBar(model: model)
+                    StatusBar(
+                        model: model,
+                        requestRedraw: { controllerBox.controller?.requestRedraw() }
+                    )
                     commandBar
                     // The AutoCAD-style tool LAUNCHER bar — ADDED below the U1
                     // coordinate line, alongside the grouped button toolbar at the
@@ -297,6 +300,7 @@ struct ContentView: View {
                     CommandBar(
                         model: model,
                         focused: $commandBarFocused,
+                        pinned: pinnedToolsSet,
                         activateTool: { kind in controllerBox.controller?.activateTool(kind) },
                         placeImage: { chooseAndPlaceImage() },
                         returnFocusToCanvas: { controllerBox.controller?.returnFocusToCanvas() }
@@ -889,15 +893,14 @@ struct ContentView: View {
                 // Esc clears + returns focus to the canvas (so tool letters work).
                 .onExitCommand { returnFocusToCanvas() }
 
+            // De-dup (plan §3d): the syntax hint lives ONLY in the placeholder now;
+            // the trailing duplicate else-branch hint is removed. Keep the trailing
+            // slot for ERROR display (so a typo like `1,,2` is shown in red). The verb
+            // hints (⏎ / ⌫ / esc) live in the StatusBar only.
             if let error = model.lastCommandError, !error.isEmpty {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
-                    .lineLimit(1)
-            } else if model.isToolActive {
-                Text(commandPlaceholder)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
         }
@@ -908,11 +911,12 @@ struct ContentView: View {
     }
 
     /// The active tool's step prompt + the accepted coordinate syntax, shown as the
-    /// field's placeholder/hint. A neutral hint in select mode.
+    /// field's placeholder/hint (the SINGLE place the syntax hint appears). A short
+    /// neutral hint in select mode.
     private var commandPlaceholder: String {
         let hint = model.commandHint
         return hint.isEmpty
-            ? "Command line — start a tool, then type a coordinate (x,y · @dx,dy · dist<angle)"
+            ? "Command — type a coordinate (x,y · @dx,dy · dist<angle)"
             : hint
     }
 
@@ -1877,9 +1881,35 @@ struct LayoutTabStrip: View {
     /// Discard. Defaults to a no-op so existing call sites need not pass it.
     var onSelectBlockEdit: () -> Void = {}
 
+    /// Whether the strip is shown at all (plan §3d): HIDE it entirely until there is a
+    /// paper-space layout to switch to — with only the implicit "Model" space there is
+    /// nothing to tab between, so a lone "Model" pill is noise. The strip also appears
+    /// while a block-edit session is open so its transient BEDIT tab has a home.
+    /// `LayoutTabStrip.shouldShow(layoutCount:isEditingBlock:)` is the pure predicate
+    /// (unit-tested); this is its live read.
+    private var isVisible: Bool {
+        Self.shouldShow(layoutCount: model.orderedLayouts.count,
+                        isEditingBlock: model.editingBlock != nil)
+    }
+
+    /// Pure visibility predicate (plan §3d): show the strip iff there is at least one
+    /// paper-space layout to switch to, OR a block-edit session is active (so the
+    /// transient BEDIT tab is reachable). With only model space (`layoutCount == 0`)
+    /// and no session, the strip is hidden — there is nothing to tab between.
+    static func shouldShow(layoutCount: Int, isEditingBlock: Bool) -> Bool {
+        layoutCount > 0 || isEditingBlock
+    }
+
     var body: some View {
+        if isVisible {
+            stripBody
+        }
+    }
+
+    /// The actual tab strip (only built when `isVisible`).
+    private var stripBody: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 2) {
+            HStack(spacing: DS.Space.xxs) {
                 modelTab
                 ForEach(model.orderedLayouts) { layout in
                     layoutTab(named: layout.name)
@@ -1893,8 +1923,8 @@ struct LayoutTabStrip: View {
                 blockEditTab
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .padding(.horizontal, DS.Size.barPadH)
+            .padding(.vertical, DS.Space.xs)
         }
         .frame(maxWidth: .infinity)
         .background(.bar)
@@ -1974,9 +2004,9 @@ struct LayoutTabStrip: View {
     private var addButton: some View {
         Button(action: onAddLayout) {
             Image(systemName: "plus")
-                .font(.callout)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
+                .font(DS.Font.rowLabel)
+                .padding(.horizontal, DS.Space.md)
+                .padding(.vertical, DS.Space.xs)
         }
         .buttonStyle(.plain)
         .help("New layout")
@@ -1984,8 +2014,9 @@ struct LayoutTabStrip: View {
     }
 
     /// A single tab pill — shared chrome for the Model tab + each layout tab. The
-    /// active tab reads with the accent tint + a filled background; inactive tabs are
-    /// secondary. A plain button so the whole pill is the hit target.
+    /// active tab reads with the accent tint, a `selectionFill` background, a
+    /// `.semibold` title, and a 2pt accent underline (plan §3d); inactive tabs are
+    /// secondary and underline-free. A plain button so the whole pill is the hit target.
     @ViewBuilder
     private func tabButton(
         title: String,
@@ -1994,19 +2025,28 @@ struct LayoutTabStrip: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            HStack(spacing: 5) {
+            HStack(spacing: DS.Space.sm) {
                 Image(systemName: systemImage)
                 Text(title)
             }
-            .font(.callout)
+            .font(DS.Font.rowLabel)
+            .fontWeight(isActive ? .semibold : .regular)
             .lineLimit(1)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .foregroundStyle(isActive ? Color.accentColor : .secondary)
+            .padding(.horizontal, DS.Space.md)
+            .padding(.vertical, DS.Space.xs)
+            .foregroundStyle(isActive ? DS.Palette.accent : .secondary)
             .background(
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(isActive ? Color.accentColor.opacity(0.15) : Color.clear)
+                RoundedRectangle(cornerRadius: DS.Radius.selection)
+                    .fill(isActive ? DS.Palette.selectionFill : Color.clear)
             )
+            .overlay(alignment: .bottom) {
+                // The 2pt accent underline marks the active tab (AutoCAD/Chrome-style).
+                if isActive {
+                    Rectangle()
+                        .fill(DS.Palette.accent)
+                        .frame(height: 2)
+                }
+            }
         }
         .buttonStyle(.plain)
     }

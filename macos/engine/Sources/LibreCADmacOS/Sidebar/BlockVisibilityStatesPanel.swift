@@ -75,24 +75,24 @@ struct BlockVisibilityStatesPanel: View {
     // MARK: Panel chrome
 
     @ViewBuilder private var panel: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: DS.Space.md) {
             header
             statesList
             Divider()
             visibilityButtons
         }
-        .padding(10)
+        .padding(DS.Space.lg)
         .frame(width: 240)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.separator))
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: DS.Radius.card))
+        .overlay(RoundedRectangle(cornerRadius: DS.Radius.card).stroke(.separator))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Visibility States")
     }
 
     @ViewBuilder private var header: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: DS.Space.sm) {
             Image(systemName: "eye.square")
-                .foregroundStyle(.tint)
+                .foregroundStyle(DS.Palette.accent)
             Text("Visibility States")
                 .font(.headline)
             Spacer(minLength: 4)
@@ -127,9 +127,9 @@ struct BlockVisibilityStatesPanel: View {
 
     @ViewBuilder private func stateRow(_ state: BlockVisibilityState, isDefault: Bool) -> some View {
         let isCurrent = state.name == currentStateName
-        HStack(spacing: 6) {
+        HStack(spacing: DS.Space.sm) {
             Image(systemName: isCurrent ? "largecircle.fill.circle" : "circle")
-                .foregroundStyle(isCurrent ? Color.accentColor : .secondary)
+                .foregroundStyle(isCurrent ? DS.Palette.accent : .secondary)
                 .onTapGesture { currentStateName = state.name }
             Text(state.name)
                 .lineLimit(1)
@@ -163,10 +163,10 @@ struct BlockVisibilityStatesPanel: View {
                   ? "A block must keep at least one visibility state"
                   : "Delete this state")
         }
-        .padding(.vertical, 2)
-        .padding(.horizontal, 4)
-        .background(isCurrent ? Color.accentColor.opacity(0.12) : .clear,
-                    in: RoundedRectangle(cornerRadius: 5))
+        .padding(.vertical, DS.Space.xxs)
+        .padding(.horizontal, DS.Space.xs)
+        .background(isCurrent ? DS.Palette.selectionFill : .clear,
+                    in: RoundedRectangle(cornerRadius: DS.Radius.selection))
         .contentShape(Rectangle())
         .onTapGesture { currentStateName = state.name }
     }

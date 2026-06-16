@@ -318,15 +318,24 @@ final class CanvasModel {
     var commandBarMRU: [ToolKind] = []
 
     /// The ordered tools the command bar should show as chips right now — the pure
-    /// `ToolSuggester` applied to the live query, the current selection state, and
-    /// the MRU. Empty query ⇒ the adaptive default set; otherwise the fuzzy matches.
-    /// A derived, side-effect-free read the chip row binds to.
+    /// `ToolSuggester` applied to the live query. Wave 4 de-mirror: an EMPTY query
+    /// returns NO chips (the bar shows a prompt hint + a labeled Recent row instead —
+    /// see `commandBarRecents(pinned:)`); only a non-empty query yields fuzzy-match
+    /// chips. A derived, side-effect-free read the chip row binds to.
     var commandBarSuggestions: [ToolKind] {
         ToolSuggester.suggestions(
             query: commandBarQuery,
             hasSelection: !selection.isEmpty,
             mru: commandBarMRU
         )
+    }
+
+    /// The most-recently-used tools to surface as a clearly-LABELED "Recent" row when
+    /// the query is empty (the de-mirror replacement for the dropped static chip set).
+    /// Excludes the tools already PINNED to the toolbar so the row never duplicates a
+    /// button the user already has. Pure read over the MRU + the pure `ToolSuggester`.
+    func commandBarRecents(pinned: Set<ToolKind>) -> [ToolKind] {
+        ToolSuggester.recents(mru: commandBarMRU, excluding: pinned)
     }
 
     /// The top-ranked suggestion for the current query — what ⏎ activates. `nil` when
@@ -4184,6 +4193,32 @@ final class CanvasModel {
         orthoEnabled.toggle()
         modelVersion &+= 1
     }
+
+    // MARK: - Status-bar CAD toggles (Wave 4 — surfaces EXISTING state, no new snap logic)
+
+    /// Toggles the grid's visibility (AutoCAD GRID / F7) — the same `gridVisible` flag
+    /// the Inspector and the canvas context menu drive. Bumps `modelVersion` so the
+    /// status-bar chip + menu state refresh; the renderer reads `gridVisible` on the
+    /// next pack. Additive surface of existing state (no new grid logic).
+    func toggleGrid() {
+        gridVisible.toggle()
+        modelVersion &+= 1
+    }
+
+    /// Toggles GRID SNAP (AutoCAD SNAP / F9) — the `.grid` bit of the existing
+    /// `snapModes` set, routed through `setSnapMode` so it persists (the same undoable
+    /// `$LC_SNAPMODE` path the Inspector's "Grid" snap toggle uses). This is the only
+    /// snap on/off this wave surfaces as a single-flag toggle; the per-osnap object
+    /// snaps stay in the Inspector's detailed list. `modelVersion` is bumped so the
+    /// status chip refreshes immediately.
+    func toggleGridSnap() {
+        setSnapMode(.grid, !isSnapModeOn(.grid))
+        modelVersion &+= 1
+    }
+
+    /// Whether grid snap (the `.grid` snap-mode bit) is currently on — the status
+    /// bar's SNAP chip reads this. Read-only convenience over `isSnapModeOn(.grid)`.
+    var gridSnapEnabled: Bool { isSnapModeOn(.grid) }
 
     /// The EFFECTIVE ortho state for a point input given whether ⇧ is held: the
     /// persistent flag XOR the transient hold-⇧ override (LibreCAD lets ⇧ flip ortho

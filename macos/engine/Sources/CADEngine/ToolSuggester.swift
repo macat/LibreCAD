@@ -126,19 +126,22 @@ public enum ToolSuggester {
     /// The default chip cap (~10) the brief calls for.
     public static let defaultCap = 10
 
-    /// The ordered tools the command bar should display.
+    /// The ordered tools the command bar should display AS CHIPS.
     ///
-    /// - When `query` is empty (or whitespace) → the ADAPTIVE default set: the
-    ///   curated `core`, then the most-recently-used tools, then a context list
-    ///   (`modify` when `hasSelection`, else `draw`). Deduped (first occurrence
-    ///   wins), order-stable, capped at `cap`.
+    /// Wave 4 de-mirror (plan §3d): the command bar is now a true command LINE, not a
+    /// static mirror of a default tool set. So:
+    /// - When `query` is empty (or whitespace) → **NO chips** (`[]`). The bar shows a
+    ///   prompt hint instead, with the most-recently-used tools surfaced separately as
+    ///   a clearly-labeled "Recent" row (see `recents(mru:excluding:cap:)`).
     /// - Otherwise → a fuzzy filter of EVERY `ToolKind` (title + aliases) ranked by
-    ///   the shared `CommandMatcher`, capped at `cap`.
+    ///   the shared `CommandMatcher`, capped at `cap`. These are the only chips.
     ///
     /// - Parameters:
     ///   - query: the user's typed text.
-    ///   - hasSelection: whether the canvas selection is non-empty.
-    ///   - mru: most-recently-used tools, most-recent FIRST.
+    ///   - hasSelection: retained for source compatibility; no longer affects the
+    ///     result now that the empty-query adaptive mirror is gone (the fuzzy path is
+    ///     query-only, the empty path is empty).
+    ///   - mru: most-recently-used tools — surfaced via `recents`, NOT as chips here.
     ///   - catalog: the roster + aliases to rank over (defaults to `.default`).
     ///   - cap: the maximum number of chips (defaults to ~10).
     public static func suggestions(query: String,
@@ -147,13 +150,42 @@ public enum ToolSuggester {
                                    catalog: ToolSuggestionCatalog = .default,
                                    cap: Int = defaultCap) -> [ToolKind] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            return adaptiveSet(hasSelection: hasSelection, mru: mru, catalog: catalog, cap: cap)
-        }
+        // De-mirror: an empty query shows no chips at all (a prompt hint + Recent row
+        // take their place). Chips/results appear ONLY while typing.
+        if trimmed.isEmpty { return [] }
         return fuzzySet(query: trimmed, catalog: catalog, cap: cap)
     }
 
-    // MARK: - Empty query → adaptive default set
+    // MARK: - Empty query → labeled "Recent" row (NOT chips)
+
+    /// The most-recently-used tools to surface as a clearly-labeled "Recent" row when
+    /// the query is empty — the replacement for the dropped static chip mirror. Most-
+    /// recent first, with any `excluding` tools (e.g. the ones already PINNED to the
+    /// toolbar) removed so the row never duplicates a button the user already has, and
+    /// capped at `cap`. Pure — no SwiftUI, fully unit-testable.
+    ///
+    /// - Parameters:
+    ///   - mru: most-recently-used tools, most-recent FIRST.
+    ///   - excluding: tools to omit (typically the pinned toolbar set).
+    ///   - cap: the maximum number of recent chips.
+    public static func recents(mru: [ToolKind],
+                               excluding: Set<ToolKind> = [],
+                               cap: Int = defaultCap) -> [ToolKind] {
+        var seen = Set<ToolKind>()
+        var ordered: [ToolKind] = []
+        for kind in mru where !excluding.contains(kind) && !seen.contains(kind) {
+            seen.insert(kind)
+            ordered.append(kind)
+        }
+        return Array(ordered.prefix(Swift.max(0, cap)))
+    }
+
+    // MARK: - Adaptive default set (LEGACY — retained for API stability)
+    //
+    // The empty-query path no longer calls `adaptiveSet` (Wave 4 dropped the static
+    // mirror). It is kept (with its catalog rosters) so the public `ToolSuggestionCatalog`
+    // shape and any external callers stay source-compatible; the command bar uses
+    // `recents` for the empty state instead.
 
     /// The pre-typing chip set: curated core, then MRU, then the context roster
     /// (Modify when something is selected, else Draw). Dedup keeps the FIRST
