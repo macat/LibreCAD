@@ -71,9 +71,9 @@ struct DXFPayload: Sendable, Equatable {
     /// The paper-space LAYOUT table — the named sheets (paper-space P0). Carried so
     /// the native value-model round-trip preserves layouts + the per-entity space
     /// tag (which travels on the `EntityRecord`s in `entities`). Symmetric to
-    /// `dimStyles`/`blocks`. (DXF/DWG serialization of layouts is a later phase; the
-    /// engine bridge does not yet emit them, so a SAVE to disk does not carry them
-    /// — only the in-memory payload ↔ drawing round-trip does.)
+    /// `dimStyles`/`blocks`. (Paper-space P3: a SAVE to DXF now DOES carry layouts +
+    /// their viewports to disk via the bridge writer; DWG viewport write + multi-layout
+    /// DXF remain follow-ups.)
     var layouts: [Layout]
 
     init(

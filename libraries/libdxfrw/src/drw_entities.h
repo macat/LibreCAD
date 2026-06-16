@@ -1851,6 +1851,7 @@ public:
         psheight = 156;
         centerPX = 128.5;
         centerPY = 97.5;
+        viewHeight = 0; // LibreCAD-macOS: init code-45 field so a foreign DXF that omits it yields a clamped (not garbage) view scale
     }
 
 protected:
