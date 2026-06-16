@@ -804,15 +804,19 @@ struct ContentView: View {
             .opacity(status.isEmpty ? 0 : 1)
     }
 
-    /// DB-1W: the dynamic-block visibility-states authoring panel, floated at the canvas
-    /// top-trailing while a block-edit session is active. It renders its own chrome only
-    /// when `model.isEditingBlock`, so this is a thin host (padded so it clears the
+    /// DB-1W + DB-2W: the dynamic-block authoring panels, floated at the canvas top-trailing
+    /// while a block-edit session is active — the VISIBILITY STATES panel (DB-1) stacked
+    /// above the PARAMETERS & ACTIONS panel (DB-2). Each renders its own chrome only when
+    /// `model.isEditingBlock`, so this is a thin host (padded so it clears the
     /// toolbar/tool-options chrome). Bound to the same live `CanvasModel` the canvas uses.
     @ViewBuilder
     private var visibilityStatesPanel: some View {
-        BlockVisibilityStatesPanel(model: model, controllerBox: controllerBox)
-            .padding(.top, 8)
-            .padding(.trailing, 8)
+        VStack(alignment: .trailing, spacing: 8) {
+            BlockVisibilityStatesPanel(model: model, controllerBox: controllerBox)
+            BlockDynamicParametersPanel(model: model, controllerBox: controllerBox)
+        }
+        .padding(.top, 8)
+        .padding(.trailing, 8)
     }
 
     // MARK: - Command / coordinate input line (U1)

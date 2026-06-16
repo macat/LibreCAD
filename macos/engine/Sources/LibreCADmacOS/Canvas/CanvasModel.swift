@@ -2800,6 +2800,180 @@ final class CanvasModel {
         return targets.count
     }
 
+    // MARK: Authoring — PARAMETERS + ACTIONS (DB-2W STAGE 2, inside the Block Editor)
+    //
+    // The DB-2 authoring funnel: while editing a block (`editingBlock != nil`), turn the
+    // current canvas SELECTION into a LINEAR STRETCH parameter+action or a FLIP
+    // parameter+action, and list/remove them. The geometry (the parameter segment / flip
+    // line / stretch frame) is DERIVED from the selection's block-local bounding box — a
+    // straightforward, headless-testable UX that needs no modal and no tool-input state
+    // machine (the brief: "UX can be straightforward"). Each routes through the engine's
+    // undoable `CADDrawing` mutators (one ⌘Z per add/remove), and a parameter remove
+    // PRUNES the actions that referenced it (so no orphan action is left behind).
+
+    /// The parameters of the block CURRENTLY being edited (the panel's list), or `[]` when
+    /// not editing / the block has none.
+    var editingBlockParameters: [BlockParameter] {
+        guard let name = editingBlock,
+              let block = drawing.blocks.block(named: name) else { return [] }
+        return block.dynamic?.parameters ?? []
+    }
+
+    /// The actions of the block CURRENTLY being edited (the panel's list), or `[]`.
+    var editingBlockActions: [BlockAction] {
+        guard let name = editingBlock,
+              let block = drawing.blocks.block(named: name) else { return [] }
+        return block.dynamic?.actions ?? []
+    }
+
+    /// The block-LOCAL bounding box of the current selection's members (the editing block's
+    /// own coordinate space — members are stored re-authored about the base point). `nil`
+    /// for an empty / non-member selection. The authoring geometry is derived from this.
+    private var selectionBlockLocalBounds: AABB? {
+        guard let name = editingBlock,
+              let memberIDs = drawing.blocks.block(named: name)?.entityIDs else { return nil }
+        let memberSet = Set(memberIDs)
+        var box = AABB.empty
+        for id in selection.ids where memberSet.contains(id) {
+            guard let e = drawing.entity(id) else { continue }
+            box = box.union(e.boundingBox())
+        }
+        return box.isEmpty ? nil : box
+    }
+
+    /// The selected ids that are actual members of the editing block (an action's selection
+    /// set). Empty if not editing / nothing applicable.
+    private var selectedMemberIDs: Set<EntityID> {
+        guard let name = editingBlock,
+              let memberIDs = drawing.blocks.block(named: name)?.entityIDs else { return [] }
+        let memberSet = Set(memberIDs)
+        return Set(selection.ids.filter { memberSet.contains($0) })
+    }
+
+    /// A fresh, unused parameter id within the editing block (prefix `p`), so two adds never
+    /// collide on the per-instance value key.
+    private func freshParameterID() -> BlockParameterID {
+        let used = Set(editingBlockParameters.map { $0.id.raw })
+        var n = used.count + 1
+        while used.contains("p\(n)") { n += 1 }
+        return BlockParameterID("p\(n)")
+    }
+
+    /// A fresh, unused action id within the editing block (prefix `a`).
+    private func freshActionID() -> BlockActionID {
+        let used = Set(editingBlockActions.map { $0.id.raw })
+        var n = used.count + 1
+        while used.contains("a\(n)") { n += 1 }
+        return BlockActionID("a\(n)")
+    }
+
+    /// Authors a LINEAR STRETCH from the current selection (block-features §5.2.2 + §6.2.3):
+    /// adds a `.linear` parameter running left-mid → right-mid across the selection's
+    /// block-local bounds, plus a `.stretch` action over the RIGHT HALF of those bounds
+    /// (so dragging the grip stretches the right portion) targeting the selected members.
+    /// Both adds are ONE undo group. Returns the new parameter id, or `nil` if not editing
+    /// or the selection has no members / a degenerate (zero-width) box.
+    ///
+    /// `label` names the parameter in the Properties palette; an empty label defaults to
+    /// "Distance N".
+    @discardableResult
+    func addLinearStretchFromSelection(label: String = "") -> BlockParameterID? {
+        guard let block = editingBlock, let box = selectionBlockLocalBounds else { return nil }
+        let members = selectedMemberIDs
+        guard !members.isEmpty else { return nil }
+        let midY = (box.min.y + box.max.y) * 0.5
+        let base = Vector(box.min.x, midY)
+        let end = Vector(box.max.x, midY)
+        guard (end - base).magnitude > Tolerance.distance else { return nil }   // degenerate
+        // The stretch frame = the RIGHT HALF of the bounds (so the right defining points move,
+        // the left stay), grown a hair in Y so endpoints exactly on the mid-line are inside.
+        let midX = (box.min.x + box.max.x) * 0.5
+        let pad = Swift.max((box.max.y - box.min.y) * 0.5, Tolerance.distance)
+        let frame = AABB(min: Vector(midX, box.min.y - pad),
+                         max: Vector(box.max.x + (box.max.x - midX), box.max.y + pad))
+
+        let pid = freshParameterID()
+        let aid = freshActionID()
+        let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalLabel = name.isEmpty ? "Distance \(editingBlockParameters.count + 1)" : name
+
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        guard drawing.addLinearParameter(toBlock: block, id: pid, label: finalLabel,
+                                         base: base, end: end) else { return nil }
+        _ = drawing.addStretchAction(toBlock: block, id: aid, parameterID: pid,
+                                     frame: frame, memberIDs: members)
+        modelDirty = true; modelVersion &+= 1
+        return pid
+    }
+
+    /// Authors a FLIP from the current selection (block-features §5.2.7 + §6.2.6): adds a
+    /// `.flip` parameter whose reflection line is VERTICAL through the selection's
+    /// block-local center (so a flip mirrors left↔right), plus a `.flip` action targeting
+    /// the selected members. Both adds are ONE undo group. Returns the new parameter id, or
+    /// `nil` if not editing / no members / a degenerate box.
+    @discardableResult
+    func addFlipFromSelection(label: String = "") -> BlockParameterID? {
+        guard let block = editingBlock, let box = selectionBlockLocalBounds else { return nil }
+        let members = selectedMemberIDs
+        guard !members.isEmpty else { return nil }
+        let midX = (box.min.x + box.max.x) * 0.5
+        let midY = (box.min.y + box.max.y) * 0.5
+        // A vertical reflection line through the center, spanning (a bit beyond) the box. For
+        // a zero-height selection (e.g. a single horizontal line) fall back to the box WIDTH
+        // so the line is non-degenerate and the flip-grip triangle has an orientation.
+        let height = box.max.y - box.min.y
+        let span = Swift.max(height, box.max.x - box.min.x, Tolerance.distance * 10)
+        let lineStart = Vector(midX, midY - span * 0.6)
+        let lineEnd = Vector(midX, midY + span * 0.6)
+        guard (lineEnd - lineStart).magnitude > Tolerance.distance else { return nil }
+
+        let pid = freshParameterID()
+        let aid = freshActionID()
+        let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalLabel = name.isEmpty ? "Flip \(editingBlockParameters.count + 1)" : name
+
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        guard drawing.addFlipParameter(toBlock: block, id: pid, label: finalLabel,
+                                       lineStart: lineStart, lineEnd: lineEnd) else { return nil }
+        _ = drawing.addFlipAction(toBlock: block, id: aid, parameterID: pid, memberIDs: members)
+        modelDirty = true; modelVersion &+= 1
+        return pid
+    }
+
+    /// Removes a parameter from the editing block AND prunes every action that referenced it
+    /// (so no orphan action is left), as ONE undo group. Undoable. Returns `false` if not
+    /// editing or the parameter is unknown.
+    @discardableResult
+    func removeEditingBlockParameter(_ id: BlockParameterID) -> Bool {
+        guard let block = editingBlock,
+              let def = drawing.blocks.block(named: block)?.dynamic,
+              def.parameter(id) != nil else { return false }
+        let orphans = def.actions.filter { $0.parameterID == id }.map { $0.id }
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        for aid in orphans { drawing.removeAction(fromBlock: block, id: aid) }
+        drawing.removeParameter(fromBlock: block, id: id)
+        modelDirty = true; modelVersion &+= 1
+        return true
+    }
+
+    /// Removes a single action from the editing block (leaving its parameter intact).
+    /// Undoable. Returns `false` if not editing or the action is unknown.
+    @discardableResult
+    func removeEditingBlockAction(_ id: BlockActionID) -> Bool {
+        guard let block = editingBlock,
+              let def = drawing.blocks.block(named: block)?.dynamic,
+              def.actions.contains(where: { $0.id == id }) else { return false }
+        drawing.removeAction(fromBlock: block, id: id)
+        modelDirty = true; modelVersion &+= 1
+        return true
+    }
+
     // MARK: - Layer ops (F17 — freeze/lock all, per-entity layer ops, layer states)
 
     /// Freezes / thaws every layer in one undoable step (sidebar "freeze all").
