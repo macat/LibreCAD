@@ -97,6 +97,127 @@ enum DrawingPrinter {
                                                     background: background)
         try DrawingExporter.writePDF(scene: scene, to: url, options: options)
     }
+
+    // MARK: - Layout (paper-space sheet) plot — Paper Space P4
+
+    /// Presents the print panel for a paper-space `layout` sheet of `drawing`,
+    /// plotted at the LAYOUT's own plot scale (the sheet at 1:1 for a fixed ratio,
+    /// fit-to-page for `.fit`) rather than the model-space page setup.
+    ///
+    /// `scene` is the layout's paper-space drawables (the caller filters the drawing's
+    /// `space == .paper && layoutName == layout.name` records into a scene — kept as a
+    /// parameter so this entry point does not reach into `CADDrawing`'s space/layout
+    /// model, which other phases own). `window` (optional) attaches the panel as a
+    /// sheet; returns whether the user proceeded.
+    @discardableResult
+    static func printLayout(_ layout: Layout,
+                            scene: ExportScene,
+                            in window: NSWindow? = nil,
+                            snapToStandard: Bool = true) -> Bool {
+        let info = NSPrintInfo.shared.copy() as! NSPrintInfo
+        info.horizontalPagination = .clip
+        info.verticalPagination = .clip
+        info.isHorizontallyCentered = false
+        info.isVerticallyCentered = false
+
+        // Bind the print JOB's media to the LAYOUT's (snapped) sheet, not the
+        // printer's default paper — the layout renders against `makeLayout(for:)`'s
+        // layout-sized media, so a mismatch (e.g. an A3 layout on an A4-default
+        // printer) would otherwise make `NSPrintOperation` scale/clip and break the
+        // 1:1 sheet. This mirrors `print(...)`, which rebinds the setup to the actual
+        // paper. Zero hardware margins so our own margin/clip is the only inset.
+        let setup = PrintLayout.pageSetup(from: layout.page, snapToStandard: snapToStandard)
+        let sheet = NSSize(width: CGFloat(setup.paperSize.width),
+                           height: CGFloat(setup.paperSize.height))
+        info.paperSize = sheet
+        info.leftMargin = 0; info.rightMargin = 0
+        info.topMargin = 0; info.bottomMargin = 0
+
+        let view = LayoutPrintView(scene: scene, layout: layout,
+                                   snapToStandard: snapToStandard)
+        view.frame = NSRect(origin: .zero, size: sheet)
+
+        let op = NSPrintOperation(view: view, printInfo: info)
+        op.showsPrintPanel = true
+        op.showsProgressPanel = true
+
+        if let window {
+            op.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
+            return true
+        } else {
+            return op.run()
+        }
+    }
+}
+
+// MARK: - Layout render (pure, panel-free — testable + shared by print/export)
+
+/// The PURE "draw this layout sheet into a CGContext" function — NO print panel, NO
+/// save panel, NO modal — so it is reachable from a unit test and shared by the
+/// print view (`LayoutPrintView`) and the PDF export path
+/// (`DrawingExporter.writeLayoutPDF` / `layoutPDFData`). The context must already be
+/// flipped to a TOP-LEFT origin (y-down) to match `ExportTransform` (the
+/// PDF/print/bitmap callers do this).
+///
+/// Draws the sheet through `PrintLayout.makeLayout(for:)`'s layout-aware transform,
+/// clipping to the sheet's imageable (margin-inset) area so an oversize sheet at a
+/// fixed scale does not bleed into the hardware margins.
+@MainActor
+enum LayoutRenderer {
+    /// Renders `scene` (the layout's paper-space drawables) onto its sheet in `ctx`.
+    /// Returns the resolved `PlotLayout`/`PageSetup` used (handy for the caller to
+    /// size the page / report overflow).
+    @discardableResult
+    static func draw(scene: ExportScene,
+                     layout: Layout,
+                     in ctx: CGContext,
+                     background: RGBAColor? = nil,
+                     snapToStandard: Bool = true)
+        -> (layout: PlotLayout, setup: PageSetup) {
+        let result = PrintLayout.makeLayout(for: layout, snapToStandard: snapToStandard)
+        let setup = result.setup
+        let m = CGFloat(setup.margin)
+        let clip = CGRect(x: m, y: m,
+                          width: CGFloat(setup.imageableSize.width),
+                          height: CGFloat(setup.imageableSize.height))
+        ctx.saveGState()
+        ctx.clip(to: clip)
+        CGSceneRenderer.draw(scene: scene, in: ctx, transform: result.layout.transform,
+                             background: background)
+        ctx.restoreGState()
+        return result
+    }
+}
+
+/// The NSView that draws one paper-space layout sheet for the print operation, at
+/// the layout's plot scale (sheet at 1:1 / fit-to-page), anchored + clipped.
+final class LayoutPrintView: NSView {
+    private let scene: ExportScene
+    private let layout: Layout
+    private let snapToStandard: Bool
+
+    init(scene: ExportScene, layout: Layout, snapToStandard: Bool) {
+        self.scene = scene
+        self.layout = layout
+        self.snapToStandard = snapToStandard
+        let setup = PrintLayout.pageSetup(from: layout.page, snapToStandard: snapToStandard)
+        super.init(frame: NSRect(origin: .zero,
+                                 size: NSSize(width: setup.paperSize.width,
+                                              height: setup.paperSize.height)))
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override var isFlipped: Bool { true }   // top-left origin, matching the renderer.
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        // NSView is flipped (top-left origin), exactly what the layout renderer /
+        // ExportTransform expect, so no extra flip is needed here.
+        LayoutRenderer.draw(scene: scene, layout: layout, in: ctx,
+                            background: nil, snapToStandard: snapToStandard)
+    }
 }
 
 /// The NSView that draws one page of the drawing for the print operation, at the
@@ -216,5 +337,30 @@ extension PageSetup {
         var copy = self
         copy.paperSize = size
         return copy
+    }
+}
+
+// MARK: - PaperSize ⇄ layout page descriptor (Paper Space P4)
+//
+// The `PaperSize`-enum mapping lives HERE (an app-target-only file that is never
+// symlinked into the test target), not in `PrintLayout.swift`, so `PrintLayout`
+// stays symlink-safe. The symlink-safe nearest-sheet MATH is `PrintLayout.
+// nearestStandardPage(...)` (tested); this just maps its canonical name to the app
+// enum.
+
+extension PaperSize {
+    /// The `PaperSize` whose canonical name matches `name` ("A4", "Letter", …),
+    /// falling back to A4 for an unknown name. Pairs with
+    /// `PrintLayout.nearestStandardPage(...).name`.
+    static func named(_ name: String) -> PaperSize {
+        PaperSize.allCases.first { $0.label.caseInsensitiveCompare(name) == .orderedSame } ?? .a4
+    }
+
+    /// The nearest standard `PaperSize` for an engine `PageDescriptor`'s millimeter
+    /// page (orientation-agnostic — A4 portrait and A4 landscape both map to `.a4`).
+    /// Bridges the engine layout descriptor to the app's print/page-setup enum.
+    static func nearest(to page: PageDescriptor) -> PaperSize {
+        named(PrintLayout.nearestStandardPage(widthMM: page.widthMM,
+                                              heightMM: page.heightMM).name)
     }
 }

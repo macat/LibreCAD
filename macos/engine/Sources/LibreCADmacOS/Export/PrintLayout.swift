@@ -287,3 +287,205 @@ public enum PrintLayout {
 /// Millimeters → page points (72 pt / inch). Used to turn a paper size in mm into
 /// the points `PageSetup`/`ExportOptions` speak.
 public func pointsFromMM(_ mm: Double) -> Double { mm * 72.0 / 25.4 }
+
+// MARK: - Layout → page-setup conversion (Paper Space P4)
+//
+// A drawing's layouts (`CADDrawing.layouts: [Layout]`) carry an ENGINE-level page
+// descriptor — `PageDescriptor { widthMM, heightMM, marginMM, plotScale }` with
+// `plotScale: LayoutPlotScale` (`.fit` / `.ratio(Double)`) — kept in plain engine
+// values so `CADEngine` does not depend on the app (Layout.swift header). The PLOT
+// substrate here speaks the app's `PageSetup` (points) + `PlotScale`. These pure
+// converters bridge the two, so a layout can be printed/exported at its sheet's
+// plot scale through the SAME `makeLayout` math the model-space path uses.
+//
+// `Layout` / `PageDescriptor` / `LayoutPlotScale` are all `CADEngine` value types,
+// so this stays symlink-safe (the test target sees them via `@testable import
+// CADEngine`). The `PaperSize`-enum mapping (which DOES need the app-only enum)
+// lives in `DrawingPrinter.swift` — an app-target-only file that is never symlinked
+// into the test target — so THIS file remains free of app-module references.
+
+/// A standard sheet matched to a layout's millimeter page — the symlink-safe value
+/// result of `PrintLayout.nearestStandardPage`. Carries the size in BOTH mm and
+/// points plus the canonical name ("A4", "Letter", …), so a test can assert the
+/// match without the app's `PaperSize` enum (the app maps `name` → `PaperSize` in
+/// `DrawingPrinter.swift`). `isExact` reports whether the page matched a standard
+/// size within tolerance (vs. the nearest-by-area fallback for a custom sheet).
+public struct StandardPage: Sendable, Equatable {
+    /// Canonical name ("A4", "A3", "Letter", "Legal", "Tabloid", …).
+    public var name: String
+    /// Portrait width in millimeters.
+    public var widthMM: Double
+    /// Portrait height in millimeters.
+    public var heightMM: Double
+    /// Whether the queried page matched this standard size within tolerance.
+    public var isExact: Bool
+
+    public init(name: String, widthMM: Double, heightMM: Double, isExact: Bool) {
+        self.name = name
+        self.widthMM = widthMM
+        self.heightMM = heightMM
+        self.isExact = isExact
+    }
+
+    /// The portrait size in page points (72 pt / inch).
+    public var sizePt: SizePt {
+        SizePt(width: pointsFromMM(widthMM), height: pointsFromMM(heightMM))
+    }
+}
+
+extension PrintLayout {
+
+    /// The standard ISO/US sheet table (portrait mm), matching the app's `PaperSize`
+    /// enum 1:1 (kept here as plain values so the matcher is symlink-safe). Order is
+    /// the `PaperSize.allCases` order so a tie resolves to the same canonical sheet.
+    static let standardPages: [(name: String, widthMM: Double, heightMM: Double)] = [
+        ("A4", 210, 297),
+        ("A3", 297, 420),
+        ("A2", 420, 594),
+        ("A1", 594, 841),
+        ("A0", 841, 1189),
+        ("Letter", 215.9, 279.4),
+        ("Legal", 215.9, 355.6),
+        ("Tabloid", 279.4, 431.8),
+    ]
+
+    /// Matches a millimeter page (any orientation) to the nearest standard sheet.
+    ///
+    /// Orientation-agnostic: the query is normalized to portrait (the smaller side
+    /// is the width) before matching, so a 297×210 landscape A4 still matches "A4".
+    /// An EXACT match (both sides within `tolMM`, default 1 mm) sets `isExact = true`;
+    /// otherwise the closest sheet by summed-dimension distance is returned with
+    /// `isExact = false` (a custom sheet still gets a sensible nearest `PaperSize`).
+    /// A degenerate (≤ 0) page falls back to A4 so downstream math stays finite.
+    public static func nearestStandardPage(widthMM: Double,
+                                           heightMM: Double,
+                                           tolMM: Double = 1.0) -> StandardPage {
+        // Degenerate page → A4 (never let a 0-size sheet drive the matcher).
+        guard widthMM.isFinite, heightMM.isFinite, widthMM > 0, heightMM > 0 else {
+            let a4 = standardPages[0]
+            return StandardPage(name: a4.name, widthMM: a4.widthMM,
+                                heightMM: a4.heightMM, isExact: false)
+        }
+        // Normalize to portrait so orientation never affects the match.
+        let qw = Swift.min(widthMM, heightMM)
+        let qh = Swift.max(widthMM, heightMM)
+
+        var best = standardPages[0]
+        var bestDist = Double.greatestFiniteMagnitude
+        var bestExact = false
+        for page in standardPages {
+            let dw = abs(page.widthMM - qw)
+            let dh = abs(page.heightMM - qh)
+            let exact = dw <= tolMM && dh <= tolMM
+            let dist = dw + dh
+            // Prefer an exact match; among non-exact, prefer the smallest distance.
+            if exact && !bestExact {
+                best = page; bestDist = dist; bestExact = true
+            } else if exact == bestExact && dist < bestDist {
+                best = page; bestDist = dist
+            }
+        }
+        return StandardPage(name: best.name, widthMM: best.widthMM,
+                            heightMM: best.heightMM, isExact: bestExact)
+    }
+
+    /// Converts an engine `LayoutPlotScale` to the app's `PlotScale`.
+    ///
+    /// - `.fit`        → `.fit` (scale-to-fit the printable area).
+    /// - `.ratio(r)`   → a custom `drawingUnits : paperUnits` ratio. `r` is
+    ///   drawing-units-PER-paper-unit (AutoCAD plot-scale convention, e.g. 50 for
+    ///   50:1, 0.01 for 1:100), so it maps to `.custom(drawingUnits: r, paperUnits:
+    ///   1)` — which `PlotScale.ratioMultiplier` reads back as `1/r` (paper per
+    ///   drawing), the correct shrink/enlarge factor.
+    public static func plotScale(from layoutScale: LayoutPlotScale) -> PlotScale {
+        switch layoutScale {
+        case .fit:
+            return .fit
+        case .ratio(let r):
+            // `LayoutPlotScale.ratio` is already clamped finite+positive by
+            // `fixed(_:)`; guard once more so a hand-built value can't degenerate.
+            let safe = (r.isFinite && r > 0) ? r : 1
+            return .custom(drawingUnits: safe, paperUnits: 1)
+        }
+    }
+
+    /// Builds an app `PageSetup` from an engine `PageDescriptor`: the mm paper size +
+    /// margin become page points (snapped to the nearest standard sheet's points so
+    /// the print job lands on a real `PaperSize`), and the engine plot scale becomes
+    /// the app `PlotScale`. The margin is converted directly (not snapped).
+    ///
+    /// `snapToStandard` (default `true`) rounds the paper rect to the nearest standard
+    /// sheet so a layout authored as "A4" prints on A4 exactly; pass `false` to keep
+    /// the layout's literal mm size (e.g. a genuinely custom sheet).
+    public static func pageSetup(from page: PageDescriptor,
+                                 snapToStandard: Bool = true) -> PageSetup {
+        let paperPt: SizePt
+        if snapToStandard {
+            // Preserve the layout's orientation while using the matched standard
+            // sheet's true dimensions (the match is orientation-normalized).
+            let std = nearestStandardPage(widthMM: page.widthMM, heightMM: page.heightMM)
+            let landscape = page.widthMM > page.heightMM
+            let w = landscape ? Swift.max(std.widthMM, std.heightMM)
+                              : Swift.min(std.widthMM, std.heightMM)
+            let h = landscape ? Swift.min(std.widthMM, std.heightMM)
+                              : Swift.max(std.widthMM, std.heightMM)
+            paperPt = SizePt(width: pointsFromMM(w), height: pointsFromMM(h))
+        } else {
+            paperPt = SizePt(width: pointsFromMM(Swift.max(page.widthMM, 0)),
+                             height: pointsFromMM(Swift.max(page.heightMM, 0)))
+        }
+        let margin = pointsFromMM(Swift.max(page.marginMM, 0))
+        return PageSetup(paperSize: paperPt, margin: margin,
+                         scale: plotScale(from: page.plotScale))
+    }
+}
+
+// MARK: - Layout-aware plot transform (paper-space sheet at its plot scale)
+
+extension PrintLayout {
+
+    /// The world→page transform for a paper-space LAYOUT sheet, plus its `PageSetup`.
+    ///
+    /// A layout is a printed sheet measured in MILLIMETERS: paper-space entities live
+    /// in sheet coordinates with origin (0,0) and extent (widthMM, heightMM). Plotting
+    /// the sheet maps that sheet rect onto the output page (the paper inset by its
+    /// margin) at the layout's plot scale:
+    ///
+    ///   - `.fit`     → the whole sheet is fit-to-page in the imageable area (the
+    ///                  sheet, not the model — paper space already frames the model).
+    ///   - `.ratio`   → the sheet prints at its TRUE physical size (1 sheet-mm → one
+    ///                  paper-mm, i.e. paper-space at 1:1), so a title block measures
+    ///                  correctly with a ruler. The model behind a viewport is scaled
+    ///                  by the ratio at resolve time; the SHEET transform itself is the
+    ///                  unit-correct mm→points map. An oversize sheet at 1:1 is
+    ///                  reported via the returned `PlotLayout.overflows` and clipped.
+    ///
+    /// Returns the `PlotLayout` (transform + scale + overflow) AND the resolved
+    /// `PageSetup` (so the caller can size the page / clip rect). Reuses `makeLayout`
+    /// — it does NOT re-implement the centering/overflow math.
+    public static func makeLayout(for layout: Layout,
+                                  snapToStandard: Bool = true)
+        -> (layout: PlotLayout, setup: PageSetup) {
+        // The page rect / margin come from the descriptor; the SHEET transform's
+        // scale, however, is NOT the descriptor's plot ratio. A layout's plot ratio
+        // (drawing-units-per-paper-unit) scales the MODEL seen through a viewport at
+        // resolve time; the paper-space SHEET itself always prints 1:1 on paper
+        // (1 sheet-mm → one paper-mm) for a fixed scale, or fit-to-page for `.fit`.
+        // So we keep the descriptor's page size + margin but override the scale to the
+        // sheet's own intent: `.fit` ⇒ fit, any fixed ratio ⇒ `.oneToOne` (true mm).
+        let base = pageSetup(from: layout.page, snapToStandard: snapToStandard)
+        let sheetScale: PlotScale
+        switch layout.page.plotScale {
+        case .fit:   sheetScale = .fit
+        case .ratio: sheetScale = .oneToOne   // sheet prints at true physical size
+        }
+        var setup = base
+        setup.scale = sheetScale
+        // The sheet's paper-space bounds, in millimeters (origin at the lower-left).
+        let sheet = AABB(min: Vector(0, 0),
+                         max: Vector(Swift.max(layout.page.widthMM, 0),
+                                     Swift.max(layout.page.heightMM, 0)))
+        let plot = makeLayout(bounds: sheet, unit: .millimeter, setup: setup)
+        return (plot, setup)
+    }
+}
