@@ -261,6 +261,11 @@ struct ContentView: View {
                         onAddLayout: {
                             model.newLayout()
                             controllerBox.controller?.requestRedraw()
+                        },
+                        onSelectBlockEdit: {
+                            // The block-edit tab is already the active context; clicking it
+                            // just repaints (leaving is via the BlockEditBar).
+                            controllerBox.controller?.requestRedraw()
                         }
                     )
                     StatusBar(model: model)
@@ -1669,6 +1674,10 @@ struct LayoutTabStrip: View {
     let onSelectLayout: (String) -> Void
     /// Add (and switch to) a new layout.
     let onAddLayout: () -> Void
+    /// Select the transient block-edit tab (BEDIT). A no-op beyond a repaint while a
+    /// session is open — leaving the editor is via the BlockEditBar's Save&Close /
+    /// Discard. Defaults to a no-op so existing call sites need not pass it.
+    var onSelectBlockEdit: () -> Void = {}
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -1678,6 +1687,12 @@ struct LayoutTabStrip: View {
                     layoutTab(named: layout.name)
                 }
                 addButton
+                // BEDIT (STAGE 2): the transient block-edit tab — a visually-distinct
+                // "✎ <BlockName>" pill shown ONLY while a session is open, appended after
+                // the "+" so the persistent Model/Layout tabs (and the add button) keep
+                // their fixed positions. Sourced from `model.editingBlock`; vanishes on
+                // Save&Close/Discard.
+                blockEditTab
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 8)
@@ -1692,26 +1707,32 @@ struct LayoutTabStrip: View {
 
     // MARK: - Tabs
 
-    /// The always-present "Model" tab — selected when the active space is model.
+    /// The always-present "Model" tab — selected when the active space is model AND no
+    /// block-edit session is open. During a session NO Model/Layout tab reads active —
+    /// the block-edit tab does — even though `enterBlockEditing` leaves `activeSpace`
+    /// unchanged (it re-scopes the index, not the space). Gating on `editingBlock == nil`
+    /// is what keeps exactly ONE tab active at a time.
     @ViewBuilder
     private var modelTab: some View {
         tabButton(
             title: "Model",
             systemImage: "square.dashed",
-            isActive: model.activeSpace == .model,
+            isActive: model.editingBlock == nil && model.activeSpace == .model,
             action: onSelectModel
         )
         .accessibilityIdentifier("tab.model")
     }
 
     /// One tab per layout (keyed by name — the engine `Layout`'s stable id) —
-    /// selected when it is the active paper layout. Takes the name (not the engine
+    /// selected when it is the active paper layout AND no block-edit session is open
+    /// (see `modelTab` for why the session gate matters). Takes the name (not the engine
     /// `Layout` value) so the helper never has to NAME the engine type, which is
     /// ambiguous in this file (SwiftUI's `Layout` protocol is also in scope, and the
     /// module-qualified form resolves to the `CADEngine` actor).
     @ViewBuilder
     private func layoutTab(named name: String) -> some View {
-        let isActive = model.activeSpace == .paper
+        let isActive = model.editingBlock == nil
+            && model.activeSpace == .paper
             && (model.activeLayout?.caseInsensitiveCompare(name) == .orderedSame)
         tabButton(
             title: name,
@@ -1720,6 +1741,34 @@ struct LayoutTabStrip: View {
             action: { onSelectLayout(name) }
         )
         .accessibilityIdentifier("tab.layout.\(name)")
+    }
+
+    /// The transient BLOCK-EDIT tab (BEDIT, STAGE 2). Present ONLY while
+    /// `model.editingBlock != nil`; it is the lone active tab during a session (its
+    /// active-ness comes from the session itself, not `activeSpace`). For a nested
+    /// stack it shows a breadcrumb of the open blocks (STAGE 3). Clicking it is a no-op
+    /// (you are already on it) beyond a repaint — leaving is via the BlockEditBar's
+    /// Save&Close / Discard.
+    @ViewBuilder
+    private var blockEditTab: some View {
+        if let breadcrumb = blockEditBreadcrumb {
+            tabButton(
+                title: breadcrumb,
+                systemImage: "pencil.and.outline",
+                isActive: true,
+                action: onSelectBlockEdit
+            )
+            .accessibilityIdentifier("tab.blockEdit")
+        }
+    }
+
+    /// The block-edit tab's label: the nested-session breadcrumb when editing
+    /// (e.g. "A ▸ B"), or `nil` when no session is open (the tab is then absent).
+    /// Falls back to the single `editingBlock` name if the stack is unavailable.
+    private var blockEditBreadcrumb: String? {
+        let stack = model.editingBlockStack
+        if !stack.isEmpty { return stack.joined(separator: " ▸ ") }
+        return model.editingBlock
     }
 
     /// The trailing "+" that adds a new layout (and switches to it).

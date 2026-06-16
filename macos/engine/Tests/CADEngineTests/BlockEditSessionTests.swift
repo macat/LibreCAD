@@ -161,6 +161,27 @@ struct BlockEditSessionTests {
         return (model, mID, iID)
     }
 
+    /// Like `seededBlockModel`, but also seeds a paper-space `Layout` named `layoutName`
+    /// BEFORE the model is built, so the layout add registers no undo (the drawing has no
+    /// undo manager yet — matching how the block is seeded). Used by the STAGE 2 tab tests
+    /// that need a real Model + Layout set to keep intact across a session.
+    private func seededBlockModelWithLayout(
+        layoutName: String = "Layout1"
+    ) -> (model: CanvasModel, memberID: EntityID, insertID: EntityID) {
+        let drawing = CADDrawing()
+        let mID = drawing.add(line(Vector(0, 0), Vector(10, 0)))
+        drawing.mutateBlocks { _ = $0.add(Block(name: "WIDGET", entityIDs: [mID])) }
+        let iID = drawing.add(EntityRecord(
+            id: .placeholder,
+            kind: .insert(InsertData(blockName: "WIDGET", insertionPoint: Vector(20, 20)))))
+        _ = drawing.addLayout(Layout(name: layoutName, tabOrder: 0))
+
+        let model = CanvasModel(drawing: drawing, viewSize: CGSize(width: 800, height: 600))
+        model.undoManager.groupsByEvent = false
+        model.undoManager.removeAllActions()
+        return (model, mID, iID)
+    }
+
     // MARK: - Enter → move a member → Save & Close
 
     @Test("Enter → move a member → Save & Close: block member + a resolved insert update")
@@ -582,6 +603,132 @@ struct BlockEditSessionTests {
         m.undo()
         #expect(m.drawing.blocks.block(named: "WIDGET")?.entityIDs.contains(m2) == true)
         #expect(m.drawing.entity(m2) != nil)
+    }
+
+    // MARK: - STAGE 2 — the Block Editor is its OWN tab (BEDIT)
+    //
+    // The tab strip (`LayoutTabStrip`) is presentational: each tab's active-ness is a
+    // pure predicate over the live model. These mirror those predicates EXACTLY and pin
+    // the STAGE 2 behavior without rendering a SwiftUI body (project gotcha: no view
+    // rendering / no modal in headless tests).
+
+    /// Mirror of `LayoutTabStrip.modelTab` active predicate.
+    private func modelTabActive(_ m: CanvasModel) -> Bool {
+        m.editingBlock == nil && m.activeSpace == .model
+    }
+    /// Mirror of `LayoutTabStrip.layoutTab` active predicate.
+    private func layoutTabActive(_ m: CanvasModel, _ name: String) -> Bool {
+        m.editingBlock == nil
+            && m.activeSpace == .paper
+            && (m.activeLayout?.caseInsensitiveCompare(name) == .orderedSame)
+    }
+    /// Mirror of `LayoutTabStrip.blockEditTab` presence/active predicate (it is present
+    /// AND active exactly when a session is open).
+    private func blockEditTabActive(_ m: CanvasModel) -> Bool {
+        !m.editingBlockStack.isEmpty
+    }
+
+    @Test("Entering shows a distinct block-edit tab; Model/Layout tabs stay present")
+    func enteringShowsBlockEditTab() {
+        let (m, _, _) = seededBlockModelWithLayout()
+        let layoutsBefore = m.orderedLayouts.map(\.name)
+        #expect(layoutsBefore == ["Layout1"])
+        #expect(m.editingBlockStack.isEmpty)        // no block-edit tab yet
+
+        m.enterBlockEditing(name: "WIDGET")
+        // The block-edit tab now exists and is labeled with the block name.
+        #expect(m.editingBlockStack == ["WIDGET"])
+        #expect(m.editingBlock == "WIDGET")
+        // The document tabs are NOT replaced — Model + the layout are still there.
+        #expect(m.orderedLayouts.map(\.name) == layoutsBefore)
+
+        m.exitBlockEditing(save: true)
+        #expect(m.editingBlockStack.isEmpty)        // tab gone after close
+        #expect(m.orderedLayouts.map(\.name) == layoutsBefore)
+    }
+
+    @Test("Exactly ONE tab reads active during a block-edit session")
+    func exactlyOneActiveTabDuringSession() {
+        let (m, _, _) = seededBlockModelWithLayout()
+
+        // Before: Model active, no block-edit tab.
+        #expect(modelTabActive(m) == true)
+        #expect(layoutTabActive(m, "Layout1") == false)
+        #expect(blockEditTabActive(m) == false)
+
+        m.enterBlockEditing(name: "WIDGET")
+        // During: the block-edit tab is the ONLY active one — even though enter does
+        // NOT change activeSpace (it stays .model), the editingBlock gate suppresses it.
+        #expect(modelTabActive(m) == false)
+        #expect(layoutTabActive(m, "Layout1") == false)
+        #expect(blockEditTabActive(m) == true)
+        #expect(m.activeSpace == .model)            // confirms the gate, not a space change
+
+        m.exitBlockEditing(save: true)
+        // After: back to exactly Model active.
+        #expect(modelTabActive(m) == true)
+        #expect(blockEditTabActive(m) == false)
+    }
+
+    @Test("Switch to Model mid-edit → session auto-Save&Closes and the pick sticks")
+    func switchToModelMidEditAutoFinishes() {
+        let (m, memberID, _) = seededBlockModel()
+        m.enterBlockEditing(name: "WIDGET")
+        // Make an edit so it's a real (non-empty) session.
+        var edited = m.drawing.entity(memberID)!
+        edited.kind = .line(LineData(start: Vector(0, 0), end: Vector(10, 6)))
+        m.applyInspectorEdits([edited])
+        #expect(blockEditTabActive(m) == true)
+
+        // The user picks the Model tab mid-edit → the strip calls activateModel().
+        m.activateModel()
+        // The session auto-finished (Save&Close — edits kept) and the Model pick stuck.
+        #expect(m.isEditingBlock == false)
+        #expect(blockEditTabActive(m) == false)
+        #expect(modelTabActive(m) == true)
+        #expect(m.activeSpace == .model)
+        // The edit survived the auto Save&Close.
+        #expect(lineEnds(m.drawing.entity(memberID))!.1 == Vector(10, 6))
+    }
+
+    @Test("Switch to a Layout mid-edit → session auto-finishes and the layout pick sticks")
+    func switchToLayoutMidEditAutoFinishes() {
+        let (m, memberID, _) = seededBlockModelWithLayout()
+        m.enterBlockEditing(name: "WIDGET")
+        var edited = m.drawing.entity(memberID)!
+        edited.kind = .line(LineData(start: Vector(0, 0), end: Vector(10, 7)))
+        m.applyInspectorEdits([edited])
+
+        // The user picks a Layout tab mid-edit.
+        m.activateLayout(name: "Layout1")
+        #expect(m.isEditingBlock == false)
+        #expect(blockEditTabActive(m) == false)
+        #expect(layoutTabActive(m, "Layout1") == true)     // the layout pick stuck
+        #expect(modelTabActive(m) == false)
+        #expect(lineEnds(m.drawing.entity(memberID))!.1 == Vector(10, 7))   // edit kept
+    }
+
+    @Test("Save & Close / Discard closes the block-edit tab and restores the prior tab")
+    func saveCloseDiscardRestorePriorTab() {
+        let (m1, _, _) = seededBlockModel()
+        // Start on Model, enter, Save&Close → back to Model.
+        #expect(modelTabActive(m1) == true)
+        m1.enterBlockEditing(name: "WIDGET")
+        #expect(blockEditTabActive(m1) == true)
+        m1.exitBlockEditing(save: true)
+        #expect(blockEditTabActive(m1) == false)
+        #expect(modelTabActive(m1) == true)
+
+        // Discard from a layout: enter from a layout context, Discard → back to layout.
+        let (m2, _, _) = seededBlockModelWithLayout()
+        m2.activateLayout(name: "Layout1")
+        #expect(layoutTabActive(m2, "Layout1") == true)
+        m2.enterBlockEditing(name: "WIDGET")
+        #expect(blockEditTabActive(m2) == true)
+        #expect(layoutTabActive(m2, "Layout1") == false)   // suppressed during session
+        m2.exitBlockEditing(save: false)
+        #expect(blockEditTabActive(m2) == false)
+        #expect(layoutTabActive(m2, "Layout1") == true)    // prior tab restored
     }
 
     @Test("Move a member in the editor updates all inserts (regression)")

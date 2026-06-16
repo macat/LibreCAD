@@ -780,12 +780,23 @@ final class CanvasModel {
 
     /// Activates the named layout's paper sheet (a tab pick). No-op if the layout is
     /// absent. Convenience over `setActiveSpace(.paper, layoutName:)`.
+    ///
+    /// If a block-edit session is open, picking a Model/Layout tab AUTO Save&Closes it
+    /// first (owner decision: switch-away mid-edit keeps the live edits) so the user's
+    /// tab pick sticks. `finishBlockEditingIfNeeded` restores the session's
+    /// `editingPriorView` (the space active when the editor opened); the subsequent
+    /// `setActiveSpace` then applies THIS pick on top — so the pick wins, not the stale
+    /// prior view. (If the pick equals the prior view, `setActiveSpace` is a no-op, which
+    /// is correct: exit already left us there.)
     func activateLayout(name: String) {
+        finishBlockEditingIfNeeded()
         setActiveSpace(.paper, layoutName: name)
     }
 
     /// Returns to model space (the "Model" tab). Convenience over `setActiveSpace`.
+    /// Auto Save&Closes an open block-edit session first (see `activateLayout`).
     func activateModel() {
+        finishBlockEditingIfNeeded()
         setActiveSpace(.model)
     }
 
@@ -1012,6 +1023,14 @@ final class CanvasModel {
 
     /// Whether a block-edit session is active.
     var isEditingBlock: Bool { editingBlock != nil }
+
+    /// The open block-edit sessions, OUTERMOST → innermost (a breadcrumb for the tab
+    /// strip, e.g. `["A", "B"]` while editing B nested inside A). Empty when no session
+    /// is open. STAGE 2 surfaces this for the block-edit tab label; STAGE 3 makes it a
+    /// real nested stack. Until then it is just the single `editingBlock` wrapped.
+    var editingBlockStack: [String] {
+        editingBlock.map { [$0] } ?? []
+    }
 
     /// The member `EntityRecord`s of the block being edited (looked up LIVE via the
     /// block's `entityIDs`), or `[]` when not editing / the block vanished. This is the
