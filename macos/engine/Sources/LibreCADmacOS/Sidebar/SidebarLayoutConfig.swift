@@ -165,6 +165,14 @@ struct SidebarLayoutConfig: Codable, Equatable, Sendable {
     ///      Customize menu rather than crowding an existing user's sidebar. An id the
     ///      stored config ALREADY knew keeps the user's own hidden choice (we only force
     ///      the default-hidden flag for ids the stored config had never seen).
+    ///   3. ZERO-VISIBLE FLOOR: if the reconciled config would hide EVERY panel while
+    ///      `order` is non-empty, the FIRST panel in `order` is forced visible — so the
+    ///      result ALWAYS has ≥1 visible panel. The Customize (⋯) menu rides in the first
+    ///      visible panel's header (`SidebarPanelStack`), so an all-hidden state (reachable
+    ///      via an externally-edited `@AppStorage` config, or a future build that marks more
+    ///      panels default-hidden) would otherwise orphan that menu — leaving no way to
+    ///      re-show anything. The live UI guards interactive hides separately (the last
+    ///      visible panel's toggle is disabled); this floor backstops the PERSISTED path.
     func reconciled(withAvailable available: [SidebarPanelID]) -> SidebarLayoutConfig {
         let availableSet = Set(available)
 
@@ -191,10 +199,20 @@ struct SidebarLayoutConfig: Codable, Equatable, Sendable {
         let newlyDefaultHidden = orderSet
             .subtracting(storedKnown)
             .intersection(SidebarLayoutConfig.defaultHiddenIDs)
+        var newHidden = hidden.intersection(orderSet).union(newlyDefaultHidden)
+
+        // ZERO-VISIBLE FLOOR: never hand back a config that hides every panel while there
+        // ARE panels to show. If the hidden set covers the whole order, un-hide the first
+        // panel so there is ALWAYS ≥1 visible panel to carry the Customize (⋯) menu and
+        // keep the sidebar recoverable. (When `order` is empty there's nothing to floor.)
+        if let first = newOrder.first, newHidden.count == newOrder.count {
+            newHidden.remove(first)
+        }
+
         return SidebarLayoutConfig(
             order: newOrder,
             collapsed: collapsed.intersection(orderSet),
-            hidden: hidden.intersection(orderSet).union(newlyDefaultHidden)
+            hidden: newHidden
         )
     }
 

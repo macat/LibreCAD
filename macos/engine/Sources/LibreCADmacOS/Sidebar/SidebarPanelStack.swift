@@ -88,9 +88,11 @@ struct SidebarPanelStack: View {
             ForEach(Array(orderedVisiblePanels.enumerated()), id: \.element.id) { index, panel in
                 // The Customize (show/hide) menu rides in the FIRST panel header's
                 // trailing actions instead of a dedicated top band — that empty "tune"
-                // row is gone (plan §3a). The first panel always exists (an all-hidden
-                // config re-shows everything via `reconciled`), so the customize entry
-                // never becomes unreachable.
+                // row is gone (plan §3a). A first panel always exists whenever `order` is
+                // non-empty: `reconciled` enforces a ZERO-VISIBLE FLOOR (it un-hides the
+                // first panel if a persisted config would hide them all), and
+                // `orderedVisiblePanels` below falls back to `order.first` as a final
+                // backstop — so the customize entry never becomes unreachable.
                 panelSection(panel, isFirst: index == 0)
             }
             .onMove(perform: movePanels)
@@ -103,9 +105,19 @@ struct SidebarPanelStack: View {
 
     /// The descriptors to render, in the config's visible order (hidden panels dropped,
     /// ids without a descriptor skipped).
+    ///
+    /// Belt-and-suspenders backstop to the config-layer ZERO-VISIBLE FLOOR: if the visible
+    /// list resolves to EMPTY while the config still has SOME ordered panel we hold a
+    /// descriptor for, render `order.first` anyway. The Customize (⋯) menu lives in the
+    /// first rendered panel's header, so an empty render would orphan it; this guarantees
+    /// at least one header even if an all-hidden config ever slipped past reconciliation.
     private var orderedVisiblePanels: [SidebarPanel] {
         let map = byID
-        return config.visibleOrder.compactMap { map[$0] }
+        let visible = config.visibleOrder.compactMap { map[$0] }
+        if visible.isEmpty, let firstID = config.order.first, let firstPanel = map[firstID] {
+            return [firstPanel]
+        }
+        return visible
     }
 
     // MARK: Customize (show/hide) — the ⋯ menu (now in the first panel header)

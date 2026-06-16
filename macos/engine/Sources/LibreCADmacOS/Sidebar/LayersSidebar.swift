@@ -178,8 +178,6 @@ struct LayersSidebar: View {
                 onSelect: { selectLayer(layer.name) },
                 onToggleVisible: { setVisible(layer.name, $0) },
                 onToggleLocked: { setLocked(layer.name, $0) },
-                onTogglePrintable: { setPrintable(layer.name, $0) },
-                onToggleConstruction: { setConstruction(layer.name, $0) },
                 onColorChange: { setColor(layer.name, $0) },
                 onLineTypeChange: { setLineType(layer.name, $0) },
                 onLineWidthChange: { setLineWidth(layer.name, $0) },
@@ -514,8 +512,6 @@ private struct LayerRow: View {
     let onSelect: () -> Void
     let onToggleVisible: (Bool) -> Void
     let onToggleLocked: (Bool) -> Void
-    let onTogglePrintable: (Bool) -> Void
-    let onToggleConstruction: (Bool) -> Void
     let onColorChange: (RGBAColor) -> Void
     let onLineTypeChange: (PenLineType) -> Void
     let onLineWidthChange: (PenLineWidth) -> Void
