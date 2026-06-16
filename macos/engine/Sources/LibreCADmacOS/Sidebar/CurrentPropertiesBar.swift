@@ -117,10 +117,11 @@ struct CurrentPropertiesBar: View {
             .help("Current pen color mode")
 
             if case .explicit = model.currentPen.lineColor {
-                ColorPicker("", selection: explicitColorBinding, supportsOpacity: false)
-                    .labelsHidden()
-                    .frame(width: 28)
-                    .help("Current explicit pen color")
+                // A SMALL 16pt chip (ColorSwatchPicker), not the stock ~44×22pt
+                // NSColorWell pill — it opens the real ColorPicker in a popover and
+                // writes through the SAME `explicitColorBinding` (undo path unchanged).
+                ColorSwatchPicker(color: explicitColorBinding,
+                                  help: "Current explicit pen color")
             }
         }
     }

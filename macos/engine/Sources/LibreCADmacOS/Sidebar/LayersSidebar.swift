@@ -472,7 +472,7 @@ struct LayersSidebar: View {
 
 // MARK: - One layer row
 
-/// A single layer row: visibility eye, lock, color swatch (→ ColorPicker), an
+/// A single layer row: visibility eye, lock, color swatch (→ ColorSwatchPicker), an
 /// inline-editable name, and the active indicator. All actions call back into the
 /// sidebar, which routes them through the drawing's undoable mutators. A tap on the
 /// row's background selects + activates the layer (the old `List(selection:)` role).
@@ -492,8 +492,6 @@ private struct LayerRow: View {
 
     /// Local edit buffer for the inline name field (committed on return / blur).
     @State private var draftName: String = ""
-    /// Local color binding for the `ColorPicker` (initialised from the layer).
-    @State private var swatch: Color = .green
 
     var body: some View {
         HStack(spacing: 8) {
@@ -540,16 +538,12 @@ private struct LayerRow: View {
             .buttonStyle(.borderless)
             .help(layer.isConstruction ? "Clear construction flag" : "Mark as construction layer")
 
-            // Color swatch (tap → ColorPicker → setLayerColor). The label is empty
-            // so only the well shows; macOS renders it as a tappable swatch.
-            ColorPicker("", selection: $swatch, supportsOpacity: false)
-                .labelsHidden()
-                .frame(width: 28)
-                .help("Layer color")
-                .onChange(of: swatch) { _, newColor in
-                    let rgba = newColor.rgbaColor
-                    if rgba != layer.color { onColorChange(rgba) }
-                }
+            // Color swatch (tap → ColorPicker popover → setLayerColor). A SMALL 16pt
+            // chip, not the stock ~44×22pt NSColorWell pill. The binding reads the
+            // layer's REAL color (so the swatch shows ITS color immediately — no green
+            // first-frame flash) and writes through the SAME undoable `onColorChange`
+            // callback the old well used.
+            ColorSwatchPicker(color: colorBinding, help: "Layer color")
 
             // Line TYPE + WIDTH defaults — behind one compact menu so the row stays
             // tight at the sidebar's min width. Each picker binds to the layer's
@@ -583,17 +577,29 @@ private struct LayerRow: View {
         .onTapGesture { onSelect() }
         .onAppear {
             draftName = layer.name
-            swatch = Color(rgba: layer.color)
         }
-        // Keep local mirrors in step if the underlying layer changes (undo,
-        // external edit) while the row stays on screen.
+        // Keep the name mirror in step if the underlying layer changes (undo,
+        // external edit) while the row stays on screen. (The color needs no mirror:
+        // `colorBinding` reads `layer.color` directly, so it always reflects the live
+        // value with no first-frame flash.)
         .onChange(of: layer.name) { _, newName in
             if draftName != newName { draftName = newName }
         }
-        .onChange(of: layer.color) { _, newColor in
-            let asColor = Color(rgba: newColor)
-            if swatch.rgbaColor != newColor { swatch = asColor }
-        }
+    }
+
+    /// A binding to the layer's color for the swatch picker. GET reads the layer's
+    /// REAL color (so the chip shows ITS color immediately — no `.green` first-frame
+    /// flash); SET routes the edit through the EXACT same undoable `onColorChange`
+    /// callback the stock well used, guarding a no-op so an unchanged round-trip
+    /// doesn't register a spurious undo step.
+    private var colorBinding: Binding<Color> {
+        Binding(
+            get: { Color(rgba: layer.color) },
+            set: { newColor in
+                let rgba = newColor.rgbaColor
+                if rgba != layer.color { onColorChange(rgba) }
+            }
+        )
     }
 
     /// The compact line-type / line-width default menu for this layer. The two
