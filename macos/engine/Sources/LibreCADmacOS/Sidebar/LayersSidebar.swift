@@ -254,15 +254,20 @@ struct LayersSidebar: View {
     private var layerStatesBody: some View {
         let states = model.drawing.layerStates.states
         if states.isEmpty {
-            Text("No saved states")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            // Unified empty state with a CTA — saving the current flags IS reachable from
+            // here (`saveCurrentLayerState`), so offer it directly (mirrors the header ＋).
+            SidebarEmptyState(
+                icon: "rectangle.stack",
+                title: "No saved layer states",
+                cta: (label: "Save Current State", action: { saveCurrentLayerState() })
+            )
         } else {
             ForEach(states) { state in
-                HStack(spacing: 8) {
+                HStack(spacing: DS.Space.md) {
                     Image(systemName: "rectangle.stack")
                         .foregroundStyle(.secondary)
                     Text(state.name)
+                        .font(DS.Font.rowLabel)
                     Spacer(minLength: 0)
                     Button {
                         restoreLayerState(state.name)
@@ -275,7 +280,7 @@ struct LayersSidebar: View {
                         .buttonStyle(.borderless)
                         .help("Delete this layer state")
                 }
-                .padding(.vertical, 2)
+                .padding(.vertical, DS.Space.xxs)
             }
         }
     }

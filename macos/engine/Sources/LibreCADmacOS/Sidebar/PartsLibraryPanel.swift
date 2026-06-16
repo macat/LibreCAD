@@ -84,14 +84,20 @@ struct PartsLibrarySectionContent: View {
     @State private var note: String = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            folderRow
+        VStack(alignment: .leading, spacing: DS.Space.sm) {
+            // The chosen-folder row only appears once a folder IS chosen; with no folder
+            // the body is just the empty-state (which carries its own "Choose Folder…"
+            // CTA), so there's no redundant prompt row.
+            if !folderPath.isEmpty {
+                folderRow
+            }
             content
             if !note.isEmpty {
                 Text(note)
-                    .font(.caption)
+                    .font(DS.Font.hint)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    // Wrap the status/error line instead of clipping it to 2 lines.
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .onAppear { rescan() }
@@ -103,34 +109,40 @@ struct PartsLibrarySectionContent: View {
 
     // MARK: Subviews (decomposed for the SwiftUI type-checker)
 
-    /// The current-folder row: the folder name (or a prompt) + a "Choose Folder…" button.
+    /// The current-folder row: the chosen folder's NAME (last path component) with the
+    /// FULL path in a tooltip — no middle truncation, no duplicate Choose-Folder button
+    /// (the panel header's `folder.badge.plus` is the single chooser affordance). Shown
+    /// only when a folder is chosen.
     @ViewBuilder
     private var folderRow: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: DS.Space.sm) {
             Image(systemName: "folder")
                 .foregroundStyle(.secondary)
             Text(folderDisplayName)
-                .font(.callout)
-                .foregroundStyle(folderPath.isEmpty ? .secondary : .primary)
+                .font(DS.Font.rowLabel)
+                .foregroundStyle(.primary)
                 .lineLimit(1)
-                .truncationMode(.middle)
+                .help(folderPath)   // full path on hover (resolves the truncation conflict)
             Spacer(minLength: 0)
-            Button("Choose Folder…") { chooseFolder() }
-                .controlSize(.small)
         }
     }
 
-    /// The catalog list (or an empty-state prompt).
+    /// The catalog list (or a unified empty-state). No folder → the shared
+    /// `SidebarEmptyState` with a "Choose Folder…" CTA (the only body chooser); a chosen-
+    /// but-empty folder → a plain note.
     @ViewBuilder
     private var content: some View {
         if folderPath.isEmpty {
-            Text("Choose a folder of .dxf symbols to build a parts library.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            SidebarEmptyState(
+                icon: "puzzlepiece.extension",
+                title: "No folder chosen",
+                cta: (label: "Choose Folder…", action: { chooseFolder() })
+            )
         } else if items.isEmpty {
             Text("No .dxf symbols in this folder.")
-                .font(.callout)
+                .font(DS.Font.rowLabel)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         } else {
             ForEach(items) { item in
                 PartRow(item: item, onInsert: { insert(item) })
@@ -147,7 +159,9 @@ struct PartsLibrarySectionContent: View {
 
     // MARK: Display
 
-    /// A friendly name for the chosen folder (its last path component), or a prompt.
+    /// A friendly name for the chosen folder — its last path component (the full path is
+    /// shown in the row's `.help()` tooltip). Falls back to the raw path for an
+    /// unusual/rootless path. (Only read when a folder IS chosen — see `folderRow`.)
     private var folderDisplayName: String {
         guard !folderPath.isEmpty else { return "No folder chosen" }
         let name = URL(fileURLWithPath: folderPath).lastPathComponent
@@ -227,11 +241,12 @@ private struct PartRow: View {
     let onInsert: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: DS.Space.md) {
             Image(systemName: "puzzlepiece.extension")
                 .foregroundStyle(.secondary)
-                .frame(width: 24, height: 24)
+                .frame(width: DS.Size.rowIcon, height: DS.Size.rowIcon)
             Text(item.name)
+                .font(DS.Font.rowLabel)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 0)
@@ -241,7 +256,7 @@ private struct PartRow: View {
             .buttonStyle(.borderless)
             .help("Insert this symbol at the view center")
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, DS.Space.xs)
         .contentShape(Rectangle())
         // Double-click the row to import + place (a common gallery affordance).
         .onTapGesture(count: 2) { onInsert() }
