@@ -63,6 +63,14 @@ struct StatusBar: View {
     /// so the toggle cluster can both reflect and drive the model's mode flags.
     @Bindable var model: CanvasModel
 
+    /// Repaint the Metal canvas after a mode toggle. The canvas does NOT auto-repaint
+    /// from `modelVersion` — every sibling control explicitly asks the controller to
+    /// redraw (the F-key/menu paths call `redraw()`, the LayoutTabStrip calls back into
+    /// `requestRedraw`). The status chips mirror that: a GRID click must hide/show the
+    /// grid immediately, not on the next mouse nudge. The host wires this to
+    /// `controllerBox.controller?.requestRedraw`; defaults to a no-op (e.g. previews).
+    var requestRedraw: () -> Void = {}
+
     var body: some View {
         HStack(spacing: DS.Space.lg) {
             // Left: active tool + step prompt + verb hints (gap G3 / G4).
@@ -163,15 +171,17 @@ struct StatusBar: View {
 
     /// The right-aligned cluster of borderless mode toggles. Each fills
     /// `DS.Palette.accent` when ON and calls the model's existing toggle (the same one
-    /// the F-key / menu fires), so clicking here is identical to pressing the F-key.
+    /// the F-key / menu fires) THEN asks the canvas to repaint (the canvas does not
+    /// auto-repaint from `modelVersion`), so clicking here is identical to pressing the
+    /// F-key — including the immediate visual update.
     private var modeToggles: some View {
         HStack(spacing: DS.Space.xs) {
             modeToggle(title: "GRID", isOn: model.gridVisible,
-                       help: "Grid (F7)") { model.toggleGrid() }
+                       help: "Grid (F7)") { model.toggleGrid(); requestRedraw() }
             modeToggle(title: "SNAP", isOn: model.gridSnapEnabled,
-                       help: "Grid snap (F9)") { model.toggleGridSnap() }
+                       help: "Grid snap (F9)") { model.toggleGridSnap(); requestRedraw() }
             modeToggle(title: "ORTHO", isOn: model.orthoEnabled,
-                       help: "Ortho (F8)") { model.toggleOrtho() }
+                       help: "Ortho (F8)") { model.toggleOrtho(); requestRedraw() }
         }
         .accessibilityElement(children: .contain)
     }

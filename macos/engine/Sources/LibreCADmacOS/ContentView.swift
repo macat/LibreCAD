@@ -284,7 +284,10 @@ struct ContentView: View {
                             controllerBox.controller?.requestRedraw()
                         }
                     )
-                    StatusBar(model: model)
+                    StatusBar(
+                        model: model,
+                        requestRedraw: { controllerBox.controller?.requestRedraw() }
+                    )
                     commandBar
                     // The AutoCAD-style tool LAUNCHER bar — ADDED below the U1
                     // coordinate line, alongside the grouped button toolbar at the

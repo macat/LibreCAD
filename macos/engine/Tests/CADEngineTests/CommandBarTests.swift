@@ -3,15 +3,16 @@
 //  CADEngineTests
 //
 //  Pure-logic tests for the bottom COMMAND BAR's tool launcher — specifically the
-//  side-effect-free `ToolSuggester` that decides which ~8-10 tools the chip row
-//  shows. These pin the contract the SwiftUI `CommandBar` relies on:
-//    - the EMPTY-query adaptive set differs correctly by selection state (Draw vs
-//      Modify bias) and always leads with the curated core;
-//    - the MRU influences ordering (a recently-used tool surfaces) without ever
-//      dropping the core;
-//    - a non-empty query fuzzy-filters EVERY tool, title + aliases, ranked sensibly
-//      ("ci"→Circle first, "tr"→Trim, "rect"→Rectangle, "dim"→a dimension tool);
-//    - the empty set is capped at ~10;
+//  side-effect-free `ToolSuggester` that decides what the bar shows. The bar is a true
+//  command LINE (Wave 4 de-mirror — plan §3d), NOT a static mirror of a default tool
+//  set, and these pin that contract:
+//    - an EMPTY query returns NO suggestion chips at all (regardless of selection or
+//      MRU) — the bar shows a prompt hint, with the recents surfaced separately;
+//    - `ToolSuggester.recents` builds the clearly-LABELED "Recent" row from the MRU
+//      (most-recent first), EXCLUDING pinned tools, deduped and capped;
+//    - chips/results appear ONLY while typing: a non-empty query fuzzy-filters EVERY
+//      tool, title + aliases, ranked sensibly ("ci"→Circle first, "tr"→Trim,
+//      "rect"→Rectangle, "dim"→a dimension tool), capped at ~10;
 //    - activation promotes a tool in the MRU (dedup + cap).
 //
 //  Engine-level, no GUI: `ToolSuggester`/`ToolKind` live in CADEngine, so these
