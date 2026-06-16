@@ -586,6 +586,14 @@ final class CADCanvasController {
     /// returns nil) so the FlippedMTKView keeps the marquee/click/pan gesture.
     private(set) var marqueeOverlay: MarqueeHoverOverlayView?
 
+    /// The dynamic-block VISIBILITY GRIP overlay (DB-1W, a subview of the MTKView). A
+    /// down-arrow dropdown grip shown ONLY when the single selection is a dynamic insert;
+    /// clicking it pops an `NSMenu` of the block's visibility-state names and switches the
+    /// insert's active state (block-features §9.4, §13.5). Transparent to clicks that are
+    /// NOT on the grip (its `hitTest` returns nil there). Arbitrated against the gizmo in
+    /// `refreshGizmo` (a dynamic insert suppresses the gizmo and shows ONLY this overlay).
+    private(set) var dynamicGrip: DynamicGripOverlayView?
+
     func attach(view: FlippedMTKView, renderer: LineRenderer) {
         self.view = view
         self.renderer = renderer
@@ -618,6 +626,17 @@ final class CADCanvasController {
         gizmoView.autoresizingMask = [.width, .height]
         view.addSubview(gizmoView)
         gizmo = gizmoView
+
+        // Float the dynamic-block visibility grip OVER the gizmo (added last, so its chip
+        // paints on top). It is transparent to clicks that are NOT on the grip; and when
+        // it is shown for a dynamic insert the gizmo is suppressed (see `refreshGizmo`), so
+        // the two overlays never contend for an ambiguous hit-test (critic must-fix).
+        let dynamicGripView = DynamicGripOverlayView(model: model) { [weak self] in self?.redraw() }
+        dynamicGripView.frame = view.bounds
+        dynamicGripView.autoresizingMask = [.width, .height]
+        view.addSubview(dynamicGripView)
+        dynamicGrip = dynamicGripView
+
         refreshGizmo()
         refreshCrosshair()
     }
@@ -646,14 +665,32 @@ final class CADCanvasController {
     /// in Select mode with a non-empty selection (and never while an inline text
     /// editor is open, so it doesn't fight the editor). Call after any change to the
     /// selection, the viewport (pan/zoom), or the active tool.
+    ///
+    /// DUAL-OVERLAY ARBITRATION (DB-1W, critic must-fix): when the single selection is a
+    /// dynamic-block insert (`model.shouldSuppressGizmoForSelection`), the transform gizmo
+    /// is SUPPRESSED (`isHidden = true` + `clearGizmoPreview`) and ONLY the dynamic-grip
+    /// overlay shows — so two transparent overlays never contend for an ambiguous hit-test.
+    /// For ANY other selection the gizmo behaves exactly as before and the dynamic grip is
+    /// hidden. (The dynamic grip is itself only shown in Select mode with no text editor,
+    /// the same gate the gizmo uses.)
     func refreshGizmo() {
         guard let gizmo else { return }
-        let showable = !model.isToolActive && textEditor == nil
-        if showable {
+        let interactive = !model.isToolActive && textEditor == nil
+        let suppressForDynamic = interactive && model.shouldSuppressGizmoForSelection
+
+        if interactive && !suppressForDynamic {
             gizmo.refresh()                 // shows itself iff there is a selection
         } else {
             model.clearGizmoPreview()
             gizmo.isHidden = true
+        }
+
+        // The dynamic-grip overlay shows ONLY for a single dynamic insert in Select mode;
+        // it hides itself (via its own `refresh`) for any other selection or non-interactive
+        // mode, so it never blocks clicks when inactive.
+        if let dynamicGrip {
+            if interactive { dynamicGrip.refresh() }
+            else { dynamicGrip.isHidden = true }
         }
     }
 

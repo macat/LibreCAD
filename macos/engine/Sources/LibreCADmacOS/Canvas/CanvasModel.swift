@@ -1093,8 +1093,11 @@ final class CanvasModel {
     func exitBlockEditing(save: Bool) -> Bool {
         guard let name = editingBlock else { return false }
 
-        // Did any edit funnel commit during the session? (Only `applyCommit` /
-        // `applyInspectorEdits` bump `modelVersion` between enter and here.)
+        // Did any edit funnel commit during the session? (The edit funnels —
+        // `applyCommit` / `applyInspectorEdits` — and the in-session authoring mutators
+        // (DB-1W: `addEditingBlockVisibilityState` / `removeEditingBlockVisibilityState` /
+        // `renameEditingBlockVisibilityState` / `setSelectedMembersVisibility`) all bump
+        // `modelVersion` between enter and here, so any session edit is detected.)
         let sessionChanged = modelVersion != editingEntryModelVersion
 
         if save && sessionChanged {
@@ -2412,6 +2415,146 @@ final class CanvasModel {
         modelDirty = true
         modelVersion &+= 1
         return true
+    }
+
+    // MARK: - Dynamic blocks — visibility states (DB-1W wiring)
+    //
+    // The UI funnel for dynamic-block VISIBILITY STATES (block-features §9). Authoring
+    // (create / rename / delete a state; show/hide selected members in the current
+    // authoring state) runs INSIDE the in-place Block Editor (`editingBlock`) and routes
+    // through the engine's undoable `CADDrawing` mutators. The INSTANCE side switches a
+    // placed insert's active state through the same undoable inspector funnel
+    // (`applyInspectorEdits`) the gizmo/Inspector use — re-resolving shows the variant.
+    // All modal/menu presentation stays in the View layer (overlay + Inspector); these
+    // methods are pure model logic so they unit-test headless.
+
+    /// The single selected entity that is a DYNAMIC-block insert — `nil` unless exactly
+    /// one entity is selected AND it is an `.insert` whose referenced block carries
+    /// visibility states. This is the gate BOTH the on-canvas dropdown grip
+    /// (`DynamicGripOverlay`) and the Inspector's active-state picker read, and the
+    /// arbitration input that suppresses the transform gizmo (`shouldSuppressGizmoForSelection`).
+    var singleSelectedDynamicInsert: (id: EntityID, blockName: String, states: [BlockVisibilityState], active: String?)? {
+        guard selection.ids.count == 1, let id = selection.ids.first,
+              let record = drawing.entity(id), case .insert(let data) = record.kind,
+              let block = drawing.blocks.block(named: data.blockName),
+              let def = block.dynamic, !def.visibilityStates.isEmpty
+        else { return nil }
+        return (id, data.blockName, def.visibilityStates, data.dynamic?.activeVisibilityState)
+    }
+
+    /// The arbitration decision for the dual-overlay critic must-fix: when the single
+    /// selection is a dynamic insert, the transform gizmo is SUPPRESSED and ONLY the
+    /// dynamic-grip overlay shows (no undefined hit-test precedence between two
+    /// transparent overlays); for ANY other selection the gizmo behaves as today. Pure
+    /// (reads selection + drawing only) so the canvas controller's `refreshGizmo` can
+    /// branch on it and a test can assert the decision without any NSView/NSMenu.
+    var shouldSuppressGizmoForSelection: Bool { singleSelectedDynamicInsert != nil }
+
+    /// Switches a placed `.insert`'s ACTIVE visibility state (block-features §9.4) — the
+    /// path the on-canvas dropdown grip and the Inspector picker both trigger. Writes
+    /// `InsertData.dynamic.activeVisibilityState` through the SAME undoable funnel the
+    /// Inspector/gizmo use (`applyInspectorEdits` → record replace), so one ⌘Z reverts
+    /// it and the re-resolve immediately shows the new variant. Passing `nil` resets the
+    /// insert to the block's DEFAULT state (state 0). A no-op (false) if `id` is not an
+    /// insert or the state is already active. Engine-pure (no UI / no modal).
+    @discardableResult
+    func setInsertVisibilityState(_ id: EntityID, to stateName: String?) -> Bool {
+        guard var record = drawing.entity(id), case .insert(var data) = record.kind else { return false }
+        var state = data.dynamic ?? InsertDynamicState()
+        guard state.activeVisibilityState != stateName else { return false } // redundant → no-op
+        state.activeVisibilityState = stateName
+        data.dynamic = state
+        record.kind = .insert(data)
+        applyInspectorEdits([record])
+        return true
+    }
+
+    // MARK: Authoring (inside the Block Editor scope)
+
+    /// The visibility states of the block CURRENTLY being edited (the Block Editor's
+    /// authoring target), or `[]` when not in a block-edit session / the block has no
+    /// states. Drives the Visibility States panel's list.
+    var editingBlockVisibilityStates: [BlockVisibilityState] {
+        guard let name = editingBlock,
+              let block = drawing.blocks.block(named: name) else { return [] }
+        return block.dynamic?.visibilityStates ?? []
+    }
+
+    /// Adds a new visibility state to the block being edited (block-features §9.2 New),
+    /// creating the block's `DynamicBlockDef` if it has none yet (§9.5: the first state
+    /// becomes the default). Undoable. Returns `true` on success — `false` if not in a
+    /// block-edit session, the name is blank, or a state with that name already exists.
+    @discardableResult
+    func addEditingBlockVisibilityState(named name: String) -> Bool {
+        guard let block = editingBlock else { return false }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let created = drawing.addVisibilityState(toBlock: block, named: trimmed) != nil
+        if created { modelDirty = true; modelVersion &+= 1 }
+        return created
+    }
+
+    /// Removes a visibility state from the block being edited (block-features §9.2
+    /// Delete). Undoable. Returns `false` if not editing, the state is unknown, or it is
+    /// the LAST state (§9.5 requires ≥1 state) — the panel disables Delete in that case,
+    /// but the model enforces it too.
+    @discardableResult
+    func removeEditingBlockVisibilityState(named name: String) -> Bool {
+        guard let block = editingBlock,
+              let def = drawing.blocks.block(named: block)?.dynamic,
+              def.visibilityState(named: name) != nil,
+              def.visibilityStates.count > 1 else { return false }
+        drawing.removeVisibilityState(block: block, named: name)
+        modelDirty = true; modelVersion &+= 1
+        return true
+    }
+
+    /// Renames a visibility state of the block being edited (block-features §9.2 Rename),
+    /// PRESERVING the state's stable id + its visible-member set. Undoable. Returns
+    /// `false` if not editing, the old state is unknown, the new name is blank, or the
+    /// new name already names another state. Composed from the engine's
+    /// `setBlockDynamic` mutator (there is no dedicated rename mutator — the rename is a
+    /// whole-`DynamicBlockDef` replace that keeps every other state intact).
+    @discardableResult
+    func renameEditingBlockVisibilityState(_ oldName: String, to newName: String) -> Bool {
+        guard let block = editingBlock,
+              var def = drawing.blocks.block(named: block)?.dynamic,
+              let idx = def.visibilityStates.firstIndex(where: { $0.name == oldName }) else { return false }
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != oldName,
+              !def.visibilityStates.contains(where: { $0.name == trimmed }) else { return false }
+        def.visibilityStates[idx].name = trimmed
+        drawing.setBlockDynamic(name: block, def)
+        modelDirty = true; modelVersion &+= 1
+        return true
+    }
+
+    /// Shows (`visible == true`, BVSHOW) or hides (`false`, BVHIDE) the CURRENT canvas
+    /// SELECTION's members in the named visibility state of the block being edited
+    /// (block-features §9.3). Only selected ids that are actual members of the editing
+    /// block are toggled (a stray selection of something outside the block is ignored).
+    /// One undo group covers the whole batch. Returns the number of members whose
+    /// visibility actually changed (0 ⇒ nothing applicable / already in that state).
+    @discardableResult
+    func setSelectedMembersVisibility(inState stateName: String, visible: Bool) -> Int {
+        guard let block = editingBlock,
+              let memberIDs = drawing.blocks.block(named: block)?.entityIDs else { return 0 }
+        let memberSet = Set(memberIDs)
+        // The state's current visible set, so we only act on REAL changes (a redundant
+        // toggle registers nothing — matching the engine mutator's own no-op skip).
+        let before = drawing.blocks.block(named: block)?.dynamic?
+            .visibilityState(named: stateName)?.visibleMemberIDs ?? []
+        let targets = selection.ids.filter { memberSet.contains($0) && before.contains($0) != visible }
+        guard !targets.isEmpty else { return 0 }   // nothing applicable → no-op, no undo
+
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        for id in targets {
+            drawing.setMemberVisibility(block: block, state: stateName, memberID: id, visible: visible)
+        }
+        modelDirty = true; modelVersion &+= 1
+        return targets.count
     }
 
     // MARK: - Layer ops (F17 — freeze/lock all, per-entity layer ops, layer states)

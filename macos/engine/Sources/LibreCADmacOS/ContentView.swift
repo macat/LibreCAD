@@ -209,6 +209,12 @@ struct ContentView: View {
             // top-leading file-status chip stays (it is the load/export status, not a
             // coordinate/tool readout).
             .overlay(alignment: .topLeading) { statusHUD }
+            // DB-1W: the dynamic-block VISIBILITY STATES authoring panel, floated at the
+            // top-trailing of the canvas while the in-place Block Editor is open
+            // (`model.isEditingBlock`). It lets the user add / rename / delete the editing
+            // block's visibility states and show/hide the current selection's members per
+            // state (block-features §9). Renders nothing when not editing.
+            .overlay(alignment: .topTrailing) { visibilityStatesPanel }
             // U2: the contextual tool-options bar, pinned directly under the toolbar
             // and above the canvas. It shows ONLY the active tool's parameters (and
             // collapses to nothing for tools without options), two-way bound to the
@@ -796,6 +802,17 @@ struct ContentView: View {
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
             .padding(8)
             .opacity(status.isEmpty ? 0 : 1)
+    }
+
+    /// DB-1W: the dynamic-block visibility-states authoring panel, floated at the canvas
+    /// top-trailing while a block-edit session is active. It renders its own chrome only
+    /// when `model.isEditingBlock`, so this is a thin host (padded so it clears the
+    /// toolbar/tool-options chrome). Bound to the same live `CanvasModel` the canvas uses.
+    @ViewBuilder
+    private var visibilityStatesPanel: some View {
+        BlockVisibilityStatesPanel(model: model, controllerBox: controllerBox)
+            .padding(.top, 8)
+            .padding(.trailing, 8)
     }
 
     // MARK: - Command / coordinate input line (U1)

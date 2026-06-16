@@ -99,6 +99,12 @@ struct InspectorView: View {
 
         GeometryEditor(record: record, onCommit: commit)
 
+        // DB-1W: dynamic-block VISIBILITY STATE picker (block-features §9.4) — a reliable,
+        // redundant control alongside the on-canvas dropdown grip. Shown only when the
+        // selected entity is an `.insert` whose block carries visibility states; switches
+        // the insert's active state through the undoable `setInsertVisibilityState` funnel.
+        dynamicInsertSection(record)
+
         // The font/style editor — the user-facing payoff of the font system.
         switch record.kind {
         case .text, .mtext:
@@ -112,6 +118,54 @@ struct InspectorView: View {
         default:
             EmptyView()
         }
+    }
+
+    // MARK: Dynamic-block visibility state (instance side, §9.4)
+
+    /// The Inspector's dynamic-block visibility-state picker — rendered only when `record`
+    /// is an `.insert` whose referenced block declares visibility states. Lets the user pick
+    /// the active state (the same thing the on-canvas dropdown grip does, surfaced as a
+    /// reliable fallback control). Selecting a state writes the insert's
+    /// `activeVisibilityState` through the undoable funnel and repaints.
+    @ViewBuilder
+    private func dynamicInsertSection(_ record: EntityRecord) -> some View {
+        if case .insert(let data) = record.kind,
+           let block = model.drawing.blocks.block(named: data.blockName),
+           let def = block.dynamic, !def.visibilityStates.isEmpty {
+            Section("Dynamic Block") {
+                Picker("Visibility State", selection: activeStateBinding(record, def: def)) {
+                    ForEach(def.visibilityStates) { state in
+                        Text(state.name).tag(state.name)
+                    }
+                }
+                LabeledContent("Block", value: data.blockName)
+            }
+        }
+    }
+
+    /// A two-way binding over the selected insert's active visibility state NAME. The GET
+    /// resolves `nil` (no explicit state) to the block's DEFAULT (first) state so the picker
+    /// always reflects what is drawn (§9.5); the SET routes through the undoable
+    /// `setInsertVisibilityState` funnel + a redraw. The SET always writes an EXPLICIT state
+    /// name (every picker tag is a `state.name`), so this control never takes the funnel's
+    /// `nil`→default-reset branch — writing the default state's name resolves identically.
+    /// (The `nil` reset path stays reachable from the engine / future grip affordances.)
+    private func activeStateBinding(_ record: EntityRecord, def: DynamicBlockDef) -> Binding<String> {
+        Binding(
+            get: {
+                if case .insert(let d) = record.kind,
+                   let active = d.dynamic?.activeVisibilityState,
+                   def.visibilityState(named: active) != nil {
+                    return active
+                }
+                return def.defaultVisibilityState?.name ?? ""
+            },
+            set: { newName in
+                if model.setInsertVisibilityState(record.id, to: newName) {
+                    requestRedraw()
+                }
+            }
+        )
     }
 
     // MARK: Multi selection (common fields only)
