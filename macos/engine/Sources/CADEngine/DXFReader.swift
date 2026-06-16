@@ -203,6 +203,42 @@ extension CADEngine {
                              warnings: warnings)
     }
 
+    // MARK: - Viewport-table mapping (paper-space P3)
+
+    /// Maps the bridge's `lc_viewports` PODs into `LayoutViewport`s, grouped by the
+    /// layout name each was read on (the `*Paper_Space` block / reconstructed name).
+    /// The paper frame is reconstructed from the viewport's center + size (the POD
+    /// carries the CENTER + width/height; `LayoutViewport.paperRect` is the corner
+    /// box). A degenerate (zero-size) viewport is dropped (it can't frame anything).
+    /// Returns `[layoutName(lowercased): [LayoutViewport]]` so `mapLayouts` can zip
+    /// them onto the matching `Layout` case-insensitively.
+    private static func mapViewports(_ list: OpaquePointer) -> [String: [LayoutViewport]] {
+        let count = Int(lc_viewport_count(list))
+        guard count > 0, let base = lc_viewports(list) else { return [:] }
+        let buf = UnsafeBufferPointer(start: base, count: count)
+        var byLayout: [String: [LayoutViewport]] = [:]
+        for v in buf {
+            let w = v.width
+            let h = v.height
+            guard w.isFinite, h.isFinite, w > 0, h > 0 else { continue }
+            // The POD carries the paper-frame CENTER + size; rebuild the corner box.
+            let half = Vector(w * 0.5, h * 0.5)
+            let center = Vector(v.centerX, v.centerY)
+            let rect = AABB(
+                min: Vector(center.x - half.x, center.y - half.y),
+                max: Vector(center.x + half.x, center.y + half.y)
+            )
+            let vp = LayoutViewport(
+                paperRect: rect,
+                viewCenter: Vector(v.viewCenterX, v.viewCenterY),
+                viewHeight: v.viewHeight
+            )
+            let key = (string(v.layoutName) ?? "Layout1").lowercased()
+            byLayout[key, default: []].append(vp)
+        }
+        return byLayout
+    }
+
     // MARK: - Layout-table mapping (paper-space P1)
 
     /// Maps the bridge's reconstructed `LCLayout` array (`lc_layouts`) into engine
@@ -215,6 +251,8 @@ extension CADEngine {
         let count = Int(lc_layout_count(list))
         guard count > 0, let base = lc_layouts(list) else { return [] }
         let buf = UnsafeBufferPointer(start: base, count: count)
+        // Paper-space P3: the viewports read on each layout, keyed by lowercased name.
+        let viewportsByLayout = mapViewports(list)
         return buf.map { l in
             let name = string(l.name) ?? "Layout1"
             // A default A4 page; override width/height/margin only when the bridge
@@ -223,7 +261,9 @@ extension CADEngine {
             if l.widthMM > 0 { page.widthMM = l.widthMM }
             if l.heightMM > 0 { page.heightMM = l.heightMM }
             if l.marginMM > 0 { page.marginMM = l.marginMM }
-            return Layout(name: name, tabOrder: Int(l.tabOrder), page: page)
+            // Zip the matching viewports onto this layout (case-insensitive name).
+            let viewports = viewportsByLayout[name.lowercased()] ?? []
+            return Layout(name: name, tabOrder: Int(l.tabOrder), page: page, viewports: viewports)
         }
     }
 

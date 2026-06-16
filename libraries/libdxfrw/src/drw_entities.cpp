@@ -5223,6 +5223,13 @@ bool DRW_Viewport::parseCode(int code, const std::unique_ptr<dxfReader>& reader)
     case 22:
         centerPY = reader->getDouble();
         break;
+    case 45:
+        // LibreCAD macOS (paper-space P3): the model view height. Stock libdxfrw
+        // declared `viewHeight` (code 45) but never parsed it here (it fell through
+        // to DRW_Point), so a viewport's view SCALE was dropped on read. Parse it so
+        // the view height round-trips (matched by the code-45 write in libdxfrw.cpp).
+        viewHeight = reader->getDouble();
+        break;
     default:
         return DRW_Point::parseCode(code, reader);
     }

@@ -284,7 +284,12 @@ enum DXFDocumentCodec {
                 layers: result.layers,
                 blocks: result.blocks,
                 graphicVariables: gv,
-                dimStyles: dimStyles
+                dimStyles: dimStyles,
+                // Paper-space P1/P3: carry the reconstructed layouts (and their
+                // viewports) so an opened paper-space DXF shows its layout tabs +
+                // viewports. Previously DROPPED here, so a paper-space file opened
+                // with ZERO layout tabs and invisible paper entities (confirmed bug).
+                layouts: result.layouts
             )
         } catch {
             throw CodecError.engine(error)
@@ -320,14 +325,22 @@ enum DXFDocumentCodec {
                         payload.entities, layers: payload.layers,
                         blocks: payload.blocks, blockMembers: blockMembers,
                         graphicVariables: payload.graphicVariables,
-                        dimStyles: payload.dimStyles, toPath: tmp.path
+                        dimStyles: payload.dimStyles,
+                        // Paper-space P3: persist each layout's viewports as DXF
+                        // VIEWPORT entities (symmetric to the read path).
+                        layouts: payload.layouts,
+                        toPath: tmp.path
                     )
                 case .dwg:
                     return try await CADEngine.shared.writeEntities(
                         payload.entities, layers: payload.layers,
                         blocks: payload.blocks, blockMembers: blockMembers,
                         graphicVariables: payload.graphicVariables,
-                        dimStyles: payload.dimStyles, toDWGPath: tmp.path
+                        dimStyles: payload.dimStyles,
+                        // DWG has no VIEWPORT write path (the library gap); the
+                        // layouts are passed for symmetry but viewports aren't written.
+                        layouts: payload.layouts,
+                        toDWGPath: tmp.path
                     )
                 }
             }

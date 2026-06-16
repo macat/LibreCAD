@@ -567,11 +567,57 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             }
         }
 
+        // Paper-space P3: when a layout is active, draw each viewport's CONTENTS —
+        // the model-space drawing seen through the viewport, scaled into its paper
+        // frame and clipped to it. Pure geometry (no Metal scissor): each model
+        // entity is resolved, mapped into paper space by the viewport's affine,
+        // Cohen–Sutherland-clipped to the frame, and fed through the SAME line-
+        // instance path. v1: DRAW-ONLY (not snap/select-through), so this packs into
+        // `instanceScratch` only and the quadtree stays scoped to the active space.
+        if activeSpace == .paper, let layout = model.activeLayoutRecord, !layout.viewports.isEmpty {
+            packViewportContents(layout.viewports, ctx: ctx, origin: origin, layers: layers)
+        }
+
         uploadLineInstances(instanceScratch)
         uploadFillVertices(fillScratch)
         builtModelVersion = model.modelVersion
         builtVisibleRect = cullRect   // cache the PADDED rect we culled
         model.modelDirty = false
+    }
+
+    /// Packs the CONTENTS of each viewport (paper-space P3): for every viewport, the
+    /// MODEL-space entities are resolved, their polylines mapped into paper space by
+    /// the viewport's model→paper affine, clipped to the viewport frame, and appended
+    /// as line instances. The pure transform + clip live on `LayoutViewport` (engine,
+    /// GPU-free), so this is just resolve → map → clip → pack. Frozen/hidden layers
+    /// are skipped, matching `packEntity`. Fills are NOT mapped (v1 draws viewport
+    /// contents as STROKES only — a hatch shows as its boundary; fill-through-the-
+    /// viewport is a follow-up).
+    private func packViewportContents(_ viewports: [LayoutViewport], ctx: ResolveContext,
+                                      origin: Vector, layers: LayerTable) {
+        let halfWidthPx = renderPrefs.lineHalfWidthPx(backingScale: backingScale)
+        // Resolve the model-space set ONCE per rebuild; every viewport reuses it.
+        let modelEntities = model.drawing.entities.filter { $0.space == .model }
+        for vp in viewports {
+            guard vp.scale > 0 else { continue }   // degenerate frame: nothing visible
+            for e in modelEntities {
+                guard RendererVisibility.isRendered(e.layer, in: layers) else { continue }
+                let geo = e.resolve(ctx)
+                for poly in geo.polylines {
+                    // Map each model point into paper space, then clip the resulting
+                    // paper-space polyline to the frame; each surviving segment is a
+                    // 2-point instance (clipping breaks a crossing polyline into pieces).
+                    let paperPoints = poly.points.map { vp.modelToPaper($0) }
+                    let segments = vp.clipPolylineToFrame(paperPoints, closed: poly.closed)
+                    for (a, b) in segments {
+                        let seg = ResolvedPolyline(points: [a, b], closed: false, pen: poly.pen)
+                        RendererGeometry.appendInstances(for: seg, renderOrigin: origin,
+                                                         halfWidthPx: halfWidthPx,
+                                                         into: &instanceScratch)
+                    }
+                }
+            }
+        }
     }
 
     /// Resolves one entity and packs its lines + fills into the scratch buffers,
@@ -773,8 +819,15 @@ final class LineRenderer: NSObject, MTKViewDelegate {
         // unchanged. Built GPU-free from the engine `PageDescriptor` via the pure
         // `PaperSheetGeometry`.
         var sheetVerts: [FlatVertex] = []
-        if let page = model.activeLayoutRecord?.page {
-            sheetVerts = PaperSheetGeometry.sheetOutline(for: page, renderOrigin: origin)
+        if let layout = model.activeLayoutRecord {
+            sheetVerts = PaperSheetGeometry.sheetOutline(for: layout.page, renderOrigin: origin)
+            // Paper-space P3: draw each viewport's FRAME outline on the sheet (the
+            // contents are drawn by the model-buffer pass; this is the pickable
+            // border). Reuses the sheet-rect vertex path.
+            if !layout.viewports.isEmpty {
+                sheetVerts += PaperSheetGeometry.viewportFrames(
+                    layout.viewports, renderOrigin: origin)
+            }
         }
 
         // Honor the Inspector's grid settings: the preferred spacing (when set)
@@ -870,6 +923,9 @@ enum PaperSheetGeometry {
     /// (drawn solid here; a distinct, lower-alpha tone so it reads as the inner
     /// "plot border" vs the paper edge).
     static let marginColor = SIMD4<Float>(0.55, 0.65, 0.85, 0.55)
+    /// The viewport-frame color (paper-space P3) — a distinct cyan-ish border so a
+    /// viewport window reads as separate from the page edge / margin.
+    static let viewportFrameColor = SIMD4<Float>(0.40, 0.80, 0.90, 0.80)
 
     /// The sheet outline + margin border as a `.line` vertex list (pairs), offset to
     /// render space against `renderOrigin`. Returns the page rectangle (4 edges) and,
@@ -888,6 +944,19 @@ enum PaperSheetGeometry {
         if !margin.isEmpty, margin.size.x > 0, margin.size.y > 0,
            margin != sheet {
             appendRect(margin, color: marginColor, renderOrigin: renderOrigin, into: &v)
+        }
+        return v
+    }
+
+    /// The frame outlines of `viewports` (paper-space P3) as `.line` vertex pairs,
+    /// each viewport's `paperRect` drawn as a 4-edge box in render space. A
+    /// degenerate (empty/zero-size) viewport rect contributes nothing.
+    static func viewportFrames(_ viewports: [LayoutViewport], renderOrigin: Vector) -> [FlatVertex] {
+        var v: [FlatVertex] = []
+        for vp in viewports {
+            let rect = vp.paperRect
+            guard !rect.isEmpty, rect.size.x > 0, rect.size.y > 0 else { continue }
+            appendRect(rect, color: viewportFrameColor, renderOrigin: renderOrigin, into: &v)
         }
         return v
     }
