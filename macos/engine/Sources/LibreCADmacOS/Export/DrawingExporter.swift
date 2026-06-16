@@ -128,6 +128,65 @@ enum DrawingExporter {
         ctx.closePDF()
     }
 
+    // MARK: - Layout (paper-space sheet) PDF export — Paper Space P4
+
+    /// Exports a paper-space `layout` sheet of `scene` to a single-page PDF at `url`,
+    /// plotted at the LAYOUT's own plot scale (the sheet at 1:1 for a fixed ratio,
+    /// fit-to-page for `.fit`) via the layout-aware transform. The page MEDIA box is
+    /// the layout's sheet size (snapped to the nearest standard sheet by default), so
+    /// the PDF is the size of the plotted sheet.
+    ///
+    /// `scene` is the layout's paper-space drawables (the caller filters `space ==
+    /// .paper && layoutName == layout.name` into a scene — kept a parameter so this
+    /// does not reach into the space/layout model another phase owns).
+    static func writeLayoutPDF(scene: ExportScene,
+                               layout: Layout,
+                               to url: URL,
+                               background: RGBAColor? = .white,
+                               snapToStandard: Bool = true) throws {
+        let data = try layoutPDFData(scene: scene, layout: layout,
+                                     background: background, snapToStandard: snapToStandard)
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            throw ExportError.writeFailed(error.localizedDescription)
+        }
+    }
+
+    /// The PURE "render this layout sheet to PDF data" function — NO save panel, NO
+    /// modal — so it is reachable from a unit test (the panel stays in the View
+    /// layer). Returns the in-memory single-page PDF `Data`; `writeLayoutPDF` just
+    /// writes it to disk. The page size is the layout's sheet (snapped to standard by
+    /// default); the sheet is drawn through the shared `LayoutRenderer` (clipped to
+    /// the margin-inset imageable area).
+    static func layoutPDFData(scene: ExportScene,
+                              layout: Layout,
+                              background: RGBAColor? = .white,
+                              snapToStandard: Bool = true) throws -> Data {
+        let setup = PrintLayout.pageSetup(from: layout.page, snapToStandard: snapToStandard)
+        let pageW = Swift.max(setup.paperSize.width, 1)
+        let pageH = Swift.max(setup.paperSize.height, 1)
+        var mediaBox = CGRect(x: 0, y: 0, width: pageW, height: pageH)
+
+        let pdfData = NSMutableData()
+        guard let consumer = CGDataConsumer(data: pdfData as CFMutableData),
+              let ctx = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
+            throw ExportError.contextCreationFailed
+        }
+
+        ctx.beginPDFPage(nil)
+        // PDF origin is bottom-left, y-up; the layout renderer / ExportTransform
+        // produce TOP-LEFT, y-down page points. Flip to a top-left origin so the
+        // shared renderer maps identically (same flip as `writePDF`).
+        ctx.translateBy(x: 0, y: pageH)
+        ctx.scaleBy(x: 1, y: -1)
+        LayoutRenderer.draw(scene: scene, layout: layout, in: ctx,
+                            background: background, snapToStandard: snapToStandard)
+        ctx.endPDFPage()
+        ctx.closePDF()
+        return pdfData as Data
+    }
+
     // MARK: - PNG
 
     /// Writes a raster PNG of `scene` at `url` at `dpi` (white-backed).
