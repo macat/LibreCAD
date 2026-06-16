@@ -55,13 +55,22 @@ public enum SelectionPolicy {
     /// Every selectable entity's id in `drawing` (Select All). Order is the
     /// drawing's stable draw order, filtered to the selectable set.
     ///
+    /// Block-DEFINITION members (ids in `drawing.blockMemberIDs`) are EXCLUDED: they
+    /// are geometry the block owns (editable only inside the Block Editor or drawn via
+    /// an `.insert`), never loose top-level entities. `selectableIDs`/`invertedIDs`
+    /// bypass the active-space scope (they walk the whole `entities` array), so without
+    /// this filter ⌘A and Invert would grab a block's members — the bug this guards.
+    ///
     /// `@MainActor` because `CADDrawing` is main-actor-isolated (its `entities` /
     /// `layers` reads); the only callers — `CanvasModel` and the contract tests — are
     /// already on the main actor, so this adds no friction.
     @MainActor
     public static func selectableIDs(in drawing: CADDrawing) -> [EntityID] {
         let layers = drawing.layers
-        return drawing.entities.compactMap { isSelectable($0, layers: layers) ? $0.id : nil }
+        let members = drawing.blockMemberIDs
+        return drawing.entities.compactMap {
+            (!members.contains($0.id) && isSelectable($0, layers: layers)) ? $0.id : nil
+        }
     }
 
     /// The complement of `current` within the *selectable* set of `drawing`
@@ -70,14 +79,18 @@ public enum SelectionPolicy {
     /// Locked/hidden entities are excluded from the result entirely, so an invert
     /// never selects something the user cannot edit — and because the universe is
     /// the selectable set, a currently-selected locked entity is dropped (toggled
-    /// OUT), which is the safe direction.
+    /// OUT), which is the safe direction. Block-DEFINITION members
+    /// (`drawing.blockMemberIDs`) are likewise excluded so an Invert never grabs a
+    /// block's owned geometry (same rationale as `selectableIDs`).
     ///
     /// `@MainActor` for the same reason as `selectableIDs` (it reads `CADDrawing`).
     @MainActor
     public static func invertedIDs(current: Set<EntityID>, in drawing: CADDrawing) -> [EntityID] {
         let layers = drawing.layers
+        let members = drawing.blockMemberIDs
         return drawing.entities.compactMap { entity in
-            guard isSelectable(entity, layers: layers) else { return nil }
+            guard !members.contains(entity.id),
+                  isSelectable(entity, layers: layers) else { return nil }
             return current.contains(entity.id) ? nil : entity.id
         }
     }

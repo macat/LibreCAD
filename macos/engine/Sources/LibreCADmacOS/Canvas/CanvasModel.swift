@@ -693,10 +693,23 @@ final class CanvasModel {
     /// — and any renderer that keys off this subset — operate on the block's contents,
     /// exactly the way paper space scopes to a sheet. The scope is restored to the
     /// prior space on `exitBlockEditing`.
+    ///
+    /// In MODEL space (and NOT in a block-edit session) block-DEFINITION members
+    /// (`drawing.blockMemberIDs`) are EXCLUDED: they are geometry owned by a block and
+    /// must draw/select ONLY via an `.insert` of the block (or while their block is open
+    /// in the Block Editor), never as loose top-level model-space entities. Because this
+    /// subset drives the quadtree (→ marquee / hit-test / snap) AND the render pack, the
+    /// single exclusion keeps members non-selectable and non-double-rendered. The Block
+    /// Editor branch above is untouched (members stay editable inside a session); paper
+    /// space carries no block members, so it is unaffected.
     var activeSpaceEntities: [EntityRecord] {
         if editingBlock != nil { return editingBlockEntities }
-        return PaperSpaceLayout.entities(
+        let scoped = PaperSpaceLayout.entities(
             in: drawing.entities, space: activeSpace, layoutName: activeLayout)
+        guard activeSpace == .model else { return scoped }
+        let members = drawing.blockMemberIDs
+        guard !members.isEmpty else { return scoped }
+        return scoped.filter { !members.contains($0.id) }
     }
 
     /// The `Layout` currently active (paper space), or `nil` in model space / when the
