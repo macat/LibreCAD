@@ -279,12 +279,21 @@ public struct GraphicVariables: Sendable, Hashable, Codable {
     // MARK: Document Settings additions (V4 — Document Settings sheet)
     //
     // The settings sheet (Units / Grid & Snap / Dimensions / Paper) surfaces these
-    // as editable, DXF-round-tripping document state. Each is a standard AutoCAD
-    // header var EXCEPT `$LC_SNAPMODE`, a LibreCAD-private var for the app-only snap
-    // mode set (decision D5). All follow the same one-line typed-accessor pattern as
-    // the accessors above, so they persist + round-trip through the `values` bag for
-    // free (set → read in memory, and via the DXF header bridge when it carries
-    // them — other CAD apps ignore unknown `$`-vars gracefully).
+    // as editable document state. Each is a standard AutoCAD header var EXCEPT
+    // `$LC_SNAPMODE`, a LibreCAD-private var for the app-only snap-mode set
+    // (decision D5). All follow the same one-line typed-accessor pattern as the
+    // accessors above, so they persist + read back in memory (and through the
+    // Codable `DXFPayload` / `CADDrawing.load` path) for free.
+    //
+    // DXF FILE round-trip: as of the R4b "generic $VAR pass-through" wave, the DXF
+    // header bridge carries an extra-var bag, so the STANDARD header vars below
+    // ($GRIDUNIT, $PDMODE, $PDSIZE, plus the units/dim vars handled by the fixed
+    // header POD) survive a Save → reopen on a .dxf file (other CAD apps ignore
+    // unknown `$`-vars gracefully). The PRIVATE `$LC_SNAPMODE` is the exception —
+    // libdxfrw's writer only emits its curated var list (and never `customVars`),
+    // so `$LC_SNAPMODE` would be silently dropped on a .dxf write; it is persisted
+    // ONLY in memory / the Codable payload (it is an app-local preference). DWG: the
+    // header-var pass-through follows whatever the DWG writer honors (see DXFWriter).
 
     /// `$GRIDUNIT` — the user's preferred grid spacing in world units (the X
     /// component; LibreCAD stores grid spacing as a vector but the app uses a single
@@ -361,8 +370,9 @@ public struct GraphicVariables: Sendable, Hashable, Codable {
 
     /// `$PDMODE` — the document-default point display mode (the AutoCAD point-marker
     /// encoding; see `PointDisplayMode`). New points and points left at the `.dot`
-    /// inherit sentinel render with this. Defaults `0` (a dot). Round-trips through
-    /// the header bridge (other CAD apps honor `$PDMODE` natively).
+    /// inherit sentinel render with this. Defaults `0` (a dot). It is a standard
+    /// AutoCAD header var, so it survives a .dxf Save → reopen via the header
+    /// extra-var bag (R4b), and other CAD apps honor `$PDMODE` natively.
     public var pointDisplayMode: PointDisplayMode {
         get { PointDisplayMode(rawMode: int("$PDMODE", default: 0)) }
         set { setInt("$PDMODE", newValue.rawMode) }
@@ -372,7 +382,8 @@ public struct GraphicVariables: Sendable, Hashable, Codable {
     /// glyph is drawn at this half-extent. `<= 0` (unset / "auto") ⇒ the resolve
     /// step uses its built-in default half-extent (AutoCAD's `0` means "5% of the
     /// viewport", which the viewport-free resolve approximates with a fixed size).
-    /// Defaults `0`. Round-trips through the header bridge.
+    /// Defaults `0`. A standard AutoCAD header var: survives a .dxf Save → reopen
+    /// via the header extra-var bag (R4b).
     public var pointSize: Double {
         get { double("$PDSIZE", default: 0) }
         set { setDouble("$PDSIZE", newValue) }
@@ -381,7 +392,11 @@ public struct GraphicVariables: Sendable, Hashable, Codable {
     /// `$LC_SNAPMODE` — a LibreCAD-PRIVATE header var persisting the app's enabled
     /// snap-mode set (`SnapMode.rawValue`, decision D5). It has no standard DXF
     /// header var; we store it as a custom `$`-var so it travels with the document
-    /// and round-trips (other CAD apps ignore unknown header vars). `nil` (unset) ⇒
+    /// IN MEMORY and through the Codable `DXFPayload` / `CADDrawing.load` path.
+    /// LIMITATION: it does NOT survive a .dxf FILE round-trip — libdxfrw's writer
+    /// emits only its curated standard-var list (and never `customVars`), so a
+    /// non-standard `$`-var like this is silently dropped on a .dxf write (R4b
+    /// chose not to patch libdxfrw for an app-local preference). `nil` (unset) ⇒
     /// the app keeps its built-in interactive default.
     public var snapModeRaw: Int? {
         get { values["$LC_SNAPMODE"]?.intValue }
