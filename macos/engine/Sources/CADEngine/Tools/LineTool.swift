@@ -34,6 +34,30 @@
 
 import Foundation
 
+/// How the Line tool constrains the angle of the NEXT segment — surfaced by the
+/// tool-options bar (UX-plan U2). It mirrors LibreCAD's angle-constrained line
+/// entry: once a starting point is fixed, the cursor/clicked/typed point is
+/// PROJECTED onto a ray of the chosen angle from the running endpoint, so the
+/// committed segment lands at exactly that angle (its length is the projection of
+/// the pick along the ray).
+///
+/// `.free` (the default) projects nothing — the original two-point flow is
+/// unchanged and fully back-compatible.
+public enum LineAngleMode: Sendable, Hashable {
+    /// No angle constraint (the original behavior): the segment runs straight to
+    /// the picked point.
+    case free
+    /// Constrain every segment to this ABSOLUTE angle (radians, CCW from +X). The
+    /// pick is projected onto the ray from the running endpoint at this angle.
+    case absolute(Double)
+    /// Constrain each segment to this angle measured RELATIVE to the direction of
+    /// the PREVIOUS committed segment (radians, CCW). The first segment of a run
+    /// has no previous direction, so it is taken relative to +X (i.e. behaves like
+    /// `.absolute` for the first segment), then each subsequent segment turns by
+    /// this angle from the one before.
+    case relative(Double)
+}
+
 /// The interactive Line tool. Click two points to draw a line; it then chains
 /// (LibreCAD behavior), continuing from the endpoint until `.commit`/`.cancel`.
 public struct LineTool: Tool {
@@ -57,7 +81,22 @@ public struct LineTool: Tool {
     /// between clicks. Invalid until the first move.
     private var cursor: Vector = .invalid
 
-    public init() {}
+    /// The angle constraint for the next segment. Surfaced by the tool-options bar
+    /// (UX-plan U2). Back-compatible: the default `.free` keeps the original
+    /// straight-to-the-pick two-point flow.
+    public let angleMode: LineAngleMode
+
+    /// The direction (radians) of the most recently committed segment within this
+    /// run, or `nil` before the first segment commits. Used by `.relative` angle
+    /// mode to turn each segment off the previous one; reset with the run.
+    private var lastDirection: Double?
+
+    /// Creates a Line tool with the given angle constraint (default `.free` — the
+    /// original two-point flow). The app's `applyToolConfig` mints the tool in the
+    /// mode the options bar selected.
+    public init(angleMode: LineAngleMode = .free) {
+        self.angleMode = angleMode
+    }
 
     // MARK: - Tool
 
@@ -77,7 +116,36 @@ public struct LineTool: Tool {
         guard case .settingEnd(let last) = state, cursor.valid, last.valid else {
             return []
         }
-        return [ResolvedPolyline(points: [last, cursor], closed: false, pen: .toolPreview)]
+        // Preview the CONSTRAINED endpoint so the rubber-band shows where the
+        // angle-locked segment will actually land (identity in `.free` mode).
+        let endPoint = constrained(last, cursor)
+        return [ResolvedPolyline(points: [last, endPoint], closed: false, pen: .toolPreview)]
+    }
+
+    // MARK: - Angle constraint (pure)
+
+    /// The angle (radians, CCW from +X) the next segment from `from` is locked to,
+    /// or `nil` in `.free` mode (no constraint). `.relative` turns off the previous
+    /// segment's direction (`lastDirection`), falling back to +X for the first
+    /// segment of a run.
+    private var constraintAngle: Double? {
+        switch angleMode {
+        case .free:               return nil
+        case .absolute(let a):    return a
+        case .relative(let a):    return (lastDirection ?? 0) + a
+        }
+    }
+
+    /// Projects `pick` onto the constraint ray from `from`. In `.free` mode (or with
+    /// an invalid input) it returns `pick` unchanged, so the plain two-point flow is
+    /// untouched. The projected point is `from + (pick−from)·d̂ · d̂` for the unit
+    /// ray direction `d̂`: the pick's component along the locked angle, so the
+    /// segment runs at exactly that angle with the length the cursor reaches.
+    func constrained(_ from: Vector, _ pick: Vector) -> Vector {
+        guard let angle = constraintAngle, from.valid, pick.valid else { return pick }
+        let dir = Vector(angle: angle)            // unit ray direction
+        let t = (pick - from).dot(dir)            // signed projection length
+        return from + dir * t
     }
 
     /// A draw tool: it IGNORES `context` (it needs only the snapped world points)
@@ -120,17 +188,21 @@ public struct LineTool: Tool {
             return .none
 
         case .settingEnd(let last):
-            // Commit one segment last→p, then CONTINUE from p (chaining).
-            guard last.valid, p.valid, (p - last).magnitude > Tolerance.distance else {
-                // Degenerate (zero-length) pick — ignore it, keep waiting.
+            // Apply the angle constraint (identity in `.free` mode), then commit one
+            // segment last→end and CONTINUE from `end` (chaining).
+            let end = constrained(last, p)
+            guard last.valid, end.valid, (end - last).magnitude > Tolerance.distance else {
+                // Degenerate (zero-length) pick — ignore it, keep waiting. (A pick
+                // exactly behind an angle ray projects to `last`, also a no-op.)
                 return .none
             }
             let record = EntityRecord(
                 id: .placeholder,
-                kind: .line(LineData(start: last, end: p))
+                kind: .line(LineData(start: last, end: end))
             )
-            state = .settingEnd(last: p)
-            cursor = p
+            lastDirection = (end - last).angle
+            state = .settingEnd(last: end)
+            cursor = end
             return .commit([.add(record)])
         }
     }
@@ -153,5 +225,6 @@ public struct LineTool: Tool {
     private mutating func reset() {
         state = .settingStart
         cursor = .invalid
+        lastDirection = nil
     }
 }
