@@ -2448,7 +2448,26 @@ final class CanvasModel {
     /// transparent overlays); for ANY other selection the gizmo behaves as today. Pure
     /// (reads selection + drawing only) so the canvas controller's `refreshGizmo` can
     /// branch on it and a test can assert the decision without any NSView/NSMenu.
-    var shouldSuppressGizmoForSelection: Bool { singleSelectedDynamicInsert != nil }
+    ///
+    /// DB-2W broadens the trigger: a single insert whose block carries ANY dynamic
+    /// authoring — visibility states (DB-1) OR linear/flip PARAMETERS (DB-2) — suppresses
+    /// the gizmo, so the parameter grips (square stretch / triangle flip) own the
+    /// manipulation instead of the bounding-box gizmo.
+    var shouldSuppressGizmoForSelection: Bool { singleSelectedDynamicInsertID != nil }
+
+    /// The id of the single selected `.insert` whose block carries ANY dynamic authoring
+    /// (visibility states OR parameters) — the gate for suppressing the gizmo and showing
+    /// the dynamic-grip overlay (DB-2W). `nil` unless EXACTLY one entity is selected and it
+    /// is such an insert. Broader than `singleSelectedDynamicInsert` (which is
+    /// visibility-specific) so a parameters-only dynamic block still gets its grips.
+    var singleSelectedDynamicInsertID: EntityID? {
+        guard selection.ids.count == 1, let id = selection.ids.first,
+              let record = drawing.entity(id), case .insert(let data) = record.kind,
+              let block = drawing.blocks.block(named: data.blockName),
+              let def = block.dynamic, !def.isEmpty
+        else { return nil }
+        return id
+    }
 
     /// Switches a placed `.insert`'s ACTIVE visibility state (block-features §9.4) — the
     /// path the on-canvas dropdown grip and the Inspector picker both trigger. Writes
@@ -2463,6 +2482,230 @@ final class CanvasModel {
         var state = data.dynamic ?? InsertDynamicState()
         guard state.activeVisibilityState != stateName else { return false } // redundant → no-op
         state.activeVisibilityState = stateName
+        data.dynamic = state
+        record.kind = .insert(data)
+        applyInspectorEdits([record])
+        return true
+    }
+
+    // MARK: - Dynamic blocks — PARAMETER GRIPS (DB-2W instance live-drag)
+    //
+    // The on-canvas INSTANCE grips for a selected dynamic insert (block-features §5.2.2
+    // linear / §5.2.7 flip, §13.5 grips): a SQUARE stretch grip at each linear
+    // parameter's `end` (live-DRAG → new distance) and a TRIANGLE flip grip on each flip
+    // parameter's line (CLICK → toggle). The pure model below mirrors the gizmo's
+    // preview-then-commit shape (`gizmoPreviewPolylines`/`commitGizmoTransform`): the
+    // overlay (`DynamicGripOverlayView`) does ONLY screen↔world + hit-test + the drag
+    // lifecycle; every value mapping, the live re-resolve preview, and the undoable write
+    // live here as pure model logic so they unit-test headless (no NSView / no NSMenu).
+
+    /// One instance grip on a selected dynamic insert, anchored in WORLD coordinates (the
+    /// parameter's defining points run through the insert's placement transform). The
+    /// overlay enumerates these to draw + hit-test the grips; the value/commit math keys
+    /// off `parameterID`.
+    enum DynamicInstanceGrip: Equatable {
+        /// A SQUARE stretch grip at a LINEAR parameter's `end` (world). Dragging it sets a
+        /// new distance along the parameter direction. `base`/`end` are the world-mapped
+        /// parameter segment endpoints (so the overlay can project the cursor onto the
+        /// direction); `baseDistance` is the parameter's default distance.
+        case stretch(parameterID: BlockParameterID, base: Vector, end: Vector, baseDistance: Double)
+        /// A TRIANGLE flip grip at a FLIP parameter's line midpoint (world). Clicking it
+        /// toggles the instance flip state. `lineStart`/`lineEnd` are the world-mapped
+        /// reflection-line endpoints (so the overlay can orient the triangle).
+        case flip(parameterID: BlockParameterID, lineStart: Vector, lineEnd: Vector, isFlipped: Bool)
+
+        /// The grip's world ANCHOR (where the handle is drawn + hit-tested).
+        var anchor: Vector {
+            switch self {
+            case .stretch(_, _, let end, _): return end
+            case .flip(_, let s, let e, _):  return Vector((s.x + e.x) * 0.5, (s.y + e.y) * 0.5)
+            }
+        }
+    }
+
+    /// The insert's local→world placement transform on the FIRST MINSERT cell — the SAME
+    /// `translate(insertionPoint) ∘ rotate(rotation) ∘ scale(scale)` the resolve uses
+    /// (`Resolve.insertTransform`, which is module-internal, so reconstructed here from the
+    /// public `InsertData` fields). Parameter defining points are authored in the block's
+    /// LOCAL frame (same space as the members), so this maps them to where the grip draws.
+    /// A degenerate (zero) scale axis is clamped away from 0 (matching the resolve).
+    private static func instancePlacementTransform(_ d: InsertData) -> Affine2D {
+        let eps = 1e-9
+        let sx = abs(d.scale.x) < eps ? (d.scale.x < 0 ? -eps : eps) : d.scale.x
+        let sy = abs(d.scale.y) < eps ? (d.scale.y < 0 ? -eps : eps) : d.scale.y
+        let scale = Affine2D(a: sx, b: 0, c: 0, d: sy, tx: 0, ty: 0)
+        let rotate = Affine2D.rotation(angle: d.rotation)
+        let translate = Affine2D.translation(d.insertionPoint)
+        return translate * rotate * scale
+    }
+
+    /// The instance grips for the single selected dynamic insert, anchored in WORLD
+    /// coordinates — `nil` unless exactly one dynamic insert is selected. One SQUARE
+    /// stretch grip per LINEAR parameter (anchored at its world-mapped `end`) and one
+    /// TRIANGLE flip grip per FLIP parameter (anchored at its line midpoint). The grips
+    /// reflect the insert's CURRENT instance values (the dragged distance, the flip flag)
+    /// so they sit where the live geometry is. Pure (reads selection + drawing only).
+    var singleSelectedDynamicInsertGrips: (id: EntityID, grips: [DynamicInstanceGrip])? {
+        guard selection.ids.count == 1, let id = selection.ids.first,
+              let record = drawing.entity(id), case .insert(let data) = record.kind,
+              let block = drawing.blocks.block(named: data.blockName),
+              let def = block.dynamic, !def.parameters.isEmpty
+        else { return nil }
+        let t = Self.instancePlacementTransform(data)
+        var grips: [DynamicInstanceGrip] = []
+        for param in def.parameters {
+            switch param {
+            case .linear(let pid, _, let base, let end):
+                let baseDist = param.baseDistance ?? (end - base).magnitude
+                // Where the grip currently sits: the parameter's `end` advanced/retracted
+                // to the CURRENT distance along the (local) direction, then world-mapped.
+                let current = data.dynamic?.parameterValues[pid.raw] ?? baseDist
+                let localEnd: Vector
+                if let dir = param.unitDirection {
+                    localEnd = Vector(base.x + dir.x * current, base.y + dir.y * current)
+                } else {
+                    localEnd = end
+                }
+                grips.append(.stretch(parameterID: pid,
+                                      base: t.apply(base),
+                                      end: t.apply(localEnd),
+                                      baseDistance: baseDist))
+            case .flip(let pid, _, let lineStart, let lineEnd):
+                let flipped = data.dynamic?.flipStates[pid.raw] ?? false
+                grips.append(.flip(parameterID: pid,
+                                   lineStart: t.apply(lineStart),
+                                   lineEnd: t.apply(lineEnd),
+                                   isFlipped: flipped))
+            }
+        }
+        return grips.isEmpty ? nil : (id, grips)
+    }
+
+    /// The new DISTANCE a stretch grip drag yields: the cursor's world point projected
+    /// onto the parameter direction (measured from the parameter's world BASE). This is
+    /// the pure drag→value mapping (analogous to `GizmoTransform.move`/`.rotateAngle`).
+    /// Returns `nil` for a degenerate parameter direction. The result is clamped to be
+    /// non-negative (a linear parameter's distance cannot go past its base point — a
+    /// negative projection clamps to 0, matching AutoCAD's linear-stretch behavior).
+    func stretchDistance(forGrip grip: DynamicInstanceGrip, cursorWorld: Vector) -> Double? {
+        guard case .stretch(_, let base, _, _) = grip else { return nil }
+        // Use the CURRENT (world) grip direction base→end; if the grip is at base
+        // (current distance 0) the direction is ill-defined, so fall back to a tiny step.
+        let dir = grip.anchor - base
+        let len = dir.magnitude
+        guard len > Tolerance.distance else {
+            // Direction unknown (grip on the base). Project onto the cursor offset itself
+            // so a fresh drag still produces a sensible (positive) distance.
+            let v = cursorWorld - base
+            let d = v.magnitude
+            return d.isFinite ? d : nil
+        }
+        let unit = Vector(dir.x / len, dir.y / len)
+        let proj = (cursorWorld - base).dot(unit)
+        guard proj.isFinite else { return nil }
+        return Swift.max(0, proj)
+    }
+
+    // MARK: Live preview (mirrors gizmoPreviewPolylines)
+
+    /// The trial per-instance state during a grip drag (a PREVIEW only; not committed).
+    /// The overlay sets it on every drag step (a copy of the insert's `InsertDynamicState`
+    /// with the dragged parameter's value swapped) and the canvas draws the insert
+    /// re-resolved at it via `insertEvaluationPreview`; cleared on commit/cancel. Mirrors
+    /// `gizmoPreviewTransform`.
+    @ObservationIgnored
+    var insertPreviewID: EntityID?
+    @ObservationIgnored
+    var insertPreviewState: InsertDynamicState?
+
+    /// The selected insert RE-RESOLVED at the trial preview state, as preview polylines
+    /// (the tool-preview pen) for the overlay renderer. Empty when no grip drag is in
+    /// progress. Mirrors `gizmoPreviewPolylines`: the overlay draws these green lines so a
+    /// stretch/flip drag reads identically to the gizmo's rubber-band.
+    var insertEvaluationPreview: [ResolvedPolyline] {
+        guard let id = insertPreviewID, let trial = insertPreviewState,
+              var record = drawing.entity(id), case .insert(var data) = record.kind else { return [] }
+        data.dynamic = trial
+        record.kind = .insert(data)
+        var out: [ResolvedPolyline] = []
+        for poly in record.resolve(drawing.makeResolveContext()).polylines {
+            out.append(ResolvedPolyline(points: poly.points, closed: poly.closed, pen: .toolPreview))
+        }
+        return out
+    }
+
+    /// Sets the live grip-drag preview: the insert re-resolved at `trial` is drawn via
+    /// `insertEvaluationPreview` on the next redraw. The overlay calls this each drag step
+    /// with the trial parameter value swapped in.
+    func setInsertEvaluationPreview(id: EntityID, state: InsertDynamicState) {
+        insertPreviewID = id
+        insertPreviewState = state
+    }
+
+    /// Clears the live grip-drag preview (drag ended / cancelled) WITHOUT committing.
+    func clearInsertEvaluationPreview() {
+        insertPreviewID = nil
+        insertPreviewState = nil
+    }
+
+    /// A copy of the insert's current `InsertDynamicState` (or a fresh one), the base the
+    /// overlay mutates to build a trial preview / a commit. `nil` if `id` is not an insert.
+    func insertDynamicState(_ id: EntityID) -> InsertDynamicState? {
+        guard let record = drawing.entity(id), case .insert(let data) = record.kind else { return nil }
+        return data.dynamic ?? InsertDynamicState()
+    }
+
+    // MARK: Commit (one undoable edit, mirrors commitGizmoTransform)
+
+    /// Commits a STRETCH grip drag: writes the dragged `distance` into the insert's
+    /// `parameterValues[parameterID.raw]` through the SAME undoable funnel the
+    /// Inspector/gizmo use (`applyInspectorEdits` → record replace), so one ⌘Z reverts the
+    /// whole drag and the re-resolve immediately shows the new geometry. Clears the live
+    /// preview. A no-op (returns `false`) if `id` is not an insert, the parameter is
+    /// unknown/not linear, or the value is unchanged within tolerance (so an accidental
+    /// tiny drag never pushes an undo step). The new value is clamped non-finite-safe.
+    @discardableResult
+    func commitInsertStretch(_ id: EntityID, parameter parameterID: BlockParameterID,
+                             distance: Double) -> Bool {
+        clearInsertEvaluationPreview()
+        guard distance.isFinite,
+              var record = drawing.entity(id), case .insert(var data) = record.kind,
+              let block = drawing.blocks.block(named: data.blockName),
+              let param = block.dynamic?.parameter(parameterID),
+              case .linear = param else { return false }
+        let baseDist = param.baseDistance ?? 0
+        var state = data.dynamic ?? InsertDynamicState()
+        let current = state.parameterValues[parameterID.raw] ?? baseDist
+        guard abs(current - distance) > Tolerance.distance else { return false }   // no real change
+        // Storing the base distance back is the same as "no override" — drop the key so a
+        // grip dragged back to default leaves a clean (key-free) instance state.
+        if abs(distance - baseDist) <= Tolerance.distance {
+            state.parameterValues.removeValue(forKey: parameterID.raw)
+        } else {
+            state.parameterValues[parameterID.raw] = distance
+        }
+        data.dynamic = state
+        record.kind = .insert(data)
+        applyInspectorEdits([record])
+        return true
+    }
+
+    /// Toggles a FLIP grip: flips `flipStates[parameterID.raw]` on the insert through the
+    /// same undoable funnel, so one ⌘Z reverts it and the re-resolve shows the mirrored (or
+    /// un-mirrored) geometry. A no-op (returns `false`) if `id` is not an insert or the
+    /// parameter is unknown/not a flip parameter. Clears any live preview.
+    @discardableResult
+    func toggleInsertFlip(_ id: EntityID, parameter parameterID: BlockParameterID) -> Bool {
+        clearInsertEvaluationPreview()
+        guard var record = drawing.entity(id), case .insert(var data) = record.kind,
+              let block = drawing.blocks.block(named: data.blockName),
+              let param = block.dynamic?.parameter(parameterID),
+              case .flip = param else { return false }
+        var state = data.dynamic ?? InsertDynamicState()
+        let nowFlipped = !(state.flipStates[parameterID.raw] ?? false)
+        // `false` is the default — drop the key when un-flipping so the instance stays clean.
+        if nowFlipped { state.flipStates[parameterID.raw] = true }
+        else { state.flipStates.removeValue(forKey: parameterID.raw) }
         data.dynamic = state
         record.kind = .insert(data)
         applyInspectorEdits([record])
