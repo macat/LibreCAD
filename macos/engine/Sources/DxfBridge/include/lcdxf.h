@@ -220,6 +220,21 @@ typedef struct LCEntity {
     int32_t color;         /**< ACI color index, code 62 (0=ByBlock, 256=ByLayer). */
     int32_t color24;       /**< true-color 0x00RRGGBB, code 420, or -1 if unset. */
     int32_t lineWeightMM100;/**< lineweight in mm*100; -1 ByLayer, -2 ByBlock, -3 default. */
+    /** Which "space" the entity lives in (paper-space P1): 0 == model space (DXF
+     *  code 67 == 0, the default), 1 == paper space (code 67 == 1). The reader
+     *  copies DRW_Entity::space (which libdxfrw parses from code 67) here, AND
+     *  forces 1 for any entity read inside a `*Paper_Space` block (where AutoCAD
+     *  marks the space by the block, not code 67). The Swift reader maps this to
+     *  `EntityRecord.space`; the writer sets DRW_Entity::space from it so libdxfrw
+     *  emits code 67 for a paper-space entity. */
+    int32_t spaceFlag;
+    /** The layout (paper sheet) name a paper-space entity belongs to (`spaceFlag
+     *  == 1`), borrowing the owning list's string pool — e.g. "Layout1". NULL for
+     *  model-space entities (and for paper-space entities not bound to a named
+     *  layout). Reconstructed from the `*Paper_Space` block name on read (lossy on
+     *  the user-facing tab name — see `LCLayout`). The Swift reader maps this to
+     *  `EntityRecord.layoutName`. */
+    const char *layoutName;
 
     /* Geometry (meaning per `kind`). */
     double p1x, p1y, p1z;  /**< line start / point / generic base point. */
@@ -440,6 +455,40 @@ typedef struct LCDimStyle {
     double dimGap;          /**< code 147 — text gap (world units). */
 } LCDimStyle;
 
+/* ------------------------------------------------------------------------- *
+ *  Reconstructed paper-space LAYOUT (paper-space P1)
+ *
+ *  libdxfrw's DXF reader does NOT parse the ACAD_LAYOUT dictionary (its
+ *  processObjects handles only IMAGEDEF + PLOTSETTINGS), so the named LAYOUT
+ *  table — tab name, tab order, the paper-size selection — is not available.
+ *  We therefore RECONSTRUCT a SINGLE layout when a drawing has paper-space
+ *  content: the reader emits one LCLayout whenever it sees either a non-empty
+ *  `*Paper_Space` block OR a PLOTSETTINGS object. Its page geometry comes from
+ *  PLOTSETTINGS where present (margins; codes 40–43), defaulting otherwise.
+ *
+ *  KNOWN LOSS (single-layout, stock libdxfrw): the user-facing tab name + order
+ *  are NOT recoverable, so the reconstructed layout is always named "Layout1".
+ *  Stock libdxfrw's DRW_PlotSettings parses ONLY the margins + plot-view name —
+ *  NOT the paper width/height — so `widthMM`/`heightMM` are 0 (== "use the
+ *  engine default sheet size") unless a future libdxfrw patch supplies them.
+ *  Multi-layout read + true tab names require the libdxfrw LAYOUT-dict patch
+ *  (the documented follow-up).
+ * ------------------------------------------------------------------------- */
+
+/**
+ * One reconstructed paper-space layout (see the section comment above). Strings
+ * borrow the owning list's pool; lifetime is tied to the LCEntityList.
+ */
+typedef struct LCLayout {
+    const char *name;       /**< layout / tab name. Always "Layout1" on stock
+                                 libdxfrw (the LAYOUT dict is not parsed). */
+    double widthMM;         /**< paper width  (mm); 0 == use the engine default. */
+    double heightMM;        /**< paper height (mm); 0 == use the engine default. */
+    double marginMM;        /**< uniform page margin (mm) — the max of the
+                                 PLOTSETTINGS margins (codes 40–43); 0 if none. */
+    int32_t tabOrder;       /**< left-to-right tab position (0-based); always 0. */
+} LCLayout;
+
 /** Opaque owned result handle. Free with `lc_entity_list_free`. */
 typedef struct LCEntityList LCEntityList;
 
@@ -539,6 +588,17 @@ int lc_dimstyle_count(const LCEntityList *list);
  *  or NULL. The pointer (and each style's `name`) stays valid until
  *  `lc_entity_list_free`. NULL-safe. */
 const LCDimStyle *lc_dimstyles(const LCEntityList *list);
+
+/** Number of RECONSTRUCTED paper-space layouts (paper-space P1). 0 for a model-
+ *  space-only drawing; 1 when the file carries paper-space content (a non-empty
+ *  `*Paper_Space` block or a PLOTSETTINGS object). Never > 1 on stock libdxfrw
+ *  (the LAYOUT dictionary is not parsed — see `LCLayout`). NULL-safe. */
+int lc_layout_count(const LCEntityList *list);
+
+/** Pointer to the contiguous flat array of `lc_layout_count` layouts, or NULL.
+ *  The pointer (and each layout's `name`) stays valid until
+ *  `lc_entity_list_free`. NULL-safe. */
+const LCLayout *lc_layouts(const LCEntityList *list);
 
 /** Frees a handle returned by `lc_dxf_read`. NULL-safe. */
 void lc_entity_list_free(LCEntityList *list);
