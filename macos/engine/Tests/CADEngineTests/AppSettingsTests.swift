@@ -97,7 +97,7 @@ struct AppSettingsDefaultTests {
         #expect(AppSettings.Default.theme == .system)
         #expect(AppSettings.Default.canvasBackgroundHex.isEmpty)    // empty = follow theme
         #expect(AppSettings.Default.gridColorHex.isEmpty)
-        #expect(AppSettings.Default.crosshairStyle == .small)
+        #expect(AppSettings.Default.crosshairStyle == .full)
         #expect(AppSettings.Default.snapAperturePx == 12)
         #expect(AppSettings.Default.antialias == true)
         #expect(AppSettings.Default.renderQuality == .high)
