@@ -838,7 +838,14 @@ final class CADCanvasController {
             model.handleViewportMove(p)
         } else if model.isToolActive {
             let p = model.snappedWorldPoint(atScreenPoint: point, gridSpacing: spacing)
-            let constrained = model.orthoConstrained(p, shiftHeld: Self.shiftHeld)
+            // Angular constraint: ortho axis-locks, polar angle-locks (15° increments).
+            // The two are MUTUALLY EXCLUSIVE in the model (turning one on clears the
+            // other — see `togglePolar`), and each call gates internally on its own
+            // enabled flag (returning the point unchanged when not effective), so it is
+            // safe to chain them: at most one ever mutates the point.
+            let constrained = model.polarConstrained(
+                model.orthoConstrained(p, shiftHeld: Self.shiftHeld),
+                shiftHeld: Self.shiftHeld)
             model.handleToolInput(.move(constrained))
         }
         // Hover highlight (U5): in SELECT mode, track the entity under the cursor so
@@ -894,9 +901,13 @@ final class CADCanvasController {
         if model.isToolActive {
             let spacing = renderer?.lastGridSpacing
             let p = model.snappedWorldPoint(atScreenPoint: point, gridSpacing: spacing)
-            // Apply ortho to the CLICKED point too (osnap > ortho > free), so the
-            // committed point matches the constrained preview the user is looking at.
-            let constrained = model.orthoConstrained(p, shiftHeld: Self.shiftHeld)
+            // Apply the angular constraint to the CLICKED point too (osnap > ortho/polar
+            // > free), so the committed point matches the constrained preview the user is
+            // looking at. Ortho and polar are mutually exclusive in the model and each
+            // gates internally, so chaining them mutates the point with at most one.
+            let constrained = model.polarConstrained(
+                model.orthoConstrained(p, shiftHeld: Self.shiftHeld),
+                shiftHeld: Self.shiftHeld)
             if model.handleToolInput(.click(constrained)) { redraw() }
             return
         }
