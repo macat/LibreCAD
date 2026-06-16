@@ -40,9 +40,11 @@
 //  loop (by |signed area|) is the outer boundary (CCW); every other loop is a hole
 //  (CW). If no usable loop results, nothing is committed.
 //
-//  Solid fill by default (`patternName == "SOLID"`, `solidFill == true`) — the
-//  only fill the resolve renders today; a named pattern still resolves to a solid
-//  fill of its boundary, so patterns are out of scope here.
+//  Solid fill by default (`patternName == "SOLID"`, `solidFill == true`). A tool
+//  configured with a pattern (`init(patternName:scale:angle:)` or by setting
+//  `fill`) instead emits a NON-solid `.hatch` carrying that `patternName` /
+//  `patternScale` / `patternAngle`; the resolve arm draws the bundled `.pat`
+//  pattern's clipped lines (an unknown name falls back to solid there).
 //
 //  PURE (ADR-001 / Tool contract): it never touches CADDrawing / Quadtree / GUI.
 //  It reads only the read-only `ToolContext.selected` and returns the `.add` edit;
@@ -90,7 +92,48 @@ public struct HatchTool: Tool {
     /// to 10 decimals) still chain. Kept private; not user-tunable.
     static let joinTolerance = 1.0e-6
 
+    // MARK: - Pattern configuration (the picker the wire-wave drives)
+
+    /// The fill the committed `.hatch` is given. `.solid` is the back-compatible
+    /// default (a solid fill — the prior behavior). `.pattern(name:scale:angle:)`
+    /// asks for a named `.pat` pattern (e.g. `"ANSI31"`); the resolve arm draws
+    /// its clipped pattern lines, and an unknown name falls back to solid there.
+    public enum Fill: Equatable, Sendable {
+        /// A solid fill (`solidFill == true`, `patternName == "SOLID"`).
+        case solid
+        /// A named pattern fill (`solidFill == false`) with the per-hatch
+        /// `patternScale` (DXF code 41) and `patternAngle` (DXF code 52, radians).
+        case pattern(name: String, scale: Double, angle: Double)
+    }
+
+    /// The fill the next committed hatch is given. Settable so the picker (wired
+    /// later) can flip a live tool between solid and a chosen pattern without
+    /// re-creating it. Defaults to `.solid` for back-compat.
+    public var fill: Fill = .solid
+
+    /// The default Hatch tool: a SOLID fill (unchanged behavior — existing
+    /// callers and tests keep getting `solidFill: true, patternName: "SOLID"`).
     public init() {}
+
+    /// A Hatch tool pre-configured to fill with a named `.pat` pattern.
+    ///
+    /// - `patternName`: the pattern to fill with (case-insensitive; resolved
+    ///   against the bundled `.pat` library at draw time). An unknown name still
+    ///   commits a `.hatch` — the resolve arm falls back to a solid fill.
+    /// - `scale`: the per-hatch pattern scale (DXF code 41); `<= 0`/non-finite is
+    ///   normalized to `1` so the hatch always resolves.
+    /// - `angle`: an EXTRA rotation applied to the pattern, in radians (code 52).
+    ///
+    /// Passing `patternName == "SOLID"` (case-insensitive) configures a solid
+    /// fill, matching the resolve arm's "SOLID ⇒ no pattern" rule.
+    public init(patternName: String, scale: Double = 1, angle: Double = 0) {
+        if patternName.uppercased() == "SOLID" {
+            self.fill = .solid
+        } else {
+            let s = (scale.isFinite && scale > 0) ? scale : 1
+            self.fill = .pattern(name: patternName, scale: s, angle: angle)
+        }
+    }
 
     // MARK: - Tool
 
@@ -132,7 +175,7 @@ public struct HatchTool: Tool {
 
         case .click, .commit:
             // Both activate the fill (there is no point-picking phase here).
-            return fill()
+            return commitFill()
 
         case .backspace:
             // Nothing picked within this single-shot action; no-op.
@@ -148,9 +191,10 @@ public struct HatchTool: Tool {
     // MARK: - Fill (build the hatch from the captured boundary)
 
     /// Builds the hatch loops from the captured selection and, if a usable
-    /// boundary results, emits one `.add` of a solid `.hatch` on the active layer.
-    /// Commits nothing for an empty / open / degenerate selection.
-    private mutating func fill() -> ToolOutcome {
+    /// boundary results, emits one `.add` of a `.hatch` on the active layer —
+    /// solid or the configured `.pattern`. Commits nothing for an empty / open /
+    /// degenerate selection.
+    private mutating func commitFill() -> ToolOutcome {
         guard !captured.isEmpty else { return .none }   // status nudges to select
 
         let loops = Self.buildLoops(captured)
@@ -164,7 +208,14 @@ public struct HatchTool: Tool {
         // current layer; the boundary's layer is the closest pure-tool proxy for
         // "active layer" without GUI access).
         let template = captured[0]
-        let hatch = HatchData(loops: loops, solidFill: true, patternName: "SOLID")
+        let hatch: HatchData
+        switch fill {
+        case .solid:
+            hatch = HatchData(loops: loops, solidFill: true, patternName: "SOLID")
+        case .pattern(let name, let scale, let angle):
+            hatch = HatchData(loops: loops, solidFill: false, patternName: name,
+                              patternScale: scale, patternAngle: angle)
+        }
         let record = EntityRecord(
             id: .placeholder,
             layer: template.layer,
