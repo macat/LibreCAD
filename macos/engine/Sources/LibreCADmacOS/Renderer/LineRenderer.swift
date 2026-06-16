@@ -538,6 +538,14 @@ final class LineRenderer: NSObject, MTKViewDelegate {
         // model entities; a layout ⇒ only that layout's paper entities).
         let activeSpace = model.activeSpace
         let activeLayout = model.activeLayout
+        // Block-member exclusion (computed ONCE per rebuild, not per entity): in MODEL
+        // space outside a block-edit session, a block definition's owned members must
+        // not draw directly (they draw via the INSERT / inside the Block Editor). Inside
+        // a session the active space IS the block's members, so they MUST draw — hence
+        // the empty set there; paper space carries no block members, so empty there too.
+        let blockMembers: Set<EntityID> =
+            (activeSpace == .model && model.editingBlock == nil)
+            ? model.drawing.blockMemberIDs : []
         let visibleIDs = model.quadtree.query(region: cullRect)
 
         if visibleIDs.isEmpty && model.quadtree.isEmpty {
@@ -547,7 +555,8 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             // index.
             for e in model.activeSpaceEntities {
                 packEntity(e, ctx: ctx, origin: origin, layers: layers,
-                           activeSpace: activeSpace, activeLayout: activeLayout)
+                           activeSpace: activeSpace, activeLayout: activeLayout,
+                           blockMembers: blockMembers)
             }
         } else {
             // Honor DRAW ORDER (F16): the spatial query returns ids in quadtree-
@@ -563,7 +572,8 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             for id in ordered {
                 guard let e = model.drawing.entity(id) else { continue }
                 packEntity(e, ctx: ctx, origin: origin, layers: layers,
-                           activeSpace: activeSpace, activeLayout: activeLayout)
+                           activeSpace: activeSpace, activeLayout: activeLayout,
+                           blockMembers: blockMembers)
             }
         }
 
@@ -627,13 +637,25 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     /// re-triggers this rebuild, so toggling re-packs the visible set.
     private func packEntity(_ e: EntityRecord, ctx: ResolveContext, origin: Vector,
                             layers: LayerTable,
-                            activeSpace: EntitySpace, activeLayout: String?) {
+                            activeSpace: EntitySpace, activeLayout: String?,
+                            blockMembers: Set<EntityID>) {
         // Paper-space P2 space gate: only the active space's entities are packed. The
         // pure `PaperSpaceLayout.entities` predicate is the single source of truth for
         // "does this record belong on screen"; applied per-entity here so even a
         // stale/leaked id never paints geometry from the wrong space.
         guard PaperSpaceLayout.isInActiveSpace(e, space: activeSpace, layoutName: activeLayout)
         else { return }
+        // Block-member guard: a block DEFINITION's members are owned geometry — they
+        // draw ONLY via an `.insert` of the block (resolveInsert) or inside the Block
+        // Editor, never directly. The scoped set / quadtree that feeds this pack already
+        // excludes them (via `CanvasModel.activeSpaceEntities`), but this per-entity arm
+        // keeps the pack and the index in lockstep so even a stale/leaked id never
+        // DOUBLE-renders (drawn directly AND through the insert). `blockMembers` is
+        // hoisted by the caller: it is `drawing.blockMemberIDs` in MODEL space outside a
+        // block-edit session, and EMPTY otherwise (inside a Block Editor session the
+        // active space IS the block's members, so they must draw; paper space carries no
+        // block members), so this guard self-disables exactly when members should show.
+        if blockMembers.contains(e.id) { return }
         // Layer-visibility filter: a frozen/hidden layer contributes neither lines
         // nor fills. An entity referencing an unknown layer (no record) still draws
         // (resolve() already falls back to the default pen for a missing layer). The

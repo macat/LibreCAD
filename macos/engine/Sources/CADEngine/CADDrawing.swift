@@ -1632,6 +1632,32 @@ public final class CADDrawing {
         )
     }
 
+    /// The union of EVERY block definition's `entityIDs` — the single source-of-truth
+    /// "is this entity a block member?" predicate for the model-space consumers.
+    ///
+    /// A block member is geometry the block OWNS (it draws only via an `.insert` of the
+    /// block, or while its block is open in the Block Editor) — it must NOT be treated
+    /// as loose top-level model-space geometry. Without this exclusion, members
+    /// (`space == .model`, `.visible`, referenced by some `Block.entityIDs`) get picked
+    /// up by render, selection, marquee, hit-test, ⌘A / Invert, and snap — and drawn
+    /// TWICE (directly AND via the insert).
+    ///
+    /// FROZEN blocks are included too: a frozen block's members are still owned by the
+    /// block (just not currently drawn) — they are not loose geometry either, so
+    /// excluding them keeps the membership truth stable across freeze/thaw.
+    ///
+    /// Computed inline over the (few) block definitions; cheap enough to recompute on
+    /// demand (blocks are sparse relative to entities). The model-space consumers
+    /// (`activeSpaceEntities`, the render pack, `SelectionPolicy`) subtract this set so
+    /// every membership decision keys off ONE truth.
+    public var blockMemberIDs: Set<EntityID> {
+        var ids = Set<EntityID>()
+        for block in blocks.blocks {
+            ids.formUnion(block.entityIDs)
+        }
+        return ids
+    }
+
     /// Builds a `blockName → DynamicBlockDef` snapshot (value copies) from the block
     /// table — only the blocks that carry a dynamic bundle (`Block.dynamic != nil`).
     /// Backs the resolve context's `blockDynamic` so an `.insert` can evaluate its
