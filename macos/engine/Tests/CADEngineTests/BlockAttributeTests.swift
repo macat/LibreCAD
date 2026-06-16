@@ -364,6 +364,37 @@ struct BlockAttributeTests {
         #expect(d.attributes.contains { $0.tag.caseInsensitiveCompare("EMPTY") == .orderedSame })
     }
 
+    @Test("per-instance ATTRIB code-70 flags round-trip through DXF")
+    func dxfAttributeFlagsRoundTrip() async throws {
+        // An individually-hidden attribute value (flag 1 = invisible) on the insert.
+        let insert = EntityRecord(id: EntityID(1), layer: LayerID("0"),
+            kind: .insert(InsertData(blockName: "FB", insertionPoint: Vector(0, 0),
+                attributes: [
+                    BlockAttributeValue(tag: "HIDDEN", text: "h",
+                                        position: Vector(0, 0), height: 2, flags: 1),
+                    BlockAttributeValue(tag: "SHOWN", text: "s",
+                                        position: Vector(0, 5), height: 2, flags: 0),
+                ])))
+        var blocks = BlockTable()
+        blocks.add(Block(name: "FB"))
+        let layers = LayerTable(layers: [Layer(name: "0")], activeLayerName: "0")
+
+        let outPath = tempDXF()
+        defer { try? FileManager.default.removeItem(atPath: outPath) }
+
+        _ = try await CADEngine.shared.writeEntities(
+            [insert], layers: layers, blocks: blocks, blockMembers: ["FB": []],
+            toPath: outPath)
+        let back = try await CADEngine.shared.readEntities(dxfPath: outPath)
+        let d = try #require(back.records.compactMap { r -> InsertData? in
+            if case .insert(let i) = r.kind { return i } else { return nil }
+        }.first)
+        let hidden = try #require(d.attributes.first { $0.tag.caseInsensitiveCompare("HIDDEN") == .orderedSame })
+        let shown = try #require(d.attributes.first { $0.tag.caseInsensitiveCompare("SHOWN") == .orderedSame })
+        #expect(hidden.flags == 1)   // the invisible flag survived
+        #expect(shown.flags == 0)
+    }
+
     // MARK: - tiny DXF text helper
 
     /// True if the DXF text has a `code` group line immediately followed by a line

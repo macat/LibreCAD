@@ -579,7 +579,8 @@ extension CADEngine {
                 text: string(a.text) ?? "",
                 position: Vector(a.x, a.y),
                 height: a.height,
-                rotation: a.rotation)
+                rotation: a.rotation,
+                flags: Int(a.flags))
         }
     }
 

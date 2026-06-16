@@ -816,19 +816,41 @@ public struct BlockAttributeValue: Sendable, Hashable, Codable {
     public var height: Double
     /// DXF code 50 — baseline rotation in radians (CCW).
     public var rotation: Double
+    /// DXF code 70 — per-instance attribute flags (1 invisible, 2 constant, 4
+    /// verify, 8 preset). Carried for round-trip; an ATTRIB normally inherits its
+    /// visibility from the block's `BlockAttributeDef`, but a per-instance override
+    /// (e.g. an individually-hidden value) survives here. Defaults to `0`.
+    public var flags: Int
 
     public init(
         tag: String,
         text: String,
         position: Vector = Vector(0, 0),
         height: Double = 2.5,
-        rotation: Double = 0
+        rotation: Double = 0,
+        flags: Int = 0
     ) {
         self.tag = tag
         self.text = text
         self.position = position
         self.height = height
         self.rotation = rotation
+        self.flags = flags
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case tag, text, position, height, rotation, flags
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tag = try c.decode(String.self, forKey: .tag)
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        position = try c.decodeIfPresent(Vector.self, forKey: .position) ?? Vector(0, 0)
+        height = try c.decodeIfPresent(Double.self, forKey: .height) ?? 2.5
+        rotation = try c.decodeIfPresent(Double.self, forKey: .rotation) ?? 0
+        // ADDITIVE: a value born without `flags` (or partial JSON) decodes to 0.
+        flags = try c.decodeIfPresent(Int.self, forKey: .flags) ?? 0
     }
 }
 

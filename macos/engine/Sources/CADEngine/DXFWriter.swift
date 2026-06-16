@@ -430,7 +430,7 @@ private final class PODBuilder {
                 x: v.position.x, y: v.position.y,
                 height: v.height,
                 rotation: v.rotation,
-                flags: 0)
+                flags: Int32(v.flags))
         }
         attribBuffers.append(buf)
         return (UnsafePointer(buf.baseAddress!), Int32(values.count))
