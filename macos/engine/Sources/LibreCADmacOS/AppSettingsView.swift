@@ -125,7 +125,7 @@ enum AppSettings {
         /// Empty hex = "follow the theme palette" (do not override `CanvasTheme`).
         static let canvasBackgroundHex = ""
         static let gridColorHex = ""
-        static let crosshairStyle: CrosshairStyle = .small
+        static let crosshairStyle: CrosshairStyle = .full   // preserve the prior full-window "spider" crosshair as the default; users can pick small/none in Preferences
 
         /// LibreCAD's standard opt-in set (endpoint+center+middle+intersection+
         /// onEntity+grid+free) — mirrors `SnapMode.standard`.

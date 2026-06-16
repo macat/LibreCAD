@@ -112,10 +112,10 @@ struct CrosshairStyleTests {
         #expect(small != none)
     }
 
-    // MARK: The preference default is .small (current shipped default)
+    // MARK: The preference default is .full (preserves the prior full-window "spider" crosshair)
 
-    @Test("AppSettings default crosshair style is .small")
-    func defaultIsSmall() {
-        #expect(AppSettings.Default.crosshairStyle == .small)
+    @Test("AppSettings default crosshair style is .full")
+    func defaultIsFull() {
+        #expect(AppSettings.Default.crosshairStyle == .full)
     }
 }
