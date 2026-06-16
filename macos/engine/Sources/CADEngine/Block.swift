@@ -31,6 +31,57 @@ public struct BlockID: Sendable, Hashable, Codable, CustomStringConvertible {
     public var description: String { "BlockID(\(name))" }
 }
 
+/// One **block attribute definition** (ATTDEF template) declared by a block (DXF
+/// `ATTDEF`, libdxfrw `DRW_Attdef`, derives `DRW_Attrib`/`DRW_Text`). A block's
+/// `attributeDefs` are the TEMPLATES — tag + prompt + default value + placement —
+/// that each `INSERT` overrides per-instance with one `BlockAttributeValue`
+/// (`ATTRIB`) per tag. Mirrors the defining fields LibreCAD stores on an
+/// `RS_Insert`'s attribute children.
+///
+/// ## Field grounding (DXF `ATTDEF` / libdxfrw `DRW_Attdef`)
+/// - `tag`         — code 2: the tag (field name; matches an `ATTRIB`'s tag).
+/// - `prompt`      — code 3: the prompt shown when the user is asked for a value.
+/// - `defaultText` — code 1: the default value if the insert supplies none.
+/// - `position`    — code 10: the template text insertion point (block local frame).
+/// - `height`      — code 40: the template text cap height (world units).
+/// - `rotation`    — code 50: baseline rotation in **radians** (CCW).
+/// - `flags`       — code 70: attribute flags (1 invisible, 2 constant, 4 verify,
+///                   8 preset). Carried for round-trip.
+public struct BlockAttributeDef: Sendable, Hashable, Codable {
+    /// DXF code 2 — the attribute tag (field name).
+    public var tag: String
+    /// DXF code 3 — the prompt string.
+    public var prompt: String
+    /// DXF code 1 — the default attribute value.
+    public var defaultText: String
+    /// DXF code 10 — template text insertion point (block local frame).
+    public var position: Vector
+    /// DXF code 40 — template text cap height (world units).
+    public var height: Double
+    /// DXF code 50 — baseline rotation in radians (CCW).
+    public var rotation: Double
+    /// DXF code 70 — attribute flags (1 invisible, 2 constant, 4 verify, 8 preset).
+    public var flags: Int
+
+    public init(
+        tag: String,
+        prompt: String = "",
+        defaultText: String = "",
+        position: Vector = Vector(0, 0),
+        height: Double = 2.5,
+        rotation: Double = 0,
+        flags: Int = 0
+    ) {
+        self.tag = tag
+        self.prompt = prompt
+        self.defaultText = defaultText
+        self.position = position
+        self.height = height
+        self.rotation = rotation
+        self.flags = flags
+    }
+}
+
 /// A block definition — the value-type port of `RS_Block` / `RS_BlockData`.
 ///
 /// Field map:
@@ -41,6 +92,8 @@ public struct BlockID: Sendable, Hashable, Codable, CustomStringConvertible {
 ///                   these reference records in `CADDrawing.entities`; the block
 ///                   owns no nested objects, no back-pointers, no child lists.
 /// - `isFrozen`    → `RS_BlockData::frozen` (a frozen block is not drawn)
+/// - `attributeDefs` → the block's ATTDEF templates (DXF `ATTDEF`); each `INSERT`
+///                   of this block supplies a `BlockAttributeValue` per tag.
 public struct Block: Sendable, Hashable, Codable, Identifiable {
     public var id: BlockID { BlockID(name) }
     public var name: String
@@ -49,17 +102,23 @@ public struct Block: Sendable, Hashable, Codable, Identifiable {
     public var entityIDs: [EntityID]
     /// `RS_BlockData::frozen` — a frozen block is invisible / not drawn.
     public var isFrozen: Bool
+    /// The block's ATTDEF attribute templates (DXF `ATTDEF`). ADDITIVE field: a
+    /// block born without it — and every old saved file — decodes to `[]`, so
+    /// existing blocks are 100% unaffected.
+    public var attributeDefs: [BlockAttributeDef]
 
     public init(
         name: String,
         basePoint: Vector = Vector(0, 0),
         entityIDs: [EntityID] = [],
-        isFrozen: Bool = false
+        isFrozen: Bool = false,
+        attributeDefs: [BlockAttributeDef] = []
     ) {
         self.name = name
         self.basePoint = basePoint
         self.entityIDs = entityIDs
         self.isFrozen = isFrozen
+        self.attributeDefs = attributeDefs
     }
 
     /// Visibility — the inverse of `isFrozen` (`RS_Block::toggle` flips frozen).
@@ -74,6 +133,7 @@ public struct Block: Sendable, Hashable, Codable, Identifiable {
 extension Block {
     private enum CodingKeys: String, CodingKey {
         case name, basePoint, entityIDs, isFrozen
+        case attributeDefs
     }
 
     public init(from decoder: any Decoder) throws {
@@ -82,6 +142,8 @@ extension Block {
         basePoint = try c.decodeIfPresent(Vector.self, forKey: .basePoint) ?? Vector(0, 0)
         entityIDs = try c.decodeIfPresent([EntityID].self, forKey: .entityIDs) ?? []
         isFrozen = try c.decodeIfPresent(Bool.self, forKey: .isFrozen) ?? false
+        // ADDITIVE: old files (no `attributeDefs` key) decode to an empty list.
+        attributeDefs = try c.decodeIfPresent([BlockAttributeDef].self, forKey: .attributeDefs) ?? []
     }
 }
 

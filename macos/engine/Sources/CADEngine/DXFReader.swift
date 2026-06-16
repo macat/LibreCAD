@@ -187,7 +187,8 @@ extension CADEngine {
                     name: blockName,
                     basePoint: Vector(b.bx, b.by, b.bz),
                     entityIDs: memberIDs,
-                    isFrozen: (b.flags & 0x1) != 0))
+                    isFrozen: (b.flags & 0x1) != 0,
+                    attributeDefs: Self.mapAttribDefs(b.attribDefs, count: b.attribDefCount)))
             }
         }
 
@@ -560,8 +561,44 @@ extension CADEngine {
             rows: Int(e.insRows),
             cols: Int(e.insCols),
             rowSpacing: e.insRowSpacing,
-            colSpacing: e.insColSpacing
+            colSpacing: e.insColSpacing,
+            attributes: mapAttribs(e.attribs, count: e.attribCount)
         ))
+    }
+
+    /// Maps the bridge's flat `LCAttrib` ATTRIB array (attached to an INSERT) into
+    /// `[BlockAttributeValue]`. NULL/zero base ⇒ `[]`. The angle is already in
+    /// radians (the bridge converted from DXF degrees).
+    private static func mapAttribs(_ base: UnsafePointer<LCAttrib>?, count: Int32)
+        -> [BlockAttributeValue] {
+        guard let base, count > 0 else { return [] }
+        let buf = UnsafeBufferPointer(start: base, count: Int(count))
+        return buf.map { a in
+            BlockAttributeValue(
+                tag: string(a.tag) ?? "",
+                text: string(a.text) ?? "",
+                position: Vector(a.x, a.y),
+                height: a.height,
+                rotation: a.rotation)
+        }
+    }
+
+    /// Maps the bridge's flat `LCAttrib` ATTDEF array (declared by a block) into
+    /// `[BlockAttributeDef]`. NULL/zero base ⇒ `[]`. The angle is already radians.
+    private static func mapAttribDefs(_ base: UnsafePointer<LCAttrib>?, count: Int32)
+        -> [BlockAttributeDef] {
+        guard let base, count > 0 else { return [] }
+        let buf = UnsafeBufferPointer(start: base, count: Int(count))
+        return buf.map { a in
+            BlockAttributeDef(
+                tag: string(a.tag) ?? "",
+                prompt: string(a.prompt) ?? "",
+                defaultText: string(a.text) ?? "",
+                position: Vector(a.x, a.y),
+                height: a.height,
+                rotation: a.rotation,
+                flags: Int(a.flags))
+        }
     }
 
     /// Maps a flattened DIMENSION POD to `DimData`. The `dimType` discriminator

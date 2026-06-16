@@ -538,6 +538,11 @@ public:
 *  Class to handle block entries
 *  @author Rallaz
 */
+// Forward declaration so DRW_Block can hold ATTDEF templates (defined below as a
+// DRW_Attrib subclass); a vector of shared_ptr works with the incomplete type,
+// mirroring DRW_Insert::attlist's `std::vector<std::shared_ptr<DRW_Attrib>>`.
+class DRW_Attdef;
+
 class DRW_Block : public DRW_Point {
     SETENTFRIENDS
 public:
@@ -558,6 +563,12 @@ public:
     UTF8STRING name;             /*!< block name, code 2 */
     int flags;                   /*!< block type, code 70 */
     UTF8STRING xrefPath;         /*!< Xref path name, code 1 (DXF) / copied from BLOCK_RECORD (DWG) */
+    /*!< Block attribute-definition TEMPLATES (ATTDEF) declared by this block. Set
+         externally before dxfRW::writeBlock so the DXF writer emits them inside the
+         block definition. Empty for a block with no attributes (the common case);
+         not parsed on read (read ATTDEFs are delivered via DRW_Interface::addAttdef).
+         shared_ptr so the incomplete forward-declared DRW_Attdef is usable here. */
+    std::vector<std::shared_ptr<DRW_Attdef>> attdefs;
 
     /// Set externally before encodeDwg to emit an ENDBLK rather than a
     /// BLOCK entity (suppresses the name field and uses oType=5).

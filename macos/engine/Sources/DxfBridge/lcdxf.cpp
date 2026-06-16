@@ -84,6 +84,10 @@ struct LCEntityList {
     std::deque<std::vector<LCVertex>> vertexPool;
     std::deque<std::vector<double>>  doublePool;
     std::deque<std::vector<LCLoop>>  loopPool;
+    // Block ATTRIB / ATTDEF flat arrays (one vector per owning INSERT / block).
+    // Each LCEntity.attribs / LCBlock.attribDefs borrows a pointer into one of
+    // these; the deque keeps those pointers stable for the handle's lifetime.
+    std::deque<std::vector<LCAttrib>> attribPool;
 };
 
 namespace {
@@ -116,6 +120,9 @@ public:
         // EntityRecords. `paperLayoutName` is the reconstructed layout name.
         bool paperSpace = false;
         std::string paperLayoutName;
+        // Block ATTDEF templates (delivered via addAttdef while this block is open).
+        // Flattened into the block's `attribDefs` window at finalizeBlocks().
+        std::vector<LCAttrib> attdefs;
     };
 
     // A captured IMAGE entity awaiting its IMAGEDEF link (the entity arrives in the
@@ -193,6 +200,14 @@ public:
             b.memberOffset = static_cast<int32_t>(m_out->blockEntities.size());
             b.memberCount = static_cast<int32_t>(pb.members.size());
             for (auto &m : pb.members) m_out->blockEntities.push_back(m);
+            // Flatten the block's ATTDEF templates into the stable attribute pool.
+            b.attribDefs = nullptr;
+            b.attribDefCount = 0;
+            if (!pb.attdefs.empty()) {
+                m_out->attribPool.push_back(pb.attdefs);
+                b.attribDefs = m_out->attribPool.back().data();
+                b.attribDefCount = static_cast<int32_t>(m_out->attribPool.back().size());
+            }
             m_out->blocks.push_back(b);
         }
     }
@@ -321,6 +336,8 @@ public:
         e.insCols = 1;
         e.insRowSpacing = 0.0;
         e.insColSpacing = 0.0;
+        e.attribs = nullptr;
+        e.attribCount = 0;
         e.vertices = nullptr;
         e.vertexCount = 0;
         e.knots = nullptr;
@@ -681,7 +698,51 @@ public:
         e.insColSpacing = data.colspace;
         e.insRowSpacing = data.rowspace;
         e.textValue = intern(data.name);      // referenced block name
+        // Block ATTRIB values (code 66 → ATTRIB sub-entities, populated by
+        // dxfRW::processInsert into data.attlist). Flatten into the stable attribute
+        // pool; DRW_Attrib derives DRW_Text, so angle is in DEGREES → radians here.
+        if (!data.attlist.empty()) {
+            std::vector<LCAttrib> attrs;
+            attrs.reserve(data.attlist.size());
+            for (const auto &att : data.attlist) {
+                if (!att) continue;
+                LCAttrib a{};
+                a.tag = intern(att->tag);
+                a.text = intern(att->text);
+                a.prompt = intern("");
+                a.x = att->basePoint.x;
+                a.y = att->basePoint.y;
+                a.height = att->height;
+                a.rotation = att->angle * M_PI / 180.0;
+                a.flags = static_cast<int32_t>(att->attribFlags);
+                attrs.push_back(a);
+            }
+            if (!attrs.empty()) {
+                m_out->attribPool.push_back(std::move(attrs));
+                e.attribs = m_out->attribPool.back().data();
+                e.attribCount = static_cast<int32_t>(m_out->attribPool.back().size());
+            }
+        }
         pushEntity(e);
+    }
+
+    // ATTDEF (block attribute-definition template). Delivered while a block is open
+    // (between addBlock and endBlock); collected onto the current block's `attdefs`
+    // so finalizeBlocks flattens them into `LCBlock.attribDefs`. An ATTDEF read
+    // OUTSIDE a block (malformed input) is ignored gracefully. DRW_Attdef derives
+    // DRW_Text, so angle is in DEGREES → radians here.
+    void addAttdef(const DRW_Attdef &data) override {
+        if (m_currentBlock == nullptr) return;   // ATTDEF only meaningful in a block
+        LCAttrib a{};
+        a.tag = intern(data.tag);
+        a.text = intern(data.text);              // default value (code 1)
+        a.prompt = intern(data.prompt);          // prompt (code 3)
+        a.x = data.basePoint.x;
+        a.y = data.basePoint.y;
+        a.height = data.height;
+        a.rotation = data.angle * M_PI / 180.0;
+        a.flags = static_cast<int32_t>(data.attribFlags);
+        m_currentBlock->attdefs.push_back(a);
     }
     void addTrace(const DRW_Trace &data) override { emitSolid(data); }
     void add3dFace(const DRW_3Dface &data) override { addUnsupportedEntity(data, "3DFACE"); }
@@ -1585,6 +1646,25 @@ public:
             b.name = name;
             b.basePoint.x = blk.bx; b.basePoint.y = blk.by; b.basePoint.z = blk.bz;
             b.flags = blk.flags;
+            // Block ATTDEF templates → emitted inside the block by dxfRW::writeBlock.
+            // DRW_Attdef derives DRW_Text whose angle is in DEGREES (radians → here).
+            if (blk.attribDefs != nullptr && blk.attribDefCount > 0) {
+                for (int j = 0; j < blk.attribDefCount; ++j) {
+                    const LCAttrib &a = blk.attribDefs[j];
+                    auto def = std::make_shared<DRW_Attdef>();
+                    def->layer = std::string("0");
+                    def->tag = (a.tag != nullptr) ? std::string(a.tag) : std::string();
+                    def->text = (a.text != nullptr) ? std::string(a.text) : std::string();
+                    def->prompt = (a.prompt != nullptr) ? std::string(a.prompt) : std::string();
+                    def->basePoint.x = a.x;
+                    def->basePoint.y = a.y;
+                    def->basePoint.z = 0.0;
+                    def->height = a.height;
+                    def->angle = a.rotation * 180.0 / M_PI;   // radians → degrees
+                    def->attribFlags = static_cast<duint8>(a.flags);
+                    b.attdefs.push_back(def);
+                }
+            }
             m_dxf->writeBlock(&b);
             // Member entities (the block's geometry), windowed into blockEntities.
             const int start = blk.memberOffset;
@@ -1874,6 +1954,27 @@ private:
         ins.rowcount = e.insRows > 0 ? e.insRows : 1;
         ins.colspace = e.insColSpacing;
         ins.rowspace = e.insRowSpacing;
+        // Block ATTRIB values → DRW_Insert::attlist (code 66 + ATTRIB sub-entities +
+        // SEQEND emitted by dxfRW::writeInsert). DRW_Attrib derives DRW_Text whose
+        // angle is in DEGREES, so convert from the engine's radians here. DXF only:
+        // the DWG writer makes empty blocks and does not emit attributes (documented
+        // gap). Each ATTRIB inherits the INSERT's layer so the record is well-formed.
+        if (!m_dwg && e.attribs != nullptr && e.attribCount > 0) {
+            for (int i = 0; i < e.attribCount; ++i) {
+                const LCAttrib &a = e.attribs[i];
+                auto att = std::make_shared<DRW_Attrib>();
+                att->layer = ins.layer;
+                att->tag = (a.tag != nullptr) ? std::string(a.tag) : std::string();
+                att->text = (a.text != nullptr) ? std::string(a.text) : std::string();
+                att->basePoint.x = a.x;
+                att->basePoint.y = a.y;
+                att->basePoint.z = 0.0;
+                att->height = a.height;
+                att->angle = a.rotation * 180.0 / M_PI;   // radians → degrees
+                att->attribFlags = static_cast<duint8>(a.flags);
+                ins.attlist.push_back(att);
+            }
+        }
         // DWG: resolve the block name to the block_record handle captured in
         // writeBlocks (defineBlock). dwgWriter15 encodes INSERT by `blockRecH.ref`,
         // not by name; without this the INSERT can't reference its block on re-read.

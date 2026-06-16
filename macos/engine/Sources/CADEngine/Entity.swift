@@ -784,6 +784,54 @@ public struct LeaderData: Sendable, Hashable, Codable {
     }
 }
 
+// MARK: - Block attribute value (ATTRIB) — per-insert text field
+
+/// One **block attribute value** attached to a block reference (DXF `ATTRIB`,
+/// libdxfrw `DRW_Attrib`). A block attribute is the parametric text field that
+/// makes a block (e.g. a title-block symbol) reusable: the block definition
+/// declares attribute *templates* (`BlockAttributeDef`, DXF `ATTDEF`) and each
+/// placed `INSERT` overrides their *values* with one `ATTRIB` per tag.
+///
+/// Per ADR-001 this is a pure value type holding only the defining data; the drawn
+/// text is produced on demand by `resolve()` through the SAME `.text` resolve arm
+/// every other text entity uses (no second text path). An ATTRIB derives from
+/// `TEXT` in DXF, so the fields mirror the `TextData` subset that round-trips.
+///
+/// ## Field grounding (DXF `ATTRIB` / libdxfrw `DRW_Attrib`, derives `DRW_Text`)
+/// - `tag`      — DXF code 2: the attribute's tag (the field name, e.g. `"PARTNO"`).
+/// - `text`     — DXF code 1: the attribute's VALUE (the displayed string).
+/// - `position` — DXF code 10: the text insertion point, in the INSERT's LOCAL
+///                frame (relative to the block base), exactly like a block member;
+///                `resolve()` transforms it by the insert placement.
+/// - `height`   — DXF code 40: the text cap height (world units, local frame).
+/// - `rotation` — DXF code 50: baseline rotation in **radians** (CCW), local frame.
+public struct BlockAttributeValue: Sendable, Hashable, Codable {
+    /// DXF code 2 — the attribute tag (field name).
+    public var tag: String
+    /// DXF code 1 — the attribute value (the displayed text).
+    public var text: String
+    /// DXF code 10 — text insertion point in the insert's local frame.
+    public var position: Vector
+    /// DXF code 40 — text cap height (world units).
+    public var height: Double
+    /// DXF code 50 — baseline rotation in radians (CCW).
+    public var rotation: Double
+
+    public init(
+        tag: String,
+        text: String,
+        position: Vector = Vector(0, 0),
+        height: Double = 2.5,
+        rotation: Double = 0
+    ) {
+        self.tag = tag
+        self.text = text
+        self.position = position
+        self.height = height
+        self.rotation = rotation
+    }
+}
+
 // MARK: - Block reference (Insert) defining data (RS_InsertData / DRW_Insert)
 
 /// `RS_InsertData` — a **block reference**: a placement of a named block. Mirrors
@@ -826,6 +874,13 @@ public struct InsertData: Sendable, Hashable, Codable {
     public var colSpacing: Double
     /// DXF code 45 — MINSERT row spacing (local-frame Y step between rows).
     public var rowSpacing: Double
+    /// The block **attribute values** (DXF `ATTRIB` sub-entities, code 66 == 1)
+    /// attached to this insert — one per attribute tag the referenced block
+    /// declares (`Block.attributeDefs`). Each is rendered by `resolve()` as TEXT
+    /// at the insert's placement (once per MINSERT cell). ADDITIVE field: a record
+    /// born without it — and every old saved file — decodes to `[]`, so a plain
+    /// insert is 100% unaffected.
+    public var attributes: [BlockAttributeValue]
 
     public init(
         blockName: String,
@@ -835,7 +890,8 @@ public struct InsertData: Sendable, Hashable, Codable {
         rows: Int = 1,
         cols: Int = 1,
         rowSpacing: Double = 0,
-        colSpacing: Double = 0
+        colSpacing: Double = 0,
+        attributes: [BlockAttributeValue] = []
     ) {
         self.blockName = blockName
         self.insertionPoint = insertionPoint
@@ -845,6 +901,7 @@ public struct InsertData: Sendable, Hashable, Codable {
         self.cols = Swift.max(1, cols)
         self.rowSpacing = rowSpacing
         self.colSpacing = colSpacing
+        self.attributes = attributes
     }
 
     /// Whether this insert repeats over a grid (more than one cell).
@@ -856,6 +913,7 @@ public struct InsertData: Sendable, Hashable, Codable {
 extension InsertData {
     private enum CodingKeys: String, CodingKey {
         case blockName, insertionPoint, scale, rotation, rows, cols, colSpacing, rowSpacing
+        case attributes
     }
 
     public init(from decoder: any Decoder) throws {
@@ -868,6 +926,8 @@ extension InsertData {
         cols = Swift.max(1, try c.decodeIfPresent(Int.self, forKey: .cols) ?? 1)
         colSpacing = try c.decodeIfPresent(Double.self, forKey: .colSpacing) ?? 0
         rowSpacing = try c.decodeIfPresent(Double.self, forKey: .rowSpacing) ?? 0
+        // ADDITIVE: old files (no `attributes` key) decode to an empty list.
+        attributes = try c.decodeIfPresent([BlockAttributeValue].self, forKey: .attributes) ?? []
     }
 }
 

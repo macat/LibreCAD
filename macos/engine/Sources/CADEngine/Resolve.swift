@@ -1311,10 +1311,12 @@ extension EntityKind {
     /// depth budget (the cyclic-block guard), and unions the results. Missing
     /// block / exhausted depth ⇒ empty geometry (no crash).
     static func resolveInsert(_ d: InsertData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
-        guard ctx.blockRecursionDepth > 0,
-              let provider = ctx.blockProvider,
-              let members = provider(d.blockName), !members.isEmpty
-        else { return ResolvedGeometry() }
+        // A block-LESS insert can still carry attribute text (an INSERT whose block
+        // is empty / missing but whose ATTRIBs should still draw). So only the
+        // recursion-depth guard fully bails; a missing block just skips the members.
+        guard ctx.blockRecursionDepth > 0 else { return ResolvedGeometry() }
+        let members = ctx.blockProvider?(d.blockName) ?? []
+        if members.isEmpty && d.attributes.isEmpty { return ResolvedGeometry() }
 
         // Thread the insert's pen as the current block pen so member `.byBlock`
         // sentinels inherit from the placing insert, and decrement the depth budget
@@ -1333,9 +1335,38 @@ extension EntityKind {
                     placed.kind = member.kind.transformed(by: t)
                     geo = geo.merged(with: placed.resolve(childCtx))
                 }
+                // Emit each block ATTRIB value as TEXT at the insert placement —
+                // once per MINSERT cell. Reuses the SHARED `.text` resolve arm (no
+                // second text path): build a `.text` record at the attribute's
+                // local-frame placement, transform it by the SAME cell transform
+                // the members use, and resolve it through `childCtx` (so `.byBlock`
+                // pen threading + the font provider apply identically).
+                for attr in d.attributes {
+                    geo = geo.merged(with: resolveAttribute(attr, transform: t, ctx: childCtx))
+                }
             }
         }
         return geo
+    }
+
+    /// Resolves one block ATTRIB value to its TEXT geometry at a placed insert
+    /// cell. Builds a `.text` `EntityRecord` from the attribute (carrying a
+    /// `.byBlock` pen so it inherits the insert's resolved pen, exactly like a
+    /// block member), transforms its kind by `transform` (the per-cell insert
+    /// placement), and resolves through the SHARED `.text` arm via `childCtx`.
+    static func resolveAttribute(_ attr: BlockAttributeValue, transform t: Affine2D,
+                                 ctx childCtx: ResolveContext) -> ResolvedGeometry {
+        guard !attr.text.isEmpty, attr.height > 0 else { return ResolvedGeometry() }
+        let textData = TextData(
+            position: attr.position,
+            height: attr.height,
+            rotation: attr.rotation,
+            text: attr.text
+        )
+        let byBlockPen = Pen(lineColor: .byBlock, lineType: .byBlock, lineWidth: .byBlock)
+        var record = EntityRecord(id: EntityID(0), pen: byBlockPen, kind: .text(textData))
+        record.kind = record.kind.transformed(by: t)
+        return record.resolve(childCtx)
     }
 
     // MARK: - Dimension resolve (RS_Dimension::update ported as a PURE function)

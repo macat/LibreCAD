@@ -197,6 +197,22 @@ typedef struct LCLoop {
     int32_t count;    /**< number of vertices in this loop. */
 } LCLoop;
 
+/** One flattened **block attribute** — an ATTRIB instance (attached to an INSERT)
+ *  or an ATTDEF template (declared in a BLOCK). Both derive from DXF TEXT, so the
+ *  geometry is a single insertion point + height + rotation. `tag`/`text`/`prompt`
+ *  borrow the owning LCEntityList's string pool (same lifetime as every other
+ *  borrowed string). For an ATTRIB, `text` is the value and `prompt` is NULL/empty;
+ *  for an ATTDEF, `text` is the DEFAULT value (code 1) and `prompt` is code 3. */
+typedef struct LCAttrib {
+    const char *tag;     /**< attribute tag (code 2; field name). Borrowed; never NULL ("" if absent). */
+    const char *text;    /**< ATTRIB value / ATTDEF default (code 1). Borrowed; may be "". */
+    const char *prompt;  /**< ATTDEF prompt (code 3). Borrowed; "" for an ATTRIB. */
+    double x, y;         /**< text insertion point (code 10/20), block/insert local frame. */
+    double height;       /**< text cap height (code 40). */
+    double rotation;     /**< baseline rotation in RADIANS (code 50; degrees→rad on read). */
+    int32_t flags;       /**< attribute flags (code 70): 1 invisible, 2 constant, 4 verify, 8 preset. */
+} LCAttrib;
+
 /**
  * A single flattened entity. Plain-old-data: trivially copyable, no owning
  * pointers except the borrowed `const char*` strings and the borrowed flat
@@ -335,6 +351,13 @@ typedef struct LCEntity {
     int32_t insCols;             /**< MINSERT column count (code 70); default 1. */
     double insRowSpacing;        /**< MINSERT row spacing (code 45); default 0. */
     double insColSpacing;        /**< MINSERT column spacing (code 44); default 0. */
+    /** Block ATTRIB values attached to this INSERT (code 66 == 1 → ATTRIB sub-
+     *  entities, terminated by SEQEND). Borrowed pointer into the owning list's
+     *  attribute pool, or NULL/0 if the insert has none. Meaningful only when
+     *  kind == LC_ENT_INSERT. The Swift reader maps these to
+     *  `InsertData.attributes`; the writer emits them after the INSERT. */
+    const LCAttrib *attribs;
+    int32_t attribCount;
 
     /* LEADER-only fields (meaningful when kind == LC_ENT_LEADER). The path
      * vertices live in the flat `vertices` array (bulge unused); the text
@@ -399,6 +422,12 @@ typedef struct LCBlock {
     int32_t flags;          /**< block type bit flags, code 70. */
     int32_t memberOffset;   /**< index of the first member in `lc_block_entities`. */
     int32_t memberCount;    /**< number of member entities. */
+    /** Block ATTDEF attribute TEMPLATES declared by this block (DXF ATTDEF entities
+     *  in the block definition). Borrowed pointer into the owning list's attribute
+     *  pool, or NULL/0 if the block declares none. The Swift reader maps these to
+     *  `Block.attributeDefs`; the writer emits them as ATTDEF inside the block. */
+    const LCAttrib *attribDefs;
+    int32_t attribDefCount;
 } LCBlock;
 
 /* ------------------------------------------------------------------------- *
