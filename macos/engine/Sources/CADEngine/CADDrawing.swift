@@ -1656,6 +1656,77 @@ public final class CADDrawing {
         return true
     }
 
+    /// Duplicates the layout named `name` (case-insensitive) into a fresh, fully
+    /// INDEPENDENT sheet — backlog #4c's "Duplicate" layout op. The copy gets:
+    ///
+    ///  • a unique name derived as `"<name> (2)"`, bumping the suffix (`(3)`, `(4)`,
+    ///    …) until it does not clash (case-insensitively) with an existing layout;
+    ///  • `tabOrder = (max existing tabOrder) + 1` so it lands at the end of the strip;
+    ///  • a deep copy of the source layout's `page` AND its `viewports` (both pure
+    ///    value types, so the `Layout` value copy carries them by value);
+    ///  • its OWN copy of every paper-space entity painted on the source sheet
+    ///    (`space == .paper`, `layoutName == name`), re-tagged with the new layout
+    ///    name and given freshly-minted ids — so the duplicate owns independent
+    ///    geometry, exactly like the source (not a shared/aliased reference).
+    ///
+    /// The whole operation is ONE undo group: every entity `add` plus the single
+    /// `mutateLayouts` register their undo within the same user action, so one ⌘Z
+    /// reverts the entire duplicate (the new sheet AND its copied geometry), matching
+    /// `renameLayout`'s multi-registration pattern. No-op (returns `false`) if `name`
+    /// does not name a layout.
+    @discardableResult
+    public func duplicateLayout(name: String) -> Bool {
+        guard let source = layout(named: name) else { return false }
+
+        // A unique "<name> (N)" — bump N until it doesn't clash (case-insensitive).
+        var copyIndex = 2
+        var newName = "\(source.name) (\(copyIndex))"
+        while hasLayout(newName) {
+            copyIndex += 1
+            newName = "\(source.name) (\(copyIndex))"
+        }
+
+        // Land at the end of the tab strip: max existing tabOrder + 1.
+        let newTabOrder = (layouts.map(\.tabOrder).max() ?? source.tabOrder) + 1
+
+        // Re-tag a COPY of every paper-space entity on the source sheet to the new
+        // layout (fresh ids via `add`) so the duplicate owns independent geometry.
+        // Done first (each undoable) so they reverse together with the layout add.
+        for e in entities where e.space == .paper
+            && e.layoutName?.caseInsensitiveCompare(source.name) == .orderedSame {
+            var copy = e
+            copy.id = .placeholder      // mint a fresh id in `add` (independent record)
+            copy.layoutName = newName
+            _ = add(copy)
+        }
+
+        // The new sheet: a deep copy of the source value (page + viewports ride along
+        // by value) under the unique name + end-of-strip tab position.
+        var duplicate = source
+        duplicate.name = newName
+        duplicate.tabOrder = newTabOrder
+        mutateLayouts { $0.append(duplicate) }
+        return true
+    }
+
+    /// Replaces the `page` descriptor of the layout named `name` (case-insensitive)
+    /// with `page` — backlog #4c's per-layout "Page Setup" engine op. Routed through
+    /// `mutateLayouts`, so it is one undoable value-snapshot step (one ⌘Z restores the
+    /// prior page). No-op (returns `false`, no undo) if `name` is absent or the page
+    /// is already equal (the funnel's no-op guard). Returns `true` if the page changed.
+    @discardableResult
+    public func setLayoutPage(name: String, _ page: PageDescriptor) -> Bool {
+        guard let current = layout(named: name), current.page != page else { return false }
+        mutateLayouts {
+            if let i = $0.firstIndex(where: {
+                $0.name.caseInsensitiveCompare(name) == .orderedSame
+            }) {
+                $0[i].page = page
+            }
+        }
+        return true
+    }
+
     // MARK: - Viewport mutations (paper-space P3 — undoable via the layout funnel)
     //
     // Paper-space viewports (paperspace-plan §3 row P3) live in `Layout.viewports`

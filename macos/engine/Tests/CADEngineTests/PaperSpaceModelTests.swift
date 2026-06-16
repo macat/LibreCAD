@@ -273,6 +273,146 @@ struct PaperSpaceModelTests {
         #expect(um.canUndo == false)
     }
 
+    // MARK: - duplicateLayout / setLayoutPage (backlog #4c engine ops)
+
+    @Test("duplicateLayout deep-copies the sheet incl. viewports + re-tagged entities")
+    func duplicateLayoutDeepCopies() {
+        let d = CADDrawing()
+        // Source sheet: a non-default page + a viewport, plus a paper-space entity.
+        // An 80×60 mm paper frame showing a 30-model-unit-tall window ⇒ scale 60/30 = 2.
+        let vp = LayoutViewport(paperRect: AABB(min: Vector(10, 20), max: Vector(90, 80)),
+                                viewCenter: Vector(0, 0), viewHeight: 30)
+        d.addLayout(Layout(name: "Layout1", tabOrder: 0,
+                           page: PageDescriptor(widthMM: 420, heightMM: 297,
+                                                marginMM: 7.5, plotScale: .ratio(0.02)),
+                           viewports: [vp]))
+        let paperID = d.add(EntityRecord(id: .placeholder,
+            kind: .line(LineData(start: Vector(1, 1), end: Vector(2, 2))),
+            space: .paper, layoutName: "Layout1"))
+        // A model entity + a paper entity on ANOTHER sheet must NOT be copied.
+        let modelID = d.add(line(Vector(0, 0), Vector(9, 0)))
+        d.addLayout(Layout(name: "Other", tabOrder: 1))
+        let otherPaperID = d.add(EntityRecord(id: .placeholder,
+            kind: .line(LineData(start: Vector(3, 3), end: Vector(4, 4))),
+            space: .paper, layoutName: "Other"))
+
+        let entityCountBefore = d.entities.count
+        #expect(d.duplicateLayout(name: "Layout1") == true)
+
+        // The duplicate exists under the "<name> (2)" unique name, at end of strip.
+        let dup = try! #require(d.layout(named: "Layout1 (2)"))
+        #expect(dup.tabOrder == 2)                      // (max existing 1) + 1
+        // Page is deep-copied (independent value).
+        #expect(dup.page == PageDescriptor(widthMM: 420, heightMM: 297,
+                                           marginMM: 7.5, plotScale: .ratio(0.02)))
+        // Viewports are deep-copied (frame, view window, and derived scale all ride
+        // along by value).
+        #expect(dup.viewports.count == 1)
+        #expect(dup.viewports.first?.scale == 2)
+        #expect(dup.viewports.first?.paperWidth == 80)
+        #expect(dup.viewports.first?.viewHeight == 30)
+
+        // EXACTLY ONE paper-space entity was copied (the one on the source sheet),
+        // re-tagged to the new layout with a FRESH, distinct id (independent geometry).
+        #expect(d.entities.count == entityCountBefore + 1)
+        let copied = d.entities.filter {
+            $0.space == .paper && $0.layoutName == "Layout1 (2)"
+        }
+        #expect(copied.count == 1)
+        let copy = try! #require(copied.first)
+        #expect(copy.id != paperID)                     // a fresh, independent record
+        guard case .line(let l) = copy.kind else { Issue.record("not a line"); return }
+        #expect(l.start == Vector(1, 1))                // geometry copied faithfully
+        #expect(l.end == Vector(2, 2))
+
+        // The source sheet + its entity are untouched; other-sheet/model entities too.
+        #expect(d.entity(paperID)?.layoutName == "Layout1")
+        #expect(d.entity(modelID)?.space == .model)
+        #expect(d.entity(otherPaperID)?.layoutName == "Other")
+    }
+
+    @Test("duplicateLayout bumps the suffix until the name is unique")
+    func duplicateLayoutUniqueName() {
+        let d = CADDrawing()
+        d.addLayout(Layout(name: "Plan", tabOrder: 0))
+        #expect(d.duplicateLayout(name: "Plan") == true)
+        #expect(d.hasLayout("Plan (2)"))
+        // A second duplicate of "Plan" can't reuse "(2)" — it bumps to "(3)".
+        #expect(d.duplicateLayout(name: "Plan") == true)
+        #expect(d.hasLayout("Plan (3)"))
+        #expect(d.layouts.map(\.name).sorted() == ["Plan", "Plan (2)", "Plan (3)"])
+    }
+
+    @Test("duplicateLayout of a missing name returns false (no-op)")
+    func duplicateLayoutMissing() {
+        let d = CADDrawing()
+        d.addLayout(Layout(name: "A"))
+        let countBefore = d.layouts.count
+        #expect(d.duplicateLayout(name: "ZZZ") == false)
+        #expect(d.layouts.count == countBefore)
+    }
+
+    @Test("duplicateLayout is ONE undo group (sheet + copied entities revert together)")
+    func duplicateLayoutSingleUndo() {
+        let d = CADDrawing()
+        d.addLayout(Layout(name: "Layout1"))
+        let paperID = d.add(EntityRecord(id: .placeholder,
+            kind: .line(LineData(start: Vector(0, 0), end: Vector(1, 0))),
+            space: .paper, layoutName: "Layout1"))
+        let um = testUndoManager()
+        d.undoManager = um
+
+        let entityCountBefore = d.entities.count
+
+        um.beginUndoGrouping()
+        #expect(d.duplicateLayout(name: "Layout1") == true)
+        um.endUndoGrouping()
+        #expect(d.hasLayout("Layout1 (2)"))
+        #expect(d.entities.count == entityCountBefore + 1)
+
+        // A SINGLE undo reverts the whole duplicate: the new sheet AND its copied
+        // entity vanish; the source sheet + its entity are intact.
+        um.undo()
+        #expect(!d.hasLayout("Layout1 (2)"))
+        #expect(d.entities.count == entityCountBefore)
+        #expect(d.hasLayout("Layout1"))
+        #expect(d.entity(paperID)?.layoutName == "Layout1")
+        // No stray copied entities remain.
+        #expect(d.entities.filter { $0.layoutName == "Layout1 (2)" }.isEmpty)
+
+        // Redo re-applies the whole duplicate as one step.
+        um.redo()
+        #expect(d.hasLayout("Layout1 (2)"))
+        #expect(d.entities.count == entityCountBefore + 1)
+    }
+
+    @Test("setLayoutPage replaces the page and is undoable; missing/no-op return false")
+    func setLayoutPageUndoable() {
+        let d = CADDrawing()
+        let original = PageDescriptor(widthMM: 210, heightMM: 297, marginMM: 10,
+                                      plotScale: .fit)
+        d.addLayout(Layout(name: "L", tabOrder: 0, page: original))
+        let um = testUndoManager()
+        d.undoManager = um
+
+        let newPage = PageDescriptor(widthMM: 420, heightMM: 297, marginMM: 5,
+                                     plotScale: .ratio(0.01))
+        um.beginUndoGrouping()
+        #expect(d.setLayoutPage(name: "l", newPage) == true)   // case-insensitive
+        um.endUndoGrouping()
+        #expect(d.layout(named: "L")?.page == newPage)
+
+        // One ⌘Z restores the prior page.
+        um.undo()
+        #expect(d.layout(named: "L")?.page == original)
+        um.redo()
+        #expect(d.layout(named: "L")?.page == newPage)
+
+        // Setting the SAME page is a no-op (no undo); a missing name returns false.
+        #expect(d.setLayoutPage(name: "L", newPage) == false)
+        #expect(d.setLayoutPage(name: "ZZZ", newPage) == false)
+    }
+
     // MARK: - load(...) carries layouts
 
     @Test("CADDrawing.load carries the layout table (ordered) and per-entity space")
