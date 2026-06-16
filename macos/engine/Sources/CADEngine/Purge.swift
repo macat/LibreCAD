@@ -8,7 +8,7 @@
 //  inspects a drawing's entity list + name tables and returns a `PurgePlan` — the
 //  set of names safe to remove per category — WITHOUT mutating anything (ADR-002:
 //  the app applies the plan later through the existing undoable funnels
-//  `CADDrawing.removeLayer` / `removeBlock` / `dimStyles.remove(named:)`, inside
+//  `CADDrawing.removeLayer` / `removeBlock` / `mutateDimStyles`, inside
 //  ONE undo group, so a single ⌘Z reverts the whole purge).
 //
 //  ## What counts as "used"
@@ -265,17 +265,15 @@ public enum Purge {
     /// reverts the whole purge. Each removal goes through the drawing's existing
     /// path: layers via `removeLayer` (no reassign — by construction no entity
     /// references them), blocks via `removeBlock` (definition only; the plan never
-    /// lists a block whose members are still in use), and dim-styles via a direct
-    /// `dimStyles` table mutation. Returns the number of named objects removed.
+    /// lists a block whose members are still in use), and dim-styles via the
+    /// undoable `mutateDimStyles` funnel. Returns the number of named objects removed.
     ///
     /// This is the wire-wave entry point; it is `@MainActor` (it mutates the
     /// document) and is deliberately tiny — the policy lives in `plan(...)`.
     ///
-    /// - Note: `CADDrawing` exposes undoable funnels for `removeLayer`/`removeBlock`
-    ///   but has no dim-style undo funnel today, so the dim-style removals are a
-    ///   plain `dimStyles` assignment (not individually undo-registered). The undo
-    ///   group below still scopes the layer/block removals into one ⌘Z; closing the
-    ///   dim-style undo gap is a `CADDrawing.swift` follow-up (flagged, not owned).
+    /// - Note: all three removals go through `CADDrawing`'s value-snapshot undo
+    ///   funnels (`removeLayer`/`removeBlock`/`mutateDimStyles`), so the whole purge
+    ///   reverts as ONE ⌘Z inside the undo group below.
     @MainActor
     @discardableResult
     public static func apply(_ plan: PurgePlan, to drawing: CADDrawing) -> Int {
@@ -293,7 +291,7 @@ public enum Purge {
             removed += 1
         }
         for name in plan.dimStyles where drawing.dimStyles.contains(name) {
-            drawing.dimStyles.remove(named: name)
+            drawing.mutateDimStyles { $0.remove(named: name) }   // undoable, folds into the group
             removed += 1
         }
         return removed

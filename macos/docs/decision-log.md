@@ -6,6 +6,19 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-16 — "Move beyond blocks" wave: block-member-editability FIX + utility tools (`native-macos @ HEAD`, **2221 tests**)
+
+Owner: "blocks should be edited only when OPENED, not loose in the document." Plus owner chose to move beyond blocks → a fresh code-grounded gap audit (catalog is **~entirely stale**: measure/hatch-engine/construction-lines/all-dim-subtypes/image/stretch-break-join-align/polyline-node-edit/advanced-snaps/ortho/multi-select-edit/MTEXT-write are all already DONE). The genuinely-remaining gaps are persistence/fidelity/power-editing follow-ups.
+
+Landed (all reviewed, serial-gated):
+- **FIX — block members editable/double-rendered in model space** `b4b02238e` (+11). Root cause (investigator): create-block is correct (removes originals + drops INSERT), but there was NO "is this a block member?" exclusion → members were selectable/marquee/⌘A/snappable AND drawn twice (directly + via the insert). Fix: `CADDrawing.blockMemberIDs` (union of all blocks' `entityIDs`, frozen incl.) excludes members from `CanvasModel.activeSpaceEntities` (→ render/quadtree/marquee/hit-test/snap), the `LineRenderer` model-arm pack guard (kills double-render), and `SelectionPolicy.selectableIDs`/`invertedIDs` (kills ⌘A/Invert). Members stay editable INSIDE the Block Editor (`editingBlock != nil` short-circuits); resolve/inserts/thumbnails/DXF untouched (read `entityIDs` directly). Investigator re-verified the fix matches the recommendation exactly.
+- **Hatch pattern picker** `8146b5329` (+13) — the pattern ENGINE was already complete; added `HatchTool.Fill` config (default solid, back-compat) + 20 bundled ANSI/ISO/generic `.pat` patterns (25 total). UNWIRED.
+- **Purge + QuickSelect** `ca79c165c` (+32) — pure engine: `Purge.plan` (transitive unused layers/blocks/dim-styles, protects 0/active/Standard) + `Purge.apply` (undoable via removeLayer/removeBlock/**mutateDimStyles** — review SHOULD-FIX applied: the dim-style undo funnel DID exist) + `QuickSelect.matches` (by kind/layer/color/width). UNWIRED.
+
+**NEXT:** wire-wave to surface hatch-pattern picker + Purge + QuickSelect (+ A3 Layer-Isolate / A4 Spline-node-edit, currently HELD) in the UI; QuickSelect should also exclude `blockMemberIDs`. `.app` rebuilt for owner to verify the block-member fix (no doubled lines, members unclickable in the document, editable only via open-in-editor).
+
+---
+
 ## 2026-06-16 — DYNAMIC BLOCKS: Stretch + Flip LANDED end-to-end (`native-macos @ b6831f83e`, **2165 tests**, `.app` rebuilt)
 
 Owner picked **Stretch + Flip** as the first DB-2 bite (the two most common dynamic behaviors). Both reviewed APPROVE/-WITH-NITS, fixes folded:
