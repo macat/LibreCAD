@@ -623,6 +623,7 @@ final class LineRenderer: NSObject, MTKViewDelegate {
                         let seg = ResolvedPolyline(points: [a, b], closed: false, pen: poly.pen)
                         RendererGeometry.appendInstances(for: seg, renderOrigin: origin,
                                                          halfWidthPx: halfWidthPx,
+                                                         backingScale: backingScale,
                                                          into: &instanceScratch)
                     }
                 }
@@ -669,13 +670,17 @@ final class LineRenderer: NSObject, MTKViewDelegate {
         let identity: (SIMD4<Float>) -> SIMD4<Float> = { $0 }
         let colorTransform: (SIMD4<Float>) -> SIMD4<Float> =
             OverlayStyle.invertNearWhiteEntities ? RendererGeometry.autoInvertWhite : identity
-        // The stroke half-width comes from the Rendering prefs (default line width +
-        // antialias toggle), converted to device pixels for this display. A 0 mm
-        // stored width / untouched prefs resolve to the renderer's hairline default.
+        // The FALLBACK stroke half-width comes from the Rendering prefs (default
+        // line width + antialias toggle), converted to device pixels for this
+        // display; it applies to pens with no explicit lineweight. A pen with an
+        // explicit `.millimeters` width overrides this per-polyline inside
+        // `appendInstances` (mm → device px, fixed on zoom). A 0 mm stored width /
+        // untouched prefs resolve to the renderer's hairline default.
         let halfWidthPx = renderPrefs.lineHalfWidthPx(backingScale: backingScale)
         for poly in geo.polylines {
             RendererGeometry.appendInstances(for: poly, renderOrigin: origin,
                                              halfWidthPx: halfWidthPx,
+                                             backingScale: backingScale,
                                              colorTransform: colorTransform,
                                              into: &instanceScratch)
         }
