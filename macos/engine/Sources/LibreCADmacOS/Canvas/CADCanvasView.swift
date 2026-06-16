@@ -703,7 +703,11 @@ final class CADCanvasController {
         // it repaints itself). Refreshing mid-drag would not move the frame (the
         // selection bounds are unchanged until commit) but we skip it to avoid any
         // churn while the user is actively dragging a handle.
-        if let gizmo, !gizmo.isDragging { refreshGizmo() }
+        // Skip the refresh while EITHER the gizmo OR the dynamic-grip overlay owns a live
+        // drag (each repaints itself; its drag math is relative to the value captured at
+        // mouse-down, so re-anchoring mid-drag would only churn).
+        let dynamicDragging = dynamicGrip?.isDragging ?? false
+        if let gizmo, !gizmo.isDragging, !dynamicDragging { refreshGizmo() }
         // Keep the crosshair glued to the (snapped) cursor across pan/zoom repaints
         // (its center is `worldToScreen(cursor)`, which moves when the viewport does).
         if let crosshair, !crosshair.isHidden { crosshair.refresh() }
@@ -1461,6 +1465,16 @@ final class CADCanvasController {
         }
 
         if isEscape {
+            // Esc on an in-progress DYNAMIC-GRIP stretch drag reverts to the committed
+            // value (drop the preview, re-anchor the grips) WITHOUT committing — the
+            // earliest unwind step, before any tool/marquee/selection handling. Routed
+            // here (not via the overlay's own first-responder keyDown) so the canvas's
+            // key handler — which always has focus — reliably cancels the drag.
+            if dynamicGrip?.isDragging == true {
+                dynamicGrip?.cancelActiveDrag()
+                redraw()
+                return true
+            }
             // Esc in zoom-window mode cancels the box + exits the mode (the gesture
             // is transient; nothing else changes).
             if isZoomWindowArmed || isZoomWindowDragActive {

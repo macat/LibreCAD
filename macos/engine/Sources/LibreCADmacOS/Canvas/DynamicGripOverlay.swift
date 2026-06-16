@@ -62,6 +62,26 @@ final class DynamicGripOverlayView: NSView {
     /// when there is nothing to show. Recomputed in `refresh()`.
     private var anchorWorld: Vector?
 
+    /// The selected dynamic insert's PARAMETER grips (DB-2W), world-anchored, recomputed in
+    /// `refresh()` from `model.singleSelectedDynamicInsertGrips`. Empty when the insert has
+    /// no parameters (a visibility-only DB-1 block).
+    private var paramGrips: [CanvasModel.DynamicInstanceGrip] = []
+
+    /// The id of the selected dynamic insert (for the param-grip commit funnels), or `nil`.
+    private var insertID: EntityID?
+
+    /// The in-progress STRETCH drag (a square parameter grip), or `nil` when idle. A flip
+    /// grip is a CLICK (no drag state) and the visibility chip pops a menu (no drag state).
+    private var activeDrag: StretchDrag?
+
+    /// One live stretch-grip drag: which linear parameter, and the grip captured at
+    /// mouse-down (its world `base`/`end` stay stable so the projection math is relative
+    /// to the value at grab time, exactly like the gizmo captures its frame).
+    private struct StretchDrag {
+        let parameterID: BlockParameterID
+        let grip: CanvasModel.DynamicInstanceGrip
+    }
+
     // MARK: Geometry constants (screen points)
 
     /// The drawn dropdown chip's width / height (points). A small rounded square holding
@@ -74,11 +94,21 @@ final class DynamicGripOverlayView: NSView {
     /// Click slop around the chip for easier grabbing (points).
     private static let hitSlop: CGFloat = 4
 
+    /// Half-size of a square STRETCH grip (points); the full square is 2× (§13.5 square grip).
+    private static let stretchHalf: CGFloat = 5
+    /// Half-size of a triangle FLIP grip (points) — the AutoCAD flip-arrow affordance.
+    private static let flipHalf: CGFloat = 7
+
     // MARK: Colors (match the gizmo accent so the chrome reads as one UI)
 
     private static let chipFill   = NSColor(calibratedRed: 0.30, green: 0.85, blue: 1.0, alpha: 1.0)
     private static let chipStroke = NSColor.white
     private static let glyphColor = NSColor.white
+    /// Stretch/flip grip fill + stroke (the same cyan accent the gizmo handles use).
+    private static let gripFill   = NSColor(calibratedRed: 0.30, green: 0.85, blue: 1.0, alpha: 1.0)
+    private static let gripStroke = NSColor.white
+    /// The live drag preview line color (matches the gizmo/tool preview green).
+    private static let previewColor = NSColor(calibratedRed: 0.45, green: 1.0, blue: 0.55, alpha: 0.95)
 
     // MARK: Init
 
@@ -103,22 +133,40 @@ final class DynamicGripOverlayView: NSView {
     /// hidden otherwise so it never blocks clicks. Called by the controller's `refreshGizmo`
     /// on selection / pan / zoom change.
     func refresh() {
+        // A drag in progress keeps its captured grips/anchor stable until mouse-up.
+        guard activeDrag == nil else { needsDisplay = true; return }
+
+        // The visibility DROPDOWN chip (DB-1): shown when the insert carries states.
         if model.singleSelectedDynamicInsert != nil, let box = model.selectionWorldBounds {
-            // Anchor at the box's top-right corner (world max.x / max.y).
-            anchorWorld = Vector(box.max.x, box.max.y)
+            anchorWorld = Vector(box.max.x, box.max.y)   // top-right corner (world)
         } else {
             anchorWorld = nil
         }
-        isHidden = (anchorWorld == nil)
+
+        // The PARAMETER grips (DB-2W): square stretch + triangle flip, world-anchored.
+        if let g = model.singleSelectedDynamicInsertGrips {
+            insertID = g.id
+            paramGrips = g.grips
+        } else {
+            insertID = nil
+            paramGrips = []
+        }
+
+        isHidden = (anchorWorld == nil && paramGrips.isEmpty)
         needsDisplay = true
     }
 
-    /// Whether the grip currently has something to show (a single dynamic insert selected).
-    var isActive: Bool { anchorWorld != nil }
+    /// Whether the grip currently has something to show (a dropdown chip OR parameter grips).
+    var isActive: Bool { anchorWorld != nil || !paramGrips.isEmpty }
+
+    /// Whether a stretch-grip drag is currently in progress (so the controller lets this
+    /// overlay own the gesture and skips its own refresh churn mid-drag).
+    var isDragging: Bool { activeDrag != nil }
 
     // MARK: Screen mapping
 
     private func screen(_ world: Vector) -> CGPoint { model.viewport.worldToScreen(world) }
+    private func world(_ screen: CGPoint) -> Vector { model.viewport.screenToWorld(screen) }
 
     /// The chip's screen-space rect (in our flipped, Y-down space), or `nil` when hidden.
     private func chipRect() -> CGRect? {
@@ -129,27 +177,116 @@ final class DynamicGripOverlayView: NSView {
         return CGRect(x: origin.x, y: origin.y, width: Self.chipWidth, height: Self.chipHeight)
     }
 
-    // MARK: Hit-testing (transparent except over the grip)
-
-    /// `hitTest` returns this view ONLY when the point is over the dropdown chip (so it can
-    /// own the click); otherwise `nil`, letting the click fall through to the canvas
-    /// (selection / drawing) unchanged — exactly the gizmo overlay's contract.
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        guard !isHidden, let rect = chipRect() else { return nil }
-        let local = convert(point, from: superview)
-        return rect.insetBy(dx: -Self.hitSlop, dy: -Self.hitSlop).contains(local) ? self : nil
+    /// The screen-space hit rect for a parameter grip's world anchor (square stretch grip
+    /// or triangle flip grip), sized for an easy grab.
+    private func gripHitRect(_ grip: CanvasModel.DynamicInstanceGrip) -> CGRect {
+        let s = screen(grip.anchor)
+        let half: CGFloat = {
+            switch grip {
+            case .stretch: return Self.stretchHalf
+            case .flip:    return Self.flipHalf
+            }
+        }() + Self.hitSlop
+        return CGRect(x: s.x - half, y: s.y - half, width: half * 2, height: half * 2)
     }
 
-    // MARK: Mouse handling (click → state-pick menu)
+    /// The parameter grip (if any) under a local screen point — searched before the chip so
+    /// a grip near the chip still claims the drag/click. Returns the grip's INDEX.
+    private func paramGripIndex(at p: CGPoint) -> Int? {
+        for (i, grip) in paramGrips.enumerated() where gripHitRect(grip).contains(p) {
+            return i
+        }
+        return nil
+    }
+
+    // MARK: Hit-testing (transparent except over a grip)
+
+    /// `hitTest` returns this view ONLY when the point is over the dropdown chip OR a
+    /// parameter grip (so it can own the click/drag); otherwise `nil`, letting the click
+    /// fall through to the canvas (selection / drawing) unchanged — the gizmo's contract.
+    /// A drag in progress keeps the gesture.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden else { return nil }
+        if activeDrag != nil { return self }
+        let local = convert(point, from: superview)
+        if paramGripIndex(at: local) != nil { return self }
+        if let rect = chipRect(),
+           rect.insetBy(dx: -Self.hitSlop, dy: -Self.hitSlop).contains(local) { return self }
+        return nil
+    }
+
+    // MARK: Mouse handling (square = drag, triangle = click toggle, chip = menu)
 
     override func mouseDown(with event: NSEvent) {
-        guard let rect = chipRect() else { super.mouseDown(with: event); return }
         let p = convert(event.locationInWindow, from: nil)
-        guard rect.insetBy(dx: -Self.hitSlop, dy: -Self.hitSlop).contains(p) else {
-            super.mouseDown(with: event); return
+
+        // 1) A PARAMETER grip (square stretch begins a drag; triangle flip toggles now).
+        if let i = paramGripIndex(at: p) {
+            switch paramGrips[i] {
+            case .stretch(let pid, _, _, _, _):
+                activeDrag = StretchDrag(parameterID: pid, grip: paramGrips[i])
+                needsDisplay = true
+            case .flip(let pid, _, _, _):
+                if let id = insertID, model.toggleInsertFlip(id, parameter: pid) {
+                    requestCanvasRedraw()
+                    refresh()
+                }
+            }
+            return
         }
-        presentStateMenu(at: event)
+
+        // 2) The visibility DROPDOWN chip → state menu (DB-1, unchanged).
+        if let rect = chipRect(),
+           rect.insetBy(dx: -Self.hitSlop, dy: -Self.hitSlop).contains(p) {
+            presentStateMenu(at: event)
+            return
+        }
+
+        super.mouseDown(with: event)
     }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let drag = activeDrag, let id = insertID else { super.mouseDragged(with: event); return }
+        let cursorWorld = world(convert(event.locationInWindow, from: nil))
+        guard let distance = model.stretchDistance(forGrip: drag.grip, cursorWorld: cursorWorld),
+              var trial = model.insertDynamicState(id) else { return }
+        trial.parameterValues[drag.parameterID.raw] = distance
+        model.setInsertEvaluationPreview(id: id, state: trial)
+        needsDisplay = true
+        requestCanvasRedraw()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let drag = activeDrag, let id = insertID else { super.mouseUp(with: event); return }
+        let cursorWorld = world(convert(event.locationInWindow, from: nil))
+        activeDrag = nil
+        if let distance = model.stretchDistance(forGrip: drag.grip, cursorWorld: cursorWorld) {
+            _ = model.commitInsertStretch(id, parameter: drag.parameterID, distance: distance)
+        } else {
+            model.clearInsertEvaluationPreview()
+        }
+        // The geometry moved → re-anchor the grips, repaint chrome + canvas.
+        refresh()
+        requestCanvasRedraw()
+    }
+
+    /// Cancels an in-progress stretch drag → revert to the committed value (drop the
+    /// preview, re-anchor the grips) WITHOUT committing. The canvas controller's Escape
+    /// handler calls this (the controller's key handler always has focus, so this is the
+    /// reliable cancel path — the overlay does not depend on becoming first responder).
+    /// No-op when no drag is in progress. Matches the gizmo's cancel-on-Escape feel.
+    func cancelActiveDrag() {
+        guard activeDrag != nil else { return }
+        activeDrag = nil
+        model.clearInsertEvaluationPreview()
+        refresh()
+        requestCanvasRedraw()
+    }
+
+    /// AppKit's responder-chain Escape entry point, forwarded to `cancelActiveDrag` for the
+    /// case where the overlay does happen to be first responder (belt-and-suspenders; the
+    /// primary cancel path is the controller's Escape handler).
+    override func cancelOperation(_ sender: Any?) { cancelActiveDrag() }
 
     /// Pops the visibility-state `NSMenu` at the grip and applies the chosen state through
     /// the undoable funnel. The menu lives ONLY here in the View layer (never reachable
@@ -185,9 +322,89 @@ final class DynamicGripOverlayView: NSView {
     // MARK: Drawing
 
     override func draw(_ dirtyRect: NSRect) {
-        guard let rect = chipRect(), let ctx = NSGraphicsContext.current?.cgContext else { return }
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
 
-        // The rounded chip body.
+        // During a stretch drag, draw the insert RE-RESOLVED at the trial value as green
+        // preview polylines (the same look as the gizmo's rubber-band).
+        if activeDrag != nil { drawPreview(in: ctx) }
+
+        // The PARAMETER grips (DB-2W): square per linear param, triangle per flip param.
+        for grip in paramGrips { drawParamGrip(grip, in: ctx) }
+
+        // The visibility DROPDOWN chip (DB-1), if present.
+        if let rect = chipRect() { drawChip(rect, in: ctx) }
+    }
+
+    /// Draws one parameter grip: a filled square (stretch) or triangle (flip) at its
+    /// screen anchor.
+    private func drawParamGrip(_ grip: CanvasModel.DynamicInstanceGrip, in ctx: CGContext) {
+        let s = screen(grip.anchor)
+        switch grip {
+        case .stretch:
+            let half = Self.stretchHalf
+            let r = CGRect(x: s.x - half, y: s.y - half, width: half * 2, height: half * 2)
+            ctx.setFillColor(Self.gripFill.cgColor)
+            ctx.fill(r)
+            ctx.setStrokeColor(Self.gripStroke.cgColor)
+            ctx.setLineWidth(1)
+            ctx.stroke(r)
+        case .flip(_, let lineStart, let lineEnd, _):
+            drawFlipTriangle(at: s, lineStart: lineStart, lineEnd: lineEnd, in: ctx)
+        }
+    }
+
+    /// Draws a small filled triangle (the flip-arrow affordance) at `center`, pointing
+    /// ALONG the flip line's screen direction so it reads as a mirror handle.
+    private func drawFlipTriangle(at center: CGPoint, lineStart: Vector, lineEnd: Vector,
+                                  in ctx: CGContext) {
+        let a = screen(lineStart), b = screen(lineEnd)
+        var dx = b.x - a.x, dy = b.y - a.y
+        let len = max(hypot(dx, dy), 0.0001)
+        dx /= len; dy /= len                       // unit direction along the line (screen)
+        let nx = -dy, ny = dx                       // perpendicular
+        let h = Self.flipHalf
+        // Tip ahead along the line; base two corners behind, spread along the perpendicular.
+        let tip  = CGPoint(x: center.x + dx * h,        y: center.y + dy * h)
+        let baseL = CGPoint(x: center.x - dx * h + nx * h, y: center.y - dy * h + ny * h)
+        let baseR = CGPoint(x: center.x - dx * h - nx * h, y: center.y - dy * h - ny * h)
+        ctx.beginPath()
+        ctx.move(to: tip)
+        ctx.addLine(to: baseL)
+        ctx.addLine(to: baseR)
+        ctx.closePath()
+        ctx.setFillColor(Self.gripFill.cgColor)
+        ctx.fillPath()
+        ctx.beginPath()
+        ctx.move(to: tip)
+        ctx.addLine(to: baseL)
+        ctx.addLine(to: baseR)
+        ctx.closePath()
+        ctx.setStrokeColor(Self.gripStroke.cgColor)
+        ctx.setLineWidth(1)
+        ctx.strokePath()
+    }
+
+    /// Draws the insert's live drag preview (its geometry re-resolved at the trial value),
+    /// from `model.insertEvaluationPreview`, as green polylines in screen space.
+    private func drawPreview(in ctx: CGContext) {
+        let polys = model.insertEvaluationPreview
+        guard !polys.isEmpty else { return }
+        ctx.saveGState()
+        ctx.setStrokeColor(Self.previewColor.cgColor)
+        ctx.setLineWidth(1.5)
+        for poly in polys {
+            let pts = poly.points
+            guard pts.count >= 2 else { continue }
+            ctx.move(to: screen(pts[0]))
+            for i in 1..<pts.count { ctx.addLine(to: screen(pts[i])) }
+            if poly.closed, pts.count >= 3 { ctx.addLine(to: screen(pts[0])) }
+            ctx.strokePath()
+        }
+        ctx.restoreGState()
+    }
+
+    /// Draws the visibility dropdown chip (the rounded body + the down-chevron glyph).
+    private func drawChip(_ rect: CGRect, in ctx: CGContext) {
         let path = CGPath(roundedRect: rect, cornerWidth: 3, cornerHeight: 3, transform: nil)
         ctx.saveGState()
         ctx.addPath(path)
@@ -198,8 +415,6 @@ final class DynamicGripOverlayView: NSView {
         ctx.setLineWidth(1)
         ctx.strokePath()
         ctx.restoreGState()
-
-        // A down-chevron glyph centered in the chip (the dropdown affordance, §13.5).
         drawDownChevron(in: rect, ctx: ctx)
     }
 
