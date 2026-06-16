@@ -26,13 +26,16 @@
 //  A right-aligned cluster of borderless toggles that fill `DS.Palette.accent` when ON,
 //  each wired to the EXISTING model state + its F-key handler — they SURFACE existing
 //  state, they do NOT invent new snap logic:
-//    • GRID  (F7) → `model.gridVisible`     via `model.toggleGrid()`
-//    • SNAP  (F9) → grid-snap (`.grid` bit) via `model.toggleGridSnap()`
-//    • ORTHO (F8) → `model.orthoEnabled`    via `model.toggleOrtho()`
-//  POLAR (F10) and OSNAP (F3) are intentionally NOT shown here: there is no single
-//  pre-existing flag to toggle for them (polar has no state at all; OSNAP is the
-//  composite object-snap set). The detailed per-osnap list already lives in the
-//  Inspector's Snap & Grid section — this cluster is the at-a-glance/F-key surface.
+//    • GRID  (F7)  → `model.gridVisible`       via `model.toggleGrid()`
+//    • SNAP  (F9)  → grid-snap (`.grid` bit)   via `model.toggleGridSnap()`
+//    • ORTHO (F8)  → `model.orthoEnabled`      via `model.toggleOrtho()`
+//    • OSNAP (F3)  → `model.objectSnapEnabled` via `model.setObjectSnapEnabled(!…)`
+//    • POLAR (F10) → `model.polarEnabled`      via `model.togglePolar()`
+//  (OSNAP + POLAR became real status flags in backlog Phase 0 — #7.) Ortho/polar
+//  mutual exclusion is handled in the model; the chips just reflect state. The
+//  detailed per-osnap list also lives in the Inspector's Snap & Grid section and in
+//  this bar's gear `.popover` (`SnapGridPopover`, backlog #3) — the chips are the
+//  at-a-glance/F-key surface; the gear is the full quick-settings surface.
 //
 //  ## Coexistence with U1's command line
 //  This bar is hosted by ContentView ABOVE the U1 command-line `safeAreaInset`
@@ -71,8 +74,17 @@ struct StatusBar: View {
     /// `controllerBox.controller?.requestRedraw`; defaults to a no-op (e.g. previews).
     var requestRedraw: () -> Void = {}
 
+    /// Whether the Snap & Grid quick-settings popover (the gear button, backlog #3)
+    /// is shown. View-local presentation state only.
+    @State private var showSnapGridPopover = false
+
     var body: some View {
         HStack(spacing: DS.Space.lg) {
+            // Left-most: the relocated document status (name + unit) — backlog #4a.
+            docStatusSegment
+
+            Divider().frame(height: DS.Size.barDivider)
+
             // Left: active tool + step prompt + verb hints (gap G3 / G4).
             toolSegment
 
@@ -89,6 +101,7 @@ struct StatusBar: View {
             zoomSegment
             Divider().frame(height: DS.Size.barDivider)
             modeToggles
+            snapGridGear
         }
         .font(DS.Font.rowLabel)
         .lineLimit(1)
@@ -100,6 +113,33 @@ struct StatusBar: View {
     }
 
     // MARK: - Segments
+
+    /// The relocated document status (backlog #4a) — the old canvas "New drawing (mm)"
+    /// label, moved to the status bar's left edge. There is no model-level document
+    /// DISPLAY NAME available here (the file title lives in the document/window chrome,
+    /// not on `CanvasModel`), so this surfaces what the model DOES expose: the drawing's
+    /// unit, as `<short> · <long-name>` (e.g. "mm · Millimeters"), falling back to
+    /// "Unitless" for the `.none` unit. The window title bar already shows the file name.
+    private var docStatusSegment: some View {
+        Label {
+            Text(docStatusText)
+                .foregroundStyle(.secondary)
+        } icon: {
+            Image(systemName: "doc")
+                .foregroundStyle(.secondary)
+        }
+        .labelStyle(.titleAndIcon)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Document units \(docStatusText)")
+    }
+
+    /// The unit description shown in the doc-status segment: `"mm · Millimeters"` when a
+    /// sign exists, else just the long name (e.g. "Unitless" for `.none`).
+    private var docStatusText: String {
+        let unit = model.drawing.graphicVariables.unit
+        let name = DrawingSummary.displayName(for: unit)
+        return unit.sign.isEmpty ? name : "\(unit.sign) \u{00B7} \(name)"
+    }
 
     /// Active tool + current step, plus the always-on keyboard verb hints (only while
     /// a tool is active — in select mode the verbs don't apply).
@@ -120,7 +160,36 @@ struct StatusBar: View {
     /// Absolute X/Y (unit-aware) + the relative `@Δx,Δy` and live distance/angle
     /// while a tool has placed a reference point. A neutral placeholder when the
     /// cursor is outside the canvas, so the segment never collapses to nothing.
+    ///
+    /// Click-to-toggle (backlog #5): the readout was read-only telemetry; it is now a
+    /// borderless `Button` that cycles the coordinate display mode
+    /// (absolute → relative → polar) via the model's existing
+    /// `cycleCoordinateDisplayMode()`, then repaints. The visible text already switches
+    /// (the model's `cursorReadout` reflects `coordinateDisplayMode`); the a11y
+    /// label/value name the ACTIVE mode so the (formerly silent) readout stays legible
+    /// to VoiceOver.
     private var coordinateSegment: some View {
+        Button {
+            model.cycleCoordinateDisplayMode()
+            requestRedraw()
+        } label: {
+            coordinateReadout
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Coordinate mode: \(coordinateModeName) — click to cycle (absolute / relative / polar)")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Coordinate display mode")
+        .accessibilityValue("\(coordinateModeName). \(model.cursorReadout ?? "no coordinate")")
+        .accessibilityHint("Cycles absolute, relative, polar")
+        .accessibilityAddTraits(.isButton)
+    }
+
+    /// The bare coordinate text content (absolute / relative / distance-angle), shared
+    /// by the click-to-cycle button label. A neutral placeholder when the cursor is
+    /// outside the canvas, so the segment never collapses to nothing.
+    @ViewBuilder
+    private var coordinateReadout: some View {
         HStack(spacing: DS.Space.lg) {
             if let abs = model.cursorReadout {
                 Text(abs)
@@ -141,7 +210,15 @@ struct StatusBar: View {
                     .foregroundStyle(.tertiary)
             }
         }
-        .accessibilityElement(children: .combine)
+    }
+
+    /// Human-readable name of the active coordinate display mode (for a11y + help).
+    private var coordinateModeName: String {
+        switch model.coordinateDisplayMode {
+        case .absolute: return "Absolute"
+        case .relative: return "Relative"
+        case .polar:    return "Polar"
+        }
     }
 
     /// The active snap mode (what the cursor is bound to right now).
@@ -182,6 +259,15 @@ struct StatusBar: View {
                        help: "Grid snap (F9)") { model.toggleGridSnap(); requestRedraw() }
             modeToggle(title: "ORTHO", isOn: model.orthoEnabled,
                        help: "Ortho (F8)") { model.toggleOrtho(); requestRedraw() }
+            // OSNAP (F3) — master object-snap, now a real status flag (backlog #7).
+            modeToggle(title: "OSNAP", isOn: model.objectSnapEnabled,
+                       help: "Object snap (F3)") {
+                model.setObjectSnapEnabled(!model.objectSnapEnabled); requestRedraw()
+            }
+            // POLAR (F10) — polar tracking; ortho/polar mutual exclusion is handled in
+            // the model's `togglePolar` (the chip just reflects state) (backlog #7).
+            modeToggle(title: "POLAR", isOn: model.polarEnabled,
+                       help: "Polar tracking (F10)") { model.togglePolar(); requestRedraw() }
         }
         .accessibilityElement(children: .contain)
     }
@@ -211,5 +297,28 @@ struct StatusBar: View {
         .accessibilityLabel(title)
         .accessibilityValue(isOn ? "on" : "off")
         .accessibilityAddTraits(isOn ? [.isButton, .isSelected] : .isButton)
+    }
+
+    // MARK: - Snap & Grid gear popover (backlog #3)
+
+    /// A gear button that presents the `SnapGridPopover` — the same object-snap /
+    /// per-mode / show-grid / grid-spacing controls the inspector hosts, reachable
+    /// without opening the sidebar. View-layer presentation only (no modal in logic).
+    private var snapGridGear: some View {
+        Button {
+            showSnapGridPopover.toggle()
+        } label: {
+            Image(systemName: "gearshape")
+                .foregroundStyle(showSnapGridPopover ? DS.Palette.accent : Color.secondary)
+                .padding(.horizontal, DS.Space.xs)
+                .padding(.vertical, DS.Space.xxs)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Snap & grid settings")
+        .accessibilityLabel("Snap and grid settings")
+        .popover(isPresented: $showSnapGridPopover, arrowEdge: .top) {
+            SnapGridPopover(model: model, requestRedraw: requestRedraw)
+        }
     }
 }
