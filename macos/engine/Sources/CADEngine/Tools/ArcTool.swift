@@ -55,6 +55,12 @@ public enum ArcCreationMode: Sendable, Hashable, CaseIterable {
     /// Three points ON the arc: start → a point the arc passes through → end. The
     /// arc is the unique circular arc through the three clicked points.
     case threePoint
+    /// Tangential: the arc STARTS at a point, leaves it TANGENT to a picked
+    /// direction (a second point defines the tangent ray from the start), and is
+    /// the unique arc that then passes THROUGH a third (end) point. Mirrors
+    /// LibreCAD's `RS_ActionDrawArcTangential` (an arc continuing tangentially from
+    /// a chosen point/segment direction).
+    case tangential
 }
 
 /// The interactive Arc tool. Two construction modes (see `ArcCreationMode`):
@@ -86,6 +92,17 @@ public struct ArcTool: Tool {
         /// Three-point mode: start + mid fixed; waiting for the end point. The
         /// committed arc is the unique circle through the three picks.
         case threeEnd(start: Vector, mid: Vector)
+
+        /// Tangential mode: waiting for the start point (where the arc begins).
+        case tanStart
+        /// Tangential mode: the start is fixed; waiting for a point that defines the
+        /// TANGENT direction at the start (the arc leaves `start` along `dirPoint −
+        /// start`).
+        case tanDir(start: Vector)
+        /// Tangential mode: start + tangent direction fixed; waiting for the end
+        /// point the arc passes through. `tangent` is the tangent ray's direction at
+        /// `start` (not necessarily unit length).
+        case tanEnd(start: Vector, tangent: Vector)
     }
 
     /// The current state. Set in `init` from the `mode`.
@@ -104,7 +121,16 @@ public struct ArcTool: Tool {
     /// the options bar selected.
     public init(mode: ArcCreationMode = .centerStartEnd) {
         self.mode = mode
-        self.state = (mode == .threePoint) ? .threeStart : .settingCenter
+        self.state = Self.initialState(for: mode)
+    }
+
+    /// The initial waiting state for a construction mode.
+    private static func initialState(for mode: ArcCreationMode) -> State {
+        switch mode {
+        case .centerStartEnd: return .settingCenter
+        case .threePoint:     return .threeStart
+        case .tangential:     return .tanStart
+        }
     }
 
     // MARK: - Tool
@@ -119,6 +145,9 @@ public struct ArcTool: Tool {
         case .threeStart:    return "Specify start point"
         case .threeMid:      return "Specify point on arc"
         case .threeEnd:      return "Specify end point"
+        case .tanStart:      return "Specify start point"
+        case .tanDir:        return "Specify tangent direction"
+        case .tanEnd:        return "Specify end point"
         }
     }
 
@@ -140,6 +169,18 @@ public struct ArcTool: Tool {
         case .threeEnd(let start, let mid):
             // Rubber-band the arc through start → mid → cursor.
             guard cursor.valid, let arc = Self.arcThrough(start, mid, cursor) else { return [] }
+            let pts = Tessellation.arcPoints(
+                center: arc.center, radius: arc.radius,
+                startAngle: arc.startAngle, endAngle: arc.endAngle, reversed: arc.reversed,
+                tolerance: ResolveContext.default.tessellationTolerance
+            )
+            return [ResolvedPolyline(points: pts, closed: false, pen: .toolPreview)]
+
+        case .tanEnd(let start, let tangent):
+            // Rubber-band the tangential arc: starts at `start` along `tangent`,
+            // through the cursor.
+            guard cursor.valid, let arc = Self.arcTangent(start: start, tangent: tangent, end: cursor)
+            else { return [] }
             let pts = Tessellation.arcPoints(
                 center: arc.center, radius: arc.radius,
                 startAngle: arc.startAngle, endAngle: arc.endAngle, reversed: arc.reversed,
@@ -238,6 +279,31 @@ public struct ArcTool: Tool {
             let record = EntityRecord(id: .placeholder, kind: .arc(arc))
             reset()
             return .commit([.add(record)])
+
+        // MARK: Tangential mode
+
+        case .tanStart:
+            guard p.valid else { return .none }
+            state = .tanDir(start: p)
+            cursor = p
+            return .none
+
+        case .tanDir(let start):
+            // The second pick defines the tangent direction at the start; reject a
+            // coincident pick (no direction).
+            guard p.valid, (p - start).magnitude > Tolerance.distance else { return .none }
+            state = .tanEnd(start: start, tangent: p - start)
+            cursor = p
+            return .none
+
+        case .tanEnd(let start, let tangent):
+            // Third pick fixes the end the arc passes through. A degenerate
+            // configuration (end on the tangent line / coincident with start) has no
+            // finite arc — ignore it and keep waiting for a valid end.
+            guard let arc = Self.arcTangent(start: start, tangent: tangent, end: p) else { return .none }
+            let record = EntityRecord(id: .placeholder, kind: .arc(arc))
+            reset()
+            return .commit([.add(record)])
         }
     }
 
@@ -273,12 +339,27 @@ public struct ArcTool: Tool {
             state = .threeMid(start: start)
             cursor = start
             return .preview
+
+        case .tanStart:
+            // Nothing to step back.
+            return .none
+
+        case .tanDir:
+            // Undo the start pick → back to the initial tangential state.
+            reset()
+            return .preview
+
+        case .tanEnd(let start, _):
+            // Undo the tangent-direction pick → back to waiting for it, keep start.
+            state = .tanDir(start: start)
+            cursor = start
+            return .preview
         }
     }
 
     /// Returns to the initial waiting-for-first-pick state for the active `mode`.
     private mutating func reset() {
-        state = (mode == .threePoint) ? .threeStart : .settingCenter
+        state = Self.initialState(for: mode)
         cursor = .invalid
     }
 
@@ -310,6 +391,52 @@ public struct ArcTool: Tool {
         // CCW (reversed == false) sweep from start to end passes through the mid; a
         // CW turn needs reversed == true.
         let reversed = d < 0
+        return ArcData(center: center, radius: radius,
+                       startAngle: startAngle, endAngle: endAngle, reversed: reversed)
+    }
+
+    // MARK: - Tangential arc geometry
+
+    /// The unique circular arc that BEGINS at `start`, leaves it TANGENT to
+    /// direction `tangent` (the arc's velocity at the start is parallel to
+    /// `tangent`), and passes THROUGH `end`.
+    ///
+    /// Construction: the center lies on the line through `start` perpendicular to
+    /// `tangent` (the radius is ⟂ to the tangent at the point of tangency). Writing
+    /// the center as `C = start + k·n̂` for the unit normal `n̂ ⟂ t̂`, the
+    /// equal-radius constraint `|C − end| = |C − start| = |k|` solves for the signed
+    /// offset `k = −|start − end|² / (2 (start − end)·n̂)`. The arc is then oriented
+    /// so its tangent AT the start points along `tangent` (matching the picked ray).
+    ///
+    /// Returns `nil` for a degenerate configuration: `start`/`end`/`tangent`
+    /// invalid, a zero-length `tangent`, `end` coincident with `start`, or `end`
+    /// lying ON the tangent line through `start` (the perpendicular offset is zero,
+    /// so there is no finite arc — the straight tangent itself).
+    static func arcTangent(start: Vector, tangent: Vector, end: Vector) -> ArcData? {
+        guard start.valid, tangent.valid, end.valid else { return nil }
+        let tLen = tangent.magnitude
+        guard tLen > Tolerance.distance else { return nil }
+        // Unit tangent and a unit normal (rotate tangent +90°).
+        let tHat = tangent / tLen
+        let nHat = Vector(-tHat.y, tHat.x)
+        let v = start - end                       // start relative to end
+        guard v.magnitude > Tolerance.distance else { return nil }
+        let denom = 2 * v.dot(nHat)
+        // `end` on the tangent line through `start` ⇒ denom ≈ 0 ⇒ no finite arc.
+        guard abs(denom) > Tolerance.distance else { return nil }
+        let k = -v.squared / denom
+        let radius = abs(k)
+        guard radius > Tolerance.distance else { return nil }
+        let center = start + nHat * k
+        let startAngle = (start - center).angle
+        let endAngle = (end - center).angle
+        // Orient the sweep so the arc's tangent at the START points along `tangent`.
+        // At a point P on a CCW (reversed == false) arc, the tangent (direction of
+        // increasing angle) is the radius (P − center) rotated +90°. The arc is CCW
+        // exactly when that CCW-tangent agrees with the picked direction.
+        let radial = start - center
+        let ccwTangent = Vector(-radial.y, radial.x)  // radius rotated +90°
+        let reversed = ccwTangent.dot(tHat) < 0
         return ArcData(center: center, radius: radius,
                        startAngle: startAngle, endAngle: endAngle, reversed: reversed)
     }

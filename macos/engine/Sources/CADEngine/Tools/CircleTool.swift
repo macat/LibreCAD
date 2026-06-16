@@ -46,6 +46,24 @@ public enum CircleSizeMode: Sendable, Hashable, CaseIterable {
     case diameter
 }
 
+/// The GEOMETRIC construction method the Circle tool uses to fix the circle from
+/// picked points — surfaced by the tool-options bar (UX-plan U2), mirroring
+/// LibreCAD's circle-construction actions (`RS_ActionDrawCircle*`). This is
+/// orthogonal to `CircleSizeMode` (which only labels the NUMERIC entry on the
+/// `.centerRadius` path); it selects HOW the picks define the circle.
+public enum CircleConstructionMode: Sendable, Hashable, CaseIterable {
+    /// Click the center, then a point ON the circle that fixes the radius (the
+    /// original two-click flow). The default — fully back-compatible.
+    case centerRadius
+    /// Click two points that are DIAMETER endpoints: the circle's center is their
+    /// midpoint and its radius is half their distance (`RS_ActionDrawCircle2P`).
+    case twoPoint
+    /// Click three points the circle passes THROUGH: the unique circle through the
+    /// three picks (its circumcircle) (`RS_ActionDrawCircle3P`). Collinear /
+    /// coincident picks have no finite circle and are ignored.
+    case threePoint
+}
+
 /// The interactive center+radius Circle tool. Click the center, then click (or
 /// move to preview) a point on the circle to set the radius; it commits one
 /// circle and re-arms for the next (LibreCAD behavior).
@@ -60,10 +78,24 @@ public struct CircleTool: Tool {
         case settingCenter
         /// Center fixed; waiting for a point on the circle that sets the radius.
         case settingRadius(center: Vector)
+
+        /// Two-point (diameter) mode: waiting for the first diameter endpoint.
+        case twoFirst
+        /// Two-point (diameter) mode: the first endpoint is fixed; waiting for the
+        /// second. The committed circle's center is the midpoint of the two.
+        case twoSecond(first: Vector)
+
+        /// Three-point mode: waiting for the first point ON the circle.
+        case threeFirst
+        /// Three-point mode: one point fixed; waiting for the second.
+        case threeSecond(first: Vector)
+        /// Three-point mode: two points fixed; waiting for the third. The committed
+        /// circle is the unique one through the three picks.
+        case threeThird(first: Vector, second: Vector)
     }
 
-    /// The current state. Starts waiting for the center.
-    private var state: State = .settingCenter
+    /// The current state. Set in `init` from the `mode`.
+    private var state: State
 
     /// The last cursor point seen via `.move`, used to draw the rubber-band even
     /// between clicks. Invalid until the first move.
@@ -87,7 +119,27 @@ public struct CircleTool: Tool {
         return sizeMode == .diameter ? s / 2 : s
     }
 
-    public init() {}
+    /// The geometric construction method. Surfaced by the tool-options bar (UX-plan
+    /// U2). Back-compatible: the default `.centerRadius` keeps the original
+    /// two-click center+radius flow (and the `sizeMode` / `fixedSize` options).
+    public let mode: CircleConstructionMode
+
+    /// Creates a Circle tool in the given construction mode (default the original
+    /// center+radius). The app's `applyToolConfig` mints the tool in the mode the
+    /// options bar selected.
+    public init(mode: CircleConstructionMode = .centerRadius) {
+        self.mode = mode
+        self.state = Self.initialState(for: mode)
+    }
+
+    /// The initial waiting state for a construction mode.
+    private static func initialState(for mode: CircleConstructionMode) -> State {
+        switch mode {
+        case .centerRadius: return .settingCenter
+        case .twoPoint:     return .twoFirst
+        case .threePoint:   return .threeFirst
+        }
+    }
 
     // MARK: - Tool
 
@@ -97,6 +149,11 @@ public struct CircleTool: Tool {
         switch state {
         case .settingCenter: return "Specify center point"
         case .settingRadius: return "Specify radius"
+        case .twoFirst:      return "Specify first diameter point"
+        case .twoSecond:     return "Specify second diameter point"
+        case .threeFirst:    return "Specify first point"
+        case .threeSecond:   return "Specify second point"
+        case .threeThird:    return "Specify third point"
         }
     }
 
@@ -105,11 +162,31 @@ public struct CircleTool: Tool {
     /// CLOSED `ResolvedPolyline`. Empty before the center is set, before the cursor
     /// has moved, or while the radius is still degenerate (zero).
     public var preview: [ResolvedPolyline] {
-        guard case .settingRadius(let center) = state, cursor.valid, center.valid else {
+        guard cursor.valid else { return [] }
+        switch state {
+        case .settingRadius(let center):
+            guard center.valid else { return [] }
+            return previewCircle(center: center, radius: (cursor - center).magnitude)
+
+        case .twoSecond(let first):
+            // Diameter preview: center = midpoint(first, cursor), radius = half-span.
+            guard first.valid, let c = Self.circleFromDiameter(first, cursor) else { return [] }
+            return previewCircle(center: c.center, radius: c.radius)
+
+        case .threeThird(let first, let second):
+            // Rubber-band the circle through first → second → cursor.
+            guard let c = Self.circleThrough(first, second, cursor) else { return [] }
+            return previewCircle(center: c.center, radius: c.radius)
+
+        default:
             return []
         }
-        let radius = (cursor - center).magnitude
-        guard radius > Tolerance.distance else { return [] }
+    }
+
+    /// Builds a tessellated, closed circular preview, or `[]` for a degenerate
+    /// (non-positive) radius. Shared by every construction mode's rubber-band.
+    private func previewCircle(center: Vector, radius: Double) -> [ResolvedPolyline] {
+        guard center.valid, radius > Tolerance.distance else { return [] }
         let pts = Tessellation.circlePoints(
             center: center, radius: radius, tolerance: ResolveContext.default.tessellationTolerance
         )
@@ -165,6 +242,41 @@ public struct CircleTool: Tool {
             // Commit one circle (center, radius = |p − center|), then re-arm.
             guard center.valid, p.valid else { return .none }
             return commitCircle(center: center, radius: (p - center).magnitude)
+
+        // MARK: Two-point (diameter) mode
+
+        case .twoFirst:
+            // First diameter endpoint fixed; rubber-band toward the second.
+            guard p.valid else { return .none }
+            state = .twoSecond(first: p)
+            cursor = p
+            return .none
+
+        case .twoSecond(let first):
+            // Second diameter endpoint: center = midpoint, radius = half-distance.
+            guard let c = Self.circleFromDiameter(first, p) else { return .none }
+            return commitCircle(center: c.center, radius: c.radius)
+
+        // MARK: Three-point mode
+
+        case .threeFirst:
+            guard p.valid else { return .none }
+            state = .threeSecond(first: p)
+            cursor = p
+            return .none
+
+        case .threeSecond(let first):
+            // Need a second point distinct from the first; a coincident pick waits.
+            guard p.valid, (p - first).magnitude > Tolerance.distance else { return .none }
+            state = .threeThird(first: first, second: p)
+            cursor = p
+            return .none
+
+        case .threeThird(let first, let second):
+            // Third pick closes the circle through the three points. Collinear /
+            // coincident picks have no finite circle — ignore and keep waiting.
+            guard let c = Self.circleThrough(first, second, p) else { return .none }
+            return commitCircle(center: c.center, radius: c.radius)
         }
     }
 
@@ -184,19 +296,66 @@ public struct CircleTool: Tool {
 
     private mutating func handleBackspace() -> ToolOutcome {
         switch state {
-        case .settingCenter:
-            // Nothing to step back.
+        case .settingCenter, .twoFirst, .threeFirst:
+            // Nothing to step back (waiting for the first pick of the mode).
             return .none
         case .settingRadius:
             // Step the radius pick back to before the center was fixed.
             reset()
             return .preview
+        case .twoSecond:
+            // Undo the first diameter endpoint → back to the initial state.
+            reset()
+            return .preview
+        case .threeSecond:
+            // Undo the first three-point pick → back to the initial state.
+            reset()
+            return .preview
+        case .threeThird(let first, _):
+            // Undo the second three-point pick → back to waiting for it, keep first.
+            state = .threeSecond(first: first)
+            cursor = first
+            return .preview
         }
     }
 
-    /// Returns to the initial waiting-for-center state.
+    /// Returns to the initial waiting-for-first-pick state for the active `mode`.
     private mutating func reset() {
-        state = .settingCenter
+        state = Self.initialState(for: mode)
         cursor = .invalid
+    }
+
+    // MARK: - Construction geometry (pure, side-effect-free; unit-tested directly)
+
+    /// The circle whose DIAMETER endpoints are `a` and `b`: center = midpoint,
+    /// radius = half the distance. `nil` when the two points coincide (degenerate,
+    /// zero radius) or either is invalid.
+    static func circleFromDiameter(_ a: Vector, _ b: Vector) -> CircleData? {
+        guard a.valid, b.valid else { return nil }
+        let radius = (b - a).magnitude / 2
+        guard radius > Tolerance.distance else { return nil }
+        let center = (a + b) / 2
+        return CircleData(center: center, radius: radius)
+    }
+
+    /// The unique circle passing THROUGH the three points `a`, `b`, `c` (their
+    /// circumcircle), or `nil` when they are collinear / coincident (no finite
+    /// circle). Uses the perpendicular-bisector determinant — the same circumcenter
+    /// math as `ArcTool.arcThrough`, returning just center + radius.
+    static func circleThrough(_ a: Vector, _ b: Vector, _ c: Vector) -> CircleData? {
+        guard a.valid, b.valid, c.valid else { return nil }
+        // `d` is twice the signed area of triangle abc; zero exactly when the three
+        // points are collinear (or two coincide), which has no finite circle.
+        let d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y))
+        guard abs(d) > Tolerance.distance else { return nil }
+        let a2 = a.x * a.x + a.y * a.y
+        let b2 = b.x * b.x + b.y * b.y
+        let c2 = c.x * c.x + c.y * c.y
+        let ux = (a2 * (b.y - c.y) + b2 * (c.y - a.y) + c2 * (a.y - b.y)) / d
+        let uy = (a2 * (c.x - b.x) + b2 * (a.x - c.x) + c2 * (b.x - a.x)) / d
+        let center = Vector(ux, uy)
+        let radius = (a - center).magnitude
+        guard radius > Tolerance.distance else { return nil }
+        return CircleData(center: center, radius: radius)
     }
 }
