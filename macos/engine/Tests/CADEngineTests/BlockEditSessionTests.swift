@@ -343,4 +343,78 @@ struct BlockEditSessionTests {
         // A second call is a no-op (no session open).
         #expect(m.finishBlockEditingIfNeeded() == false)
     }
+
+    // MARK: - Discard preserves a PRIOR committed undo step (the realistic in-app case)
+
+    @Test("Discard with a prior committed step on the stack preserves that step")
+    func discardPreservesPriorUndoStep() {
+        let (m, memberID, _) = seededBlockModel()
+
+        // A REAL committed edit BEFORE entering the block (the prior undo step). Move the
+        // member to (10,3) outside any session, as a normal document edit.
+        var pre = m.drawing.entity(memberID)!
+        pre.kind = .line(LineData(start: Vector(0, 0), end: Vector(10, 3)))
+        m.applyInspectorEdits([pre])
+        #expect(m.canUndo == true)                                   // prior step on stack
+        #expect(lineEnds(m.drawing.entity(memberID))!.1 == Vector(10, 3))
+
+        // Enter, edit, Discard.
+        m.enterBlockEditing(name: "WIDGET")
+        var inSession = m.drawing.entity(memberID)!
+        inSession.kind = .line(LineData(start: Vector(0, 0), end: Vector(50, 50)))
+        m.applyInspectorEdits([inSession])
+        m.exitBlockEditing(save: false)
+
+        // Geometry reverted to the SESSION-ENTRY state (which is the prior edit's (10,3),
+        // NOT the seed's (10,0)).
+        #expect(lineEnds(m.drawing.entity(memberID))!.1 == Vector(10, 3))
+
+        // The prior step is STILL undoable (not clobbered by the session group drop) and
+        // undoing it reverts to the seed geometry — the prior edit's own pre-state.
+        #expect(m.canUndo == true)
+        m.undo()
+        #expect(lineEnds(m.drawing.entity(memberID))!.1 == Vector(10, 0))
+    }
+
+    // MARK: - A no-edit session never strands a no-op undo step (SHOULD-FIX)
+
+    @Test("Save & Close with NO edits drops its empty group (no stranded no-op ⌘Z)")
+    func emptySaveCloseLeavesNoUndo() {
+        let (m, _, _) = seededBlockModel()
+        #expect(m.canUndo == false)
+
+        // Enter and immediately Save & Close without touching anything.
+        m.enterBlockEditing(name: "WIDGET")
+        m.exitBlockEditing(save: true)
+
+        // The empty session group must NOT be left on the stack.
+        #expect(m.canUndo == false)
+    }
+
+    @Test("an empty no-edit Save & Close does not consume a prior real undo step")
+    func emptySaveCloseKeepsPriorStep() {
+        let (m, memberID, _) = seededBlockModel()
+        // A prior committed edit.
+        var pre = m.drawing.entity(memberID)!
+        pre.kind = .line(LineData(start: Vector(0, 0), end: Vector(10, 4)))
+        m.applyInspectorEdits([pre])
+        #expect(m.canUndo == true)
+
+        // A no-edit session (enter → Save&Close) must leave the prior step intact and the
+        // next ⌘Z must undo the PRIOR edit (not a stranded no-op session step).
+        m.enterBlockEditing(name: "WIDGET")
+        m.exitBlockEditing(save: true)
+        #expect(m.canUndo == true)
+        m.undo()
+        #expect(lineEnds(m.drawing.entity(memberID))!.1 == Vector(10, 0))   // prior edit reverted
+    }
+
+    @Test("Discard with NO edits also drops its empty group (clean stack stays clean)")
+    func emptyDiscardLeavesNoUndo() {
+        let (m, _, _) = seededBlockModel()
+        #expect(m.canUndo == false)
+        m.enterBlockEditing(name: "WIDGET")
+        m.exitBlockEditing(save: false)
+        #expect(m.canUndo == false)
+    }
 }

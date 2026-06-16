@@ -783,6 +783,16 @@ final class CanvasModel {
     @ObservationIgnored
     private var editingPriorView: (space: EntitySpace, layout: String?, viewport: Viewport)?
 
+    /// `modelVersion` captured the instant the session opened (after the enter bump).
+    /// The edit funnels (`applyCommit` / `applyInspectorEdits`) bump `modelVersion` on
+    /// every committed change, so `modelVersion != editingEntryModelVersion` at exit
+    /// means the session registered at least one undo step. We use this to AVOID
+    /// stranding an empty (no-edit) session group on the undo stack: an untouched
+    /// Save & Close (or the document-close guard firing with no edits) drops its empty
+    /// group instead of leaving a no-op ⌘Z step.
+    @ObservationIgnored
+    private var editingEntryModelVersion = 0
+
     /// Whether a block-edit session is active.
     var isEditingBlock: Bool { editingBlock != nil }
 
@@ -850,6 +860,9 @@ final class CanvasModel {
         hoverID = nil
         modelDirty = true
         modelVersion &+= 1
+        // Capture the post-bump version: any later change is a session edit (used at
+        // exit to drop an empty no-edit group rather than strand a no-op ⌘Z step).
+        editingEntryModelVersion = modelVersion
         return true
     }
 
@@ -863,6 +876,11 @@ final class CanvasModel {
     ///   session group, then drop that now-net-identity group off the undo stack so
     ///   `canUndo` returns to its pre-enter value (no stranded half-session steps).
     ///
+    /// A session that made NO edits (the user double-clicked, looked around, and left)
+    /// drops its empty group on EITHER path so it never strands a no-op ⌘Z step that
+    /// would silently consume the user's prior real undo — the change is detected via
+    /// `modelVersion` (only the edit funnels bump it during a session).
+    ///
     /// Either way the canvas scope + camera are restored to the prior view, the index is
     /// rebuilt for that space, and transient interaction state is cleared. No-op (returns
     /// `false`) if no session is active. Presents NO modal — the (future) view layer asks
@@ -871,10 +889,19 @@ final class CanvasModel {
     func exitBlockEditing(save: Bool) -> Bool {
         guard let name = editingBlock else { return false }
 
-        if save {
+        // Did any edit funnel commit during the session? (Only `applyCommit` /
+        // `applyInspectorEdits` bump `modelVersion` between enter and here.)
+        let sessionChanged = modelVersion != editingEntryModelVersion
+
+        if save && sessionChanged {
             // Keep edits: just close the session group (one ⌘Z reverts the session).
             undoManager.endUndoGrouping()
-        } else {
+        } else if save {
+            // Save & Close with NO edits: close the empty group and drop it so the undo
+            // stack stays at its pre-enter depth (no stranded no-op step).
+            undoManager.endUndoGrouping()
+            if undoManager.canUndo { undoManager.undo() }
+        } else if sessionChanged {
             // Discard: restore the entry snapshot through the undoable funnels (so the
             // restorations are captured INSIDE the still-open session group), making the
             // group net-identity.
@@ -883,6 +910,10 @@ final class CanvasModel {
             // Drop the net-identity session group off the undo stack so the stack depth
             // matches the pre-enter state (canUndo back to its prior value). Undoing a
             // net-identity group leaves geometry at the entry state.
+            if undoManager.canUndo { undoManager.undo() }
+        } else {
+            // Discard with NO edits: nothing to restore — just drop the empty group.
+            undoManager.endUndoGrouping()
             if undoManager.canUndo { undoManager.undo() }
         }
 
@@ -937,7 +968,12 @@ final class CanvasModel {
             quadtree.remove(id)
             selection.remove(id)
         }
-        // Restore each entry member's full record (re-adds any that were deleted).
+        // Restore each entry member's full record (re-adds any that were deleted). NOTE:
+        // a member deleted mid-session is re-added at the draw-order TAIL (drawing.replace
+        // falls back to add for an absent id), not its original storage index. This is
+        // harmless for block/insert resolution (members resolve in `entityIDs` order,
+        // which is restored by `setBlockMembers` below) — only the raw draw-order index of
+        // a re-added member is not preserved.
         for record in editingEntrySnapshot {
             drawing.replace(record)
         }
