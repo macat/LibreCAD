@@ -83,6 +83,10 @@ struct ToolOptionsBar: View {
              // NEW modes surfaced this wave: Ellipse construction mode, Trim mode,
              // and the Image tool's chosen-file readout.
              .ellipse, .trim, .image,
+             // Wire-wave-1 draw-variant modes: Line angle constraint (the Circle
+             // construction mode + Arc tangential mode ride the existing .circle/.arc
+             // arms below).
+             .line,
              .fillet, .chamfer, .array, .divide,
              // Wire-wave-3 configurable tools.
              .align, .arrayPath, .leader, .baselineDim:
@@ -203,28 +207,66 @@ struct ToolOptionsBar: View {
             }
 
         case .circle:
-            Picker("Size", selection: $model.circleSizeMode) {
-                Text("Radius").tag(CircleSizeMode.radius)
-                Text("Diameter").tag(CircleSizeMode.diameter)
+            // Construction mode: Center+Radius (the original two-click flow), 2-Point
+            // (diameter endpoints), or 3-Point (circumcircle). Fixed at construction, so
+            // applyToolConfig RE-MINTS on change.
+            Picker("Mode", selection: $model.circleConstructionMode) {
+                Text("Center, Radius").tag(CircleConstructionMode.centerRadius)
+                Text("2 Points").tag(CircleConstructionMode.twoPoint)
+                Text("3 Points").tag(CircleConstructionMode.threePoint)
             }
             .pickerStyle(.segmented)
             .fixedSize()
             .labelsHidden()
-            .onChange(of: model.circleSizeMode) { _, _ in apply() }
-            numberField(model.circleSizeMode == .diameter ? "Diameter" : "Radius",
-                        value: $model.circleFixedSize, width: 70)
-            Text("0 = drag radius")
-                .font(.caption).foregroundStyle(.tertiary)
+            .onChange(of: model.circleConstructionMode) { _, _ in apply() }
+            // The size mode + exact-size entry only label/scale the NUMERIC entry on the
+            // center+radius path (orthogonal to the construction mode), so show them only
+            // for that mode (the 2-/3-point modes are pick-defined, no numeric size).
+            if model.circleConstructionMode == .centerRadius {
+                Divider().frame(height: 16)
+                Picker("Size", selection: $model.circleSizeMode) {
+                    Text("Radius").tag(CircleSizeMode.radius)
+                    Text("Diameter").tag(CircleSizeMode.diameter)
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
+                .labelsHidden()
+                .onChange(of: model.circleSizeMode) { _, _ in apply() }
+                numberField(model.circleSizeMode == .diameter ? "Diameter" : "Radius",
+                            value: $model.circleFixedSize, width: 70)
+                Text("0 = drag radius")
+                    .font(.caption).foregroundStyle(.tertiary)
+            }
 
         case .arc:
             Picker("Mode", selection: $model.arcMode) {
                 Text("Center, Start, End").tag(ArcCreationMode.centerStartEnd)
                 Text("3 Points").tag(ArcCreationMode.threePoint)
+                Text("Tangential").tag(ArcCreationMode.tangential)
             }
             .pickerStyle(.segmented)
             .fixedSize()
             .labelsHidden()
             .onChange(of: model.arcMode) { _, _ in apply() }
+
+        case .line:
+            // Angle constraint: Free (the original behavior), Absolute (a fixed angle
+            // from +X), or Relative (an angle measured from the previous segment). The
+            // angle field shows only for the two constrained modes. Fixed at
+            // construction (it seeds the per-segment constraint), so applyToolConfig
+            // RE-MINTS on change.
+            Picker("Angle", selection: $model.lineAngleModeIndex) {
+                Text("Free").tag(0)
+                Text("Absolute").tag(1)
+                Text("Relative").tag(2)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .labelsHidden()
+            .onChange(of: model.lineAngleModeIndex) { _, _ in apply() }
+            if model.lineAngleModeIndex != 0 {
+                numberField("Angle°", value: degreesBinding($model.lineAngle), width: 70)
+            }
 
         case .point:
             Picker("Style", selection: $model.pointStyle) {

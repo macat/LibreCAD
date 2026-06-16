@@ -37,12 +37,14 @@ struct ToolKindWiringTests {
         #expect(Set(titles).count == titles.count, "Duplicate ToolKind titles: \(titles)")
     }
 
-    /// `.select` is the only kind without a `Tool` (it is the built-in select/pan
-    /// mode); every other kind mints a non-nil tool.
-    @Test func selectIsTheOnlyKindWithoutATool() {
+    /// The OUT-OF-BAND kinds — `.select` (the built-in select/pan mode) and `.viewport`
+    /// (paper-space viewport placement, driven by the standalone `ViewportTool`, not a
+    /// `Tool` conformer) — mint NO `Tool`; every other kind mints a non-nil tool.
+    @Test func selectAndViewportAreTheOnlyKindsWithoutATool() {
+        let outOfBand: Set<ToolKind> = [.select, .viewport]
         for kind in ToolKind.allCases {
-            if kind == .select {
-                #expect(kind.makeTool() == nil, ".select must not mint a Tool")
+            if outOfBand.contains(kind) {
+                #expect(kind.makeTool() == nil, "ToolKind.\(kind) (out-of-band) must not mint a Tool")
             } else {
                 #expect(kind.makeTool() != nil, "ToolKind.\(kind) minted a nil Tool")
             }
@@ -50,9 +52,11 @@ struct ToolKindWiringTests {
     }
 
     /// A minted tool's own `title` matches the kind's UI title, so the HUD prompt
-    /// ("Line: Specify first point") and the toolbar/menu label agree.
+    /// ("Line: Specify first point") and the toolbar/menu label agree. Skips the
+    /// out-of-band kinds (`.select` / `.viewport`) which mint no `Tool`.
     @Test func mintedToolTitleMatchesKindTitle() {
-        for kind in ToolKind.allCases where kind != .select {
+        let outOfBand: Set<ToolKind> = [.select, .viewport]
+        for kind in ToolKind.allCases where !outOfBand.contains(kind) {
             let tool = kind.makeTool()
             #expect(tool?.title == kind.title,
                     "ToolKind.\(kind).title (\(kind.title)) != tool.title (\(tool?.title ?? "nil"))")
@@ -83,6 +87,7 @@ struct ToolKindWiringTests {
             .align, .arrayPath,                                    // wire-wave-3 (modify)
             .leader, .baselineDim, .continueDim,                   // wire-wave-3 (annotate)
             .image,                                                // wire-wave (image)
+            .viewport,                                             // wire-wave-1 (paper-space, out-of-band)
         ]
         #expect(Set(ToolKind.allCases) == expected,
                 "ToolKind.allCases (\(ToolKind.allCases)) != expected roster")
@@ -296,6 +301,27 @@ struct ToolKindWiringTests {
         #expect(outcome == .none, "a no-file ImageTool must be inert (no commit)")
     }
 
+    /// The Viewport wiring addition (wire-wave-1, paper space): `.viewport` maps to the
+    /// title "Viewport" and — UNLIKE every other non-`.select` kind — mints NO `Tool`
+    /// (`makeTool() == nil`), because it is an OUT-OF-BAND kind driven by the standalone
+    /// `ViewportTool` (whose `LayoutViewport` result is not an entity, so it cannot flow
+    /// through the `Tool`/`ToolEdit` contract). The app keys off `activeToolKind ==
+    /// .viewport` and runs `ViewportTool` directly (see `CanvasModel.handleViewportClick`).
+    @Test func viewportKindIsOutOfBandWithMatchingTitle() {
+        #expect(ToolKind.viewport.title == "Viewport")
+        #expect(ToolKind.viewport.makeTool() == nil,
+                "ToolKind.viewport is out-of-band — it must mint NO Tool")
+    }
+
+    /// `.viewport` is reachable via the canonical `allCases` registry (so the
+    /// CommandPalette's `ToolKind.allCases` loop surfaces it) and is NOT `.select`
+    /// (it is a distinct activatable kind, just one the model handles out of band).
+    @Test func viewportKindIsRegisteredAndDistinct() {
+        #expect(ToolKind.allCases.contains(.viewport),
+                "ToolKind.viewport must be in allCases so the palette/toolbar can reach it")
+        #expect(ToolKind.viewport != .select)
+    }
+
     /// `.image` shares no keyboard chord with another kind. Image takes ⇧Y (bare Y is
     /// unassigned, ⌥Y is Ray), so it adds cleanly to the chord set guarded by
     /// `toolShortcutsAreUnique` above. This focused check documents the chosen chord.
@@ -409,6 +435,9 @@ struct ToolKindWiringTests {
             (.leader, "l", false, true),
             (.baselineDim, "d", false, true),
             (.continueDim, "c", false, true),
+            // wire-wave-1 — paper-space Viewport placement on ⌥V (bare V is Select; ⌥V
+            // is otherwise unassigned, so it adds cleanly to the option-chord tier).
+            (.viewport, "v", false, true),
         ]
         // No two entries share a (key, shift, option) chord.
         let chords = keymap.map { "\($0.1)\($0.2 ? "+shift" : "")\($0.3 ? "+option" : "")" }
@@ -460,10 +489,13 @@ struct ToolKindWiringTests {
     // ("no orphaned tools"). `.select` is the always-visible core mode (not grouped).
 
     /// The Draw group roster — geometry-creating tools (mirrors `ToolCatalog.draw`).
+    /// `.viewport` is the paper-space viewport-placement mode (an out-of-band kind that
+    /// mints no `Tool`); it lives in the Draw group so it has a toolbar/menu home and
+    /// is not orphaned, even though the app drives it via `ViewportTool` out of band.
     private static let drawGroup: [ToolKind] = [
         .line, .circle, .arc, .rectangle, .polyline, .point,
         .ellipse, .polygon, .spline, .hatch, .image,
-        .xline, .ray, .insert,
+        .xline, .ray, .insert, .viewport,
     ]
 
     /// The Modify group roster — transforms + edit-under-cursor + blocks

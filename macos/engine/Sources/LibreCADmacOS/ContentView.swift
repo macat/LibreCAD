@@ -304,6 +304,11 @@ struct ContentView: View {
             // (they are not the document type — DocumentGroup handles only DXF I/O).
             .focusedSceneValue(\.exportDocument) { format in Task { await exportDrawing(format) } }
             .focusedSceneValue(\.printDocument) { printDrawing() }
+            // Per-LAYOUT plot (Paper Space P4): the Export/Print Layout focused values,
+            // grouped into one modifier so the canvasDetail chain stays under the Swift
+            // type-checker's complexity budget (gotcha #2). Each is published only when a
+            // layout tab is active (paper space) — `nil` in model space disables the items.
+            .modifier(layoutPlotHandlers)
             // The tool / image / undo / redo / delete action handlers are grouped into
             // one modifier so the `canvasDetail` chain stays under the Swift
             // type-checker's expression-complexity limit (adding the Image action inline
@@ -361,6 +366,20 @@ struct ContentView: View {
             duplicate: {
                 if model.duplicateSelection() { controllerBox.controller?.requestRedraw() }
             }
+        )
+    }
+
+    /// The per-LAYOUT plot focused-scene-value handlers (Export Layout to PDF… / Print
+    /// Layout…), pulled into one modifier so `canvasDetail`'s chain stays under the
+    /// type-checker's complexity budget. Each closure is published only when a layout
+    /// tab is active (paper space); in model space it is `nil`, which disables the menu
+    /// items. The save/print PANELS live in the action closures (View layer only).
+    private var layoutPlotHandlers: some ViewModifier {
+        LayoutPlotHandlersModifier(
+            exportLayout: model.activeLayoutRecord != nil
+                ? { Task { @MainActor in exportActiveLayoutPDF() } } : nil,
+            printLayout: model.activeLayoutRecord != nil
+                ? { printActiveLayout() } : nil
         )
     }
 
@@ -888,6 +907,61 @@ struct ContentView: View {
             status = "Print cancelled"
         }
     }
+
+    // MARK: - Per-LAYOUT plot (Paper Space P4 — File ▸ Export Layout / Print Layout)
+
+    /// Export Layout to PDF… (File menu, enabled only in a layout tab): plots the
+    /// ACTIVE layout sheet at its own plot scale to a single-page PDF. The PURE scene
+    /// is built by `CanvasModel.layoutExportScene` (paper-space records on the active
+    /// layout); the `NSSavePanel` lives HERE in the View layer (never in the model /
+    /// tool — headless-hang trap). A no-op (status note) when no layout is active.
+    @MainActor
+    private func exportActiveLayoutPDF() {
+        guard let layout = model.activeLayoutRecord else {
+            status = "Open a layout tab to export a layout sheet"
+            return
+        }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = "\(exportBaseName)-\(layout.name).pdf"
+        panel.title = "Export Layout “\(layout.name)” to PDF"
+        panel.prompt = "Export"
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            status = "Layout export cancelled"
+            return
+        }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let scene = model.layoutExportScene(for: layout)
+            try DrawingExporter.writeLayoutPDF(scene: scene, layout: layout, to: url)
+            status = "Exported layout “\(layout.name)” — \(url.lastPathComponent)"
+            NSLog("CADCanvas: exported layout \(layout.name) to \(url.lastPathComponent)")
+        } catch {
+            status = "Layout export failed: \(error.localizedDescription)"
+            NSLog("CADCanvas: layout export failed: \(error)")
+        }
+    }
+
+    /// Print Layout… (File menu, enabled only in a layout tab): drives the system print
+    /// dialog for the ACTIVE layout sheet, plotted at the layout's plot scale. The PURE
+    /// scene is built by `CanvasModel.layoutExportScene`; `NSPrintOperation` lives HERE
+    /// in the View layer. A no-op (status note) when no layout is active.
+    @MainActor
+    private func printActiveLayout() {
+        guard let layout = model.activeLayoutRecord else {
+            status = "Open a layout tab to print a layout sheet"
+            return
+        }
+        let scene = model.layoutExportScene(for: layout)
+        let window = NSApp.keyWindow ?? NSApp.mainWindow
+        if !DrawingPrinter.printLayout(layout, scene: scene, in: window) {
+            status = "Layout print cancelled"
+        }
+    }
 }
 
 // MARK: - Tool grouping catalog (single source of truth)
@@ -983,7 +1057,7 @@ enum ToolCatalog {
     private static let drawTools: [ToolKind] = [
         .line, .circle, .arc, .rectangle, .polyline, .point,
         .ellipse, .polygon, .spline, .hatch, .image,
-        .xline, .ray, .insert,
+        .xline, .ray, .insert, .viewport,
     ]
 
     private static let modifyTools: [ToolKind] = [
@@ -1083,6 +1157,10 @@ enum ToolCatalog {
         case .measureAngle:    return .init(symbol: "angle", help: "Measure angle", shortcut: nil)
         case .measureArea:     return .init(symbol: "square.dashed", help: "Measure area + perimeter", shortcut: nil)
         case .measureLength:   return .init(symbol: "sum", help: "Total length of selection", shortcut: nil)
+        // Paper-space viewport placement (Draw group). Only meaningful in a layout tab.
+        case .viewport:    return .init(symbol: "rectangle.dashed",
+                                        help: "Place a paper-space viewport — drag two corners on a layout sheet (⌥V)",
+                                        shortcut: "⌥V")
         }
     }
 }
@@ -1135,6 +1213,20 @@ extension FocusedValues {
     var printDocument: (() -> Void)? {
         get { self[PrintDocumentKey.self] }
         set { self[PrintDocumentKey.self] = newValue }
+    }
+
+    /// Export the focused window's ACTIVE LAYOUT sheet to PDF (File ▸ Export Layout to
+    /// PDF…). Published ONLY when a layout tab is active (paper space); `nil` in model
+    /// space, which disables the menu item.
+    var exportLayout: (() -> Void)? {
+        get { self[ExportLayoutKey.self] }
+        set { self[ExportLayoutKey.self] = newValue }
+    }
+    /// Print the focused window's ACTIVE LAYOUT sheet (File ▸ Print Layout…). Published
+    /// ONLY when a layout tab is active (paper space); `nil` in model space.
+    var printLayout: (() -> Void)? {
+        get { self[PrintLayoutKey.self] }
+        set { self[PrintLayoutKey.self] = newValue }
     }
 
     /// Activate a tool kind in the focused window (Tools menu / shortcuts).
@@ -1214,6 +1306,14 @@ private struct PrintDocumentKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 
+private struct ExportLayoutKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct PrintLayoutKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
 private struct ActivateToolKey: FocusedValueKey {
     typealias Value = (ToolKind) -> Void
 }
@@ -1242,6 +1342,22 @@ private struct ToolActionHandlersModifier: ViewModifier {
             .focusedSceneValue(\.redoAction) { redo() }
             .focusedSceneValue(\.deleteSelection) { delete() }
             .focusedSceneValue(\.duplicateSelection) { duplicate() }
+    }
+}
+
+/// Groups the per-LAYOUT plot focused-scene-value handlers (Export Layout to PDF… /
+/// Print Layout…) into one `ViewModifier`, so `ContentView.canvasDetail`'s modifier
+/// chain stays under the Swift type-checker's expression-complexity limit. Each value
+/// is `nil` in model space (which disables the matching File-menu item) and the real
+/// closure in a layout tab. The save/print panels live INSIDE the closures (View layer).
+private struct LayoutPlotHandlersModifier: ViewModifier {
+    let exportLayout: (() -> Void)?
+    let printLayout: (() -> Void)?
+
+    func body(content: Content) -> some View {
+        content
+            .focusedSceneValue(\.exportLayout, exportLayout)
+            .focusedSceneValue(\.printLayout, printLayout)
     }
 }
 
