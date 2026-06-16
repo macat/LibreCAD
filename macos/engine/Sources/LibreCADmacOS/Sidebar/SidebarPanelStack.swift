@@ -185,7 +185,11 @@ struct SidebarPanelStack: View {
     @ViewBuilder
     private func disclosureLabel(_ panel: SidebarPanel) -> some View {
         Button {
-            config = config.togglingCollapsed(panel.id)
+            // Animate the collapse so the body expand/collapse matches the chevron
+            // rotation (NIT 3) instead of the body popping in/out.
+            withAnimation(.easeInOut(duration: 0.15)) {
+                config = config.togglingCollapsed(panel.id)
+            }
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "chevron.right")
