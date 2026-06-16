@@ -211,6 +211,18 @@ struct ContentView: View {
         CADCanvasView(model: model, controllerBox: controllerBox)
             .ignoresSafeArea()
             .frame(minWidth: 480, minHeight: 320)
+            // #6: drag a Parts Library symbol onto the CANVAS to import + place it at the
+            // drop point. The drop `location` is in the canvas view's LOCAL coordinate
+            // space (top-left origin, Y-down) — the SAME convention `Viewport.screenToWorld`
+            // expects (the host `CADCanvasView` is `isFlipped`, so its point space is
+            // top-left Y-down), so the location maps straight through. `PartLibraryDragItem`
+            // is the panel's existing `Transferable` (W5); the import + insert run via the
+            // engine `BlockLibrary.importItem` → `CanvasModel.insertBlock(named:at:)` path.
+            .dropDestination(for: PartLibraryDragItem.self) { items, location in
+                guard let item = items.first else { return false }
+                dropPartLibraryItem(item, atScreenPoint: location)
+                return true
+            }
             // U3 replaces the transient corner HUD chips (coordinateHUD /
             // toolPromptHUD) with the persistent bottom status bar; the small
             // top-leading file-status chip stays (it is the load/export status, not a
@@ -282,6 +294,31 @@ struct ContentView: View {
                             // The block-edit tab is already the active context; clicking it
                             // just repaints (leaving is via the BlockEditBar).
                             controllerBox.controller?.requestRedraw()
+                        },
+                        // #4c: the tab context-menu actions route to the P0-D `CanvasModel`
+                        // layout wrappers (rename/delete/duplicate handle the active-tab
+                        // fixup internally) + redraw. Page Setup is STUBBED to opening the
+                        // document settings sheet (the per-layout page editor is deferred).
+                        onRenameLayout: { name, newName in
+                            if model.renameLayout(name, to: newName) {
+                                controllerBox.controller?.requestRedraw()
+                            }
+                        },
+                        onDeleteLayout: { name in
+                            if model.deleteLayout(name) {
+                                controllerBox.controller?.requestRedraw()
+                            }
+                        },
+                        onDuplicateLayout: { name in
+                            if model.duplicateLayout(name) != nil {
+                                controllerBox.controller?.requestRedraw()
+                            }
+                        },
+                        onPageSetup: { _ in
+                            // STUB: open the document-wide Document Settings (Paper tab) —
+                            // a per-layout page editor is deferred; `CanvasModel.setLayoutPage`
+                            // exists for that later wire.
+                            showSettings = true
                         }
                     )
                     StatusBar(
@@ -407,6 +444,12 @@ struct ContentView: View {
             // (which runs BEFORE the canvas `keyDown`), so ⌫ falls through to the
             // canvas, where the tool consumes it as `.backspace`. See MUST-FIX 1.
             .focusedSceneValue(\.isToolActive, model.isToolActive)
+            // Match Properties (#2): PICK-UP (load the brush from the single selected
+            // entity) + APPLY (paint the brush onto the whole selection, then redraw),
+            // grouped into one `ViewModifier` so `canvasDetail`'s modifier chain stays
+            // under the Swift type-checker's complexity budget (gotcha #2). Both consume
+            // the P0-D `CanvasModel` ops (no model API added here).
+            .modifier(matchPropHandlers)
             // Let the canvas hand focus to the command line on Space (D1). The
             // controller calls this closure from `handleKey` when Space is pressed
             // and a tool is active, so a typed length goes to the field, not a tool.
@@ -486,6 +529,20 @@ struct ContentView: View {
         )
     }
 
+    /// The Match-Properties focused-scene-value handlers (#2 — Pick Up / Apply), pulled
+    /// into one `ViewModifier` so `canvasDetail`'s modifier chain stays under the Swift
+    /// type-checker's complexity budget (gotcha #2). Pick Up loads the property brush
+    /// from the single selected entity; Apply paints it onto the whole selection (one
+    /// undoable group) and redraws on a change.
+    private var matchPropHandlers: some ViewModifier {
+        MatchPropHandlersModifier(
+            pickUp: { _ = model.loadPaintBrushFromSelection() },
+            apply: {
+                if model.applyPaintBrushToSelection() { controllerBox.controller?.requestRedraw() }
+            }
+        )
+    }
+
     /// Raises the "Create Block from Selection…" name sheet (WAVE BW, Ask #1) after
     /// capturing a fresh unique suggested name. Called from the Blocks menu / ⌘K palette
     /// / canvas context menu (each gated on a non-empty selection). A no-op with nothing
@@ -540,8 +597,13 @@ struct ContentView: View {
         model.setDrawing(drawing, viewSize: model.viewport.size)
         adoptEnvironmentUndo()
         controllerBox.controller?.zoomToFit()
+        // #4a: the old "New drawing (mm)" canvas chip is GONE — W2 relocated the unit to
+        // the persistent status bar (StatusBar.docStatusSegment) and the file name lives
+        // in the window title bar, so a fresh drawing shows NO top-leading chip. Only a
+        // non-empty drawing surfaces a transient load count here (the chip's documented
+        // load/export status role).
         let n = model.entityCount
-        status = n == 0 ? "New drawing (\(DrawingUnit(rawValue: prefDefaultUnitRaw)?.sign ?? ""))" : "\(n) entities"
+        status = n == 0 ? "" : "\(n) entities"
     }
 
     /// Pushes the Preferences ▸ Text defaults (font style + height) into the pure
@@ -665,12 +727,29 @@ struct ContentView: View {
     /// One group's toolbar section: its PINNED tools as buttons, then a `▾` overflow
     /// `Menu` carrying the whole group (every tool, with a pin toggle each). Split out
     /// per group so each toolbar sub-expression stays tiny for the type-checker.
+    ///
+    /// In the Draw group (#1), a pinned tool that has a registered FLYOUT
+    /// (`ToolCatalog.drawFlyout(for:)` — Line / Circle / Arc / Rectangle) renders as a
+    /// hold-to-open flyout instead of a plain button (click = its default tool/mode,
+    /// hold = the variant menu). All other tools stay plain buttons.
     @ViewBuilder
     private func groupSection(_ group: ToolGroup) -> some View {
         ForEach(pinnedTools(in: group), id: \.self) { kind in
-            toolButton(kind)
+            pinnedButton(kind, in: group)
         }
         groupOverflowMenu(group)
+    }
+
+    /// Renders one pinned toolbar entry: a Draw flyout when `kind` has one registered,
+    /// else a plain tool button. Split out so `groupSection`'s `ForEach` body stays a
+    /// single small expression for the type-checker.
+    @ViewBuilder
+    private func pinnedButton(_ kind: ToolKind, in group: ToolGroup) -> some View {
+        if group == .draw, let flyout = ToolCatalog.drawFlyout(for: kind) {
+            drawFlyoutButton(flyout)
+        } else {
+            toolButton(kind)
+        }
     }
 
     /// The `▾` overflow menu for one group: every tool in the group (so all are
@@ -711,9 +790,20 @@ struct ContentView: View {
 
     /// The trailing toolbar item: a toggle for the Inspector pane (the standard Mac
     /// inspector affordance). Placed in the trailing group so it sits at the far
-    /// right, next to where the inspector opens.
+    /// right, next to where the inspector opens. Also hosts the Match-Properties
+    /// PICK-UP button (#2 — `eyedropper`): clicking it loads the property brush from the
+    /// single selected entity (then ⌘⇧V / the menu applies it to the next selection).
     @ToolbarContentBuilder
     private var inspectorToolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                _ = model.loadPaintBrushFromSelection()
+            } label: {
+                Label("Match Properties", systemImage: "eyedropper")
+            }
+            .help("Match Properties — pick up the selected object's properties (⌘⇧C), "
+                  + "then apply to a new selection (⌘⇧V)")
+        }
         ToolbarItem(placement: .primaryAction) {
             Button {
                 showInspector.toggle()
@@ -745,6 +835,91 @@ struct ContentView: View {
     private func activeBadge(_ kind: ToolKind) -> some View {
         if model.activeToolKind == kind {
             RoundedRectangle(cornerRadius: 6).fill(.tint.opacity(0.25))
+        }
+    }
+
+    // MARK: - Draw flyouts (#1)
+
+    /// A Draw FLYOUT button: `Menu(content:label:primaryAction:)`, so a plain CLICK runs
+    /// the flyout's default (`primaryAction` → activate the primary kind) and a HOLD opens
+    /// the variant menu. The label shows the primary glyph, plus — when a variant is the
+    /// currently-active configuration — the active variant's title so the toolbar reflects
+    /// the live mode/kind. Reuses the same `activeBadge` highlight as a plain button.
+    @ViewBuilder
+    private func drawFlyoutButton(_ flyout: ToolCatalog.Flyout) -> some View {
+        let meta = ToolCatalog.metadata(for: flyout.primary)
+        Menu {
+            ForEach(flyout.variants, id: \.self) { variant in
+                flyoutVariantRow(variant)
+            }
+        } label: {
+            Label(flyoutLabelTitle(flyout), systemImage: meta.symbol)
+        } primaryAction: {
+            activate(flyout.primary)
+        }
+        .menuIndicator(.visible)
+        .help("\(flyout.primary.title) — click to draw; hold for variants")
+        .background(activeBadge(flyout.primary))
+    }
+
+    /// One row of a flyout's hold-menu: activates the variant (a separate KIND, or the
+    /// base kind RE-MINTED in a construction MODE) and shows a checkmark when it is the
+    /// active configuration.
+    @ViewBuilder
+    private func flyoutVariantRow(_ variant: ToolCatalog.FlyoutVariant) -> some View {
+        Button {
+            activateVariant(variant)
+        } label: {
+            Label(ToolCatalog.variantTitle(variant),
+                  systemImage: isActiveVariant(variant) ? "checkmark"
+                                                        : ToolCatalog.variantSymbol(variant))
+        }
+    }
+
+    /// The flyout button's title: the active variant's name when a variant is the live
+    /// configuration (e.g. "Circle · 2 Points", "Construction Line"), else the primary
+    /// kind's title. Lets the toolbar reflect the held-then-picked mode/kind.
+    private func flyoutLabelTitle(_ flyout: ToolCatalog.Flyout) -> String {
+        if let active = flyout.variants.first(where: { isActiveVariant($0) }) {
+            switch active {
+            case .kind(let k):     return k.title
+            case .circleMode, .arcMode:
+                return "\(flyout.primary.title) · \(ToolCatalog.variantTitle(active))"
+            }
+        }
+        return flyout.primary.title
+    }
+
+    /// Activates one flyout variant. A `.kind` variant routes through the normal
+    /// `activate(_:)` (so Image/Create-Block special-cases still hold); a `.circleMode`
+    /// / `.arcMode` variant sets the model's construction mode FIRST, then activates the
+    /// base Circle/Arc kind so `applyToolConfig` re-mints the tool in that mode — exactly
+    /// the ToolOptionsBar path (ToolOptionsBar.swift:214 / :243).
+    private func activateVariant(_ variant: ToolCatalog.FlyoutVariant) {
+        switch variant {
+        case .kind(let k):
+            activate(k)
+        case .circleMode(let mode):
+            model.circleConstructionMode = mode
+            controllerBox.controller?.activateTool(.circle)
+        case .arcMode(let mode):
+            model.arcMode = mode
+            controllerBox.controller?.activateTool(.arc)
+        }
+    }
+
+    /// Whether `variant` is the CURRENT live configuration (drives the hold-menu
+    /// checkmark + the button's active-variant title). A `.kind` variant is active when
+    /// it is the active tool kind; a mode variant is active when its base kind is active
+    /// AND the model's construction mode matches.
+    private func isActiveVariant(_ variant: ToolCatalog.FlyoutVariant) -> Bool {
+        switch variant {
+        case .kind(let k):
+            return model.activeToolKind == k
+        case .circleMode(let mode):
+            return model.activeToolKind == .circle && model.circleConstructionMode == mode
+        case .arcMode(let mode):
+            return model.activeToolKind == .arc && model.arcMode == mode
         }
     }
 
@@ -1105,6 +1280,44 @@ struct ContentView: View {
         }
     }
 
+    /// #6: import a dragged Parts Library symbol and place ONE insert at the drop's WORLD
+    /// point. `screenPoint` is the SwiftUI drop `location` in the canvas view's local
+    /// space (top-left origin, Y-down) — the same convention `Viewport.screenToWorld`
+    /// expects (the host is `isFlipped`), so it maps straight through to world. Mirrors the
+    /// Parts panel's drag-to-place `insert(_:)`: import the file (which drops a placeholder
+    /// insert at the origin), remove that placeholder, then re-insert at the world point
+    /// via the model's selectable/snappable `insertBlock` path. Collision-safe (the engine
+    /// de-dups a clashing block name). Security-scoped read; errors land in the HUD chip.
+    @MainActor
+    private func dropPartLibraryItem(_ dragItem: PartLibraryDragItem, atScreenPoint screenPoint: CGPoint) {
+        let world = model.viewport.screenToWorld(screenPoint)
+        let url = URL(fileURLWithPath: dragItem.filePath)
+        let item = BlockLibraryItem(name: dragItem.name, url: url)
+        Task { @MainActor in
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            do {
+                guard let result = try await BlockLibrary.importItem(item, into: model.drawing) else {
+                    status = "“\(dragItem.name)” has no importable geometry"
+                    return
+                }
+                // The import added the block + a placeholder insert at the origin; drop it
+                // and re-place at the drop point via the model's insert path (selectable/
+                // snappable, index-synced, undoable).
+                model.drawing.remove(result.insertID)
+                model.quadtree.remove(result.insertID)
+                _ = model.insertBlock(named: result.blockName, at: world)
+                model.modelDirty = true
+                model.modelVersion &+= 1
+                controllerBox.controller?.requestRedraw()
+                status = "Inserted “\(result.blockName)”"
+            } catch {
+                status = "Drop import failed: \(error.localizedDescription)"
+                NSLog("CADCanvas: parts-library drop import failed: \(error)")
+            }
+        }
+    }
+
     /// "Save Block to File… (WBLOCK)" (Blocks panel row context menu / Blocks menu):
     /// present an `NSSavePanel` defaulting to `<block>.dxf`, then write the named block's
     /// geometry to a standalone `.dxf` re-based to the origin (via the engine's
@@ -1292,6 +1505,102 @@ enum ToolCatalog {
         // Annotate essentials.
         .text, .linearDim, .leader,
     ]
+
+    // MARK: Draw flyouts (#1 — click = default tool, hold = variants)
+
+    /// One VARIANT inside a Draw flyout. A variant is EITHER:
+    ///   • `.kind` — a SEPARATE `ToolKind` (e.g. Ray / Construction Line / Polygon),
+    ///     activated directly via the toolbar's `activate(_:)` routing; OR
+    ///   • `.circleMode` / `.arcMode` — a CONSTRUCTION MODE of the SAME kind (Circle /
+    ///     Arc), which is NOT its own `ToolKind`. These set the model's
+    ///     `circleConstructionMode` / `arcMode` FIRST, then activate the base kind so
+    ///     `applyToolConfig` re-mints the tool in that mode (the ToolOptionsBar path).
+    ///
+    /// No new `ToolKind` / `EntityKind` / mode is introduced — every case resolves to
+    /// an EXISTING kind or an existing construction mode (verified against
+    /// `CircleConstructionMode` / `ArcCreationMode`, which have exactly the cases listed).
+    enum FlyoutVariant: Hashable {
+        case kind(ToolKind)
+        case circleMode(CircleConstructionMode)
+        case arcMode(ArcCreationMode)
+    }
+
+    /// A Draw-toolbar FLYOUT: a primary tool button (click = activate `primary`) that,
+    /// when held, opens a menu of `variants`. Replaces a plain pinned button so the
+    /// related tools/modes for a draw family are one hold away (#1).
+    struct Flyout: Identifiable {
+        /// The kind the flyout's button activates on a plain click (and whose glyph it
+        /// shows). Also the `id` so the toolbar `ForEach`/lookup is stable.
+        let primary: ToolKind
+        /// The hold-menu variants, in display order.
+        let variants: [FlyoutVariant]
+        var id: ToolKind { primary }
+    }
+
+    /// The Draw-group flyouts (#1), in toolbar order. ONLY the four pinned Draw tools
+    /// that have meaningful variants/modes are flyouts; every other Draw tool stays a
+    /// plain button (and the whole group stays reachable via the `▾` overflow menu).
+    ///   • Line ▸ {Construction Line (XLine), Ray}  — separate KINDS.
+    ///   • Rectangle ▸ {Polygon}                    — a separate KIND.
+    ///   • Circle ▸ {Center+Radius, 2 Points, 3 Points} — construction MODES.
+    ///   • Arc ▸ {Center/Start/End, 3 Points, Tangential} — construction MODES.
+    /// (Circle has no TTR mode and Rectangle has no rounded/chamfer KIND in this build,
+    /// so neither is offered — only existing kinds/modes are listed.)
+    static let drawFlyouts: [Flyout] = [
+        Flyout(primary: .line, variants: [.kind(.xline), .kind(.ray)]),
+        Flyout(primary: .circle, variants: [
+            .circleMode(.centerRadius), .circleMode(.twoPoint), .circleMode(.threePoint),
+        ]),
+        Flyout(primary: .arc, variants: [
+            .arcMode(.centerStartEnd), .arcMode(.threePoint), .arcMode(.tangential),
+        ]),
+        Flyout(primary: .rectangle, variants: [.kind(.polygon)]),
+    ]
+
+    /// The flyout (if any) whose PRIMARY button is `kind` — so `groupSection(.draw)` can
+    /// render a flyout in place of a plain button for the four flyout primaries.
+    static func drawFlyout(for kind: ToolKind) -> Flyout? {
+        drawFlyouts.first { $0.primary == kind }
+    }
+
+    /// A short display title for one flyout variant (the hold-menu row label / the
+    /// active-variant badge text). Mode variants read as their construction-mode name;
+    /// kind variants read as the kind's UI title.
+    static func variantTitle(_ variant: FlyoutVariant) -> String {
+        switch variant {
+        case .kind(let k):           return k.title
+        case .circleMode(let m):     return circleModeTitle(m)
+        case .arcMode(let m):        return arcModeTitle(m)
+        }
+    }
+
+    /// The SF Symbol for one flyout variant's hold-menu row.
+    static func variantSymbol(_ variant: FlyoutVariant) -> String {
+        switch variant {
+        case .kind(let k):       return metadata(for: k).symbol
+        case .circleMode:        return "circle"
+        case .arcMode:           return "point.topleft.down.to.point.bottomright.curvepath"
+        }
+    }
+
+    /// Display names for the Circle construction modes (mirrors the ToolOptionsBar
+    /// picker labels so the flyout and the options bar read identically).
+    static func circleModeTitle(_ mode: CircleConstructionMode) -> String {
+        switch mode {
+        case .centerRadius: return "Center, Radius"
+        case .twoPoint:     return "2 Points"
+        case .threePoint:   return "3 Points"
+        }
+    }
+
+    /// Display names for the Arc construction modes (mirrors the ToolOptionsBar picker).
+    static func arcModeTitle(_ mode: ArcCreationMode) -> String {
+        switch mode {
+        case .centerStartEnd: return "Center, Start, End"
+        case .threePoint:     return "3 Points"
+        case .tangential:     return "Tangential"
+        }
+    }
 
     // MARK: Group rosters (canonical order)
 
@@ -1543,6 +1852,23 @@ extension FocusedValues {
         set { self[DuplicateSelectionKey.self] = newValue }
     }
 
+    /// Match Properties — PICK UP (⌘⇧C): load the property brush from the single selected
+    /// entity (`CanvasModel.loadPaintBrushFromSelection`). The focused window publishes
+    /// this; LibreCADApp's "Match Properties ▸ Pick Up Properties" item + the toolbar
+    /// `eyedropper` button fire it. `nil` when no canvas is focused (disables the item).
+    var matchPropPickUp: (() -> Void)? {
+        get { self[MatchPropPickUpKey.self] }
+        set { self[MatchPropPickUpKey.self] = newValue }
+    }
+
+    /// Match Properties — APPLY (⌘⇧V): paint the loaded brush onto the whole current
+    /// selection (`CanvasModel.applyPaintBrushToSelection`) as one undoable group, then
+    /// redraw. `nil` when no canvas is focused (disables the menu item).
+    var matchPropApply: (() -> Void)? {
+        get { self[MatchPropApplyKey.self] }
+        set { self[MatchPropApplyKey.self] = newValue }
+    }
+
     /// Whether the focused window has a draw tool mid-run. Used by LibreCADApp to
     /// disable the Edit ▸ Delete item (so its bare-⌫ shortcut does not pre-empt the
     /// tool's `.backspace` — MUST-FIX 1). `nil` when no canvas is focused; the
@@ -1672,6 +1998,21 @@ private struct BlockFileHandlersModifier: ViewModifier {
     }
 }
 
+/// Groups the Match-Properties focused-scene-value handlers (#2 — Pick Up / Apply) into
+/// one `ViewModifier`, so `ContentView.canvasDetail`'s modifier chain stays under the
+/// Swift type-checker's expression-complexity limit (gotcha #2). Each closure is the
+/// same action the Edit menu chords (⌘⇧C / ⌘⇧V) + the toolbar `eyedropper` fire.
+private struct MatchPropHandlersModifier: ViewModifier {
+    let pickUp: () -> Void
+    let apply: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .focusedSceneValue(\.matchPropPickUp) { pickUp() }
+            .focusedSceneValue(\.matchPropApply) { apply() }
+    }
+}
+
 private struct UndoActionKey: FocusedValueKey {
     typealias Value = () -> Void
 }
@@ -1685,6 +2026,14 @@ private struct DeleteSelectionKey: FocusedValueKey {
 }
 
 private struct DuplicateSelectionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct MatchPropPickUpKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct MatchPropApplyKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 
@@ -1881,6 +2230,33 @@ struct LayoutTabStrip: View {
     /// Discard. Defaults to a no-op so existing call sites need not pass it.
     var onSelectBlockEdit: () -> Void = {}
 
+    // #4c — layout-tab context-menu actions (Rename / Delete / Duplicate / Page Setup).
+    // Each forwards a LAYOUT name to the call site (ContentView), which calls the
+    // matching P0-D `CanvasModel` wrapper + redraws. Defaulted to no-ops so the pure
+    // unit tests (which construct the strip without these) need not supply them.
+
+    /// Rename the named layout to a new name (Rename → the View-layer rename sheet).
+    var onRenameLayout: (_ name: String, _ newName: String) -> Void = { _, _ in }
+    /// Delete the named layout (never the Model tab — only layout tabs show the menu).
+    var onDeleteLayout: (_ name: String) -> Void = { _ in }
+    /// Duplicate the named layout into a fresh sheet (and activate the copy).
+    var onDuplicateLayout: (_ name: String) -> Void = { _ in }
+    /// Page Setup for the named layout — STUBBED to opening Document Settings for now
+    /// (the per-layout page editor is deferred; `setLayoutPage` exists for a later wire).
+    var onPageSetup: (_ name: String) -> Void = { _ in }
+
+    /// The layout whose Rename sheet is open (View-layer only — never reached by the
+    /// headless tests, which exercise the `CanvasModel` rename wrapper directly). `nil`
+    /// when no rename is in progress. Wrapped so it is `Identifiable` for `.sheet(item:)`.
+    @State private var renameTarget: RenameTarget?
+
+    /// An `Identifiable` carrier for the layout name being renamed (so `.sheet(item:)`
+    /// can present the rename sheet keyed off the target name).
+    private struct RenameTarget: Identifiable {
+        let name: String
+        var id: String { name }
+    }
+
     /// Whether the strip is shown at all (plan §3d): HIDE it entirely until there is a
     /// paper-space layout to switch to — with only the implicit "Model" space there is
     /// nothing to tab between, so a lone "Model" pill is noise. The strip also appears
@@ -1931,6 +2307,21 @@ struct LayoutTabStrip: View {
         .overlay(alignment: .top) { Divider() }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Model and layout tabs")
+        // #4c: the layout RENAME sheet — raised from a tab's context menu (View-layer
+        // modal only; never reachable from the headless tests, which call the model
+        // rename wrapper directly). Confirming forwards (name → newName) to the call
+        // site's `onRenameLayout` (the P0-D `CanvasModel.renameLayout` wrapper).
+        .sheet(item: $renameTarget) { target in
+            LayoutRenameSheet(
+                currentName: target.name,
+                existingNames: model.orderedLayouts.map(\.name),
+                onConfirm: { newName in
+                    renameTarget = nil
+                    onRenameLayout(target.name, newName)
+                },
+                onCancel: { renameTarget = nil }
+            )
+        }
     }
 
     // MARK: - Tabs
@@ -1968,7 +2359,25 @@ struct LayoutTabStrip: View {
             isActive: isActive,
             action: { onSelectLayout(name) }
         )
+        // #4c: the layout-tab right-click menu (LAYOUT tabs only — the Model tab + BEDIT
+        // tab have no menu, so Delete can never target the Model space). Rename raises a
+        // View-layer sheet; Delete / Duplicate / Page Setup forward to the call site's
+        // P0-D `CanvasModel` wrappers (Page Setup is stubbed to Document Settings).
+        .contextMenu { layoutTabContextMenu(name) }
         .accessibilityIdentifier("tab.layout.\(name)")
+    }
+
+    /// The context-menu content for one LAYOUT tab (#4c): Rename / Delete / Duplicate /
+    /// Page Setup. Split into its own `@ViewBuilder` so `layoutTab`'s body stays small.
+    @ViewBuilder
+    private func layoutTabContextMenu(_ name: String) -> some View {
+        Button("Rename…") { renameTarget = RenameTarget(name: name) }
+        Button("Duplicate") { onDuplicateLayout(name) }
+        // Page Setup is a STUB for now (the per-layout page editor is deferred): it opens
+        // the document-wide settings; the `…` marks it as not-yet-the-full editor.
+        Button("Page Setup…") { onPageSetup(name) }
+        Divider()
+        Button("Delete", role: .destructive) { onDeleteLayout(name) }
     }
 
     /// The transient BLOCK-EDIT tab (BEDIT, STAGE 2). Present ONLY while

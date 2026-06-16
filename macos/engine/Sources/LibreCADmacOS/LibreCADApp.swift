@@ -39,6 +39,11 @@ struct LibreCADApp: App {
     /// fires the Ortho toggle. (The canvas `keyDown` also handles F8 via keyCode 100,
     /// so it works whether the menu or the canvas has key focus.)
     private static let f8Key = KeyEquivalent(Character(UnicodeScalar(NSF8FunctionKey)!))
+    /// The F7 key as a SwiftUI `KeyEquivalent` (#8 — grid toggle). Built from AppKit's
+    /// `NSF7FunctionKey` Unicode scalar (same construction as `f8Key`), so ⌥-free F7 in
+    /// the View menu fires the grid toggle. (W4's canvas `keyDown` also handles F7 via
+    /// keyCode 98, so it works whether the menu or the canvas has key focus.)
+    private static let f7Key = KeyEquivalent(Character(UnicodeScalar(NSF7FunctionKey)!))
     /// The "open command palette" (⌘K) action published by the focused window.
     @FocusedValue(\.commandPalette) private var commandPalette
     @FocusedValue(\.focusCommandLine) private var focusCommandLine
@@ -90,6 +95,12 @@ struct LibreCADApp: App {
     /// Delete item is disabled so its bare-⌫ shortcut does NOT pre-empt the tool's
     /// `.backspace` (see the Delete button below and MUST-FIX 1).
     @FocusedValue(\.isToolActive) private var isToolActive
+    /// Match Properties — Pick Up (⌘⇧C) / Apply (⌘⇧V) actions published by the focused
+    /// window (#2). Pick Up loads the property brush from the single selected entity;
+    /// Apply paints it onto the whole current selection. `nil` ⇒ no canvas focused ⇒
+    /// the matching menu item is disabled.
+    @FocusedValue(\.matchPropPickUp) private var matchPropPickUp
+    @FocusedValue(\.matchPropApply) private var matchPropApply
 
     var body: some Scene {
         // The document scene: a brand-new document is the empty `LibreCADDocument()`;
@@ -231,6 +242,23 @@ struct LibreCADApp: App {
                 Button("Select Contour") {
                     NSApp.sendAction(Selector(("selectContourAction:")), to: nil, from: nil)
                 }
+
+                Divider()
+                // Edit ▸ Match Properties (#2) — the AutoCAD MATCHPROP / format-painter
+                // pair. Pick Up (⌘⇧C) loads the property brush from the single selected
+                // entity; Apply (⌘⇧V) paints it onto the whole current selection (one
+                // undoable group). Routed to the focused window via focused values
+                // (`CanvasModel.loadPaintBrushFromSelection` / `applyPaintBrushToSelection`,
+                // P0-D). ⌘⇧C / ⌘⇧V are FREE in the app menus (system Copy/Paste are bare
+                // ⌘C/⌘V; verified no other menu item binds the shifted chords). The toolbar
+                // `eyedropper` button (ContentView) also fires Pick Up. Each is disabled
+                // when its focused value is `nil` (no canvas focused).
+                Button("Pick Up Properties") { matchPropPickUp?() }
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+                    .disabled(matchPropPickUp == nil)
+                Button("Apply Properties") { matchPropApply?() }
+                    .keyboardShortcut("v", modifiers: [.command, .shift])
+                    .disabled(matchPropApply == nil)
             }
             CommandGroup(after: .toolbar) {
                 // ⌘K — the command palette: fuzzy-find and run any tool/app action.
@@ -298,6 +326,17 @@ struct LibreCADApp: App {
                     NSApp.sendAction(Selector(("toggleOrthoAction:")), to: nil, from: nil)
                 }
                 .keyboardShortcut(Self.f8Key, modifiers: [])
+                // View ▸ Show Grid (F7 — #8) — toggles the canvas grid. Routed through the
+                // responder chain to the focused canvas exactly like Ortho above (same
+                // `NSApp.sendAction` mechanism), targeting W4's `@objc
+                // CADCanvasView.toggleGridAction(_:)` (selector `toggleGridAction:`), which
+                // also drives the menu checkmark via `validateUserInterfaceItem`. The
+                // canvas `keyDown` handles F7 (keyCode 98) too, so it works whether the
+                // menu or the canvas has key focus.
+                Button("Show Grid") {
+                    NSApp.sendAction(Selector(("toggleGridAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut(Self.f7Key, modifiers: [])
 
                 Divider()
                 // Relative-zero (LibreCAD's "Set relative zero") — the datum the
