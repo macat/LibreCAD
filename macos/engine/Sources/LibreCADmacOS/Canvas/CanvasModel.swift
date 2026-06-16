@@ -1731,7 +1731,17 @@ final class CanvasModel {
             worldTolerance: worldTolerance,
             gridSpacing: gridSpacing,
             in: drawing,
-            using: quadtree
+            using: quadtree,
+            // `ctx` powers curve nearest-point / resolve; `referencePoint` lights up
+            // the constructive modes (.perpendicular / .tangent / .parallel), which
+            // gate behind a valid reference point in `Snapping.snap`. The tool's
+            // "from" datum is `relativeZero` (nil at a tool's first point → those
+            // modes correctly contribute no candidates, matching LibreCAD).
+            // `distanceAlong` is intentionally left at its nil default: there is no
+            // CanvasModel snap-distance field yet (a tiny follow-up: add a
+            // `var snapDistance: Double?` tool option, then pass it here).
+            ctx: drawing.makeResolveContext(),
+            referencePoint: relativeZero
         )
         let changed = result != snap
         snap = result

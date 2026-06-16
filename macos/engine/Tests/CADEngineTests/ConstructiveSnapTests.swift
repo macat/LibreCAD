@@ -319,3 +319,121 @@ struct ConstructiveSnapPipelineTests {
         #expect(r.point.distance(to: Vector(5, 0.2)) < 1e-9)
     }
 }
+
+// MARK: - LIVE path (CanvasModel.updateSnap)
+//
+// The pipeline tests above call `Snapping.snap` directly with an explicit
+// `referencePoint:`/`ctx:` — they pass even when the LIVE interactive path
+// (`CanvasModel.updateSnap`) forwards NEITHER, so they could not catch the
+// dead-wiring that made perpendicular/tangent/parallel always yield zero
+// candidates in the running app. These tests drive the SAME code the canvas
+// view calls (`updateSnap(atScreenPoint:gridSpacing:)`) so the wiring itself is
+// under test. R10 fix: `updateSnap` now passes `referencePoint: relativeZero`
+// and `ctx: drawing.makeResolveContext()`.
+//
+// To verify fail-before/pass-after: temporarily delete the `referencePoint:`
+// argument from `CanvasModel.updateSnap`'s `Snapping.snap(...)` call — these
+// three tests fail (the snap kind drops to `.free`/`.onEntity`, never the
+// constructive kind); restore it and they pass.
+
+@MainActor
+private struct LiveSnapFixture {
+    let model = CanvasModel()
+    /// Horizontal line from (0,0) to (10,0).
+    let hLine: EntityID
+    /// Circle centered (0,0) radius 3.
+    let circle: EntityID
+
+    init() {
+        let drawing = CADDrawing()
+        let h = drawing.add(EntityRecord(id: EntityID(0),
+            kind: .line(LineData(start: Vector(0, 0), end: Vector(10, 0)))))
+        let c = drawing.add(EntityRecord(id: EntityID(0),
+            kind: .circle(CircleData(center: Vector(0, 0), radius: 3))))
+        hLine = h
+        circle = c
+        // setDrawing rebuilds the quadtree (so the snapper can find both entities
+        // under the cursor) AND frames the viewport. The live snap aperture is
+        // `catchPoints (8) · worldPerPixel = 8 / scale`, so pin a known scale (50 →
+        // 0.16 world-unit aperture) instead of relying on the auto-fit zoom: the
+        // tests place cursors well within that aperture of the target geometry.
+        let viewSize = CGSize(width: 1024, height: 768)
+        model.setDrawing(drawing, viewSize: viewSize)
+        model.viewport = Viewport(scale: 50, center: Vector(0, 0), size: viewSize)
+    }
+
+    /// The screen point (AppKit pts) for a world point, via the live viewport — so
+    /// `updateSnap` (which screen→world's it back) sees a cursor near `world`.
+    func screen(forWorld world: Vector) -> CGPoint {
+        model.viewport.worldToScreen(world)
+    }
+}
+
+@Suite("Constructive snap LIVE path (CanvasModel.updateSnap)")
+struct ConstructiveSnapLivePathTests {
+
+    @MainActor
+    @Test("perpendicular fires through updateSnap with a relativeZero reference")
+    func livePerpendicular() {
+        let f = LiveSnapFixture()
+        // Reference (5,5); perpendicular foot onto the x-axis line is (5,0).
+        f.model.setRelativeZero(Vector(5, 5))
+        f.model.snapModes = [.perpendicular, .free]
+        // Cursor a hair off the foot, well within the catch aperture at this zoom.
+        let scr = f.screen(forWorld: Vector(5.02, 0.02))
+        f.model.updateSnap(atScreenPoint: scr, gridSpacing: nil)
+
+        let snap = f.model.snap
+        #expect(snap?.kind == .perpendicular)
+        #expect(snap?.entity == f.hLine)
+        #expect((snap?.point ?? .invalid).distance(to: Vector(5, 0)) < 1e-6)
+    }
+
+    @MainActor
+    @Test("tangent fires through updateSnap with a relativeZero reference")
+    func liveTangent() {
+        let f = LiveSnapFixture()   // circle r=3 at origin
+        // Reference (6,0); tangent points on the circle at (1.5, ±(3√3)/2).
+        f.model.setRelativeZero(Vector(6, 0))
+        f.model.snapModes = [.tangent, .free]
+        let ty = 3.0 * (3.0).squareRoot() / 2.0
+        let scr = f.screen(forWorld: Vector(1.52, ty - 0.02))
+        f.model.updateSnap(atScreenPoint: scr, gridSpacing: nil)
+
+        let snap = f.model.snap
+        #expect(snap?.kind == .tangent)
+        #expect((snap?.point ?? .invalid).distance(to: Vector(1.5, ty)) < 1e-5)
+    }
+
+    @MainActor
+    @Test("parallel fires through updateSnap with a relativeZero reference")
+    func liveParallel() {
+        let f = LiveSnapFixture()   // hLine along the x-axis (y=0)
+        // Reference (0,0.05); projecting cursor (5,0.08) onto the line through the
+        // reference parallel to hLine's x-direction gives (5,0.05). The cursor is
+        // 0.08 from hLine — inside the live 0.16 aperture — so the quadtree surfaces
+        // hLine under the cursor (parallel needs the hovered entity nearby).
+        f.model.setRelativeZero(Vector(0, 0.05))
+        f.model.snapModes = [.parallel, .free]
+        let scr = f.screen(forWorld: Vector(5, 0.08))
+        f.model.updateSnap(atScreenPoint: scr, gridSpacing: nil)
+
+        let snap = f.model.snap
+        #expect(snap?.kind == .parallel)
+        #expect((snap?.point ?? .invalid).distance(to: Vector(5, 0.05)) < 1e-6)
+    }
+
+    @MainActor
+    @Test("perpendicular is correctly inert through updateSnap with NO relativeZero")
+    func livePerpendicularInertWithoutReference() {
+        let f = LiveSnapFixture()
+        // relativeZero is nil (a tool's first point) → the constructive modes must
+        // contribute nothing, so the snap falls back to .free (matching LibreCAD).
+        #expect(f.model.relativeZero == nil)
+        f.model.snapModes = [.perpendicular, .free]
+        let scr = f.screen(forWorld: Vector(5.02, 0.02))
+        f.model.updateSnap(atScreenPoint: scr, gridSpacing: nil)
+
+        #expect(f.model.snap?.kind == .free)
+    }
+}
