@@ -48,10 +48,16 @@ enum CGSceneRenderer {
     ///
     /// - `background`: when non-nil, the whole page is filled with this color first
     ///   (PDF/PNG want an opaque white page by default; pass `nil` for transparent).
+    /// - `minStrokeDevicePx`: a floor (in DEVICE pixels, after the world→page scale)
+    ///   on the rendered stroke width. The default `0` means "no floor" so every
+    ///   existing PDF/PNG/Print caller is byte-for-byte unchanged. A small tile
+    ///   (e.g. the Blocks-sidebar thumbnail) passes a sub-pixel-guard value like
+    ///   `0.75` so a thin hairline doesn't fall below one device pixel and vanish.
     static func draw(scene: ExportScene,
                      in ctx: CGContext,
                      transform: ExportTransform,
-                     background: RGBAColor?) {
+                     background: RGBAColor?,
+                     minStrokeDevicePx: CGFloat = 0) {
         let page = transform.pageSize
 
         // Opaque page background (so PNG isn't transparent / PDF isn't black).
@@ -78,7 +84,16 @@ enum CGSceneRenderer {
         let ty = page.height - transform.offsetY + s * transform.worldOrigin.y
         ctx.concatenate(CGAffineTransform(a: s, b: 0, c: 0, d: -s, tx: tx, ty: ty))
 
-        let strokeWorld = s > 1e-12 ? 1.0 / s : 1.0
+        // A ~1pt page hairline expressed in WORLD units (scaled by the CTM). Floor
+        // it to `minStrokeDevicePx` DEVICE pixels so a tiny tile's hairline stays
+        // visible: device width == worldWidth · s, so the floor in world units is
+        // `minStrokeDevicePx / s`. With the default floor of 0 this is a no-op and
+        // `strokeWorld` is exactly `1/s` as before.
+        let baseStrokeWorld = s > 1e-12 ? 1.0 / s : 1.0
+        let minStrokeWorld = (minStrokeDevicePx > 0 && s > 1e-12)
+            ? Double(minStrokeDevicePx) / s
+            : 0.0
+        let strokeWorld = Swift.max(baseStrokeWorld, minStrokeWorld)
 
         // Fills first (even-odd, holes cut out).
         for fill in scene.fills {

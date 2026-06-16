@@ -50,6 +50,14 @@ struct BlocksSection: View {
     /// renderer is on-demand; an insert/delete must nudge it).
     let controllerBox: CADCanvasView.ControllerBox
 
+    /// Per-section thumbnail cache, keyed by `(blockName, modelVersion, size)`.
+    /// `modelVersion` bumps on every committed edit + block enter/exit, so an edited
+    /// block's stale tile is never returned (its key changes) — edits auto-invalidate.
+    @State private var thumbnails = BlockThumbnailCache()
+
+    /// The thumbnail tile edge (points). Matches the row's icon footprint.
+    private let thumbSize: CGFloat = 28
+
     var body: some View {
         Section("Blocks") {
             let blocks = model.drawing.blocks.blocks
@@ -58,9 +66,14 @@ struct BlocksSection: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
+                // Build ONE ResolveContext for the whole list (shared across rows)
+                // so each thumbnail miss doesn't re-snapshot the layer/style/block
+                // tables. Captured by `thumbnail(for:)` below.
+                let ctx = model.drawing.makeResolveContext()
                 ForEach(blocks) { block in
                     BlockRow(
                         block: block,
+                        thumbnail: thumbnail(for: block.name, context: ctx),
                         onInsert: { insert(block.name) },
                         onRename: { rename(block.name, to: $0) },
                         onDelete: { delete(block.name) }
@@ -76,6 +89,17 @@ struct BlocksSection: View {
                 }
             }
         }
+    }
+
+    /// The cached/rendered preview image for a block (or `nil` → the row shows the
+    /// generic icon). Lazily rendered on the main actor; `thumbSize` distinguishes
+    /// cache entries so a future size change doesn't collide.
+    private func thumbnail(for name: String, context: ResolveContext) -> NSImage? {
+        thumbnails.image(for: model.drawing,
+                         blockName: name,
+                         version: model.modelVersion,
+                         size: thumbSize,
+                         context: context)
     }
 
     // MARK: Ops (all undoable, then nudge the renderer)
@@ -106,16 +130,32 @@ struct BlocksSection: View {
 /// which calls the model's undoable mutators.
 private struct BlockRow: View {
     let block: Block
+    /// A rendered preview of the block's geometry, or `nil` to show the generic
+    /// icon (unknown / empty / degenerate block). Computed + cached by the section.
+    let thumbnail: NSImage?
     let onInsert: () -> Void
     let onRename: (String) -> Void
     let onDelete: () -> Void
 
     @State private var draftName: String = ""
 
-    var body: some View {
-        HStack(spacing: 8) {
+    /// The block preview — the rendered thumbnail when available, else the generic
+    /// "square.on.square" icon (so a text/empty/unknown block still has a glyph).
+    @ViewBuilder private var preview: some View {
+        if let thumbnail {
+            Image(nsImage: thumbnail)
+                .interpolation(.high)
+                .frame(width: 28, height: 28)
+        } else {
             Image(systemName: "square.on.square")
                 .foregroundStyle(.secondary)
+                .frame(width: 28, height: 28)
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            preview
 
             TextField("Block name", text: $draftName)
                 .textFieldStyle(.plain)
