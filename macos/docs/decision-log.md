@@ -18,6 +18,11 @@ Dynamic-block program (`dynamic-blocks-plan.md`) planned → **critic GO-WITH-FI
 
 **NUMBERING RECONCILIATION:** the authoritative order is now `dynamic-blocks-plan.md`'s — **DB-1 visibility · DB-2 params/actions/grips · DB-3 value-sets/lookup · DB-4 polar/XY/array/chain · DB-5 extended** (this supersedes `block-ux-plan.md` §7's earlier DB-1=params labeling). Building **DB-VIS-ENGINE** now (DB-0 data model + DB-1 evaluator + visibility resolve, combined, UNWIRED), then DB-VIS-WIRE (state authoring in the Block Editor + instance dropdown).
 
+**— DB-1 VISIBILITY STATES LANDED end-to-end** (`native-macos @ dd86c2476`, **2105 tests**, `.app` rebuilt). Both code-reviewed APPROVE/-WITH-NITS:
+- **DB-VIS-ENGINE** `f562a9b79` (+20) — `Block.dynamic`/`InsertData.dynamic` additive (back-compat), pure `BlockEvaluator.evaluate` threaded into `resolveInsert` (MINSERT/recursion/byBlock/ATTRIB byte-for-byte unchanged), undoable `CADDrawing` mutators. Purity/isolation tests per the critic. No `EntityKind` case.
+- **DB-VIS-WIRE** `dd86c2476` (+16) — Block Editor **Visibility States panel** (add/rename/delete, set-current, show/hide selected members per state) + on-canvas **dropdown grip** (`DynamicGripOverlay`, cloned from `GizmoOverlay`; **gizmo suppressed for a single dynamic insert** via the pure `shouldSuppressGizmoForSelection`) + Inspector picker → switches an insert's variant (undoable `applyInspectorEdits`). Reviewer verified no modal-in-test + no double-input overlay state.
+First concrete dynamic block: e.g. one valve block with Gate/Ball/Check variants switched per-insert. **NEXT: DB-2** (parameters/actions + live-drag grips — the large phase) — coordinator to checkpoint scope with owner before committing the fleet.
+
 ---
 
 ## 2026-06-16 — BLOCK UX + paper-space WIRE-WAVES LANDED + owner's AutoCAD spec adopted (`native-macos @ 90633e3d0`, **2069 tests**)
