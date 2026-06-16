@@ -135,6 +135,13 @@ public:
 
     /** Called for every insert. */
     virtual void addInsert(const DRW_Insert& data) = 0;
+
+    /** Called for every ATTDEF (block attribute-definition template) found inside
+     *  a BLOCK definition's entity stream. Default no-op so existing implementers
+     *  compile unchanged; override to attach the template to the current block.
+     *  (ATTRIB instances ride DRW_Insert::attlist and are delivered with addInsert;
+     *  ATTDEF templates have no owning entity, so they get this dedicated hook.) */
+    virtual void addAttdef(const DRW_Attdef& data) { (void)data; }
     
     /** Called for every trace start */
     virtual void addTrace(const DRW_Trace& data) = 0;

@@ -1363,11 +1363,62 @@ bool dxfRW::writeDimension(DRW_Dimension *ent) {
     return true;
 }
 
+// Emit one ATTRIB / ATTDEF body (a TEXT-derived entity) at the current writer
+// position. Shared by writeInsert (ATTRIB) and writeBlock (ATTDEF, which adds the
+// prompt code 3). File-local helper (no new method declared in libdxfrw.h). The
+// caller has already written the common entity attrs via dxfRW::writeEntity, since
+// that is a private method; so this writes only the type record + geometry/text
+// codes. `isAttdef` selects the AcDbAttributeDefinition subclass + prompt.
+// DRW_Attrib derives DRW_Text, whose `angle` is in DEGREES (writeText emits it
+// directly, no ARAD), so we emit it as-is.
+static void lc_writeAttribBody(dxfWriter *writer, DRW::Version version,
+                               DRW_Attrib *ent, const char *typeName, bool isAttdef) {
+    writer->writeString(0, typeName);
+    // Minimal common attrs (layer / handle bookkeeping is handled by the caller's
+    // higher-level path for INSERT; for sub-entities we emit the layer directly so
+    // the record is well-formed without reaching the private writeEntity()).
+    writer->writeUtf8String(8, ent->layer.empty() ? std::string("0") : ent->layer);
+    if (version > DRW::AC1009) {
+        writer->writeString(100, "AcDbEntity");
+        writer->writeString(100, "AcDbText");
+    }
+    writer->writeDouble(10, ent->basePoint.x);
+    writer->writeDouble(20, ent->basePoint.y);
+    writer->writeDouble(30, ent->basePoint.z);
+    writer->writeDouble(40, ent->height);
+    writer->writeUtf8String(1, ent->text);    // ATTRIB value / ATTDEF default
+    if (ent->angle != 0.0) {
+        writer->writeDouble(50, ent->angle);  // DRW_Text angle is in degrees
+    }
+    if (isAttdef) {
+        if (version > DRW::AC1009) {
+            writer->writeString(100, "AcDbAttributeDefinition");
+        }
+        DRW_Attdef *def = static_cast<DRW_Attdef *>(ent);
+        writer->writeUtf8String(3, def->prompt);   // prompt (ATTDEF only)
+        writer->writeUtf8String(2, ent->tag);      // tag
+        writer->writeInt16(70, ent->attribFlags);  // attribute flags
+    } else {
+        if (version > DRW::AC1009) {
+            writer->writeString(100, "AcDbAttribute");
+        }
+        writer->writeUtf8String(2, ent->tag);      // tag
+        writer->writeInt16(70, ent->attribFlags);  // attribute flags
+    }
+}
+
 bool dxfRW::writeInsert(DRW_Insert *ent){
     writer->writeString(0, "INSERT");
     writeEntity(ent);
     if (version > DRW::AC1009) {
         writer->writeString(100, "AcDbBlockReference");
+    }
+    // Attributes-follow flag (code 66 == 1): emitted when this INSERT carries
+    // ATTRIB sub-entities, so a reader knows to expect them up to the SEQEND.
+    if (!ent->attlist.empty()) {
+        writer->writeInt16(66, 1);
+    }
+    if (version > DRW::AC1009) {
         writer->writeUtf8String(2, ent->name);
     } else
         writer->writeUtf8Caps(2, ent->name);
@@ -1382,6 +1433,20 @@ bool dxfRW::writeInsert(DRW_Insert *ent){
     writer->writeInt16(71, ent->rowcount);
     writer->writeDouble(44, ent->colspace);
     writer->writeDouble(45, ent->rowspace);
+    // ATTRIB sub-entities + the terminating SEQEND (matches AutoCAD's INSERT-with-
+    // attributes layout). DXF only (this path is not reached for DWG, which encodes
+    // attributes through encodeDwg).
+    if (!ent->attlist.empty()) {
+        for (auto &att : ent->attlist) {
+            if (!att) continue;
+            lc_writeAttribBody(writer.get(), version, att.get(), "ATTRIB", false);
+        }
+        writer->writeString(0, "SEQEND");
+        writer->writeUtf8String(8, ent->layer.empty() ? std::string("0") : ent->layer);
+        if (version > DRW::AC1009) {
+            writer->writeString(100, "AcDbEntity");
+        }
+    }
     return true;
 }
 
@@ -1771,6 +1836,15 @@ bool dxfRW::writeBlock(DRW_Block *bk){
         writeAppData(bk->appData);
     }
     writer->writeString(1, "");
+
+    // Block ATTDEF templates: emitted inside the block definition (between the
+    // BLOCK header and the ENDBLK that the next writeBlock / writeBlocks closes),
+    // so a re-read delivers them via addAttdef. Empty for a block with no
+    // attributes (the common case). DXF only.
+    for (auto &def : bk->attdefs) {
+        if (!def) continue;
+        lc_writeAttribBody(writer.get(), version, def.get(), "ATTDEF", true);
+    }
 
     return true;
 }
@@ -2803,6 +2877,29 @@ bool dxfRW::processEntities(bool isblock) {
             processed = processRay();
         } else if (nextentity == "XLINE") {
             processed = processXline();
+        } else if (nextentity == "ATTDEF") {
+            // ATTDEF (block attribute definition template) — appears inside a BLOCK
+            // definition's entity stream. Parse it inline (no dxfRW method is added)
+            // and deliver it via the addAttdef interface hook; the implementer
+            // attaches it to the current block. Mirrors processInsert's ATTRIB
+            // handling; both ride DRW_Attrib/DRW_Attdef.
+            DRW_Attdef attdef;
+            int acode;
+            processed = false;
+            while (reader->readRec(&acode)) {
+                if (0 == acode) {
+                    nextentity = reader->getString();
+                    iface->addAttdef(attdef);
+                    processed = true;
+                    break;
+                }
+                if (!attdef.parseCode(acode, reader)) {
+                    return setError(DRW::BAD_CODE_PARSED);
+                }
+            }
+            if (!processed) {
+                return setError(DRW::BAD_READ_ENTITIES);
+            }
         } else {
             if (!reader->readRec(&code)) {
                 return setError(DRW::BAD_READ_ENTITIES); //end of file without ENDSEC
@@ -3108,6 +3205,40 @@ bool dxfRW::processInsert() {
         if (0 == code) {
            nextentity = reader->getString();
             DRW_DBG(nextentity); DRW_DBG("\n");
+            // INSERT with attributes (code 66 == 1): the ATTRIB sub-entities follow
+            // the INSERT and are terminated by a SEQEND. Parse each into the
+            // insert's attlist; then the SEQEND's own records are consumed below
+            // (its trailing 0 sets `nextentity` to the entity AFTER the SEQEND).
+            // Inlined (not a static helper) because DRW_Attrib::parseCode is a
+            // protected member only dxfRW (a friend) may call.
+            while (nextentity == "ATTRIB") {
+                auto att = std::make_shared<DRW_Attrib>();
+                bool gotNext = false;
+                int acode;
+                while (reader->readRec(&acode)) {
+                    if (0 == acode) {
+                        nextentity = reader->getString();
+                        gotNext = true;
+                        break;
+                    }
+                    if (!att->parseCode(acode, reader)) {
+                        return setError(DRW::BAD_CODE_PARSED);
+                    }
+                }
+                if (!gotNext) {
+                    return setError(DRW::BAD_READ_ENTITIES);  // EOF mid-ATTRIB
+                }
+                insert.attlist.push_back(att);
+            }
+            if (nextentity == "SEQEND") {
+                // Consume the SEQEND body; its trailing 0 yields the real next entity.
+                while (reader->readRec(&code)) {
+                    if (0 == code) {
+                        nextentity = reader->getString();
+                        break;
+                    }
+                }
+            }
             iface->addInsert(insert);
             return true;  //found new entity or ENDSEC, terminate
         }

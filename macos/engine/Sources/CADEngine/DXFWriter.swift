@@ -369,12 +369,17 @@ private final class PODBuilder {
     /// Each interned double array (spline knots / weights) is a heap `Double`
     /// buffer, same lifetime.
     private var doubleBuffers: [UnsafeMutableBufferPointer<Double>] = []
+    /// Each interned attribute array (ATTRIB / ATTDEF) is a heap `LCAttrib`
+    /// buffer, same lifetime. The `tag`/`text`/`prompt` C strings each `LCAttrib`
+    /// borrows are interned into `strings` (same builder lifetime).
+    private var attribBuffers: [UnsafeMutableBufferPointer<LCAttrib>] = []
 
     deinit {
         for s in strings { s.deallocate() }
         for v in vertexBuffers { v.deallocate() }
         for l in loopBuffers { l.deallocate() }
         for d in doubleBuffers { d.deallocate() }
+        for a in attribBuffers { a.deallocate() }
     }
 
     /// Interns a Swift string as a stable, null-terminated C string.
@@ -409,6 +414,46 @@ private final class PODBuilder {
         }
         vertexBuffers.append(buf)
         return (UnsafePointer(buf.baseAddress!), Int32(points.count))
+    }
+
+    /// Interns block ATTRIB values as a stable contiguous `LCAttrib` block. The
+    /// rotation is in radians (the C side converts to DXF degrees). `prompt` is "".
+    /// Returns `(nil, 0)` for an empty list.
+    func internAttribValues(_ values: [BlockAttributeValue]) -> (UnsafePointer<LCAttrib>?, Int32) {
+        guard !values.isEmpty else { return (nil, 0) }
+        let buf = UnsafeMutableBufferPointer<LCAttrib>.allocate(capacity: values.count)
+        for (i, v) in values.enumerated() {
+            buf[i] = LCAttrib(
+                tag: intern(v.tag),
+                text: intern(v.text),
+                prompt: intern(""),
+                x: v.position.x, y: v.position.y,
+                height: v.height,
+                rotation: v.rotation,
+                flags: Int32(v.flags))
+        }
+        attribBuffers.append(buf)
+        return (UnsafePointer(buf.baseAddress!), Int32(values.count))
+    }
+
+    /// Interns block ATTDEF templates as a stable contiguous `LCAttrib` block.
+    /// `text` carries the DEFAULT value; `prompt` the prompt. Rotation in radians.
+    /// Returns `(nil, 0)` for an empty list.
+    func internAttribDefs(_ defs: [BlockAttributeDef]) -> (UnsafePointer<LCAttrib>?, Int32) {
+        guard !defs.isEmpty else { return (nil, 0) }
+        let buf = UnsafeMutableBufferPointer<LCAttrib>.allocate(capacity: defs.count)
+        for (i, d) in defs.enumerated() {
+            buf[i] = LCAttrib(
+                tag: intern(d.tag),
+                text: intern(d.defaultText),
+                prompt: intern(d.prompt),
+                x: d.position.x, y: d.position.y,
+                height: d.height,
+                rotation: d.rotation,
+                flags: Int32(d.flags))
+        }
+        attribBuffers.append(buf)
+        return (UnsafePointer(buf.baseAddress!), Int32(defs.count))
     }
 
     /// Interns a `Double` list (spline knots / weights) as a stable contiguous
@@ -681,6 +726,11 @@ private final class PODBuilder {
             e.insRowSpacing = d.rowSpacing
             e.insColSpacing = d.colSpacing
             e.textValue = intern(d.blockName)
+            // Block ATTRIB values → flat LCAttrib array (the C side emits code 66 +
+            // ATTRIB sub-entities + SEQEND after the INSERT). Empty ⇒ (nil, 0).
+            let (aptr, acount) = internAttribValues(d.attributes)
+            e.attribs = aptr
+            e.attribCount = acount
 
         case .xline(let d):
             // Emitted as a DXF XLINE (the C side writes DRW_Xline). Base point
@@ -798,6 +848,11 @@ private final class PODBuilder {
         b.flags = block.isFrozen ? 0x1 : 0
         b.memberOffset = Int32(memberOffset)
         b.memberCount = Int32(memberCount)
+        // Block ATTDEF templates → flat LCAttrib array (the C side emits ATTDEF
+        // entities inside the block definition). Empty ⇒ (nil, 0).
+        let (dptr, dcount) = internAttribDefs(block.attributeDefs)
+        b.attribDefs = dptr
+        b.attribDefCount = dcount
         return b
     }
 
