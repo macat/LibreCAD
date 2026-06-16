@@ -1,0 +1,1 @@
+../../Sources/LibreCADmacOS/Sidebar/SidebarLayoutConfig.swift

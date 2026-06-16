@@ -39,12 +39,14 @@ extension UTType {
     static let blockDragItem = UTType(exportedAs: "org.librecad.macos.block-drag-item")
 }
 
-// MARK: - Blocks section (live)
+// MARK: - Blocks panel content (live)
 
-/// The live Blocks section: a list of block definitions with insert / rename /
-/// delete affordances, embedded by `LayersSidebar` in its `List`. Bound to the same
+/// The live Blocks content: a list of block definitions with insert / rename / delete /
+/// edit affordances + drag-to-place. Rendered as the BODY of the Blocks panel in
+/// `SidebarPanelStack` (the panel supplies the header — including the "Create Block…"
+/// ＋ — so this view no longer wraps itself in a `Section`). Bound to the same
 /// `CanvasModel` the canvas renders so edits reflect live and undo via ⌘Z.
-struct BlocksSection: View {
+struct BlocksSectionContent: View {
     @Bindable var model: CanvasModel
     /// Bridge to the canvas controller so a block op can request a redraw (the
     /// renderer is on-demand; an insert/delete must nudge it).
@@ -59,36 +61,34 @@ struct BlocksSection: View {
     private let thumbSize: CGFloat = 28
 
     var body: some View {
-        Section("Blocks") {
-            let blocks = model.drawing.blocks.blocks
-            if blocks.isEmpty {
-                Text("No blocks")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            } else {
-                // Build ONE ResolveContext for the whole list (shared across rows)
-                // so each thumbnail miss doesn't re-snapshot the layer/style/block
-                // tables. Captured by `thumbnail(for:)` below.
-                let ctx = model.drawing.makeResolveContext()
-                ForEach(blocks) { block in
-                    BlockRow(
-                        block: block,
-                        thumbnail: thumbnail(for: block.name, context: ctx),
-                        onInsert: { insert(block.name) },
-                        onEdit: { edit(block.name) },
-                        onRename: { rename(block.name, to: $0) },
-                        onDelete: { delete(block.name) }
-                    )
-                    // Drag-to-place: the canvas drop target (owned by the canvas
-                    // agent) decodes this and calls `model.insertBlock(at:)`.
-                    .draggable(BlockDragItem(blockName: block.name))
-                    .contextMenu {
-                        Button("Insert at View Center") { insert(block.name) }
-                        // WAVE BW (Ask #2): open the in-place Block Editor (BEDIT).
-                        Button("Edit Block") { edit(block.name) }
-                        Divider()
-                        Button("Delete Block", role: .destructive) { delete(block.name) }
-                    }
+        let blocks = model.drawing.blocks.blocks
+        if blocks.isEmpty {
+            Text("No blocks")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        } else {
+            // Build ONE ResolveContext for the whole list (shared across rows)
+            // so each thumbnail miss doesn't re-snapshot the layer/style/block
+            // tables. Captured by `thumbnail(for:)` below.
+            let ctx = model.drawing.makeResolveContext()
+            ForEach(blocks) { block in
+                BlockRow(
+                    block: block,
+                    thumbnail: thumbnail(for: block.name, context: ctx),
+                    onInsert: { insert(block.name) },
+                    onEdit: { edit(block.name) },
+                    onRename: { rename(block.name, to: $0) },
+                    onDelete: { delete(block.name) }
+                )
+                // Drag-to-place: the canvas drop target (owned by the canvas
+                // agent) decodes this and calls `model.insertBlock(at:)`.
+                .draggable(BlockDragItem(blockName: block.name))
+                .contextMenu {
+                    Button("Insert at View Center") { insert(block.name) }
+                    // WAVE BW (Ask #2): open the in-place Block Editor (BEDIT).
+                    Button("Edit Block") { edit(block.name) }
+                    Divider()
+                    Button("Delete Block", role: .destructive) { delete(block.name) }
                 }
             }
         }
