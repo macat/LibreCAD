@@ -55,24 +55,23 @@ struct ToolOptionsBar: View {
         // Only build the bar when the active tool actually has options; otherwise
         // render nothing so the inset collapses (no empty strip for Select/Line/…).
         if hasOptions {
-            HStack(spacing: 14) {
-                // A leading label so the bar reads as "<Tool> options".
-                Label(model.activeToolKind.title, systemImage: "slider.horizontal.3")
-                    .font(.callout.weight(.medium))
+            HStack(spacing: DS.Space.lg) {
+                // A leading label so the bar reads as "<Tool> options" — the glyph is
+                // the ACTIVE tool's OWN symbol (from ToolCatalog), so the bar's icon
+                // matches the toolbar button the user just clicked (§3b).
+                Label(model.activeToolKind.title,
+                      systemImage: ToolCatalog.metadata(for: model.activeToolKind).symbol)
+                    .font(DS.Font.barLabel)
                     .foregroundStyle(.secondary)
                     .labelStyle(.titleAndIcon)
 
-                Divider().frame(height: 16)
+                Divider().frame(height: DS.Size.barDivider)
 
                 optionControls
 
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.bar)
-            .overlay(alignment: .bottom) { Divider() }
+            .barStrip()
         }
     }
 
@@ -107,7 +106,7 @@ struct ToolOptionsBar: View {
         // MARK: Draw tools (NEW — UX-plan U2)
 
         case .polygon:
-            stepperField("Sides", value: $model.polygonSides, range: 3...64, width: 56)
+            stepperField("Sides", value: $model.polygonSides, range: 3...64, width: DS.Field.xy)
             // Construction mode: Center→corner / Edge / Star. (case index 0/1/2 →
             // PolygonMode in applyToolConfig.)
             Picker("Mode", selection: $model.polygonModeStyle) {
@@ -121,7 +120,7 @@ struct ToolOptionsBar: View {
             .onChange(of: model.polygonModeStyle) { _, _ in apply() }
             // The star ratio (inner/outer radius), only meaningful in Star mode.
             if model.polygonModeStyle == 2 {
-                numberField("Ratio", value: $model.polygonStarRatio, width: 60)
+                numberField("Ratio", value: $model.polygonStarRatio, width: DS.Field.xy)
             }
             // Inscribed/circumscribed applies to Center & Star (ignored by Edge).
             Picker("Fit", selection: $model.polygonFit) {
@@ -148,11 +147,11 @@ struct ToolOptionsBar: View {
             .onChange(of: model.rectCornerStyle) { _, _ in apply() }
             if model.rectCornerStyle != 0 {
                 numberField(model.rectCornerStyle == 1 ? "Radius" : "Distance",
-                            value: $model.rectCornerSize, width: 64)
+                            value: $model.rectCornerSize, width: DS.Field.xy)
             }
-            Divider().frame(height: 16)
-            numberField("Width", value: $model.rectWidth, width: 70)
-            numberField("Height", value: $model.rectHeight, width: 70)
+            Divider().frame(height: DS.Size.barDivider)
+            numberField("Width", value: $model.rectWidth, width: DS.Field.narrow)
+            numberField("Height", value: $model.rectHeight, width: DS.Field.narrow)
             Text("0 = drag two corners")
                 .font(.caption).foregroundStyle(.tertiary)
 
@@ -190,7 +189,7 @@ struct ToolOptionsBar: View {
             .labelsHidden()
             .onChange(of: model.trimModeIndex) { _, _ in apply() }
             if model.trimModeIndex == 1 {
-                numberField("Amount", value: $model.trimAmount, width: 70)
+                numberField("Amount", value: $model.trimAmount, width: DS.Field.narrow)
             }
 
         case .image:
@@ -225,7 +224,7 @@ struct ToolOptionsBar: View {
             // center+radius path (orthogonal to the construction mode), so show them only
             // for that mode (the 2-/3-point modes are pick-defined, no numeric size).
             if model.circleConstructionMode == .centerRadius {
-                Divider().frame(height: 16)
+                Divider().frame(height: DS.Size.barDivider)
                 Picker("Size", selection: $model.circleSizeMode) {
                     Text("Radius").tag(CircleSizeMode.radius)
                     Text("Diameter").tag(CircleSizeMode.diameter)
@@ -235,7 +234,7 @@ struct ToolOptionsBar: View {
                 .labelsHidden()
                 .onChange(of: model.circleSizeMode) { _, _ in apply() }
                 numberField(model.circleSizeMode == .diameter ? "Diameter" : "Radius",
-                            value: $model.circleFixedSize, width: 70)
+                            value: $model.circleFixedSize, width: DS.Field.narrow)
                 Text("0 = drag radius")
                     .font(.caption).foregroundStyle(.tertiary)
             }
@@ -267,7 +266,7 @@ struct ToolOptionsBar: View {
             .labelsHidden()
             .onChange(of: model.lineAngleModeIndex) { _, _ in apply() }
             if model.lineAngleModeIndex != 0 {
-                numberField("Angle°", value: degreesBinding($model.lineAngle), width: 70)
+                numberField("Angle°", value: degreesBinding($model.lineAngle), width: DS.Field.narrow)
             }
 
         case .point:
@@ -280,16 +279,16 @@ struct ToolOptionsBar: View {
             .onChange(of: model.pointStyle) { _, _ in apply() }
 
         case .text:
-            numberField("Height", value: $model.textHeight, width: 70)
+            numberField("Height", value: $model.textHeight, width: DS.Field.narrow)
 
         // MARK: Edit / modify tools (mirrored from the Inspector)
 
         case .fillet:
-            numberField("Radius", value: $model.filletRadius, width: 70)
+            numberField("Radius", value: $model.filletRadius, width: DS.Field.narrow)
 
         case .chamfer:
-            numberField("Distance 1", value: $model.chamferDistance1, width: 70)
-            numberField("Distance 2", value: $model.chamferDistance2, width: 70)
+            numberField("Distance 1", value: $model.chamferDistance1, width: DS.Field.narrow)
+            numberField("Distance 2", value: $model.chamferDistance2, width: DS.Field.narrow)
 
         case .array:
             Picker("Type", selection: $model.arrayPolar) {
@@ -302,20 +301,20 @@ struct ToolOptionsBar: View {
             .onChange(of: model.arrayPolar) { _, _ in apply() }
 
             if model.arrayPolar {
-                stepperField("Count", value: $model.arrayPolarCount, range: 2...360, width: 56)
-                numberField("Angle°", value: degreesBinding($model.arrayPolarTotalAngle), width: 64)
+                stepperField("Count", value: $model.arrayPolarCount, range: 2...360, width: DS.Field.xy)
+                numberField("Angle°", value: degreesBinding($model.arrayPolarTotalAngle), width: DS.Field.xy)
                 Toggle("Rotate", isOn: $model.arrayPolarRotateItems)
                     .toggleStyle(.checkbox)
                     .onChange(of: model.arrayPolarRotateItems) { _, _ in apply() }
             } else {
-                stepperField("Rows", value: $model.arrayRows, range: 1...1000, width: 52)
-                stepperField("Cols", value: $model.arrayCols, range: 1...1000, width: 52)
-                numberField("Row sp.", value: $model.arraySpacingY, width: 64)
-                numberField("Col sp.", value: $model.arraySpacingX, width: 64)
+                stepperField("Rows", value: $model.arrayRows, range: 1...1000, width: DS.Field.xy)
+                stepperField("Cols", value: $model.arrayCols, range: 1...1000, width: DS.Field.xy)
+                numberField("Row sp.", value: $model.arraySpacingY, width: DS.Field.xy)
+                numberField("Col sp.", value: $model.arraySpacingX, width: DS.Field.xy)
             }
 
         case .divide:
-            stepperField("Pieces", value: $model.divideCount, range: 2...1000, width: 56)
+            stepperField("Pieces", value: $model.divideCount, range: 2...1000, width: DS.Field.xy)
 
         // MARK: Wire-wave-3 configurable tools
 
@@ -325,24 +324,24 @@ struct ToolOptionsBar: View {
                 .onChange(of: model.alignScaleToFit) { _, _ in apply() }
 
         case .arrayPath:
-            stepperField("Count", value: $model.arrayPathCount, range: 1...1000, width: 56)
+            stepperField("Count", value: $model.arrayPathCount, range: 1...1000, width: DS.Field.xy)
             Toggle("Align to path", isOn: $model.arrayPathAlignToTangent)
                 .toggleStyle(.checkbox)
                 .onChange(of: model.arrayPathAlignToTangent) { _, _ in apply() }
 
         case .leader:
-            textField("Text", value: $model.leaderText, width: 160)
-            numberField("Height", value: $model.leaderTextHeight, width: 64)
+            textField("Text", value: $model.leaderText, width: DS.Field.wide)
+            numberField("Height", value: $model.leaderTextHeight, width: DS.Field.xy)
 
         case .baselineDim:
-            numberField("Spacing", value: $model.baselineSpacing, width: 70)
+            numberField("Spacing", value: $model.baselineSpacing, width: DS.Field.narrow)
 
         // MARK: Block Insert — scale / rotation / MINSERT array
         case .insert:
             insertScaleControls
-            Divider().frame(height: 16)
-            numberField("Rotation°", value: degreesBinding($model.insertRotation), width: 70)
-            Divider().frame(height: 16)
+            Divider().frame(height: DS.Size.barDivider)
+            numberField("Rotation°", value: degreesBinding($model.insertRotation), width: DS.Field.narrow)
+            Divider().frame(height: DS.Size.barDivider)
             insertArrayControls
 
         default:
@@ -360,9 +359,9 @@ struct ToolOptionsBar: View {
             .toggleStyle(.checkbox)
             .onChange(of: model.insertScaleUniform) { _, _ in apply() }
         numberField(model.insertScaleUniform ? "Scale" : "Scale X",
-                    value: $model.insertScaleX, width: 64)
+                    value: $model.insertScaleX, width: DS.Field.xy)
         if !model.insertScaleUniform {
-            numberField("Scale Y", value: $model.insertScaleY, width: 64)
+            numberField("Scale Y", value: $model.insertScaleY, width: DS.Field.xy)
         }
     }
 
@@ -370,10 +369,10 @@ struct ToolOptionsBar: View {
     /// spacing. Default 1×1 / zero spacing ⇒ a plain single insert.
     @ViewBuilder
     private var insertArrayControls: some View {
-        stepperField("Rows", value: $model.insertRows, range: 1...1000, width: 52)
-        stepperField("Cols", value: $model.insertCols, range: 1...1000, width: 52)
-        numberField("Row sp.", value: $model.insertRowSpacing, width: 64)
-        numberField("Col sp.", value: $model.insertColSpacing, width: 64)
+        stepperField("Rows", value: $model.insertRows, range: 1...1000, width: DS.Field.xy)
+        stepperField("Cols", value: $model.insertCols, range: 1...1000, width: DS.Field.xy)
+        numberField("Row sp.", value: $model.insertRowSpacing, width: DS.Field.xy)
+        numberField("Col sp.", value: $model.insertColSpacing, width: DS.Field.xy)
     }
 
     // MARK: - Small control builders (compact, inline — sized for a single row)
