@@ -3812,6 +3812,82 @@ final class CanvasModel {
         return true
     }
 
+    // MARK: - Quick Select / Select Similar (engine: QuickSelect.swift)
+
+    /// The ids matching `filter` WITHIN the active space, gated to selectable entities.
+    /// A PURE query (reads only `activeSpaceEntities` + the layer table; mutates nothing)
+    /// so the panel can preview the resulting COUNT before applying, and so the apply path
+    /// + the unit tests share one definition of "what Quick Select would pick".
+    ///
+    /// Scoping rationale: `activeSpaceEntities` already restricts the universe to the
+    /// active space (model / a paper layout / the open block's members) AND, in model
+    /// space, EXCLUDES block-DEFINITION members (`drawing.blockMemberIDs`) — so a quick
+    /// select never picks geometry owned by a block (it is editable only via the Block
+    /// Editor / an `.insert`). On top of that we apply the same `SelectionPolicy`
+    /// selectability gate the other Select verbs use (skip locked / frozen / hidden), so a
+    /// Quick Select can only ever land on what the user could click. (`includeHidden` on
+    /// the filter still controls the entity's OWN `.visible` flag inside `QuickSelect`; the
+    /// layer-level lock/freeze gate is enforced here regardless, matching Select All.)
+    func quickSelectMatchIDs(_ filter: QuickSelectFilter) -> Set<EntityID> {
+        let scoped = activeSpaceEntities
+        let layers = drawing.layers
+        let matched = QuickSelect.matches(filter, in: scoped)
+        guard !matched.isEmpty else { return [] }
+        // Apply the Select-All selectability gate (locked/frozen layers excluded).
+        var byID = [EntityID: EntityRecord](minimumCapacity: scoped.count)
+        for e in scoped { byID[e.id] = e }
+        return matched.filter { id in
+            guard let e = byID[id] else { return false }
+            return SelectionPolicy.isSelectable(e, layers: layers)
+        }
+    }
+
+    /// Applies a Quick Select: computes the ids matching `filter` in the active space
+    /// (via `quickSelectMatchIDs`), COMBINES them with the current selection per `mode`
+    /// (replace / add / remove / intersect — `QuickSelect.combine`), and installs the
+    /// result. Returns whether the selection changed (so the caller can skip a redraw).
+    ///
+    /// Selection is view-side state (a separate `Set`), so this registers NO undo — like
+    /// every other Select verb. Bumps `modelVersion` so the highlight overlay repaints.
+    /// This is the funnel the `QuickSelectPanel` "Apply" button calls; the modal-free
+    /// filter is built entirely in the View layer.
+    @discardableResult
+    func applyQuickSelect(_ filter: QuickSelectFilter,
+                          mode: QuickSelect.ApplyMode) -> Bool {
+        let result = quickSelectMatchIDs(filter)
+        let newIDs = QuickSelect.combine(prior: selection.ids, result: result, mode: mode)
+        guard newIDs != selection.ids else { return false }
+        selection = Selection(ids: newIDs)
+        modelVersion &+= 1
+        return true
+    }
+
+    /// Builds the "Select Similar" filter for a reference entity: matches every entity
+    /// sharing its KIND tag, LAYER, and pen COLOR (the AutoCAD "Select Similar" defaults).
+    /// Pure (reads only the drawing); `nil` when `selectedID` no longer resolves. The View
+    /// layer / a menu verb feeds the result to `applyQuickSelect(_:mode:)` (usually
+    /// `.replace`). Line WIDTH is intentionally NOT constrained (Select Similar groups by
+    /// look — kind + layer + color — not by exact lineweight, matching the AutoCAD verb).
+    func similarFilter(to selectedID: EntityID) -> QuickSelectFilter? {
+        guard let record = drawing.entity(selectedID) else { return nil }
+        return QuickSelectFilter(
+            kinds: [record.quickSelectKind],
+            layer: record.layer.name,
+            color: record.pen.lineColor
+        )
+    }
+
+    /// "Select Similar": replaces the selection with every entity in the active space that
+    /// shares the reference entity's kind + layer + color (see `similarFilter`). A no-op
+    /// (returns `false`) when `selectedID` no longer resolves. Returns whether the
+    /// selection changed. The convenience the "Select Similar" affordance / context action
+    /// calls with the clicked entity's id.
+    @discardableResult
+    func selectSimilar(to selectedID: EntityID) -> Bool {
+        guard let filter = similarFilter(to: selectedID) else { return false }
+        return applyQuickSelect(filter, mode: .replace)
+    }
+
     // MARK: - Marquee (rubber-band) selection (UX-plan U5, gap G8)
 
     /// Begins a live marquee at a world point: sets a degenerate box anchored there.

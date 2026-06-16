@@ -90,6 +90,11 @@ struct LayersSidebar: View {
     /// `onChange`; the value itself is meaningless (only its CHANGES matter).
     @State private var chooseLibraryFolder = false
 
+    /// A toggled "tick" the Quick Select HEADER's Reset button flips to ask the panel BODY
+    /// (`QuickSelectSectionContent`) to clear its filter back to "match anything". The body
+    /// watches it via `onChange`; the value itself is meaningless (only its CHANGES matter).
+    @State private var resetQuickSelect = false
+
     var body: some View {
         SidebarPanelStack(panels: panels, config: $config)
             .frame(minWidth: 220, idealWidth: 260)
@@ -119,7 +124,8 @@ struct LayersSidebar: View {
             SidebarPanel(id: .layers, header: { layersHeaderControls }, body: { layersBody }),
             SidebarPanel(id: .layerStates, header: { layerStatesHeaderControls }, body: { layerStatesBody }),
             SidebarPanel(id: .blocks, header: { blocksHeaderControls }, body: { blocksBody }),
-            SidebarPanel(id: .partsLibrary, header: { partsLibraryHeaderControls }, body: { partsLibraryBody })
+            SidebarPanel(id: .partsLibrary, header: { partsLibraryHeaderControls }, body: { partsLibraryBody }),
+            SidebarPanel(id: .quickSelect, header: { quickSelectHeaderControls }, body: { quickSelectBody })
         ]
     }
 
@@ -299,6 +305,25 @@ struct LayersSidebar: View {
         PartsLibrarySectionContent(model: model,
                                    controllerBox: controllerBox,
                                    chooseFolderTick: chooseLibraryFolder)
+    }
+
+    // MARK: Quick Select panel (select-by-attributes: filter kind/layer → selection)
+
+    /// The Quick Select header control: a Reset button that clears the panel's filter back
+    /// to "match anything" (raised by flipping `resetQuickSelect`, which the body watches).
+    @ViewBuilder
+    private var quickSelectHeaderControls: some View {
+        QuickSelectHeaderControls(onReset: { resetQuickSelect.toggle() })
+    }
+
+    /// The Quick Select body: the kind / layer pickers + Replace/Add/Remove/Intersect mode
+    /// + a live match count + Apply (delegated to `QuickSelectSectionContent`). Apply
+    /// funnels through `model.applyQuickSelect` (pure, undo-free) and repaints the canvas.
+    @ViewBuilder
+    private var quickSelectBody: some View {
+        QuickSelectSectionContent(model: model,
+                                  controllerBox: controllerBox,
+                                  resetTick: resetQuickSelect)
     }
 
     // MARK: - Layers selection / remove gating

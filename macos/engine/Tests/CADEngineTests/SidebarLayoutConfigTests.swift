@@ -29,13 +29,16 @@ struct SidebarLayoutConfigTests {
 
     // MARK: Defaults
 
-    @Test("the default layout carries every panel, in declaration order, all visible & expanded")
+    @Test("the default layout carries every panel, in declaration order, all expanded; only the power-user panels start hidden")
     func defaultLayout() {
         let cfg = SidebarLayoutConfig.default
         #expect(cfg.order == SidebarPanelID.allCases)
         #expect(cfg.collapsed.isEmpty)
-        #expect(cfg.hidden.isEmpty)
-        #expect(cfg.visibleOrder == SidebarPanelID.allCases)
+        // Power-user panels (currently just Quick Select) start hidden; everything else
+        // is visible. The hidden set is exactly `defaultHiddenIDs`.
+        #expect(cfg.hidden == SidebarLayoutConfig.defaultHiddenIDs)
+        #expect(cfg.visibleOrder
+            == SidebarPanelID.allCases.filter { !SidebarLayoutConfig.defaultHiddenIDs.contains($0) })
     }
 
     @Test("an empty stored string decodes to the default layout (fresh install)")
@@ -124,7 +127,9 @@ struct SidebarLayoutConfigTests {
 
     @Test("toggling hidden flips visibility and drops the panel from the visible order")
     func toggleHidden() {
-        var cfg = SidebarLayoutConfig.default
+        // Start from a fully-visible config (the default hides the power-user panels), so
+        // this test measures only the toggle behavior for `.blocks`.
+        var cfg = SidebarLayoutConfig.default.settingAllHidden(false)
         #expect(!cfg.isHidden(.blocks))
         cfg = cfg.togglingHidden(.blocks)
         #expect(cfg.isHidden(.blocks))
@@ -241,8 +246,11 @@ struct SidebarLayoutConfigTests {
             hidden: [.layers]
         )
         #expect(!stored.order.contains(.partsLibrary))
-        let reconciled = stored.reconciled(withAvailable: SidebarPanelID.allCases)
-        // The new panel appears (at the end, in `allCases` order), visible + expanded.
+        // Pin the roster so the "appended at the end" assertion stays stable as later
+        // panels (e.g. Quick Select) are added after Parts Library in `allCases`.
+        let roster: [SidebarPanelID] = [.layers, .layerStates, .blocks, .partsLibrary]
+        let reconciled = stored.reconciled(withAvailable: roster)
+        // The new panel appears (at the end, in the roster's order), visible + expanded.
         #expect(reconciled.order.contains(.partsLibrary))
         #expect(reconciled.order.last == .partsLibrary)
         #expect(!reconciled.isHidden(.partsLibrary))
@@ -286,6 +294,80 @@ struct SidebarLayoutConfigTests {
     func partsLibraryMetadata() {
         #expect(SidebarPanelID.partsLibrary.defaultTitle == "Parts Library")
         #expect(!SidebarPanelID.partsLibrary.defaultSymbol.isEmpty)
+    }
+
+    // MARK: Reconciliation — the newly-added .quickSelect panel (defaults HIDDEN)
+
+    @Test("a stored config WITHOUT .quickSelect absorbs it (appended) but starts HIDDEN")
+    func quickSelectAppendedToOlderConfigStartsHidden() {
+        // A config saved by a build that predates the Quick Select panel. Reconciling
+        // against the live roster appends it WITHOUT disturbing the stored order/flags,
+        // and — because it is a default-hidden power-user panel the stored config never
+        // knew — it lands in the hidden set (surfaced only via ⋯ Customize).
+        let stored = SidebarLayoutConfig(
+            order: [.blocks, .layers, .layerStates],
+            collapsed: [.blocks],
+            hidden: [.layers]
+        )
+        #expect(!stored.order.contains(.quickSelect))
+        let reconciled = stored.reconciled(withAvailable: SidebarPanelID.allCases)
+        // The new panel appears in the order, but HIDDEN (not in the visible order).
+        #expect(reconciled.order.contains(.quickSelect))
+        #expect(reconciled.isHidden(.quickSelect))
+        #expect(!reconciled.visibleOrder.contains(.quickSelect))
+        #expect(!reconciled.isCollapsed(.quickSelect))
+        // The user's prior order + flags are preserved for the panels they had.
+        #expect(reconciled.order.prefix(3) == [.blocks, .layers, .layerStates])
+        #expect(reconciled.isCollapsed(.blocks))
+        #expect(reconciled.isHidden(.layers))
+        // The default layout lists it but starts it hidden (a fresh install does not crowd
+        // the sidebar; the panel is reachable via ⋯ Customize).
+        #expect(SidebarLayoutConfig.default.order.contains(.quickSelect))
+        #expect(SidebarLayoutConfig.default.isHidden(.quickSelect))
+        // It round-trips through encode/decode like any panel id.
+        let restored = SidebarLayoutConfig.decoded(from: reconciled.encoded())
+        #expect(restored.order.contains(.quickSelect))
+        #expect(restored.isHidden(.quickSelect))
+    }
+
+    @Test("a user who already SHOWED .quickSelect keeps it shown across reconciliation")
+    func quickSelectUserShownChoicePreserved() {
+        // Once the stored config KNOWS .quickSelect (the user has it in their order and has
+        // chosen NOT to hide it), reconciliation must respect that choice — the
+        // default-hidden flag only applies to a brand-new id the stored config never saw.
+        let stored = SidebarLayoutConfig(
+            order: [.layers, .quickSelect, .blocks],   // user moved it up + kept it visible
+            collapsed: [],
+            hidden: []                                 // explicitly NOT hidden
+        )
+        let reconciled = stored.reconciled(withAvailable: SidebarPanelID.allCases)
+        #expect(reconciled.order.contains(.quickSelect))
+        #expect(!reconciled.isHidden(.quickSelect))     // user's "shown" choice survives
+        #expect(reconciled.visibleOrder.contains(.quickSelect))
+    }
+
+    @Test("an unknown stored id is dropped while the new .quickSelect panel appears (hidden)")
+    func unknownIdIgnoredWhileQuickSelectAppears() {
+        let stored = SidebarLayoutConfig(
+            order: [.layers, .layerStates, .blocks],
+            collapsed: [.blocks],
+            hidden: [.blocks]
+        )
+        // Drop `.blocks` (simulating a removed/unknown stored id), add `.quickSelect`.
+        let available: [SidebarPanelID] = [.layers, .layerStates, .quickSelect]
+        let reconciled = stored.reconciled(withAvailable: available)
+        #expect(!reconciled.order.contains(.blocks))
+        #expect(!reconciled.collapsed.contains(.blocks))
+        #expect(!reconciled.hidden.contains(.blocks))
+        #expect(reconciled.order == [.layers, .layerStates, .quickSelect])
+        // The new power-user panel is appended HIDDEN.
+        #expect(reconciled.isHidden(.quickSelect))
+    }
+
+    @Test(".quickSelect has a non-empty default title and SF-Symbol")
+    func quickSelectMetadata() {
+        #expect(SidebarPanelID.quickSelect.defaultTitle == "Quick Select")
+        #expect(!SidebarPanelID.quickSelect.defaultSymbol.isEmpty)
     }
 
     // MARK: PanelID metadata

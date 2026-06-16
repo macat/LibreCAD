@@ -46,6 +46,12 @@ enum SidebarPanelID: String, Codable, CaseIterable, Hashable, Sendable {
     /// as blocks on double-click / drag-to-canvas). Newly added — `reconciled` appends
     /// it to any stored config from an older build (visible + expanded by default).
     case partsLibrary
+    /// The Quick Select panel (select-by-attributes: filter by kind / layer / color /
+    /// width, with replace / add / remove / intersect modes — AutoCAD's QSELECT / the
+    /// "Select Similar" affordance). Newly added — `reconciled` appends it to any stored
+    /// config from an older build. Defaults to HIDDEN (a power-user panel surfaced via the
+    /// ⋯ Customize menu), so it does not crowd a fresh sidebar.
+    case quickSelect
 
     /// The default header title for this panel id (used when constructing a descriptor
     /// and as a stable, localizable-later label).
@@ -55,6 +61,7 @@ enum SidebarPanelID: String, Codable, CaseIterable, Hashable, Sendable {
         case .layerStates:  return "Layer States"
         case .blocks:       return "Blocks"
         case .partsLibrary: return "Parts Library"
+        case .quickSelect:  return "Quick Select"
         }
     }
 
@@ -65,6 +72,7 @@ enum SidebarPanelID: String, Codable, CaseIterable, Hashable, Sendable {
         case .layerStates:  return "rectangle.stack"
         case .blocks:       return "square.on.square"
         case .partsLibrary: return "books.vertical"
+        case .quickSelect:  return "line.3.horizontal.decrease.circle"
         }
     }
 }
@@ -97,11 +105,21 @@ struct SidebarLayoutConfig: Codable, Equatable, Sendable {
 
     // MARK: Defaults
 
-    /// The built-in default layout: every panel in its canonical declaration order,
-    /// all expanded and visible. Used on a fresh install (no stored config) and as the
-    /// reconciliation baseline.
+    /// Panels that start HIDDEN on a fresh install (and when a newly-added id of this set
+    /// is absorbed into an older stored config). These are power-user panels surfaced via
+    /// the ⋯ Customize menu rather than crowding a default sidebar — currently just Quick
+    /// Select. A panel NOT in this set defaults to visible + expanded (the established
+    /// behavior for every prior panel).
+    static let defaultHiddenIDs: Set<SidebarPanelID> = [.quickSelect]
+
+    /// The built-in default layout: every panel in its canonical declaration order, all
+    /// expanded; visible EXCEPT the `defaultHiddenIDs` power-user panels (which start
+    /// hidden, reachable via the ⋯ Customize menu). Used on a fresh install (no stored
+    /// config) and as the reconciliation baseline.
     static var `default`: SidebarLayoutConfig {
-        SidebarLayoutConfig(order: SidebarPanelID.allCases, collapsed: [], hidden: [])
+        SidebarLayoutConfig(order: SidebarPanelID.allCases,
+                            collapsed: [],
+                            hidden: defaultHiddenIDs)
     }
 
     // MARK: Persistence (single @AppStorage string)
@@ -142,7 +160,11 @@ struct SidebarLayoutConfig: Codable, Equatable, Sendable {
     ///      at the end of the stack, in `available` order).
     ///   2. `collapsed` / `hidden` are intersected with the resulting `order`, so a
     ///      removed id never lingers in a flag set, and a newly-added panel starts
-    ///      EXPANDED and VISIBLE (a sensible default — the user discovers it).
+    ///      EXPANDED and (for most panels) VISIBLE — EXCEPT a newly-appended id that is in
+    ///      `defaultHiddenIDs` (e.g. Quick Select), which starts HIDDEN so it joins the ⋯
+    ///      Customize menu rather than crowding an existing user's sidebar. An id the
+    ///      stored config ALREADY knew keeps the user's own hidden choice (we only force
+    ///      the default-hidden flag for ids the stored config had never seen).
     func reconciled(withAvailable available: [SidebarPanelID]) -> SidebarLayoutConfig {
         let availableSet = Set(available)
 
@@ -153,6 +175,9 @@ struct SidebarLayoutConfig: Codable, Equatable, Sendable {
             newOrder.append(id)
             seen.insert(id)
         }
+        // The ids the stored config already knew (after filtering to available) — used to
+        // tell a NEWLY-appended id from one the user already had a choice about.
+        let storedKnown = seen
         // Append any available id the stored order didn't carry (new panels), in the
         // caller's `available` order.
         for id in available where !seen.contains(id) {
@@ -161,10 +186,15 @@ struct SidebarLayoutConfig: Codable, Equatable, Sendable {
         }
 
         let orderSet = Set(newOrder)
+        // Newly-appended ids that default to hidden (a power-user panel the stored config
+        // had never seen) join the hidden set so they surface only via ⋯ Customize.
+        let newlyDefaultHidden = orderSet
+            .subtracting(storedKnown)
+            .intersection(SidebarLayoutConfig.defaultHiddenIDs)
         return SidebarLayoutConfig(
             order: newOrder,
             collapsed: collapsed.intersection(orderSet),
-            hidden: hidden.intersection(orderSet)
+            hidden: hidden.intersection(orderSet).union(newlyDefaultHidden)
         )
     }
 
