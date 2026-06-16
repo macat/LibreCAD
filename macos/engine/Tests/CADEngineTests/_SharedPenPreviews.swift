@@ -1,0 +1,1 @@
+../../Sources/LibreCADmacOS/Sidebar/PenPreviews.swift

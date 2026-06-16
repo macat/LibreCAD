@@ -190,10 +190,22 @@ struct LayersSidebar: View {
         }
     }
 
-    /// The right-click menu on a layer row: activate it, move the current selection
-    /// onto it, or isolate it (hide every other layer). Per-entity layer ops (F17).
+    /// The right-click menu on a layer row: the less-common per-layer FLAGS (printable /
+    /// construction — demoted here from the row so the layer NAME gets its width back,
+    /// AutoCAD-style; eye + lock stay inline), then activate / move-selection / isolate.
+    /// Per-entity layer ops (F17).
     @ViewBuilder
     private func layerRowMenu(_ layer: Layer) -> some View {
+        // Printable (was an inline row button). A non-printable layer draws on screen but
+        // is excluded from plotted output.
+        Toggle(isOn: printableBinding(layer)) {
+            Label("Printable", systemImage: layer.isPrintable ? "printer" : "printer.slash")
+        }
+        // Construction (was an inline row button). Helper geometry, never printed.
+        Toggle(isOn: constructionBinding(layer)) {
+            Label("Construction Layer", systemImage: layer.isConstruction ? "ruler.fill" : "ruler")
+        }
+        Divider()
         Button("Set Active") {
             model.drawing.setActiveLayer(layer.name)
             selectedLayer = layer.name
@@ -208,6 +220,20 @@ struct LayersSidebar: View {
             model.isolateLayer(layer.name)
             syncRenderAfterLayerEdit()
         }
+    }
+
+    /// A two-way binding for a layer's PRINTABLE flag, routed through the undoable funnel
+    /// (`setPrintable`) — drives the context-menu Toggle that replaced the inline button.
+    private func printableBinding(_ layer: Layer) -> Binding<Bool> {
+        Binding(get: { layer.isPrintable },
+                set: { setPrintable(layer.name, $0) })
+    }
+
+    /// A two-way binding for a layer's CONSTRUCTION flag, routed through the undoable
+    /// funnel (`setConstruction`) — drives the context-menu Toggle.
+    private func constructionBinding(_ layer: Layer) -> Binding<Bool> {
+        Binding(get: { layer.isConstruction },
+                set: { setConstruction(layer.name, $0) })
     }
 
     // MARK: Layer States panel (F17 — named snapshots of all layer flags)
@@ -494,7 +520,12 @@ private struct LayerRow: View {
     @State private var draftName: String = ""
 
     var body: some View {
-        HStack(spacing: 8) {
+        // CAD column grammar: leading [eye][lock] (the two AutoCAD-idiomatic always-on
+        // flags) → NAME (given a real min width + layout priority so it stops truncating
+        // to "L…"/"0") → trailing pen cluster [color swatch][linetype preview menu]. The
+        // printer + construction flags moved into the row context menu (set at the call
+        // site) so the name gets its width back.
+        HStack(spacing: DS.Space.sm) {
             // Visibility (eye / eye.slash → setLayerVisible). A frozen layer is
             // hidden in the model; the eye reflects `isVisible`.
             Button {
@@ -504,6 +535,7 @@ private struct LayerRow: View {
                     .foregroundStyle(layer.isVisible ? Color.primary : .secondary)
             }
             .buttonStyle(.borderless)
+            .frame(width: DS.Size.iconButton)
             .help(layer.isVisible ? "Hide layer" : "Show layer")
 
             // Lock (lock.open / lock → setLayerLocked).
@@ -514,29 +546,32 @@ private struct LayerRow: View {
                     .foregroundStyle(layer.isLocked ? Color.orange : .secondary)
             }
             .buttonStyle(.borderless)
+            .frame(width: DS.Size.iconButton)
             .help(layer.isLocked ? "Unlock layer" : "Lock layer")
 
-            // Printable (printer / printer.dotmatrix → setLayerPrintable). A
-            // non-printable layer draws on screen but is excluded from plotted output.
-            Button {
-                onTogglePrintable(!layer.isPrintable)
-            } label: {
-                Image(systemName: layer.isPrintable ? "printer" : "printer.slash")
-                    .foregroundStyle(layer.isPrintable ? Color.primary : .secondary)
-            }
-            .buttonStyle(.borderless)
-            .help(layer.isPrintable ? "Exclude from print" : "Include in print")
+            // Inline-editable NAME — the priority element. A real min width + layout
+            // priority keeps the full name visible at the sidebar's min width instead of
+            // collapsing to "L…"/"0" when the trailing controls would otherwise win the
+            // squeeze.
+            TextField("Layer name", text: $draftName)
+                .textFieldStyle(.plain)
+                .font(DS.Font.rowLabel)
+                .lineLimit(1)
+                .frame(minWidth: DS.Field.xy, alignment: .leading)
+                .layoutPriority(1)
+                .onSubmit { onRename(draftName) }
+                .disabled(layer.name == "0")   // DXF requires "0"; never renamed.
 
-            // Construction (ruler → setLayerConstruction). A construction layer holds
-            // helper geometry and is never printed; the toggle marks the intent.
-            Button {
-                onToggleConstruction(!layer.isConstruction)
-            } label: {
-                Image(systemName: layer.isConstruction ? "ruler.fill" : "ruler")
-                    .foregroundStyle(layer.isConstruction ? Color.orange : .secondary)
+            Spacer(minLength: DS.Space.xs)
+
+            // Active indicator: the layer where new geometry lands.
+            if isActive {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.tint)
+                    .help("Active layer")
             }
-            .buttonStyle(.borderless)
-            .help(layer.isConstruction ? "Clear construction flag" : "Mark as construction layer")
+
+            // Trailing pen cluster — color swatch then the line-type/-width menu.
 
             // Color swatch (tap → ColorPicker popover → setLayerColor). A SMALL 16pt
             // chip, not the stock ~44×22pt NSColorWell pill. The binding reads the
@@ -549,26 +584,12 @@ private struct LayerRow: View {
             // tight at the sidebar's min width. Each picker binds to the layer's
             // current default and routes a change through the undoable layer mutators.
             // A layer can't defer its own default to a layer/block, so the sentinels
-            // are excluded; the width picker still offers the drawing "Default".
+            // are excluded; the width picker still offers the drawing "Default". The menu
+            // LABEL is the layer's actual dash pattern (LinetypePreview), not a glyph.
             penDefaultsMenu
-
-            // Inline-editable name.
-            TextField("Layer name", text: $draftName)
-                .textFieldStyle(.plain)
-                .onSubmit { onRename(draftName) }
-                .disabled(layer.name == "0")   // DXF requires "0"; never renamed.
-
-            Spacer(minLength: 0)
-
-            // Active indicator: the layer where new geometry lands.
-            if isActive {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.tint)
-                    .help("Active layer")
-            }
         }
-        .padding(.vertical, 2)
-        .padding(.horizontal, 4)
+        .padding(.vertical, DS.Space.xxs)
+        .padding(.horizontal, DS.Space.xs)
         .background(rowBackground)
         .contentShape(Rectangle())
         // Tap the row (outside the controls) to select + activate the layer — the role
@@ -623,10 +644,12 @@ private struct LayerRow: View {
                 label: "Line width"
             )
         } label: {
-            Image(systemName: "line.diagonal")
+            // Show the layer's ACTUAL dash pattern (not a cryptic "/" glyph) so the row
+            // communicates the line type at a glance.
+            LinetypePreview(lineType: layer.lineType, color: .secondary)
         }
         .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        .menuIndicator(.visible)
         .fixedSize()
         .help("Layer line type: \(LineTypePicker.displayName(layer.lineType)) · "
               + "width: \(LineWidthPicker.displayName(layer.lineWidth))")
@@ -655,7 +678,7 @@ private struct LayerRow: View {
     @ViewBuilder
     private var rowBackground: some View {
         if isSelected {
-            RoundedRectangle(cornerRadius: 6).fill(.tint.opacity(0.15))
+            RoundedRectangle(cornerRadius: DS.Radius.selection).fill(DS.Palette.selectionFill)
         }
     }
 }
