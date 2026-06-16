@@ -73,15 +73,36 @@ struct PartsLibrarySectionContent: View {
     let chooseFolderTick: Bool
 
     /// The last-chosen library folder path, persisted across launches. Empty = none
-    /// chosen yet (the panel shows the "Choose Folder…" prompt). A single primitive
-    /// string store, mirroring `ContentView`'s `commandBar.mru` / sidebar-layout stores.
+    /// chosen yet — the panel then falls back to the BUNDLED starter symbols so it is
+    /// non-empty on first launch (backlog #6). A user folder, once chosen, overrides
+    /// the bundled default. A single primitive string store, mirroring `ContentView`'s
+    /// `commandBar.mru` / sidebar-layout stores.
     @AppStorage("partsLibrary.folderPath") private var folderPath: String = ""
 
-    /// The current catalog (scanned from `folderPath`). Re-scanned on appear + whenever
-    /// the folder changes; an absent/empty folder yields an empty catalog (never throws).
+    /// The current catalog (scanned from the EFFECTIVE source directory). Re-scanned on
+    /// appear + whenever the folder changes; an absent/empty folder yields an empty
+    /// catalog (never throws).
     @State private var items: [BlockLibraryItem] = []
     /// A transient status line under the list (last import result / error / empty note).
     @State private var note: String = ""
+
+    /// Whether the catalog currently shown is the BUNDLED starter library (no user
+    /// folder chosen) rather than a user-chosen folder. Drives the "Built-in" section
+    /// label and the choice of empty-state vs. starter list. Mirrors `isUsingBuiltIn`
+    /// in `effectiveSource`.
+    private var isUsingBuiltIn: Bool { folderPath.isEmpty }
+
+    /// The directory the catalog is scanned from: the user's chosen folder if one is
+    /// set, otherwise the bundled starter-symbol directory (backlog #6). `nil` only if
+    /// no folder is chosen AND the bundled directory cannot be resolved (e.g. a bare
+    /// binary with no app bundle and no in-repo assets) — then the panel shows its
+    /// empty-state with the "Choose Folder…" CTA, exactly as before.
+    private var effectiveSource: URL? {
+        if !folderPath.isEmpty {
+            return URL(fileURLWithPath: folderPath, isDirectory: true)
+        }
+        return BlockLibrary.bundledSymbolsDirectory()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: DS.Space.sm) {
@@ -99,6 +120,18 @@ struct PartsLibrarySectionContent: View {
                     // Wrap the status/error line instead of clipping it to 2 lines.
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        // Finder drop: drag .dxf file(s) onto the panel to import the first directly via
+        // the existing import path (places one insert at the view center). Non-.dxf URLs
+        // are ignored; an empty match is a no-op (the drop is declined). This is a panel-
+        // local convenience and does NOT change the catalog source (#6, optional).
+        .dropDestination(for: URL.self) { urls, _ in
+            let dxf = urls.filter { $0.pathExtension.lowercased() == "dxf" }
+            guard let first = dxf.first else { return false }
+            importURL(first)
+            return true
         }
         .onAppear { rescan() }
         // Re-scan when the persisted folder changes (e.g. a Choose Folder… elsewhere).
@@ -127,33 +160,67 @@ struct PartsLibrarySectionContent: View {
         }
     }
 
-    /// The catalog list (or a unified empty-state). No folder → the shared
-    /// `SidebarEmptyState` with a "Choose Folder…" CTA (the only body chooser); a chosen-
-    /// but-empty folder → a plain note.
+    /// The catalog list (or a unified empty-state). The effective source decides:
+    ///  - No user folder AND bundled starter symbols present → the starter list under a
+    ///    "Built-in" section header (so the panel is non-empty on first launch — #6).
+    ///  - No user folder AND no resolvable bundled directory → the shared
+    ///    `SidebarEmptyState` with a "Choose Folder…" CTA (the only body chooser).
+    ///  - A user folder that is empty → a plain note.
+    ///  - Any non-empty source → the symbol rows.
     @ViewBuilder
     private var content: some View {
-        if folderPath.isEmpty {
-            SidebarEmptyState(
-                icon: "puzzlepiece.extension",
-                title: "No folder chosen",
-                cta: (label: "Choose Folder…", action: { chooseFolder() })
-            )
-        } else if items.isEmpty {
-            Text("No .dxf symbols in this folder.")
-                .font(DS.Font.rowLabel)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        } else {
-            ForEach(items) { item in
-                PartRow(item: item, onInsert: { insert(item) })
-                    // Drag-to-place: the canvas drop target decodes this and imports the
-                    // file at the drop point (the canvas-side drop handler owns placement;
-                    // the panel provides the source). Carries the file URL as a path.
-                    .draggable(PartLibraryDragItem(filePath: item.url.path, name: item.name))
-                    .contextMenu {
-                        Button("Insert at View Center") { insert(item) }
-                    }
+        if items.isEmpty {
+            if isUsingBuiltIn {
+                // No user folder AND the bundled library is empty/unresolvable: keep the
+                // original empty-state so the user can still point the panel somewhere.
+                SidebarEmptyState(
+                    icon: "puzzlepiece.extension",
+                    title: "No symbols available",
+                    cta: (label: "Choose Folder…", action: { chooseFolder() })
+                )
+            } else {
+                Text("No .dxf symbols in this folder.")
+                    .font(DS.Font.rowLabel)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+        } else {
+            if isUsingBuiltIn {
+                builtInHeader
+            }
+            symbolRows
+        }
+    }
+
+    /// A small "Built-in" section header shown above the bundled starter symbols when no
+    /// user folder is chosen, so the user can tell the starter set apart from a folder
+    /// they pick. Choosing a folder (header button or context CTA) replaces these.
+    @ViewBuilder
+    private var builtInHeader: some View {
+        HStack(spacing: DS.Space.sm) {
+            Image(systemName: "shippingbox")
+                .foregroundStyle(.secondary)
+            Text("Built-in")
+                .font(DS.Font.hint)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// The symbol rows for the current catalog — each importable via double-click, the
+    /// Insert button, drag-to-canvas, or the context menu. Shared by the built-in and
+    /// user-folder cases (the source differs, the row affordances do not).
+    @ViewBuilder
+    private var symbolRows: some View {
+        ForEach(items) { item in
+            PartRow(item: item, onInsert: { insert(item) })
+                // Drag-to-place: the canvas drop target decodes this and imports the
+                // file at the drop point (the canvas-side drop handler owns placement;
+                // the panel provides the source). Carries the file URL as a path.
+                .draggable(PartLibraryDragItem(filePath: item.url.path, name: item.name))
+                .contextMenu {
+                    Button("Insert at View Center") { insert(item) }
+                }
         }
     }
 
@@ -187,17 +254,27 @@ struct PartsLibrarySectionContent: View {
         folderPath = url.path   // onChange → rescan
     }
 
-    /// Re-scan the chosen folder into the catalog (engine-pure; no picker). An absent /
-    /// empty / unreadable folder yields an empty catalog (never throws).
+    /// Re-scan the EFFECTIVE source into the catalog (engine-pure; no picker): the user's
+    /// chosen folder if one is set, otherwise the bundled starter library (backlog #6).
+    /// An absent / empty / unreadable / unresolvable source yields an empty catalog
+    /// (never throws).
     private func rescan() {
-        guard !folderPath.isEmpty else {
+        guard let source = effectiveSource else {
             items = []
             return
         }
-        items = BlockLibrary.scan(directory: URL(fileURLWithPath: folderPath, isDirectory: true))
+        items = BlockLibrary.scan(directory: source)
         if items.isEmpty {
             note = ""
         }
+    }
+
+    /// Import an arbitrary `.dxf` file URL (e.g. a Finder drop onto the panel) via the
+    /// existing item-import path — derives a `BlockLibraryItem` (name from the file's
+    /// base name) and delegates to `insert`. Does NOT add the file to the catalog (it may
+    /// live outside the chosen folder); it just imports + places one insert.
+    private func importURL(_ url: URL) {
+        insert(BlockLibraryItem(url: url))
     }
 
     /// Import a catalog item into the drawing as a named block and place ONE insert at
