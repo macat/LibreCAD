@@ -58,6 +58,17 @@ struct LayersSidebar: View {
     /// it). Wired into the Blocks panel header's ＋ button.
     let onCreateBlock: () -> Void
 
+    /// Raises the View-layer "Insert Block from File… (DXF)" open panel (owned by
+    /// `ContentView` — the `NSOpenPanel` MUST stay in the View layer; the sidebar only
+    /// triggers it). Wired into the Blocks panel header's ⋯ menu.
+    let onInsertBlockFromFile: () -> Void
+
+    /// Raises the View-layer "Save Block to File… (WBLOCK)" save panel for the block
+    /// named in the argument (owned by `ContentView` — the `NSSavePanel` stays in the
+    /// View layer; the sidebar only triggers it). Wired into a per-row context action
+    /// in `BlocksSectionContent`.
+    let onSaveBlockToFile: (String) -> Void
+
     /// The row currently selected in the Layers panel (the layer name). Gates the
     /// remove (−) button and drives the active layer; kept in sync with the drawing's
     /// active layer.
@@ -229,10 +240,12 @@ struct LayersSidebar: View {
 
     // MARK: Blocks panel
 
-    /// The Blocks header control: ＋ "Create Block…" routed via the host closure into
+    /// The Blocks header controls: ＋ "Create Block…" routed via the host closure into
     /// `ContentView`'s `BlockNamePrompt` flow (the modal stays in the View layer — the
-    /// sidebar never constructs a sheet/panel). The verb needs a selection; the host's
-    /// `raiseBlockNamePrompt` already no-ops without one, so the button stays simple.
+    /// sidebar never constructs a sheet/panel; the verb needs a selection so it gates on
+    /// it), then the `BlocksPanelMenu` ⋯ overflow holding "Insert Block from File…" plus
+    /// Freeze-All / Thaw-All. (The temporary copy of the freeze menu in the Blocks BODY
+    /// was a Wave-A stopgap; it now lives HERE in the header — its proper home.)
     @ViewBuilder
     private var blocksHeaderControls: some View {
         Button(action: onCreateBlock) {
@@ -241,13 +254,22 @@ struct LayersSidebar: View {
         .buttonStyle(.borderless)
         .help("Create a block from the current selection")
         .disabled(!model.hasSelection)
+
+        BlocksPanelMenu(onInsertFromFile: onInsertBlockFromFile,
+                        onFreezeAll: { model.freezeAllBlocks()
+                                       controllerBox.controller?.requestRedraw() },
+                        onThawAll: { model.thawAllBlocks()
+                                     controllerBox.controller?.requestRedraw() })
     }
 
     /// The Blocks body: the live block rows (thumbnail + Insert / Edit / rename / delete
-    /// + drag-to-place + context menu — all unchanged, delegated to `BlocksSectionContent`).
+    /// + drag-to-place + context menu, plus a per-row "Save Block to File…" — delegated
+    /// to `BlocksSectionContent`).
     @ViewBuilder
     private var blocksBody: some View {
-        BlocksSectionContent(model: model, controllerBox: controllerBox)
+        BlocksSectionContent(model: model,
+                             controllerBox: controllerBox,
+                             onSaveBlockToFile: onSaveBlockToFile)
     }
 
     // MARK: - Layers selection / remove gating

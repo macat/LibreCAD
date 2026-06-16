@@ -154,7 +154,9 @@ struct ContentView: View {
             // stay in the View layer — the sidebar only triggers it).
             LayersSidebar(model: model,
                           controllerBox: controllerBox,
-                          onCreateBlock: { raiseBlockNamePrompt() })
+                          onCreateBlock: { raiseBlockNamePrompt() },
+                          onInsertBlockFromFile: { insertBlockFromFile() },
+                          onSaveBlockToFile: { name in saveBlockToFile(named: name) })
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
                 .navigationTitle("Document")
         } detail: {
@@ -363,6 +365,11 @@ struct ContentView: View {
             // suggested name each time the sheet opens.
             .focusedSceneValue(\.createBlockFromSelection,
                                model.hasSelection ? { raiseBlockNamePrompt() } : nil)
+            // Blocks ▸ "Insert Block from File…" / "Save Block to File…" focused values,
+            // grouped into one modifier so the `canvasDetail` chain stays under the Swift
+            // type-checker's complexity budget (gotcha #2). The NSOpenPanel/NSSavePanel
+            // live inside the action closures (View layer only).
+            .modifier(blockFileHandlers)
             .focusedSceneValue(\.commandPalette) { showPalette = true }
             .focusedSceneValue(\.zoomToFit) { controllerBox.controller?.zoomToFit() }
             // Export… (PDF/PNG/SVG): present a save panel whose format follows the
@@ -454,6 +461,18 @@ struct ContentView: View {
         )
     }
 
+    /// The Blocks file-I/O focused-scene-value handlers ("Insert Block from File…" /
+    /// "Save Block to File…" + the save target name), pulled into one modifier so
+    /// `canvasDetail`'s chain stays under the type-checker's complexity budget (gotcha
+    /// #2). The NSOpenPanel/NSSavePanel live inside the action closures (View layer).
+    private var blockFileHandlers: some ViewModifier {
+        BlockFileHandlersModifier(
+            insertFromFile: { insertBlockFromFile() },
+            saveToFile: { name in saveBlockToFile(named: name) },
+            saveTargetName: saveBlockTargetName
+        )
+    }
+
     /// Raises the "Create Block from Selection…" name sheet (WAVE BW, Ask #1) after
     /// capturing a fresh unique suggested name. Called from the Blocks menu / ⌘K palette
     /// / canvas context menu (each gated on a non-empty selection). A no-op with nothing
@@ -463,6 +482,17 @@ struct ContentView: View {
         guard model.hasSelection else { return }
         suggestedBlockName = model.suggestedBlockName()
         showBlockNamePrompt = true
+    }
+
+    /// The block the Blocks ▸ "Save Block to File…" menu item targets: the block of the
+    /// first SELECTED `.insert` (so right-clicking / selecting an inserted block then
+    /// using the menu saves that one), else the FIRST defined block (a sensible default
+    /// so the menu is usable without a selection). `nil` — which DISABLES the menu item —
+    /// when the drawing defines no blocks. The per-row Blocks-panel "Save Block to File…"
+    /// already names its block explicitly; this only backs the menu-bar item.
+    private var saveBlockTargetName: String? {
+        BlockFileMenuWiring.saveTargetName(selectionIDs: model.selection.ids,
+                                           in: model.drawing)
     }
 
     // MARK: - Document ⇄ live model bridge (MAIN ACTOR)
@@ -1008,6 +1038,104 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Block file I/O (Insert Block from File / Save Block to File — WBLOCK)
+
+    /// "Insert Block from File… (DXF)" (Blocks menu / Blocks panel ⋯): present an
+    /// `NSOpenPanel` filtered to `.dxf`, import the chosen file as a NAMED block (via the
+    /// engine's collision-safe `BlockLibrary.importDXF`, which de-dups a colliding name —
+    /// never an in-place overwrite), and place ONE insert at the current view CENTER. The
+    /// `NSOpenPanel` and the post-import index/selection sync live HERE in the View layer
+    /// (the headless-modal trap: a panel reached from a test would hang the suite). The
+    /// async read runs on the shared `CADEngine` actor; the apply hops back to the main
+    /// actor inside `importDXF`. Errors / cancels land in the HUD — never a crash.
+    @MainActor
+    private func insertBlockFromFile() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = LibreCADDocument.dxfTypes
+        panel.title = "Insert Block from File"
+        panel.prompt = "Insert"
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            status = "Insert block cancelled"
+            return
+        }
+        let path = url.path
+        let displayName = url.lastPathComponent
+        Task { @MainActor in
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            do {
+                guard let result = try await BlockLibrary.importDXF(path: path,
+                                                                    into: model.drawing) else {
+                    status = "“\(displayName)” has no importable geometry"
+                    return
+                }
+                // The import added the block + a placeholder insert at the origin via the
+                // engine op; re-place it at the view center so the user sees it, syncing
+                // the spatial index + selection via the model's insert path. (Importing
+                // at the origin first keeps the engine op pure; the model insert is what
+                // makes the placed reference selectable/snappable.)
+                model.drawing.remove(result.insertID)
+                model.quadtree.remove(result.insertID)
+                _ = model.insertBlockAtViewCenter(named: result.blockName)
+                model.modelDirty = true
+                model.modelVersion &+= 1
+                controllerBox.controller?.requestRedraw()
+                status = "Inserted block “\(result.blockName)” from \(displayName)"
+            } catch {
+                status = "Insert block failed: \(error.localizedDescription)"
+                NSLog("CADCanvas: insert block from file failed: \(error)")
+            }
+        }
+    }
+
+    /// "Save Block to File… (WBLOCK)" (Blocks panel row context menu / Blocks menu):
+    /// present an `NSSavePanel` defaulting to `<block>.dxf`, then write the named block's
+    /// geometry to a standalone `.dxf` re-based to the origin (via the engine's
+    /// `BlockExport.writeBlock`). The `NSSavePanel` lives HERE in the View layer
+    /// (headless-modal trap). The write runs on the shared `CADEngine` actor. A no-op
+    /// (HUD note) for an unknown/empty block; errors / cancels land in the HUD.
+    @MainActor
+    private func saveBlockToFile(named name: String) {
+        guard model.drawing.blocks.contains(name) else {
+            status = "No block named “\(name)” to save"
+            return
+        }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = LibreCADDocument.dxfTypes
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = "\(name).dxf"
+        panel.title = "Save Block to File"
+        panel.prompt = "Save"
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            status = "Save block cancelled"
+            return
+        }
+        let path = url.path
+        let displayName = url.lastPathComponent
+        Task { @MainActor in
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            do {
+                guard let result = try await BlockExport.writeBlock(model.drawing,
+                                                                    name: name,
+                                                                    toPath: path) else {
+                    status = "Block “\(name)” has no geometry to save"
+                    return
+                }
+                status = "Saved block “\(name)” to \(displayName) — \(result.recordCount) elements"
+            } catch {
+                status = "Save block failed: \(error.localizedDescription)"
+                NSLog("CADCanvas: save block to file failed: \(error)")
+            }
+        }
+    }
+
     // MARK: - Per-LAYOUT plot (Paper Space P4 — File ▸ Export Layout / Print Layout)
 
     /// Export Layout to PDF… (File menu, enabled only in a layout tab): plots the
@@ -1353,6 +1481,31 @@ extension FocusedValues {
         set { self[CreateBlockFromSelectionKey.self] = newValue }
     }
 
+    /// "Insert Block from File… (DXF)" on the focused window (Blocks menu / Blocks panel
+    /// ⋯): present an `NSOpenPanel`, import the chosen `.dxf` as a named block, and place
+    /// it at the view center. Always available when a canvas is focused.
+    var insertBlockFromFile: (() -> Void)? {
+        get { self[InsertBlockFromFileKey.self] }
+        set { self[InsertBlockFromFileKey.self] = newValue }
+    }
+
+    /// "Save Block to File… (WBLOCK)" on the focused window (Blocks menu): present an
+    /// `NSSavePanel` and write a block to a standalone `.dxf`. `nil` when there is no
+    /// block to save, which DISABLES the menu item. The closure takes the block name
+    /// (the menu passes the current selection's block, else the first block).
+    var saveBlockToFile: ((String) -> Void)? {
+        get { self[SaveBlockToFileKey.self] }
+        set { self[SaveBlockToFileKey.self] = newValue }
+    }
+
+    /// The block name the Blocks ▸ "Save Block to File…" menu item should target on the
+    /// focused window (the selected `.insert`'s block, else the first defined block).
+    /// `nil` when the drawing has no blocks, which DISABLES the menu item.
+    var saveBlockTargetName: String? {
+        get { self[SaveBlockTargetNameKey.self] }
+        set { self[SaveBlockTargetNameKey.self] = newValue }
+    }
+
     /// Undo / redo the focused window's drawing (Edit menu, ⌘Z / ⇧⌘Z).
     var undoAction: (() -> Void)? {
         get { self[UndoActionKey.self] }
@@ -1436,6 +1589,18 @@ private struct CreateBlockFromSelectionKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 
+private struct InsertBlockFromFileKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct SaveBlockToFileKey: FocusedValueKey {
+    typealias Value = (String) -> Void
+}
+
+private struct SaveBlockTargetNameKey: FocusedValueKey {
+    typealias Value = String
+}
+
 /// Groups the tool-activation / Image-placement / undo / redo / delete focused-scene-
 /// value handlers into one `ViewModifier`, so `ContentView.canvasDetail`'s long
 /// modifier chain stays under the Swift type-checker's expression-complexity limit.
@@ -1472,6 +1637,25 @@ private struct LayoutPlotHandlersModifier: ViewModifier {
         content
             .focusedSceneValue(\.exportLayout, exportLayout)
             .focusedSceneValue(\.printLayout, printLayout)
+    }
+}
+
+/// Groups the Blocks file-I/O focused-scene-value handlers ("Insert Block from File…" /
+/// "Save Block to File…" + the save target block name) into one `ViewModifier`, so
+/// `ContentView.canvasDetail`'s modifier chain stays under the Swift type-checker's
+/// expression-complexity limit (gotcha #2). The NSOpenPanel/NSSavePanel live inside the
+/// host's action closures (View layer); `saveTargetName` is `nil` when the drawing has
+/// no blocks, which disables the Blocks ▸ "Save Block to File…" menu item.
+private struct BlockFileHandlersModifier: ViewModifier {
+    let insertFromFile: () -> Void
+    let saveToFile: (String) -> Void
+    let saveTargetName: String?
+
+    func body(content: Content) -> some View {
+        content
+            .focusedSceneValue(\.insertBlockFromFile) { insertFromFile() }
+            .focusedSceneValue(\.saveBlockToFile) { name in saveToFile(name) }
+            .focusedSceneValue(\.saveBlockTargetName, saveTargetName)
     }
 }
 

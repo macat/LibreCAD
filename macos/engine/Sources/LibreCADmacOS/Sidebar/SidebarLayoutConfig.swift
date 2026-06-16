@@ -26,6 +26,7 @@
 //
 
 import Foundation
+import CADEngine
 
 // MARK: - Panel identity
 
@@ -229,5 +230,35 @@ struct SidebarLayoutConfig: Codable, Equatable, Sendable {
             hidden.contains(id) ? id : (vIterator.next() ?? id)
         }
         return copy
+    }
+}
+
+// MARK: - Block-file menu wiring (pure helpers — SwiftUI-free, unit-testable)
+
+/// Pure, SwiftUI-free helpers backing the Blocks file menus ("Insert Block from File…" /
+/// "Save Block to File…"). They take only engine value types (`CADDrawing` reads,
+/// `EntityID`s) so they unit-test headlessly through the established `_Shared*.swift`
+/// symlink (the test target depends only on CADEngine). The `NSOpenPanel`/`NSSavePanel`
+/// and the actual import/export calls stay in the View layer (`ContentView`); these only
+/// decide WHICH block the menu-bar "Save Block to File…" item targets.
+enum BlockFileMenuWiring {
+
+    /// The block the menu-bar "Save Block to File…" item should target, given the current
+    /// `selectionIDs` and the `drawing`: the block of the FIRST selected `.insert` whose
+    /// referenced block still exists (so selecting an inserted block then using the menu
+    /// saves that one), else the FIRST defined block (a usable default with no selection).
+    /// `nil` — which DISABLES the menu item — when the drawing defines no blocks. The
+    /// per-row Blocks-panel "Save Block to File…" names its block explicitly and does NOT
+    /// use this; this only backs the single menu-bar item.
+    @MainActor
+    static func saveTargetName(selectionIDs: some Sequence<EntityID>,
+                               in drawing: CADDrawing) -> String? {
+        for id in selectionIDs {
+            if case .insert(let data)? = drawing.entity(id)?.kind,
+               drawing.blocks.contains(data.blockName) {
+                return data.blockName
+            }
+        }
+        return drawing.blocks.blocks.first?.name
     }
 }

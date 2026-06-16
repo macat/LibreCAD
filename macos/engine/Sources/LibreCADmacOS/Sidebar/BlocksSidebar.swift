@@ -51,6 +51,10 @@ struct BlocksSectionContent: View {
     /// Bridge to the canvas controller so a block op can request a redraw (the
     /// renderer is on-demand; an insert/delete must nudge it).
     let controllerBox: CADCanvasView.ControllerBox
+    /// Raises the View-layer "Save Block to File… (WBLOCK)" save panel for a block name
+    /// (owned by `ContentView` — the `NSSavePanel` stays in the View layer; this view
+    /// only triggers it from the per-row context menu).
+    let onSaveBlockToFile: (String) -> Void
 
     /// Per-section thumbnail cache, keyed by `(blockName, modelVersion, size)`.
     /// `modelVersion` bumps on every committed edit + block enter/exit, so an edited
@@ -67,14 +71,9 @@ struct BlocksSectionContent: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
         } else {
-            // The Freeze-all / Thaw-all overflow menu (also exposable in the panel
-            // header by the next wire-wave via `BlocksPanelMenu`). Embedded at the top
-            // of the body so per-document freeze-all is reachable today.
-            HStack(spacing: 6) {
-                Spacer(minLength: 0)
-                BlocksPanelMenu(onFreezeAll: { freezeAll() },
-                                onThawAll: { thawAll() })
-            }
+            // (The Freeze-All / Thaw-All overflow menu used to sit at the top of the
+            // body as a Wave-A stopgap; it now lives in the Blocks panel HEADER — see
+            // `LayersSidebar.blocksHeaderControls`. The per-row eye toggle stays here.)
             // Build ONE ResolveContext for the whole list (shared across rows)
             // so each thumbnail miss doesn't re-snapshot the layer/style/block
             // tables. Captured by `thumbnail(for:)` below.
@@ -100,6 +99,11 @@ struct BlocksSectionContent: View {
                     Button(block.isFrozen ? "Show Block" : "Hide Block") {
                         toggleFrozen(block.name)
                     }
+                    Divider()
+                    // Save Block to File… (WBLOCK): export this block as a standalone
+                    // `.dxf` re-based to the origin. The `NSSavePanel` lives in the View
+                    // layer (the host closure); this only triggers it with the block name.
+                    Button("Save Block to File…") { onSaveBlockToFile(block.name) }
                     Divider()
                     Button("Delete Block", role: .destructive) { delete(block.name) }
                 }
@@ -154,36 +158,32 @@ struct BlocksSectionContent: View {
         model.toggleBlockFrozen(name)
         controllerBox.controller?.requestRedraw()
     }
-
-    /// Freeze every named block (the ⋯ menu). Undoable; redraw so frozen inserts vanish.
-    private func freezeAll() {
-        model.freezeAllBlocks()
-        controllerBox.controller?.requestRedraw()
-    }
-
-    /// Thaw every named block (the ⋯ menu). Undoable; redraw so the inserts reappear.
-    private func thawAll() {
-        model.thawAllBlocks()
-        controllerBox.controller?.requestRedraw()
-    }
+    // (Freeze-All / Thaw-All moved to the Blocks panel header — see
+    // `LayersSidebar.blocksHeaderControls` + `BlocksPanelMenu`.)
 }
 
 // MARK: - Blocks panel overflow menu (Freeze All / Thaw All)
 
-/// The Blocks panel's `⋯` overflow menu: Freeze All Blocks / Thaw All Blocks (the
-/// document-wide visibility batch, undoable as one ⌘Z step each). Exposed as a small
-/// reusable view so it sits at the top of the live `BlocksSectionContent` body today
-/// AND can be relocated into the panel HEADER's trailing action slot by the next
-/// sidebar wire-wave (which owns `LayersSidebar`/`SidebarPanelStack`) without
-/// re-implementing the actions. The host supplies the closures so this view stays
-/// model-agnostic and headless-safe (no model reference, no modal of its own — just an
-/// `NSMenu`, which is View-layer only).
+/// The Blocks panel HEADER's `⋯` overflow menu: "Insert Block from File…" (import a
+/// `.dxf` symbol as a new block) plus the document-wide Freeze All / Thaw All batch
+/// (each undoable as one ⌘Z step). A small reusable view so the panel header can host it
+/// without re-implementing the actions; the host supplies the closures so this view
+/// stays model-agnostic and headless-safe (no model reference, no modal of its own — the
+/// `NSOpenPanel` lives in the host's `onInsertFromFile` closure, and an `NSMenu` is
+/// View-layer only). `onInsertFromFile` is optional so a caller can omit the file action.
 struct BlocksPanelMenu: View {
+    /// Optional — present the "Insert Block from File…" item (raises an `NSOpenPanel` in
+    /// the View layer). `nil` omits the item (e.g. a header with no file-import host).
+    var onInsertFromFile: (() -> Void)? = nil
     let onFreezeAll: () -> Void
     let onThawAll: () -> Void
 
     var body: some View {
         Menu {
+            if let onInsertFromFile {
+                Button("Insert Block from File…", action: onInsertFromFile)
+                Divider()
+            }
             Button("Freeze All Blocks", action: onFreezeAll)
             Button("Thaw All Blocks", action: onThawAll)
         } label: {
@@ -192,7 +192,7 @@ struct BlocksPanelMenu: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Freeze or thaw all blocks at once")
+        .help("Insert a block from a file, or freeze / thaw all blocks at once")
     }
 }
 
