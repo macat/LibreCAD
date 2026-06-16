@@ -6,6 +6,13 @@
 //  pane of `ContentView`'s `NavigationSplitView`; the canvas + HUD + toolbar
 //  stay in the detail pane untouched.
 //
+//  It is now a REARRANGEABLE PANEL STACK (`SidebarPanelStack`): three collapsible
+//  panels — Layers, Layer States, Blocks — each with its own header controls. Panels
+//  can be collapsed, dragged to reorder, and shown/hidden via the top ⋯ menu, with the
+//  order/collapsed/hidden state persisted across launches in a single `@AppStorage`
+//  JSON string (a `SidebarLayoutConfig`). The previous global ＋/− footer is gone — the
+//  add/remove-layer buttons now live in the LAYERS panel header, next to the list.
+//
 //  It binds DIRECTLY to the live `CanvasModel` the canvas uses (and through it
 //  the `@MainActor @Observable CADDrawing`), so every mutation here flows through
 //  the drawing's UNDOABLE layer mutators (`addLayer` / `removeLayer` /
@@ -33,9 +40,9 @@ import CADEngine
 
 // MARK: - Layers sidebar
 
-/// The leading-pane sidebar: a Layers section (live, editable) plus a read-only
-/// Blocks stub so the structure is visible. Bound to the same `CanvasModel` the
-/// canvas renders, so edits reflect live and undo via ⌘Z.
+/// The leading-pane sidebar: a rearrangeable stack of Layers / Layer States / Blocks
+/// panels. Bound to the same `CanvasModel` the canvas renders, so edits reflect live
+/// and undo via ⌘Z.
 struct LayersSidebar: View {
     /// The live canvas state — the SAME instance the detail-pane canvas renders.
     /// `@Bindable` so the inline rename `TextField` / color `ColorPicker` can bind
@@ -46,78 +53,113 @@ struct LayersSidebar: View {
     /// renderer is on-demand; a layer edit must nudge it — see the render-sync note).
     let controllerBox: CADCanvasView.ControllerBox
 
-    /// The row currently selected in the List (the layer name). Drives the active
-    /// layer + the highlight; kept in sync with the drawing's active layer.
+    /// Raises the View-layer "Create Block from Selection…" name sheet (owned by
+    /// `ContentView` — the modal MUST stay in the View layer; the sidebar only triggers
+    /// it). Wired into the Blocks panel header's ＋ button.
+    let onCreateBlock: () -> Void
+
+    /// The row currently selected in the Layers panel (the layer name). Gates the
+    /// remove (−) button and drives the active layer; kept in sync with the drawing's
+    /// active layer.
     @State private var selectedLayer: String?
 
+    /// The persisted panel layout (order / collapsed / hidden), serialized to one
+    /// `@AppStorage` JSON string. Mirrored into `config` (the live value the stack
+    /// binds) on appear, and re-encoded whenever `config` changes — the same
+    /// primitive-string `@AppStorage` pattern `ContentView` uses for the command-bar
+    /// MRU and the pinned-tools set.
+    @AppStorage("sidebar.panelLayout") private var panelLayoutRaw: String = ""
+    /// The live layout config the panel stack reads + mutates.
+    @State private var config: SidebarLayoutConfig = .default
+
     var body: some View {
-        List(selection: $selectedLayer) {
-            layersSection
-            layerStatesSection
-            BlocksSection(model: model, controllerBox: controllerBox)
-        }
-        .listStyle(.sidebar)
-        .frame(minWidth: 220, idealWidth: 260)
-        .safeAreaInset(edge: .bottom) { footer }
-        .onAppear { selectedLayer = model.drawing.layers.activeLayerName }
-        .onChange(of: selectedLayer) { _, newValue in
-            // Clicking a row sets the active layer (where new geometry lands).
-            guard let name = newValue, name != model.drawing.layers.activeLayerName else { return }
-            model.drawing.setActiveLayer(name)
-        }
-        // Keep the selection mirror in step when the active layer changes via undo
-        // / programmatic activation.
-        .onChange(of: model.drawing.layers.activeLayerName) { _, newActive in
-            if selectedLayer != newActive { selectedLayer = newActive }
-        }
+        SidebarPanelStack(panels: panels, config: $config)
+            .frame(minWidth: 220, idealWidth: 260)
+            .onAppear {
+                selectedLayer = model.drawing.layers.activeLayerName
+                config = SidebarLayoutConfig.decoded(from: panelLayoutRaw)
+            }
+            // Persist any layout change (reorder / collapse / show-hide) back to the
+            // durable @AppStorage string.
+            .onChange(of: config) { _, newValue in
+                panelLayoutRaw = newValue.encoded()
+            }
+            // Keep the selection mirror in step when the active layer changes via undo
+            // / programmatic activation.
+            .onChange(of: model.drawing.layers.activeLayerName) { _, newActive in
+                if selectedLayer != newActive { selectedLayer = newActive }
+            }
     }
 
-    // MARK: Layers section
+    // MARK: - Panel descriptors
 
+    /// The three panels, in canonical declaration order. The stack renders them in the
+    /// CONFIG's order; this array is just the descriptor set (id → header + body). To
+    /// add a panel later: append one descriptor + a `SidebarPanelID` case.
+    private var panels: [SidebarPanel] {
+        [
+            SidebarPanel(id: .layers, header: { layersHeaderControls }, body: { layersBody }),
+            SidebarPanel(id: .layerStates, header: { layerStatesHeaderControls }, body: { layerStatesBody }),
+            SidebarPanel(id: .blocks, header: { blocksHeaderControls }, body: { blocksBody })
+        ]
+    }
+
+    // MARK: Layers panel
+
+    /// The Layers header controls: ＋ (add) / − (remove, gated exactly as before) right
+    /// next to the list, plus a ⋯ menu holding the bulk freeze/thaw/lock/unlock-all ops
+    /// (de-cluttered out of the row of icons the old section header carried).
     @ViewBuilder
-    private var layersSection: some View {
-        Section {
-            ForEach(model.drawing.layers.layers) { layer in
-                LayerRow(
-                    layer: layer,
-                    isActive: layer.name == model.drawing.layers.activeLayerName,
-                    onToggleVisible: { setVisible(layer.name, $0) },
-                    onToggleLocked: { setLocked(layer.name, $0) },
-                    onTogglePrintable: { setPrintable(layer.name, $0) },
-                    onToggleConstruction: { setConstruction(layer.name, $0) },
-                    onColorChange: { setColor(layer.name, $0) },
-                    onRename: { rename(layer.name, to: $0) }
-                )
-                .tag(layer.name)
-                // Per-entity / per-layer ops (F17): right-click a layer row.
-                .contextMenu { layerRowMenu(layer) }
-            }
-        } header: {
-            // Section header with the bulk freeze/lock-all affordances (F17).
-            HStack {
-                Text("Layers")
-                Spacer()
-                Button {
-                    freezeAll(true)
-                } label: { Image(systemName: "snowflake") }
-                    .buttonStyle(.borderless)
-                    .help("Freeze all layers")
-                Button {
-                    freezeAll(false)
-                } label: { Image(systemName: "sun.max") }
-                    .buttonStyle(.borderless)
-                    .help("Thaw all layers")
-                Button {
-                    lockAll(true)
-                } label: { Image(systemName: "lock") }
-                    .buttonStyle(.borderless)
-                    .help("Lock all layers")
-                Button {
-                    lockAll(false)
-                } label: { Image(systemName: "lock.open") }
-                    .buttonStyle(.borderless)
-                    .help("Unlock all layers")
-            }
+    private var layersHeaderControls: some View {
+        Button(action: addLayer) {
+            Image(systemName: "plus")
+        }
+        .buttonStyle(.borderless)
+        .help("Add a new layer")
+
+        Button(action: removeSelectedLayer) {
+            Image(systemName: "minus")
+        }
+        .buttonStyle(.borderless)
+        .help("Remove the selected layer")
+        .disabled(!canRemoveSelected)
+
+        Menu {
+            Button { freezeAll(true) } label: { Label("Freeze All Layers", systemImage: "snowflake") }
+            Button { freezeAll(false) } label: { Label("Thaw All Layers", systemImage: "sun.max") }
+            Divider()
+            Button { lockAll(true) } label: { Label("Lock All Layers", systemImage: "lock") }
+            Button { lockAll(false) } label: { Label("Unlock All Layers", systemImage: "lock.open") }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Bulk layer actions")
+    }
+
+    /// The Layers body: the live layer list with the full `LayerRow` (all toggles /
+    /// color / inline rename / active indicator / context menu — unchanged). A row tap
+    /// selects + activates that layer (the old `List(selection:)` role); the active row
+    /// reads from the model's active-layer name.
+    @ViewBuilder
+    private var layersBody: some View {
+        ForEach(model.drawing.layers.layers) { layer in
+            LayerRow(
+                layer: layer,
+                isActive: layer.name == model.drawing.layers.activeLayerName,
+                isSelected: layer.name == selectedLayer,
+                onSelect: { selectLayer(layer.name) },
+                onToggleVisible: { setVisible(layer.name, $0) },
+                onToggleLocked: { setLocked(layer.name, $0) },
+                onTogglePrintable: { setPrintable(layer.name, $0) },
+                onToggleConstruction: { setConstruction(layer.name, $0) },
+                onColorChange: { setColor(layer.name, $0) },
+                onRename: { rename(layer.name, to: $0) }
+            )
+            // Per-entity / per-layer ops (F17): right-click a layer row.
+            .contextMenu { layerRowMenu(layer) }
         }
     }
 
@@ -141,70 +183,81 @@ struct LayersSidebar: View {
         }
     }
 
-    // MARK: Layer states (F17 — named snapshots of all layer flags)
+    // MARK: Layer States panel (F17 — named snapshots of all layer flags)
 
+    /// The Layer States header control: ＋ to save the current layer flags as a new
+    /// named state.
     @ViewBuilder
-    private var layerStatesSection: some View {
+    private var layerStatesHeaderControls: some View {
+        Button { saveCurrentLayerState() } label: {
+            Image(systemName: "plus")
+        }
+        .buttonStyle(.borderless)
+        .help("Save the current layer flags as a new state")
+    }
+
+    /// The Layer States body: the saved-states list with restore/delete (unchanged).
+    @ViewBuilder
+    private var layerStatesBody: some View {
         let states = model.drawing.layerStates.states
-        Section {
-            if states.isEmpty {
-                Text("No saved states")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(states) { state in
-                    HStack(spacing: 8) {
-                        Image(systemName: "rectangle.stack")
-                            .foregroundStyle(.secondary)
-                        Text(state.name)
-                        Spacer(minLength: 0)
-                        Button {
-                            restoreLayerState(state.name)
-                        } label: { Image(systemName: "arrow.uturn.backward.circle") }
-                            .buttonStyle(.borderless)
-                            .help("Restore this layer state")
-                        Button {
-                            model.removeLayerState(named: state.name)
-                        } label: { Image(systemName: "trash") }
-                            .buttonStyle(.borderless)
-                            .help("Delete this layer state")
-                    }
-                    .padding(.vertical, 2)
+        if states.isEmpty {
+            Text("No saved states")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        } else {
+            ForEach(states) { state in
+                HStack(spacing: 8) {
+                    Image(systemName: "rectangle.stack")
+                        .foregroundStyle(.secondary)
+                    Text(state.name)
+                    Spacer(minLength: 0)
+                    Button {
+                        restoreLayerState(state.name)
+                    } label: { Image(systemName: "arrow.uturn.backward.circle") }
+                        .buttonStyle(.borderless)
+                        .help("Restore this layer state")
+                    Button {
+                        model.removeLayerState(named: state.name)
+                    } label: { Image(systemName: "trash") }
+                        .buttonStyle(.borderless)
+                        .help("Delete this layer state")
                 }
-            }
-        } header: {
-            HStack {
-                Text("Layer States")
-                Spacer()
-                Button { saveCurrentLayerState() } label: { Image(systemName: "plus") }
-                    .buttonStyle(.borderless)
-                    .help("Save the current layer flags as a new state")
+                .padding(.vertical, 2)
             }
         }
     }
 
-    // MARK: Footer (add / remove)
+    // MARK: Blocks panel
 
+    /// The Blocks header control: ＋ "Create Block…" routed via the host closure into
+    /// `ContentView`'s `BlockNamePrompt` flow (the modal stays in the View layer — the
+    /// sidebar never constructs a sheet/panel). The verb needs a selection; the host's
+    /// `raiseBlockNamePrompt` already no-ops without one, so the button stays simple.
     @ViewBuilder
-    private var footer: some View {
-        HStack(spacing: 2) {
-            Button(action: addLayer) {
-                Image(systemName: "plus")
-            }
-            .help("Add a new layer")
-
-            Button(action: removeSelectedLayer) {
-                Image(systemName: "minus")
-            }
-            .help("Remove the selected layer")
-            .disabled(!canRemoveSelected)
-
-            Spacer()
+    private var blocksHeaderControls: some View {
+        Button(action: onCreateBlock) {
+            Image(systemName: "plus")
         }
         .buttonStyle(.borderless)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.bar)
+        .help("Create a block from the current selection")
+        .disabled(!model.hasSelection)
+    }
+
+    /// The Blocks body: the live block rows (thumbnail + Insert / Edit / rename / delete
+    /// + drag-to-place + context menu — all unchanged, delegated to `BlocksSectionContent`).
+    @ViewBuilder
+    private var blocksBody: some View {
+        BlocksSectionContent(model: model, controllerBox: controllerBox)
+    }
+
+    // MARK: - Layers selection / remove gating
+
+    /// Selecting a layer row sets it active (where new geometry lands) — the role the
+    /// old `List(selection:)` filled. No-op if it is already active.
+    private func selectLayer(_ name: String) {
+        selectedLayer = name
+        guard name != model.drawing.layers.activeLayerName else { return }
+        model.drawing.setActiveLayer(name)
     }
 
     /// "0" and the active layer are guarded by the model (`removeLayer` refuses
@@ -327,10 +380,13 @@ struct LayersSidebar: View {
 
 /// A single layer row: visibility eye, lock, color swatch (→ ColorPicker), an
 /// inline-editable name, and the active indicator. All actions call back into the
-/// sidebar, which routes them through the drawing's undoable mutators.
+/// sidebar, which routes them through the drawing's undoable mutators. A tap on the
+/// row's background selects + activates the layer (the old `List(selection:)` role).
 private struct LayerRow: View {
     let layer: Layer
     let isActive: Bool
+    let isSelected: Bool
+    let onSelect: () -> Void
     let onToggleVisible: (Bool) -> Void
     let onToggleLocked: (Bool) -> Void
     let onTogglePrintable: (Bool) -> Void
@@ -415,6 +471,13 @@ private struct LayerRow: View {
             }
         }
         .padding(.vertical, 2)
+        .padding(.horizontal, 4)
+        .background(rowBackground)
+        .contentShape(Rectangle())
+        // Tap the row (outside the controls) to select + activate the layer — the role
+        // the old `List(selection:)` filled. The buttons/fields above consume their own
+        // taps, so this only fires on the row's empty space.
+        .onTapGesture { onSelect() }
         .onAppear {
             draftName = layer.name
             swatch = Color(rgba: layer.color)
@@ -427,6 +490,15 @@ private struct LayerRow: View {
         .onChange(of: layer.color) { _, newColor in
             let asColor = Color(rgba: newColor)
             if swatch.rgbaColor != newColor { swatch = asColor }
+        }
+    }
+
+    /// A subtle selection highlight behind the selected row (the active row also shows
+    /// the checkmark badge above).
+    @ViewBuilder
+    private var rowBackground: some View {
+        if isSelected {
+            RoundedRectangle(cornerRadius: 6).fill(.tint.opacity(0.15))
         }
     }
 }

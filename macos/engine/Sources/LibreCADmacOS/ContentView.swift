@@ -147,9 +147,14 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
-            // Leading pane: the modern Layers (+ Blocks stub) sidebar, bound to
-            // the SAME live model the canvas renders so edits reflect immediately.
-            LayersSidebar(model: model, controllerBox: controllerBox)
+            // Leading pane: the modern rearrangeable panel-stack sidebar (Layers /
+            // Layer States / Blocks), bound to the SAME live model the canvas renders so
+            // edits reflect immediately. The Blocks panel's ＋ raises the View-layer
+            // "Create Block from Selection…" name sheet via this closure (the modal MUST
+            // stay in the View layer — the sidebar only triggers it).
+            LayersSidebar(model: model,
+                          controllerBox: controllerBox,
+                          onCreateBlock: { raiseBlockNamePrompt() })
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
                 .navigationTitle("Document")
         } detail: {
