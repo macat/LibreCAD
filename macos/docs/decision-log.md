@@ -6,6 +6,29 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-15 — PAPER SPACE P3/P4 WAVE dispatched (owner: "find the gaps, parallel-implement next steps, commit + merge worktrees")
+
+**Baseline at start:** `native-macos @ 5291ae797`, **1887 tests** green, build clean, tree clean. Gap audit (this session): paper space P0 (model) + P1 (DXF code-67 r/w, single Layout1) + P2 (Model/Layout tab + sheet render, pure helpers) are LANDED; **P3 (viewport entities) + P4 (per-layout plot) remain**, and P1/P2 (salvaged "tests follow") had **zero dedicated tests**.
+
+**Gating (read-only, parallel):** planner (P3 deep design), investigator (exact P1/P2/bridge state + missing-test map), critic (wave disjointness). Critic verdict **GO-WITH-FIXES** — all folded in:
+- `LineRenderer.swift` is in the APP module (`LibreCADmacOS/Renderer/`) and is dual-compiled into the test target via `_SharedLineRenderer.swift` → Agent 1 keeps it test-target-clean; **merge Agent 1 before the test-backfill agent**.
+- The render-transform name `Viewport` is taken → the new paper-space entity is **`LayoutViewport`** (off `EntityKind`, in `Layout.viewports`); don't touch `Viewport.swift` or its 3 tests.
+- Agent 4 rescoped: ArcTool `.threePoint` is ALREADY DONE → tangential-only; Circle 2P/3P genuinely new.
+
+**Confirmed bug (investigator):** `LibreCADDocument.swift:~282` `DXFDocumentCodec.payload(from:)` drops `result.layouts` → opened paper-space DXFs show **zero layout tabs + invisible paper entities**. One-line fix folded into Agent 1 (paper-space read-path owner).
+
+**Owner decisions (away, best-guess):** **Q1** stock libdxfrw HAS `dxfRW::writeViewport` (`libdxfrw.cpp:1552`) → P3 does FULL VIEWPORT read+write round-trip (no lib patch); writer takes layouts via an ADDITIVE/defaulted param (zero blast on other call sites). **Q2** v1 viewport contents are draw-only (not snap/select-through-the-sheet). **Q3** `ViewportTool` is a standalone 2-click value type (no `ToolEdit` contract change). All built UNWIRED (a later wire-wave surfaces them).
+
+**Wave (4 concurrent builders, disjoint worktrees off `native-macos`):**
+- **A1 — P3 viewports**: `Layout.swift`, new `LayoutViewport.swift`, `CADDrawing.swift`, `DXFReader/Writer.swift`, new `Tools/ViewportTool.swift`, `DxfBridge/lcdxf.{cpp,h}`, `Renderer/LineRenderer.swift`, `LibreCADDocument.swift`, new `LayoutViewportTests.swift`.
+- **A2 — P4 plot**: `Export/{PrintLayout,DrawingPrinter,DrawingExporter}.swift` + new `LayoutPlotTests.swift` (pure math, no NSPrintOperation).
+- **A3 — P1/P2 test backfill**: new `PaperSpaceDXFRoundTripTests.swift` + `PaperSpaceLayoutHelperTests.swift` (read-only on source; pure `PaperSpaceLayout` helpers via existing `_SharedCanvasModel` symlink).
+- **A4 — draw variants**: `Tools/{CircleTool,ArcTool,LineTool}.swift` (Circle 2P/3P, Arc tangential, Line by-angle) + tests, additive Mode enums, UNWIRED.
+
+**Merge order:** A4 → A2 → A1 → A3, batch-merge by hash + ONE serial-gate (expect 1887 + new). Then code-reviewer per non-trivial diff, acceptance-tester on a real paper-space DXF + `.app` smoke, then a wire-wave to surface viewports/plot/variants. *(In progress — this entry will be amended with landed hashes + counts.)*
+
+---
+
 ## 2026-06-15 — PARITY WAVE 3 landed + PAPER SPACE approved (full P0–P4) + P0 in progress
 
 **Landed** (`native-macos @ 025ba14bc`, **1870 tests**):
