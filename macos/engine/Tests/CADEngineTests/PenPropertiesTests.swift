@@ -147,6 +147,99 @@ struct PenPropertiesTests {
         #expect(rec?.pen == .byLayer)             // currentPen did NOT leak on
     }
 
+    // MARK: - 2b. CLONE GATE BY OPERATION: a real Copy/Array of a layer-"0" /
+    //            byLayer source preserves layer "0" even with a DIFFERENT active layer.
+    //
+    // The content gate alone (`layer == .zero && pen == .byLayer`) CANNOT tell a fresh
+    // draw from a clone of a bare layer-"0"/byLayer source — both look identical. These
+    // tests drive the REAL clone tools (Copy / Array) end-to-end through the model
+    // (`activateTool` + `handleToolInput`), so the discriminator under test is the
+    // ORIGINATING OPERATION, not the record contents. AutoCAD COPY/ARRAY/OFFSET preserve
+    // the source layer; so must we. (These FAIL before the operation-aware gate — the
+    // clone would be re-stamped onto the active layer — and PASS after.)
+
+    /// Adds a source line on layer "0" with a fully `.byLayer` pen (the fresh-doc
+    /// default — the exact ambiguous signature) and selects it. Returns its id.
+    @discardableResult
+    private func addSelectedLayerZeroSource(_ model: CanvasModel) -> EntityID {
+        let id = model.drawing.add(EntityRecord(
+            id: .placeholder,
+            layer: .zero,                 // DXF "0"
+            pen: .byLayer,                // the fresh-doc default
+            kind: .line(LineData(start: Vector(0, 0), end: Vector(4, 0)))
+        ))
+        model.setSelection([id])
+        // Clear the undo registered by the setup add so it can't muddy later assertions.
+        model.drawing.undoManager?.removeAllActions()
+        return id
+    }
+
+    @Test("a COPY of a layer-0 / byLayer source keeps layer 0 (NOT the active layer)")
+    func copyOfLayerZeroSourcePreservesLayerZero() {
+        let model = modelWithActiveLayer("Walls")     // a DIFFERENT layer is active
+        // A loud currentPen that must NOT leak onto the clone either.
+        model.currentPen = Pen(lineColor: .explicit(RGBAColor(1, 0, 0)), lineType: .dotted)
+        let sourceID = addSelectedLayerZeroSource(model)
+
+        // Drive the REAL Copy tool: base point, then destination (a non-zero delta).
+        model.activateTool(.copy)
+        _ = model.handleToolInput(.click(Vector(0, 0)))   // base
+        _ = model.handleToolInput(.click(Vector(20, 0)))  // destination → commit one .add
+
+        // Two entities now: the original + the copy. The COPY must still be on layer "0"
+        // with a byLayer pen — preserved from its source, NOT re-stamped onto "Walls".
+        let recs = model.drawing.entities
+        #expect(recs.count == 2)
+        let copy = recs.first { $0.id != sourceID }
+        #expect(copy?.layer == .zero)        // BUG repro: was wrongly re-stamped to "Walls"
+        #expect(copy?.pen == .byLayer)       // currentPen did NOT leak onto the clone
+        // The original is untouched too.
+        let original = recs.first { $0.id == sourceID }
+        #expect(original?.layer == .zero)
+        #expect(original?.pen == .byLayer)
+    }
+
+    @Test("an ARRAY of a layer-0 / byLayer source keeps every copy on layer 0")
+    func arrayOfLayerZeroSourcePreservesLayerZero() {
+        let model = modelWithActiveLayer("Walls")
+        model.currentPen = Pen(lineColor: .explicit(RGBAColor(0, 1, 0)))
+        let sourceID = addSelectedLayerZeroSource(model)
+
+        // Drive the REAL Array tool. ArrayTool replicates the selection in a grid and
+        // commits on Return; its default config produces at least one extra copy.
+        model.activateTool(.array)
+        _ = model.handleToolInput(.commit)
+
+        let recs = model.drawing.entities
+        // Every CLONE (anything that isn't the original) must remain on layer "0".
+        let clones = recs.filter { $0.id != sourceID }
+        #expect(!clones.isEmpty)             // the array produced at least one copy
+        for clone in clones {
+            #expect(clone.layer == .zero)    // preserved, not re-stamped to "Walls"
+            #expect(clone.pen == .byLayer)
+        }
+    }
+
+    @Test("a fresh DRAW via the real tool path still adopts the active layer + currentPen")
+    func freshDrawViaRealToolStillAdoptsCurrentProperties() {
+        // The companion to the clone tests: the operation-aware gate must NOT regress the
+        // layer-0 fix — a genuine DRAW (Line tool) still lands on the active layer.
+        let model = modelWithActiveLayer("Walls")
+        let blue = RGBAColor(0, 0, 1)
+        model.currentPen = Pen(lineColor: .explicit(blue), lineType: .dashed)
+
+        model.activateTool(.line)
+        _ = model.handleToolInput(.click(Vector(0, 0)))
+        _ = model.handleToolInput(.click(Vector(10, 0)))   // commits one .add line
+
+        // Exactly one entity was drawn — the line.
+        #expect(model.drawing.entities.count == 1)
+        let drawn = model.drawing.entities.first
+        #expect(drawn?.layer == LayerID("Walls"))          // adopted the active layer
+        #expect(drawn?.pen.lineColor == .explicit(blue))   // adopted currentPen
+        #expect(drawn?.pen.lineType == .dashed)
+    }
+
     // MARK: - 3. LAYER DEFAULTS: setLineType / setLineWidth via the sidebar funnel
 
     @Test("setting a layer's default line TYPE mutates the layer and is undoable")
