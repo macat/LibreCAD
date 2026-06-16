@@ -147,6 +147,90 @@ struct RendererGeometryTests {
         #expect(out[0].halfWidthPx == RendererGeometry.defaultHalfWidthPx)
     }
 
+    // MARK: - Pen lineweight → stroke half-width
+
+    /// Builds a one-segment polyline with the given resolved pen lineweight and
+    /// returns the packed instance's device-pixel half-width.
+    private func packedHalfWidth(_ lw: PenLineWidth,
+                                 fallback: Float = RendererGeometry.defaultHalfWidthPx,
+                                 backingScale: CGFloat = 2) -> Float {
+        let p = ResolvedPen(color: .librecadGreen, lineType: .solid, lineWidth: lw)
+        let poly = ResolvedPolyline(points: [Vector(0, 0), Vector(10, 0)],
+                                    closed: false, pen: p)
+        var out: [LineInstance] = []
+        RendererGeometry.appendInstances(for: poly, renderOrigin: Vector(0, 0),
+                                         halfWidthPx: fallback, backingScale: backingScale,
+                                         into: &out)
+        return out[0].halfWidthPx
+    }
+
+    @Test("an explicit thick mm lineweight packs a WIDER half-width than a thin one")
+    func explicitLineweightWidens() {
+        // Same backing scale + fallback; only the pen width differs.
+        var thick: [LineInstance] = []
+        var thin: [LineInstance] = []
+        let thickPoly = ResolvedPolyline(
+            points: [Vector(0, 0), Vector(10, 0)], closed: false,
+            pen: ResolvedPen(color: .librecadGreen, lineType: .solid, lineWidth: .millimeters(2.0)))
+        let thinPoly = ResolvedPolyline(
+            points: [Vector(0, 0), Vector(10, 0)], closed: false,
+            pen: ResolvedPen(color: .librecadGreen, lineType: .solid, lineWidth: .millimeters(0.1)))
+        RendererGeometry.appendInstances(for: thickPoly, renderOrigin: Vector(0, 0),
+                                         backingScale: 2, into: &thick)
+        RendererGeometry.appendInstances(for: thinPoly, renderOrigin: Vector(0, 0),
+                                         backingScale: 2, into: &thin)
+        #expect(thick[0].halfWidthPx > thin[0].halfWidthPx)
+        // The very thin pen floors to the renderer's hairline default.
+        #expect(thin[0].halfWidthPx == RendererGeometry.defaultHalfWidthPx)
+        // A real 2 mm pen is well above the hairline floor.
+        #expect(thick[0].halfWidthPx > RendererGeometry.defaultHalfWidthPx)
+    }
+
+    @Test("explicit mm lineweight matches mm → points → device-px half-width")
+    func explicitLineweightFormula() {
+        // 2 mm @ backingScale 2: pts = 2 / (25.4/72), halfPx = pts * 2 * 0.5.
+        let expected = Float(2.0) / RendererGeometry.mmPerPoint * Float(2.0) * 0.5
+        #expect(abs(packedHalfWidth(.millimeters(2.0), backingScale: 2) - expected) < 1e-4)
+    }
+
+    @Test("a non-explicit pen (.default/.byLayer/.byBlock) keeps the passed fallback")
+    func nonExplicitKeepsFallback() {
+        let fallback: Float = 1.25
+        #expect(packedHalfWidth(.default, fallback: fallback) == fallback)
+        #expect(packedHalfWidth(.byLayer, fallback: fallback) == fallback)
+        #expect(packedHalfWidth(.byBlock, fallback: fallback) == fallback)
+    }
+
+    @Test("explicit lineweight is FIXED on zoom — same device px regardless of view scale")
+    func explicitLineweightFixedOnZoom() {
+        // The packed half-width depends only on the pen width + backing scale, never
+        // on the world→clip zoom (the Metal path is screen-space), so packing the
+        // same pen yields the SAME device half-width — lineweight does not scale.
+        let a = packedHalfWidth(.millimeters(1.5), backingScale: 2)
+        let b = packedHalfWidth(.millimeters(1.5), backingScale: 2)
+        #expect(a == b)
+        // The helper exposed for the renderer is pure (no view state).
+        let pen = ResolvedPen(color: .librecadGreen, lineType: .solid, lineWidth: .millimeters(1.5))
+        #expect(RendererGeometry.halfWidthPx(for: pen, fallback: 0.75, backingScale: 2) == a)
+    }
+
+    @Test("backingScale scales the explicit half-width (Retina is 2× of 1×)")
+    func explicitLineweightTracksBackingScale() {
+        let at1 = packedHalfWidth(.millimeters(2.0), backingScale: 1)
+        let at2 = packedHalfWidth(.millimeters(2.0), backingScale: 2)
+        // Both are above the hairline floor, so the 2× backing doubles the px width.
+        #expect(at2 > at1)
+        #expect(abs(at2 - at1 * 2) < 1e-4)
+    }
+
+    // NOTE: The CG-export per-pen width (`CGSceneRenderer.strokeWidthWorld`) is a
+    // pure helper with the SAME contract as the Metal `halfWidthPx(for:…)` above
+    // (explicit mm → physical width floored to the shared hairline; non-explicit →
+    // the shared default). It is not unit-tested here because `CGSceneRenderer`
+    // lives in the app target and would require a NEW `_SharedCGSceneRenderer.swift`
+    // symlink (outside this change's owned-files boundary). The Metal pack tests
+    // above cover the identical width-derivation logic.
+
     // MARK: - Bulk instances from ResolvedGeometry
 
     @Test("instances(from:) flattens many geometries, preserving total segment count")

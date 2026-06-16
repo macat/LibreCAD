@@ -24,6 +24,7 @@
 //
 
 import simd
+import CoreGraphics
 import CADEngine
 
 // MARK: - The per-segment instance (matches `LineInstance` in the Metal source)
@@ -372,9 +373,41 @@ enum RendererGeometry {
 
     /// The default line half-width in device pixels. CAD lines are typically
     /// hairline; 0.75 px half-width ≈ 1.5 px stroke, which with analytic AA reads
-    /// as a crisp ~1px line. (Pen line-width → pixels is a Phase-1 upgrade; for
-    /// the foundation every stroke uses this constant — flagged in the brief.)
+    /// as a crisp ~1px line. A pen with an EXPLICIT lineweight (`.millimeters`)
+    /// overrides this via `halfWidthPx(for:fallback:backingScale:)`; a
+    /// `.default`/`.byLayer`/`.byBlock` (unresolved) pen falls back to this.
     static let defaultHalfWidthPx: Float = 0.75
+
+    /// Millimeters per typographic point (1 pt = 1/72 inch, 1 inch = 25.4 mm) —
+    /// the mm→points conversion used when turning an explicit pen lineweight into a
+    /// device-pixel half-width. Mirrors `RenderPrefs.mmPerPoint` (kept here so this
+    /// pure, app-module-free helper has no dependency on the prefs type).
+    static let mmPerPoint: Float = 25.4 / 72.0
+
+    /// The device-pixel HALF-width to pack for a resolved pen.
+    ///
+    /// - An EXPLICIT lineweight (`.millimeters(mm)`) is converted mm → points →
+    ///   device pixels, halved (the instance stores HALF the stroke width), and
+    ///   FLOORED to the hairline `defaultHalfWidthPx` so a 0 / very-thin width
+    ///   still reads as a crisp line rather than vanishing. This is a fixed device
+    ///   size — it does NOT scale with zoom (AutoCAD lineweight convention; the
+    ///   Metal path is already screen-space so this is automatic).
+    /// - Any NON-explicit width (`.default`/`.byLayer`/`.byBlock` — i.e. a pen the
+    ///   resolve step could not reduce to a concrete millimeter value) returns the
+    ///   supplied `fallback` (the renderer's global default-width half-width), so
+    ///   existing behavior is unchanged when no lineweight is set.
+    ///
+    /// Pure value math (no Metal/AppKit) → unit-testable in `RendererGeometryTests`.
+    static func halfWidthPx(for pen: ResolvedPen, fallback: Float, backingScale: CGFloat) -> Float {
+        switch pen.lineWidth {
+        case .millimeters(let mm):
+            let s = Float(backingScale > 0 ? backingScale : 1)
+            let pts = Float(mm) / mmPerPoint
+            return max(defaultHalfWidthPx, pts * s * 0.5)
+        case .default, .byLayer, .byBlock:
+            return fallback
+        }
+    }
 
     /// Light-mode "automatic color" auto-invert: a pen whose RGB is near-white
     /// (the CAD color-7 / "automatic" default the engine resolves to white for a
@@ -408,7 +441,13 @@ enum RendererGeometry {
     /// - Parameters:
     ///   - polyline: the resolved polyline (world coords, f64).
     ///   - renderOrigin: the per-view f64 floating origin to subtract.
-    ///   - halfWidthPx: device-pixel half-width for every emitted segment.
+    ///   - halfWidthPx: the FALLBACK device-pixel half-width — used for a pen with
+    ///     no explicit lineweight (`.default`/`.byLayer`/`.byBlock`). A pen with an
+    ///     explicit `.millimeters` width OVERRIDES this per-polyline via
+    ///     `halfWidthPx(for:fallback:backingScale:)` (mm → device px, fixed on zoom).
+    ///   - backingScale: points→pixels for the display (e.g. 2 on Retina), used to
+    ///     convert an explicit mm lineweight to device pixels. Defaults to 1 so
+    ///     existing call sites / tests that pass only a half-width still compile.
     ///   - colorTransform: an optional per-pen color remap applied to the pen's
     ///     RGBA before packing (identity by default). The renderer uses this for
     ///     the light-mode "automatic color" auto-invert (near-white → near-black)
@@ -421,6 +460,7 @@ enum RendererGeometry {
         for polyline: ResolvedPolyline,
         renderOrigin: Vector,
         halfWidthPx: Float = defaultHalfWidthPx,
+        backingScale: CGFloat = 1,
         colorTransform: (SIMD4<Float>) -> SIMD4<Float> = { $0 },
         into instances: inout [LineInstance]
     ) {
@@ -431,6 +471,12 @@ enum RendererGeometry {
             polyline.pen.color.r, polyline.pen.color.g,
             polyline.pen.color.b, polyline.pen.color.a
         ))
+
+        // Per-polyline stroke half-width: an explicit pen lineweight overrides the
+        // passed `halfWidthPx` fallback (mm → device px, fixed on zoom); a pen with
+        // no explicit width keeps the fallback (existing behavior).
+        let halfWidthPx = self.halfWidthPx(
+            for: polyline.pen, fallback: halfWidthPx, backingScale: backingScale)
 
         // Degenerate single point → zero-length segment (drawn as a dot).
         if pts.count == 1 {

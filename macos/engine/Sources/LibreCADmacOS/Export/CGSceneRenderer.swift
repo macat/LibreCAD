@@ -110,13 +110,16 @@ enum CGSceneRenderer {
             drawImage(image, in: ctx, strokeWorld: strokeWorld)
         }
 
-        // Strokes on top. Stroke width is in WORLD units (scaled by the CTM) so a
-        // ~1pt hairline on paper is `1/scale` world units — matching the SVG path.
+        // Strokes on top. The DEFAULT stroke width is in WORLD units (scaled by the
+        // CTM) so a ~1pt hairline on paper is `1/scale` world units — matching the
+        // SVG path. A pen with an explicit `.millimeters` lineweight OVERRIDES this
+        // per-polyline inside `drawPolyline` (mm → page points → world units), so a
+        // wider pen renders a physically wider stroke on the page.
         ctx.setLineWidth(strokeWorld)
         ctx.setLineJoin(.round)
         ctx.setLineCap(.round)
         for poly in scene.polylines {
-            drawPolyline(poly, in: ctx, strokeWorld: strokeWorld)
+            drawPolyline(poly, in: ctx, strokeWorld: strokeWorld, scale: s)
         }
 
         ctx.restoreGState()
@@ -200,16 +203,25 @@ enum CGSceneRenderer {
         ctx.restoreGState()
     }
 
-    private static func drawPolyline(_ poly: ResolvedPolyline, in ctx: CGContext, strokeWorld: Double) {
+    private static func drawPolyline(_ poly: ResolvedPolyline, in ctx: CGContext,
+                                     strokeWorld: Double, scale: Double) {
         let pts = poly.points
         guard !pts.isEmpty else { return }
         ctx.saveGState()
         ctx.setStrokeColor(cgColor(poly.pen.color))
 
+        // Per-pen stroke width in WORLD units: an explicit `.millimeters` lineweight
+        // renders at its PHYSICAL page size (mm → page points ÷ world→page scale),
+        // floored to the shared `strokeWorld` (which already carries the
+        // `minStrokeDevicePx` hairline floor) so a thin/zero pen stays crisp. A
+        // non-explicit width keeps the shared `strokeWorld` default.
+        let width = strokeWidthWorld(for: poly.pen, strokeWorld: strokeWorld, scale: scale)
+        ctx.setLineWidth(width)
+
         if pts.count == 1 {
             // A point marker: a small filled dot (radius == stroke width).
             ctx.setFillColor(cgColor(poly.pen.color))
-            let r = strokeWorld
+            let r = width
             ctx.fillEllipse(in: CGRect(x: pts[0].x - r, y: pts[0].y - r, width: 2 * r, height: 2 * r))
             ctx.restoreGState()
             return
@@ -227,6 +239,34 @@ enum CGSceneRenderer {
         ctx.strokePath()
         ctx.restoreGState()
     }
+
+    /// The stroke width in WORLD units for a resolved pen, consistent with the
+    /// `strokeWorld = 1/scale` derivation in `draw(scene:…)`:
+    ///
+    /// - An EXPLICIT lineweight (`.millimeters(mm)`) is the pen's physical paper
+    ///   width: `mm` millimeters == `mm / mmPerPoint` page points; after the
+    ///   world→page CTM (`scale` page-points-per-world-unit) that is
+    ///   `(mm / mmPerPoint) / scale` world units. It is floored to `strokeWorld`
+    ///   (the shared ~1pt / `minStrokeDevicePx` hairline) so a thin/zero pen never
+    ///   falls below a visible stroke. This is a fixed PHYSICAL size, independent of
+    ///   the fit-to-page zoom (it tracks paper mm, not screen zoom).
+    /// - Any NON-explicit width (`.default`/`.byLayer`/`.byBlock`) keeps the shared
+    ///   `strokeWorld`, so every existing export is byte-for-byte unchanged.
+    ///
+    /// `mmPerPoint` mirrors the renderer's constant (1 pt = 1/72 in = 25.4/72 mm).
+    static func strokeWidthWorld(for pen: ResolvedPen, strokeWorld: Double, scale: Double) -> Double {
+        switch pen.lineWidth {
+        case .millimeters(let mm):
+            guard scale > 1e-12 else { return strokeWorld }
+            let pagePoints = mm / mmPerPoint
+            return Swift.max(strokeWorld, pagePoints / scale)
+        case .default, .byLayer, .byBlock:
+            return strokeWorld
+        }
+    }
+
+    /// Millimeters per typographic point (1 pt = 1/72 inch, 1 inch = 25.4 mm).
+    static let mmPerPoint: Double = 25.4 / 72.0
 
     // MARK: - Color
 
