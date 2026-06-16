@@ -1465,6 +1465,16 @@ final class CADCanvasController {
         }
 
         if isEscape {
+            // Esc on an in-progress DYNAMIC-GRIP stretch drag reverts to the committed
+            // value (drop the preview, re-anchor the grips) WITHOUT committing — the
+            // earliest unwind step, before any tool/marquee/selection handling. Routed
+            // here (not via the overlay's own first-responder keyDown) so the canvas's
+            // key handler — which always has focus — reliably cancels the drag.
+            if dynamicGrip?.isDragging == true {
+                dynamicGrip?.cancelActiveDrag()
+                redraw()
+                return true
+            }
             // Esc in zoom-window mode cancels the box + exits the mode (the gesture
             // is transient; nothing else changes).
             if isZoomWindowArmed || isZoomWindowDragActive {

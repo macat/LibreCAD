@@ -2507,8 +2507,13 @@ final class CanvasModel {
         /// A SQUARE stretch grip at a LINEAR parameter's `end` (world). Dragging it sets a
         /// new distance along the parameter direction. `base`/`end` are the world-mapped
         /// parameter segment endpoints (so the overlay can project the cursor onto the
-        /// direction); `baseDistance` is the parameter's default distance.
-        case stretch(parameterID: BlockParameterID, base: Vector, end: Vector, baseDistance: Double)
+        /// direction); `baseDistance` is the parameter's default (LOCAL) distance;
+        /// `directionScale` is the local→world length scale along the parameter direction
+        /// (`|t.applyLinear(localUnitDir)|`), so a world-projected distance divides by it to
+        /// recover the LOCAL distance stored in `parameterValues` — correct under a non-unit
+        /// `InsertData.scale` (a pure rotation has `directionScale == 1`).
+        case stretch(parameterID: BlockParameterID, base: Vector, end: Vector,
+                     baseDistance: Double, directionScale: Double)
         /// A TRIANGLE flip grip at a FLIP parameter's line midpoint (world). Clicking it
         /// toggles the instance flip state. `lineStart`/`lineEnd` are the world-mapped
         /// reflection-line endpoints (so the overlay can orient the triangle).
@@ -2517,8 +2522,8 @@ final class CanvasModel {
         /// The grip's world ANCHOR (where the handle is drawn + hit-tested).
         var anchor: Vector {
             switch self {
-            case .stretch(_, _, let end, _): return end
-            case .flip(_, let s, let e, _):  return Vector((s.x + e.x) * 0.5, (s.y + e.y) * 0.5)
+            case .stretch(_, _, let end, _, _): return end
+            case .flip(_, let s, let e, _):     return Vector((s.x + e.x) * 0.5, (s.y + e.y) * 0.5)
             }
         }
     }
@@ -2561,15 +2566,22 @@ final class CanvasModel {
                 // to the CURRENT distance along the (local) direction, then world-mapped.
                 let current = data.dynamic?.parameterValues[pid.raw] ?? baseDist
                 let localEnd: Vector
+                // The local→world length scale ALONG the parameter direction, so the drag
+                // can convert a world projection back to the LOCAL distance under scaling.
+                var dirScale = 1.0
                 if let dir = param.unitDirection {
                     localEnd = Vector(base.x + dir.x * current, base.y + dir.y * current)
+                    let mapped = t.applyLinear(dir)         // local unit dir → world
+                    let m = mapped.magnitude
+                    dirScale = (m.isFinite && m > Tolerance.distance) ? m : 1.0
                 } else {
                     localEnd = end
                 }
                 grips.append(.stretch(parameterID: pid,
                                       base: t.apply(base),
                                       end: t.apply(localEnd),
-                                      baseDistance: baseDist))
+                                      baseDistance: baseDist,
+                                      directionScale: dirScale))
             case .flip(let pid, _, let lineStart, let lineEnd):
                 let flipped = data.dynamic?.flipStates[pid.raw] ?? false
                 grips.append(.flip(parameterID: pid,
@@ -2581,29 +2593,33 @@ final class CanvasModel {
         return grips.isEmpty ? nil : (id, grips)
     }
 
-    /// The new DISTANCE a stretch grip drag yields: the cursor's world point projected
-    /// onto the parameter direction (measured from the parameter's world BASE). This is
-    /// the pure drag→value mapping (analogous to `GizmoTransform.move`/`.rotateAngle`).
-    /// Returns `nil` for a degenerate parameter direction. The result is clamped to be
+    /// The new LOCAL DISTANCE a stretch grip drag yields (the value written into
+    /// `parameterValues`, which the evaluator interprets in BLOCK-LOCAL space). The cursor's
+    /// world point is projected onto the (world) parameter direction measured from the
+    /// parameter's world BASE, then divided by the grip's `directionScale` (the local→world
+    /// length scale along that direction) so a non-unit `InsertData.scale` is handled
+    /// correctly — for a pure rotation `directionScale == 1` and this is just the world
+    /// projection. The pure drag→value mapping (analogous to `GizmoTransform.move`).
+    /// Returns `nil` for a degenerate parameter direction. The result is clamped
     /// non-negative (a linear parameter's distance cannot go past its base point — a
     /// negative projection clamps to 0, matching AutoCAD's linear-stretch behavior).
     func stretchDistance(forGrip grip: DynamicInstanceGrip, cursorWorld: Vector) -> Double? {
-        guard case .stretch(_, let base, _, _) = grip else { return nil }
+        guard case .stretch(_, let base, _, _, let directionScale) = grip else { return nil }
+        let scale = (directionScale.isFinite && directionScale > Tolerance.distance) ? directionScale : 1.0
         // Use the CURRENT (world) grip direction base→end; if the grip is at base
         // (current distance 0) the direction is ill-defined, so fall back to a tiny step.
         let dir = grip.anchor - base
         let len = dir.magnitude
         guard len > Tolerance.distance else {
             // Direction unknown (grip on the base). Project onto the cursor offset itself
-            // so a fresh drag still produces a sensible (positive) distance.
-            let v = cursorWorld - base
-            let d = v.magnitude
-            return d.isFinite ? d : nil
+            // so a fresh drag still produces a sensible (positive) LOCAL distance.
+            let d = (cursorWorld - base).magnitude
+            return d.isFinite ? d / scale : nil
         }
         let unit = Vector(dir.x / len, dir.y / len)
         let proj = (cursorWorld - base).dot(unit)
         guard proj.isFinite else { return nil }
-        return Swift.max(0, proj)
+        return Swift.max(0, proj / scale)   // world projection → LOCAL distance
     }
 
     // MARK: Live preview (mirrors gizmoPreviewPolylines)
@@ -2885,12 +2901,15 @@ final class CanvasModel {
         let base = Vector(box.min.x, midY)
         let end = Vector(box.max.x, midY)
         guard (end - base).magnitude > Tolerance.distance else { return nil }   // degenerate
-        // The stretch frame = the RIGHT HALF of the bounds (so the right defining points move,
-        // the left stay), grown a hair in Y so endpoints exactly on the mid-line are inside.
+        // The stretch frame = the RIGHT HALF of the bounds: left edge at the center line,
+        // right edge at the bounds' right edge, padded a hair in Y. The evaluator tests each
+        // member's ORIGINAL (un-stretched) defining points against this frame, so points
+        // right of center (including the original right endpoint at `box.max.x`) move and
+        // left-of-center points stay — no need to over-extend past `box.max.x`.
         let midX = (box.min.x + box.max.x) * 0.5
         let pad = Swift.max((box.max.y - box.min.y) * 0.5, Tolerance.distance)
         let frame = AABB(min: Vector(midX, box.min.y - pad),
-                         max: Vector(box.max.x + (box.max.x - midX), box.max.y + pad))
+                         max: Vector(box.max.x, box.max.y + pad))
 
         let pid = freshParameterID()
         let aid = freshActionID()

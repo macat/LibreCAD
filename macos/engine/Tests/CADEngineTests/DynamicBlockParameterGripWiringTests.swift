@@ -115,7 +115,7 @@ struct DynamicBlockParameterGripWiringTests {
         var sawStretch = false, sawFlip = false
         for grip in grips {
             switch grip {
-            case .stretch(let pid, _, let end, let baseDist):
+            case .stretch(let pid, _, let end, let baseDist, _):
                 #expect(pid == lenID)
                 #expect((end - Vector(10, 0)).magnitude < 1e-6)   // end at base distance
                 #expect(abs(baseDist - 10) < 1e-6)
@@ -143,7 +143,7 @@ struct DynamicBlockParameterGripWiringTests {
         m.selection = Selection(ids: [iID])
         let grips = m.singleSelectedDynamicInsertGrips?.grips ?? []
         let stretch = grips.compactMap { grip -> Vector? in
-            if case .stretch(_, _, let end, _) = grip { return end }; return nil
+            if case .stretch(_, _, let end, _, _) = grip { return end }; return nil
         }.first
         #expect(stretch != nil)
         #expect((stretch! - Vector(110, 50)).magnitude < 1e-6)
@@ -164,6 +164,32 @@ struct DynamicBlockParameterGripWiringTests {
         // A cursor BEHIND the base (negative projection) clamps to 0.
         let d2 = m.stretchDistance(forGrip: grip, cursorWorld: Vector(-3, 0))
         #expect(d2 != nil && d2! == 0)
+    }
+
+    @Test("stretchDistance maps WORLD cursor to LOCAL distance under a non-unit insert scale")
+    func stretchDistanceUnderScale() {
+        let (m, iID, _, lenID, _) = doorModel()
+        // Scale the insert 2× in x: the block-local segment 0→10 maps to a 0→20 WORLD
+        // segment, and the linear parameter value stays in BLOCK-LOCAL units.
+        if var rec = m.drawing.entity(iID), case .insert(var data) = rec.kind {
+            data.scale = Vector(2, 2)
+            rec.kind = .insert(data)
+            m.applyInspectorEdits([rec])
+        }
+        m.selection = Selection(ids: [iID])
+        let grip = m.singleSelectedDynamicInsertGrips!.grips.first { grip in
+            if case .stretch = grip { return true }; return false
+        }!
+        // The grip sits at WORLD (20,0) (10 local × 2 scale). A WORLD cursor at x=30 is a
+        // LOCAL distance of 15 (30 world ÷ 2 scale) — NOT 30 (the raw world projection).
+        let local = m.stretchDistance(forGrip: grip, cursorWorld: Vector(30, 0))
+        #expect(local != nil && abs(local! - 15) < 1e-9)
+
+        // Committing that LOCAL distance re-resolves to a WORLD right-endpoint at 30 (15
+        // local × 2 scale): the grip tracks the cursor exactly.
+        #expect(m.commitInsertStretch(iID, parameter: lenID, distance: local!) == true)
+        let segs = resolvedSegments(m.drawing.entity(iID)!, m.drawing)
+        #expect(hasPointNear(segs, Vector(30, 0)))
     }
 
     @Test("commitInsertStretch writes the distance + the insert re-resolves stretched")
@@ -370,6 +396,19 @@ struct DynamicBlockParameterGripWiringTests {
         overlay.refresh()
         #expect(overlay.isHidden == true)          // a normal entity → the gizmo owns it
         #expect(overlay.isActive == false)
+    }
+
+    @Test("cancelActiveDrag is a safe no-op when no drag is in progress")
+    func cancelActiveDragNoOpWhenIdle() {
+        let (m, iID, _, _, _) = doorModel()
+        let overlay = DynamicGripOverlayView(model: m, requestCanvasRedraw: {})
+        m.selection = Selection(ids: [iID])
+        overlay.refresh()
+        #expect(overlay.isDragging == false)
+        // The controller's Escape handler calls this; with no drag it must not touch state.
+        overlay.cancelActiveDrag()
+        #expect(overlay.isDragging == false)
+        #expect(m.insertEvaluationPreview.isEmpty)
     }
 
     // MARK: - NO GIZMO REGRESSION for normal entities

@@ -223,7 +223,7 @@ final class DynamicGripOverlayView: NSView {
         // 1) A PARAMETER grip (square stretch begins a drag; triangle flip toggles now).
         if let i = paramGripIndex(at: p) {
             switch paramGrips[i] {
-            case .stretch(let pid, _, _, _):
+            case .stretch(let pid, _, _, _, _):
                 activeDrag = StretchDrag(parameterID: pid, grip: paramGrips[i])
                 needsDisplay = true
             case .flip(let pid, _, _, _):
@@ -270,9 +270,12 @@ final class DynamicGripOverlayView: NSView {
         requestCanvasRedraw()
     }
 
-    /// Esc cancels an in-progress stretch drag → revert to the committed value (drop the
-    /// preview, re-anchor the grips). Matches the gizmo's cancel-on-Escape feel.
-    override func cancelOperation(_ sender: Any?) {
+    /// Cancels an in-progress stretch drag → revert to the committed value (drop the
+    /// preview, re-anchor the grips) WITHOUT committing. The canvas controller's Escape
+    /// handler calls this (the controller's key handler always has focus, so this is the
+    /// reliable cancel path — the overlay does not depend on becoming first responder).
+    /// No-op when no drag is in progress. Matches the gizmo's cancel-on-Escape feel.
+    func cancelActiveDrag() {
         guard activeDrag != nil else { return }
         activeDrag = nil
         model.clearInsertEvaluationPreview()
@@ -280,11 +283,10 @@ final class DynamicGripOverlayView: NSView {
         requestCanvasRedraw()
     }
 
-    override func keyDown(with event: NSEvent) {
-        // Escape (key code 53) cancels an in-progress drag.
-        if event.keyCode == 53, activeDrag != nil { cancelOperation(nil); return }
-        super.keyDown(with: event)
-    }
+    /// AppKit's responder-chain Escape entry point, forwarded to `cancelActiveDrag` for the
+    /// case where the overlay does happen to be first responder (belt-and-suspenders; the
+    /// primary cancel path is the controller's Escape handler).
+    override func cancelOperation(_ sender: Any?) { cancelActiveDrag() }
 
     /// Pops the visibility-state `NSMenu` at the grip and applies the chosen state through
     /// the undoable funnel. The menu lives ONLY here in the View layer (never reachable
@@ -434,8 +436,4 @@ final class DynamicGripOverlayView: NSView {
         ctx.strokePath()
         ctx.restoreGState()
     }
-
-    /// The overlay must accept first-responder status so `keyDown`/`cancelOperation`
-    /// (Escape-to-cancel a drag) reach it during a stretch drag.
-    override var acceptsFirstResponder: Bool { activeDrag != nil }
 }

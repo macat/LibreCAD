@@ -100,7 +100,7 @@ struct DynamicBlockAuthoringWiringTests {
         // The grip enumeration sees the authored linear parameter.
         let grips = m.singleSelectedDynamicInsertGrips?.grips ?? []
         #expect(grips.contains { grip in
-            if case .stretch(let gpid, _, _, _) = grip { return gpid == pid }; return false
+            if case .stretch(let gpid, _, _, _, _) = grip { return gpid == pid }; return false
         })
         // Committing a stretch writes the value + re-resolves to the new length.
         #expect(m.commitInsertStretch(iID, parameter: pid, distance: 16) == true)
