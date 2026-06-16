@@ -19,7 +19,9 @@
 #include "lcdxf.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <exception>
@@ -65,6 +67,12 @@ struct LCEntityList {
     LCHeader header{};
     std::vector<LCDimStyle> dimStyles;
 
+    // RECONSTRUCTED paper-space layouts (paper-space P1). Built by the reader's
+    // `finalizeLayouts()` from observed paper-space content (`*Paper_Space` block
+    // members and/or a PLOTSETTINGS object). At most one entry on stock libdxfrw
+    // (the LAYOUT dictionary is not parsed — see LCLayout).
+    std::vector<LCLayout> layouts;
+
     // Stable-address backing pools (deque: pointers survive growth).
     std::deque<std::string>          strings;
     std::deque<std::vector<LCVertex>> vertexPool;
@@ -94,6 +102,14 @@ public:
         int flags = 0;
         std::vector<LCEntity> members;
         bool anonymous = false;   // *-prefixed (model/paper space, *U…) — not emitted
+        // Paper-space P1: a `*Paper_Space`/`*Paper_Space<n>` layout block. Its
+        // members are paper-space entities for the reconstructed layout (NOT the
+        // auto-generated graphic of a dimension/hatch, which live in `*D…`/`*U…`
+        // blocks). Members are routed to the TOP-LEVEL entity list (like model
+        // space) but tagged spaceFlag = 1 + layoutName, so they become paper-space
+        // EntityRecords. `paperLayoutName` is the reconstructed layout name.
+        bool paperSpace = false;
+        std::string paperLayoutName;
     };
 
     // A captured IMAGE entity awaiting its IMAGEDEF link (the entity arrives in the
@@ -140,6 +156,25 @@ public:
         }
     }
 
+    // After the whole read, RECONSTRUCT a single paper-space layout when the file
+    // carried any paper-space content (a non-empty `*Paper_Space` block, a top-level
+    // entity with code 67 == 1, or a PLOTSETTINGS object). Stock libdxfrw does not
+    // parse the LAYOUT dictionary, so we cannot recover the real tab name/order/paper
+    // size — we emit ONE layout named "Layout1" with the PLOTSETTINGS margin (paper
+    // size left 0 == engine default). Call AFTER finalizeImages (so block-embedded
+    // paper images are counted) — the read entry points order it so. Multi-layout +
+    // true names are the documented libdxfrw-patch follow-up.
+    void finalizeLayouts() {
+        if (!m_sawPaperContent && !m_sawPlotSettings) return;   // model-space-only: no layout
+        LCLayout l{};
+        l.name = intern(std::string(kReconstructedLayoutName));
+        l.widthMM = 0.0;        // 0 == use the engine default sheet size (stock
+        l.heightMM = 0.0;       //      libdxfrw does not parse plot paper size)
+        l.marginMM = (m_plotMarginMM > 0.0) ? m_plotMarginMM : 0.0;
+        l.tabOrder = 0;
+        m_out->layouts.push_back(l);
+    }
+
     // After the whole read, flatten the (non-anonymous, non-empty) pending blocks
     // into `m_out->blocks` + `m_out->blockEntities` with correct member windows.
     void finalizeBlocks() {
@@ -165,23 +200,67 @@ public:
         return intern(std::string(s ? s : ""));
     }
 
-    // Push a flattened entity into the CURRENT target: the block being read (if any)
-    // or the top-level entity list. The pooled pointers an entity borrows (vertices/
-    // strings) live on `m_out` regardless of which vector holds the POD, so this is
-    // a plain copy either way.
-    void pushEntity(const LCEntity &e) {
-        if (m_currentBlock != nullptr) m_currentBlock->members.push_back(e);
-        else m_out->entities.push_back(e);
+    // Paper-space P1: the single reconstructed layout's name (the LAYOUT dictionary
+    // is not parsed by stock libdxfrw, so the real tab name is unknown — see
+    // LCLayout). Matches the engine's `Layout(name: "Layout1")` default.
+    static constexpr const char *kReconstructedLayoutName = "Layout1";
+
+    // Whether a block name denotes a paper-space LAYOUT block: `*Paper_Space`,
+    // `*Paper_Space0`, `*Paper_Space<n>` (case-insensitive prefix). NOT a model-
+    // space block and NOT a `*D…`/`*U…` dimension/hatch graphic block.
+    static bool isPaperSpaceBlock(const std::string &name) {
+        const std::string prefix = "*PAPER_SPACE";
+        if (name.size() < prefix.size()) return false;
+        for (std::size_t i = 0; i < prefix.size(); ++i) {
+            if (std::toupper(static_cast<unsigned char>(name[i])) != prefix[i]) return false;
+        }
+        return true;
     }
 
-    // Fill the common (layer/linetype/color/lineweight) attributes from any
+    // Push a flattened entity into the CURRENT target (paper-space P1):
+    //  - inside a `*Paper_Space` LAYOUT block: route the member to the TOP-LEVEL
+    //    entity list (like model space) but tag it as paper space + stamp the
+    //    reconstructed layout name, so it becomes a paper-space EntityRecord. Note
+    //    we observed paper content, so a layout will be reconstructed at finalize.
+    //  - inside any other (named user) block: collect into that block's members.
+    //  - at the top level: push to the top-level entity list.
+    // The pooled pointers an entity borrows (vertices/strings) live on `m_out`
+    // regardless of which vector holds the POD, so this is a plain copy either way.
+    void pushEntity(const LCEntity &e) {
+        if (m_currentBlock != nullptr && m_currentBlock->paperSpace) {
+            LCEntity paper = e;
+            paper.spaceFlag = 1;
+            paper.layoutName = intern(m_currentBlock->paperLayoutName);
+            m_sawPaperContent = true;
+            m_out->entities.push_back(paper);
+        } else if (m_currentBlock != nullptr) {
+            m_currentBlock->members.push_back(e);
+        } else {
+            // A top-level ENTITIES-section entity carrying code 67 == 1 is paper
+            // space too (the form libdxfrw's own writer emits); note it so a layout
+            // is reconstructed. fillCommon already set spaceFlag from code 67.
+            if (e.spaceFlag == 1) m_sawPaperContent = true;
+            m_out->entities.push_back(e);
+        }
+    }
+
+    // Fill the common (layer/linetype/color/lineweight/space) attributes from any
     // DRW_Entity. Ported from rs_filterdxfrw.cpp setEntityAttributes.
+    //
+    // Paper-space P1: copy DRW_Entity::space (libdxfrw parses it from DXF code 67)
+    // into spaceFlag (0 model / 1 paper). This handles entities in the ENTITIES
+    // section that carry code 67 == 1 (the form libdxfrw's OWN writer emits). An
+    // entity read INSIDE a `*Paper_Space` block — where AutoCAD marks the space by
+    // the block, not code 67 — is tagged paper by pushEntity (block context wins),
+    // which also stamps the layout name.
     void fillCommon(LCEntity &e, const DRW_Entity &src) {
         e.layer = intern(src.layer);
         e.lineType = intern(src.lineType);
         e.color = src.color;
         e.color24 = src.color24;
         e.lineWeightMM100 = DRW_LW_Conv::lineWidth2dxfInt(src.lWeight);
+        e.spaceFlag = (src.space == DRW::PaperSpace) ? 1 : 0;
+        e.layoutName = nullptr;
     }
 
     // Allocate a fresh entity slot with defaulted geometry fields.
@@ -193,6 +272,8 @@ public:
         e.color = DRW::ColorByLayer;
         e.color24 = -1;
         e.lineWeightMM100 = -1;
+        e.spaceFlag = 0;          // model space by default (DXF code 67 == 0)
+        e.layoutName = nullptr;   // bound only for paper-space block members
         e.ratio = 1.0;
         e.degree = 0;
         e.closed = 0;
@@ -324,13 +405,32 @@ public:
     // (they are regenerated by resolve()).
     void addBlock(const DRW_Block &data) override {
         const bool anonymous = (!data.name.empty() && data.name[0] == '*');
-        // Anonymous / layout blocks (`*Model_Space`, `*Paper_Space`, the `*D…`/`*U…`
-        // dimension & hatch graphic blocks) are NOT user-referenceable blocks: their
-        // member entities are the auto-generated graphic for a DIMENSION/etc, which
+        // Paper-space P1: a `*Paper_Space` / `*Paper_Space0` / `*Paper_Space<n>`
+        // block holds the entities painted on a LAYOUT sheet. Stock libdxfrw does
+        // NOT parse the LAYOUT dictionary, so the user-facing tab name is unknown —
+        // we route these members to PAPER space (top-level list, tagged paper) under
+        // a single reconstructed layout named "Layout1" (the documented single-
+        // layout limitation). `*Model_Space` keeps flowing to model space.
+        if (isPaperSpaceBlock(data.name)) {
+            m_pendingBlocks.emplace_back();
+            PendingBlock &pb = m_pendingBlocks.back();
+            pb.name = data.name;
+            pb.bx = data.basePoint.x; pb.by = data.basePoint.y; pb.bz = data.basePoint.z;
+            pb.flags = data.flags;
+            pb.anonymous = true;           // not a user-referenceable block (not emitted)
+            pb.paperSpace = true;
+            pb.paperLayoutName = kReconstructedLayoutName;
+            m_currentBlock = &pb;
+            return;
+        }
+        // Other anonymous / layout blocks (`*Model_Space`, the `*D…`/`*U…` dimension
+        // & hatch graphic blocks) are NOT user-referenceable blocks: their member
+        // entities are the auto-generated graphic for a DIMENSION/etc, which
         // LibreCAD's own filter expands inline. We therefore leave `m_currentBlock`
-        // nullptr for them so their members flow to the TOP-LEVEL entity list exactly
-        // as before (the DIMENSION entity itself is imported + resolved separately).
-        // Only NAMED user blocks collect their members into the block table.
+        // nullptr for them so their members flow to the TOP-LEVEL entity list (model
+        // space) exactly as before (the DIMENSION entity itself is imported +
+        // resolved separately). Only NAMED user blocks collect their members into
+        // the block table.
         if (anonymous) {
             m_currentBlock = nullptr;
             return;
@@ -609,7 +709,21 @@ public:
 
     // ----- misc read hooks (not collected) -------------------------------
     void addComment(const char *comment) override { (void)comment; }
-    void addPlotSettings(const DRW_PlotSettings *data) override { (void)data; }
+    // PLOTSETTINGS (paper-space P1): captured to drive the reconstructed layout's
+    // page geometry. Stock libdxfrw's DRW_PlotSettings parses ONLY the margins
+    // (codes 40–43) and the plot-view name — NOT the paper width/height — so we
+    // capture the margins (the uniform page margin is their max) and note that
+    // PLOTSETTINGS was seen (which alone reconstructs a Layout1 even for a drawing
+    // whose paper space holds no entities yet). Paper size stays at the engine
+    // default until a libdxfrw patch exposes the plot-paper-size codes (44/45).
+    void addPlotSettings(const DRW_PlotSettings *data) override {
+        m_sawPlotSettings = true;
+        if (data == nullptr) return;
+        const double maxMargin = std::max(
+            std::max(data->marginLeft, data->marginRight),
+            std::max(data->marginTop, data->marginBottom));
+        if (maxMargin > m_plotMarginMM) m_plotMarginMM = maxMargin;
+    }
 
     // ----- write hooks: never called during read; required to be defined --
     void writeHeader(DRW_Header &data) override { (void)data; }
@@ -637,6 +751,16 @@ private:
     // and the IMAGEDEF records keyed by code-5 handle. finalizeImages() joins them.
     std::vector<PendingImage> m_pendingImages;
     std::map<duint32, ImageDefRecord> m_imageDefs;
+
+    // Paper-space P1: layout-reconstruction state. `m_sawPaperContent` is set when
+    // any paper-space entity is seen (a `*Paper_Space` block member or a top-level
+    // entity with code 67 == 1); `m_sawPlotSettings` when a PLOTSETTINGS object is
+    // read; `m_plotMarginMM` is the largest PLOTSETTINGS margin captured (the
+    // reconstructed layout's uniform page margin). finalizeLayouts() emits ONE
+    // Layout1 when either flag is set (see finalizeLayouts).
+    bool m_sawPaperContent = false;
+    bool m_sawPlotSettings = false;
+    double m_plotMarginMM = 0.0;
 
     // ----- SOLID / TRACE -------------------------------------------------
     // A filled triangle or quadrilateral. DXF orders the 4 corners as
@@ -1274,6 +1398,13 @@ public:
         // src.lineWeightMM100 holds the DXF lineweight integer (mm*100 / sentinel
         // -1/-2/-3), exactly what dxfInt2lineWidth expects.
         ent.lWeight  = DRW_LW_Conv::dxfInt2lineWidth(src.lineWeightMM100);
+        // Paper-space P1: a paper-space entity (spaceFlag == 1) gets DRW::PaperSpace,
+        // which libdxfrw emits as DXF code 67 == 1 in the ENTITIES section
+        // (libdxfrw.cpp:197). libdxfrw also writes a single built-in `*Paper_Space`
+        // block, so a single layout's paper-space entities round-trip on stock lib.
+        // Multi-layout write (one block per layout) needs a libdxfrw patch — the
+        // documented follow-up. Model entities (spaceFlag == 0) are unaffected.
+        ent.space = (src.spaceFlag == 1) ? DRW::PaperSpace : DRW::ModelSpace;
     }
 
     // ----- the table/entity callbacks libdxfrw drives during write() -------
@@ -2163,6 +2294,10 @@ extern "C" LCStatus lc_dxf_read(const char *path, LCEntityList **out) {
         // contiguous arrays (after parsing, so interned block-name pointers stay
         // valid and member windows are correct).
         reader.finalizeBlocks();
+        // Reconstruct the single paper-space layout (paper-space P1) from the
+        // observed paper content + PLOTSETTINGS. After finalizeImages/Blocks so any
+        // paper-space block image is already counted as paper content.
+        reader.finalizeLayouts();
         *out = list;
         return LC_OK;
     } catch (...) {
@@ -2189,6 +2324,7 @@ extern "C" LCStatus lc_dwg_read(const char *path, LCEntityList **out) {
         }
         reader.finalizeImages();
         reader.finalizeBlocks();
+        reader.finalizeLayouts();
         *out = list;
         return LC_OK;
     } catch (...) {
@@ -2247,6 +2383,15 @@ extern "C" int lc_dimstyle_count(const LCEntityList *list) {
 extern "C" const LCDimStyle *lc_dimstyles(const LCEntityList *list) {
     if (list == nullptr || list->dimStyles.empty()) return nullptr;
     return list->dimStyles.data();
+}
+
+extern "C" int lc_layout_count(const LCEntityList *list) {
+    return list ? static_cast<int>(list->layouts.size()) : 0;
+}
+
+extern "C" const LCLayout *lc_layouts(const LCEntityList *list) {
+    if (list == nullptr || list->layouts.empty()) return nullptr;
+    return list->layouts.data();
 }
 
 extern "C" void lc_entity_list_free(LCEntityList *list) {

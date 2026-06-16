@@ -55,16 +55,24 @@ extension CADEngine {
         /// reaches the resolve without any Resolve/Tool change. Defaults (empty bag)
         /// when the file supplied none of them.
         public var graphicVariables: GraphicVariables
+        /// The reconstructed paper-space layouts (paper-space P1). At most ONE entry
+        /// ("Layout1") on stock libdxfrw — present iff the file carried paper-space
+        /// content (a `*Paper_Space` block or a PLOTSETTINGS object). Empty for a
+        /// model-space-only drawing. Multi-layout + true tab names are a libdxfrw-
+        /// patch follow-up (the LAYOUT dictionary is not parsed by stock libdxfrw).
+        public var layouts: [Layout]
         public var warnings: [String]
 
         public init(records: [EntityRecord], layers: LayerTable,
                     blocks: BlockTable = BlockTable(),
                     graphicVariables: GraphicVariables = GraphicVariables(),
+                    layouts: [Layout] = [],
                     warnings: [String]) {
             self.records = records
             self.layers = layers
             self.blocks = blocks
             self.graphicVariables = graphicVariables
+            self.layouts = layouts
             self.warnings = warnings
         }
     }
@@ -188,9 +196,35 @@ extension CADEngine {
         }
 
         let graphicVariables = Self.mapGraphicVariables(list)
+        let layouts = Self.mapLayouts(list)
 
         return DXFReadResult(records: records, layers: layers, blocks: blocks,
-                             graphicVariables: graphicVariables, warnings: warnings)
+                             graphicVariables: graphicVariables, layouts: layouts,
+                             warnings: warnings)
+    }
+
+    // MARK: - Layout-table mapping (paper-space P1)
+
+    /// Maps the bridge's reconstructed `LCLayout` array (`lc_layouts`) into engine
+    /// `Layout`s. The bridge reconstructs a SINGLE "Layout1" from the `*Paper_Space`
+    /// block presence + PLOTSETTINGS (the LAYOUT dictionary itself is not parsed by
+    /// stock libdxfrw). A zero paper size (`widthMM`/`heightMM == 0`) means "use the
+    /// engine default sheet" — keep `PageDescriptor`'s A4 default in that case; the
+    /// captured PLOTSETTINGS margin (if any) overrides the default margin.
+    private static func mapLayouts(_ list: OpaquePointer) -> [Layout] {
+        let count = Int(lc_layout_count(list))
+        guard count > 0, let base = lc_layouts(list) else { return [] }
+        let buf = UnsafeBufferPointer(start: base, count: count)
+        return buf.map { l in
+            let name = string(l.name) ?? "Layout1"
+            // A default A4 page; override width/height/margin only when the bridge
+            // supplied a positive value (0 == "not parsed → keep the default").
+            var page = PageDescriptor()
+            if l.widthMM > 0 { page.widthMM = l.widthMM }
+            if l.heightMM > 0 { page.heightMM = l.heightMM }
+            if l.marginMM > 0 { page.marginMM = l.marginMM }
+            return Layout(name: name, tabOrder: Int(l.tabOrder), page: page)
+        }
     }
 
     // MARK: - Header / dim-style → graphic-variable mapping
@@ -308,12 +342,21 @@ extension CADEngine {
         guard let kind = mapKind(e) else { return nil }
         let layerName = string(e.layer) ?? "0"
         let pen = mapPen(e)
+        // Paper-space P1: the bridge tags an entity's space via `spaceFlag` (DXF
+        // code 67, or `*Paper_Space` block membership) and the reconstructed layout
+        // name via `layoutName`. Map them onto the additive `EntityRecord` fields;
+        // a model-space entity (spaceFlag == 0, the overwhelming common case) keeps
+        // the `.model` default + a nil layout, so existing drawings are unaffected.
+        let space: EntitySpace = (e.spaceFlag == 1) ? .paper : .model
+        let layoutName: String? = (space == .paper) ? string(e.layoutName) : nil
         return EntityRecord(
             id: idSource(),
             layer: LayerID(layerName),
             pen: pen,
             flags: .default,
-            kind: kind
+            kind: kind,
+            space: space,
+            layoutName: layoutName
         )
     }
 
@@ -811,9 +854,11 @@ public func loadDrawing(dxfPath: String) async throws -> CADDrawing {
     let drawing = CADDrawing()
     // Load the block table too so any INSERT resolves to its block's geometry
     // (the block's member records are part of `result.records`), plus the parsed
-    // header graphic variables so dimensions resolve at the file's real size/units.
+    // header graphic variables so dimensions resolve at the file's real size/units,
+    // plus the reconstructed paper-space layout table (paper-space P1).
     drawing.load(entities: result.records, layers: result.layers,
-                 blocks: result.blocks, graphicVariables: result.graphicVariables)
+                 blocks: result.blocks, graphicVariables: result.graphicVariables,
+                 layouts: result.layouts)
     return drawing
 }
 
@@ -825,6 +870,7 @@ public func loadDrawing(dwgPath: String) async throws -> CADDrawing {
     let result = try await CADEngine.shared.readEntities(dwgPath: dwgPath)
     let drawing = CADDrawing()
     drawing.load(entities: result.records, layers: result.layers,
-                 blocks: result.blocks, graphicVariables: result.graphicVariables)
+                 blocks: result.blocks, graphicVariables: result.graphicVariables,
+                 layouts: result.layouts)
     return drawing
 }

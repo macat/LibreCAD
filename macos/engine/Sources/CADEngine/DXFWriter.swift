@@ -444,6 +444,17 @@ private final class PODBuilder {
         e.lineWeightMM100 = -1     // ByLayer default
         e.ratio = 1.0
         e.layer = intern(record.layer.name.isEmpty ? "0" : record.layer.name)
+        // Paper-space P1: tag the POD's space so the bridge sets DRW_Entity::space →
+        // DXF code 67 == 1 for a paper-space entity. libdxfrw writes a single built-
+        // in `*Paper_Space` block, so paper-space entities + a single layout round-
+        // trip on stock libdxfrw. The layout name is carried for symmetry with the
+        // reader (libdxfrw has no multi-block-per-layout write path, so it does not
+        // affect the emitted bytes today — documented follow-up). Model entities
+        // (`.model`, the default) emit no code 67, leaving them byte-identical.
+        e.spaceFlag = (record.space == .paper) ? 1 : 0
+        if record.space == .paper, let name = record.layoutName, !name.isEmpty {
+            e.layoutName = intern(name)
+        }
         applyPen(record.pen, to: &e)
 
         switch record.kind {
@@ -744,7 +755,8 @@ private final class PODBuilder {
             // the leader's layer + pen so it draws in the leader's context.
             let record = EntityRecord(
                 id: leader.id, layer: leader.layer, pen: leader.pen,
-                flags: leader.flags, kind: annotation)
+                flags: leader.flags, kind: annotation,
+                space: leader.space, layoutName: leader.layoutName)
             return makeEntity(record)
         default:
             // A leader annotation is only ever a text/mtext kind; ignore anything
