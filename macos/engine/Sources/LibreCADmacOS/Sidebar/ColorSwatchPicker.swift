@@ -46,14 +46,14 @@ struct ColorSwatchPicker: View {
         Button {
             showPopover.toggle()
         } label: {
-            // NOTE: the literal 16 / 3 / 0.5 metrics below are intentional for now —
-            // they will migrate to a shared design-token file in a later wave.
-            RoundedRectangle(cornerRadius: 3)
+            // Metrics sourced from the shared design-token layer (DS). The 0.5pt
+            // stroke stays a literal — there's no token for hairline stroke width.
+            RoundedRectangle(cornerRadius: DS.Radius.swatch)
                 .fill(color)
-                .frame(width: 16, height: 16)
+                .frame(width: DS.Size.swatch, height: DS.Size.swatch)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 3)
-                        .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5)
+                    RoundedRectangle(cornerRadius: DS.Radius.swatch)
+                        .strokeBorder(DS.Palette.separator, lineWidth: 0.5)
                 )
         }
         .buttonStyle(.plain)
