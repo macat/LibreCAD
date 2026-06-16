@@ -75,6 +75,9 @@ enum AppSettings {
         static let defaultTemplate = "app.general.defaultTemplate"
         /// Whether autosave is enabled for new windows.
         static let autosaveEnabled = "app.general.autosaveEnabled"
+        /// `DXFExportVersion.rawValue` (String): the DXF format version a Save/Export
+        /// writes (read off-main by `DXFDocumentCodec`, defaulting to R2000).
+        static let dxfExportVersion = "app.general.dxfExportVersion"
 
         /// Appearance tab.
         /// `AppTheme.rawValue` (String): system / light / dark.
@@ -114,6 +117,9 @@ enum AppSettings {
         static let unit: DrawingUnit = .millimeter
         static let template = "blank"
         static let autosaveEnabled = true
+        /// R2000 (AutoCAD 2000 / AC1015) — the broadly-compatible modern DXF the
+        /// writer already defaults to, so an unset key preserves existing behavior.
+        static let dxfExportVersion: DXFExportVersion = .r2000
 
         static let theme: AppTheme = .system
         /// Empty hex = "follow the theme palette" (do not override `CanvasTheme`).
@@ -162,6 +168,14 @@ enum AppSettings {
         DrawingUnit(rawValue: raw) ?? Default.unit
     }
 
+    /// Resolve a stored DXF-export version rawValue (String) back to a
+    /// `DXFExportVersion`, falling back to the default (R2000) for an unknown / blank /
+    /// legacy value. The forgiving decode means a corrupt key never breaks a Save — it
+    /// reverts to the broadly-compatible default.
+    static func dxfExportVersion(fromRaw raw: String) -> DXFExportVersion {
+        DXFExportVersion(rawValue: raw) ?? Default.dxfExportVersion
+    }
+
     /// Resolve a stored snap mask back to a `SnapMode`. `.free` is the always-available
     /// fallback, so it is forced on even if a legacy/blank mask omitted it.
     static func snapMode(fromMask mask: Int) -> SnapMode {
@@ -197,6 +211,9 @@ struct AppSettingsModel: Sendable, Equatable {
     var defaultTextFont: String
     var defaultTextHeight: Double
 
+    /// The DXF format version a Save/Export writes (default R2000).
+    var dxfExportVersion: DXFExportVersion
+
     /// The all-defaults model (what a fresh install resolves to).
     static let standard = AppSettingsModel(
         defaultUnit: AppSettings.Default.unit,
@@ -212,7 +229,8 @@ struct AppSettingsModel: Sendable, Equatable {
         renderQuality: AppSettings.Default.renderQuality,
         defaultLineWidthMM: AppSettings.Default.defaultLineWidthMM,
         defaultTextFont: AppSettings.Default.textFont,
-        defaultTextHeight: AppSettings.Default.textHeight)
+        defaultTextHeight: AppSettings.Default.textHeight,
+        dxfExportVersion: AppSettings.Default.dxfExportVersion)
 
     /// Build a normalized model from the raw stored values (the shape a read-site
     /// gets after `UserDefaults` reads). Every numeric/enum field is run through the
@@ -231,7 +249,8 @@ struct AppSettingsModel: Sendable, Equatable {
          renderQualityRaw: String,
          defaultLineWidthMM: Double,
          textFont: String,
-         textHeight: Double) {
+         textHeight: Double,
+         dxfExportVersionRaw: String = AppSettings.Default.dxfExportVersion.rawValue) {
         self.defaultUnit = AppSettings.unit(fromRaw: unitRaw)
         self.defaultTemplate = template.isEmpty ? AppSettings.Default.template : template
         self.autosaveEnabled = autosave
@@ -246,6 +265,7 @@ struct AppSettingsModel: Sendable, Equatable {
         self.defaultLineWidthMM = AppSettings.clampLineWidthMM(defaultLineWidthMM)
         self.defaultTextFont = textFont.isEmpty ? AppSettings.Default.textFont : textFont
         self.defaultTextHeight = AppSettings.clampTextHeight(textHeight)
+        self.dxfExportVersion = AppSettings.dxfExportVersion(fromRaw: dxfExportVersionRaw)
     }
 
     /// Memberwise init for `.standard` (avoids re-running validators on known-good
@@ -254,7 +274,8 @@ struct AppSettingsModel: Sendable, Equatable {
                  theme: AppTheme, canvasBackgroundHex: String, gridColorHex: String,
                  crosshairStyle: CrosshairStyle, defaultSnap: SnapMode, snapAperturePx: Double,
                  antialias: Bool, renderQuality: RenderQuality, defaultLineWidthMM: Double,
-                 defaultTextFont: String, defaultTextHeight: Double) {
+                 defaultTextFont: String, defaultTextHeight: Double,
+                 dxfExportVersion: DXFExportVersion) {
         self.defaultUnit = defaultUnit
         self.defaultTemplate = defaultTemplate
         self.autosaveEnabled = autosaveEnabled
@@ -269,6 +290,7 @@ struct AppSettingsModel: Sendable, Equatable {
         self.defaultLineWidthMM = defaultLineWidthMM
         self.defaultTextFont = defaultTextFont
         self.defaultTextHeight = defaultTextHeight
+        self.dxfExportVersion = dxfExportVersion
     }
 }
 
@@ -322,6 +344,39 @@ enum RenderQuality: String, CaseIterable, Sendable, Hashable {
     }
 }
 
+/// The DXF format version a Save/Export writes. A thin app-level mirror of the engine's
+/// `CADEngine.DXFVersion`: it exposes the broadly-useful tiers in the Preferences UI
+/// (R12 / R2000 / R2018) and converts to the engine type for the write call. Backed by a
+/// stable `rawValue` String so it persists to `UserDefaults` via `@AppStorage` and is read
+/// off-main by `DXFDocumentCodec`. R2000 is the default — identical to the writer's own
+/// default — so an unset key leaves existing save behavior byte-for-byte unchanged.
+enum DXFExportVersion: String, CaseIterable, Sendable, Hashable {
+    /// AutoCAD R12 (AC1009) — the oldest, most widely-importable DXF (no ACAD object DB).
+    case r12
+    /// AutoCAD 2000 (AC1015) — the modern, broadly-compatible default.
+    case r2000
+    /// AutoCAD 2018 (AC1032) — the newest tier the engine writer supports.
+    case r2018
+
+    /// A short menu label for the Picker.
+    var label: String {
+        switch self {
+        case .r12:   return "R12 (AC1009)"
+        case .r2000: return "R2000 (AC1015)"
+        case .r2018: return "R2018 (AC1032)"
+        }
+    }
+
+    /// The engine writer version this UI tier maps to.
+    var engineVersion: DXFVersion {
+        switch self {
+        case .r12:   return .r12
+        case .r2000: return .r2000
+        case .r2018: return .r2018
+        }
+    }
+}
+
 // MARK: - The Preferences window view (SwiftUI; thin, decomposed per gotcha #2)
 
 #if canImport(SwiftUI)
@@ -362,6 +417,10 @@ private struct GeneralSettingsTab: View {
     @AppStorage(AppSettings.Key.defaultTemplate) private var template = AppSettings.Default.template
     // READ-SITE: document creation — toggle the DocumentGroup/NSDocument autosave policy.
     @AppStorage(AppSettings.Key.autosaveEnabled) private var autosave = AppSettings.Default.autosaveEnabled
+    // READ-SITE (WIRED): the DXF version Save/Export writes. `DXFDocumentCodec.data(from:)`
+    // reads this SAME key off-main via `UserDefaults.standard` and threads it into the
+    // engine writer; R2000 default = unchanged behavior.
+    @AppStorage(AppSettings.Key.dxfExportVersion) private var dxfVersionRaw = AppSettings.Default.dxfExportVersion.rawValue
 
     var body: some View {
         Form {
@@ -381,6 +440,15 @@ private struct GeneralSettingsTab: View {
             Section("Documents") {
                 Toggle("Autosave new documents", isOn: $autosave)
                 Text("Applies to documents created after changing this setting.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Files") {
+                Picker("DXF save version", selection: $dxfVersionRaw) {
+                    ForEach(DXFExportVersion.allCases, id: \.self) { v in
+                        Text(v.label).tag(v.rawValue)
+                    }
+                }
+                Text("The DXF format version a Save/Export writes. R2000 is the broadly-compatible default; R12 maximizes import compatibility with older tools.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
