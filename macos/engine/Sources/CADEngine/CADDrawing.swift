@@ -1016,6 +1016,21 @@ public final class CADDrawing {
         mutateBlocks { $0.activate(name) }
     }
 
+    /// Re-points a block's ordered member-entity id list (undoable, one ⌘Z reverts).
+    ///
+    /// Because a block's contents are id-refs into `entities` (ADR-001) and
+    /// `blockMembersSnapshot()` resolves those ids live at every `makeResolveContext`
+    /// call, swapping the member list immediately changes what EVERY `.insert` of the
+    /// block resolves to. The block-editor's Save&Close / Discard path uses this to
+    /// restore the entry-state member list (the member *records* themselves are
+    /// restored via `replace(_:)`). Routed through the `mutateBlocks` value-snapshot
+    /// funnel, so it is one coherent undoable step; a no-op (same ids, or an unknown
+    /// block) registers nothing. The supplied ids are NOT validated against `entities`
+    /// here — a stale id is simply skipped at resolve time (matches `blockMembersSnapshot`).
+    public func setBlockMembers(name: String, ids: [EntityID]) {
+        mutateBlocks { $0.setEntityIDs(name, ids) }
+    }
+
     // MARK: - Create block from a selection (CreateBlockTool's model op)
 
     /// The outcome of a `makeBlockFromEntities` call: the (possibly de-duplicated)
