@@ -90,4 +90,79 @@ struct SidebarPanelStackGuardTests {
         let remaining = one.visibleOrder[0]
         #expect(one.visibleOrder.count <= 1 && !one.isHidden(remaining))
     }
+
+    // MARK: Zero-visible floor (reconciled never empties visibleOrder)
+
+    /// The PRIMARY fix for the S1 review finding: while the INTERACTIVE path is guarded by
+    /// the view (the last visible panel's hide toggle is disabled), an all-hidden state can
+    /// still arrive through the PERSISTED `@AppStorage` config (externally edited, or a
+    /// future build defaulting more panels hidden). `reconciled(withAvailable:)` must impose
+    /// a zero-visible FLOOR: after reconciliation, `visibleOrder` is NEVER empty while
+    /// `order` is non-empty — it un-hides the first panel so the Customize (⋯) menu, which
+    /// rides in the first visible panel's header, always has a home.
+    ///
+    /// NOTE (fail-before / pass-after): without the floor this `#expect(!...isEmpty)` FAILS
+    /// (the un-floored reconcile returns `hidden == order`, so `visibleOrder` is empty);
+    /// with the floor it PASSES. Verified by temporarily reverting the floor.
+    @Test("reconciled imposes a zero-visible floor: an all-hidden persisted config keeps ≥1 visible")
+    func reconciledNeverEmptiesVisibleOrder() {
+        let roster: [SidebarPanelID] = [.layers, .blocks, .layerStates]
+
+        // A persisted config that hides EVERY panel in the roster (the unrecoverable state).
+        let allHidden = SidebarLayoutConfig(order: roster,
+                                            collapsed: [],
+                                            hidden: Set(roster))
+        #expect(allHidden.visibleOrder.isEmpty)   // pre-reconcile: genuinely all-hidden
+
+        let fixed = allHidden.reconciled(withAvailable: roster)
+        #expect(!fixed.visibleOrder.isEmpty)      // FLOOR: at least one visible
+        #expect(fixed.visibleOrder.count >= 1)
+        // The floor un-hides the FIRST panel in order (so the Customize menu's home is
+        // deterministic and the user's relative ordering is preserved).
+        #expect(fixed.visibleOrder.first == roster.first)
+        #expect(!fixed.isHidden(roster[0]))
+        // It un-hides ONLY the first — the user's other hidden choices are respected.
+        #expect(fixed.isHidden(.blocks))
+        #expect(fixed.isHidden(.layerStates))
+    }
+
+    /// The floor reaches the real load path too: `decoded(from:)` of an all-hidden persisted
+    /// JSON string yields a recoverable config (≥1 visible). This is exactly how an
+    /// externally-edited `@AppStorage` value enters the app.
+    @Test("decoded() of an all-hidden persisted string yields a recoverable (≥1 visible) config")
+    func decodedAllHiddenStringIsRecoverable() {
+        let roster: [SidebarPanelID] = [.layers, .blocks]
+        let allHidden = SidebarLayoutConfig(order: roster, collapsed: [], hidden: Set(roster))
+        let raw = allHidden.encoded()
+        #expect(!raw.isEmpty)
+
+        let loaded = SidebarLayoutConfig.decoded(from: raw, available: roster)
+        #expect(!loaded.visibleOrder.isEmpty)
+        #expect(loaded.visibleOrder.first == roster.first)
+    }
+
+    /// The floor only fires when EVERY panel is hidden: a config that leaves one (or more)
+    /// visible is returned untouched by the floor — it must not gratuitously un-hide a
+    /// user's deliberately-hidden panels.
+    @Test("zero-visible floor is inert when at least one panel is already visible")
+    func floorDoesNotDisturbAlreadyVisibleConfigs() {
+        let roster: [SidebarPanelID] = [.layers, .blocks, .layerStates]
+        // .layers visible, the other two hidden — a legitimate user choice.
+        let oneVisible = SidebarLayoutConfig(order: roster,
+                                             collapsed: [],
+                                             hidden: [.blocks, .layerStates])
+        let reconciled = oneVisible.reconciled(withAvailable: roster)
+        #expect(reconciled.visibleOrder == [.layers])
+        #expect(reconciled.hidden == [.blocks, .layerStates])  // unchanged
+    }
+
+    /// An empty `order` has nothing to floor: reconciling an empty roster stays empty (no
+    /// crash, no phantom panel). Pins the `order.first` guard.
+    @Test("zero-visible floor no-ops on an empty roster")
+    func floorNoOpsOnEmptyOrder() {
+        let empty = SidebarLayoutConfig(order: [], collapsed: [], hidden: [])
+        let reconciled = empty.reconciled(withAvailable: [])
+        #expect(reconciled.order.isEmpty)
+        #expect(reconciled.visibleOrder.isEmpty)
+    }
 }
