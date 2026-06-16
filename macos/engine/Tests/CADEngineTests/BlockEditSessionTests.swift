@@ -1036,4 +1036,112 @@ struct BlockEditSessionTests {
         let pts = resolvedPoints(m.drawing.entity(insertID)!, m.drawing)
         #expect(contains(pts, Vector(20, 30)))
     }
+
+    // MARK: - STAGE 3 regression — saved DEEP work survives an intermediate Discard (depth ≥3)
+    //
+    // The deeper instance of finding #1 (caught on re-review): with A ⊃ insert(B), B ⊃
+    // insert(C), the chain Save C → Discard B → Discard A used to silently revert C.
+    // Discarding B folds C's committed edits into A's open group, but the prior fix only
+    // propagated `hasSavedNestedWork` on a child's SAVE — so A was never marked and its
+    // Discard `undo()`-dropped the group containing C's saved work. The propagation now
+    // fires on ANY pop carrying saved subtree work (incl. a Discarded intermediate level).
+
+    /// A three-level nested model: block "C" (member local (0,0)->(1,0)); block "B"
+    /// (member local (0,0)->(2,0) + an INSERT of C at B-local (3,3)); block "A" (member
+    /// local (0,0)->(20,0) + an INSERT of B at A-local (5,5)); plus one top-level INSERT
+    /// of A at world (100,100). Returns the model + the three block members + the top
+    /// insert. No undo registered during seeding.
+    private func seededThreeLevelModel() -> (
+        model: CanvasModel,
+        cMemberID: EntityID, bMemberID: EntityID, aMemberID: EntityID, topInsertID: EntityID
+    ) {
+        let drawing = CADDrawing()
+        // Block C.
+        let cMember = drawing.add(line(Vector(0, 0), Vector(1, 0)))
+        drawing.mutateBlocks { _ = $0.add(Block(name: "C", entityIDs: [cMember])) }
+        // Block B: a line + an insert of C.
+        let bMember = drawing.add(line(Vector(0, 0), Vector(2, 0)))
+        let bInner = drawing.add(EntityRecord(
+            id: .placeholder,
+            kind: .insert(InsertData(blockName: "C", insertionPoint: Vector(3, 3)))))
+        drawing.mutateBlocks { _ = $0.add(Block(name: "B", entityIDs: [bMember, bInner])) }
+        // Block A: a line + an insert of B.
+        let aMember = drawing.add(line(Vector(0, 0), Vector(20, 0)))
+        let aInner = drawing.add(EntityRecord(
+            id: .placeholder,
+            kind: .insert(InsertData(blockName: "B", insertionPoint: Vector(5, 5)))))
+        drawing.mutateBlocks { _ = $0.add(Block(name: "A", entityIDs: [aMember, aInner])) }
+        // A top-level insert of A.
+        let topInsert = drawing.add(EntityRecord(
+            id: .placeholder,
+            kind: .insert(InsertData(blockName: "A", insertionPoint: Vector(100, 100)))))
+
+        let model = CanvasModel(drawing: drawing, viewSize: CGSize(width: 800, height: 600))
+        model.undoManager.groupsByEvent = false
+        model.undoManager.removeAllActions()
+        return (model, cMember, bMember, aMember, topInsert)
+    }
+
+    @Test("Save C → Discard B → Discard A: C's SAVED edits PERSIST (depth-3 data-loss fix)")
+    func saveDeepThenDiscardIntermediateThenDiscardOuter() {
+        let (m, cMemberID, bMemberID, aMemberID, topInsertID) = seededThreeLevelModel()
+
+        // Open A, B, C.
+        m.enterBlockEditing(name: "A")
+        m.enterBlockEditing(name: "B")
+        m.enterBlockEditing(name: "C")
+        #expect(m.editingBlockStack == ["A", "B", "C"])
+
+        // Edit C's member and SAVE&CLOSE C (committed): (0,0)->(1,0) becomes (0,0)->(1,9).
+        var editedC = m.drawing.entity(cMemberID)!
+        editedC.kind = .line(LineData(start: Vector(0, 0), end: Vector(1, 9)))
+        m.applyInspectorEdits([editedC])
+        #expect(m.exitBlockEditing(save: true) == true)        // SAVE C
+        #expect(m.editingBlockStack == ["A", "B"])
+        #expect(lineEnds(m.drawing.entity(cMemberID))!.1 == Vector(1, 9))
+
+        // Discard B (intermediate) — B's own members revert; C stays saved.
+        #expect(m.exitBlockEditing(save: false) == true)
+        #expect(m.editingBlockStack == ["A"])
+        #expect(lineEnds(m.drawing.entity(cMemberID))!.1 == Vector(1, 9))   // C still saved
+
+        // Discard A (outermost) — must NOT revert C's saved work.
+        #expect(m.exitBlockEditing(save: false) == true)
+        #expect(m.isEditingBlock == false)
+
+        // CRITICAL: C's SAVED edit survives the whole chain.
+        #expect(lineEnds(m.drawing.entity(cMemberID))!.1 == Vector(1, 9))
+        // A's own member is at its entry geometry (A made no own edit here).
+        #expect(lineEnds(m.drawing.entity(aMemberID))!.1 == Vector(20, 0))
+        // B's own member is at its entry geometry (B made no own edit).
+        #expect(lineEnds(m.drawing.entity(bMemberID))!.1 == Vector(2, 0))
+
+        // The top insert resolves with C's SAVED geometry deeply: world
+        // (100,100)+A-local(5,5)+B-local(3,3)+C-local(1,9) = (109,117).
+        let pts = resolvedPoints(m.drawing.entity(topInsertID)!, m.drawing)
+        #expect(contains(pts, Vector(109, 117)))
+    }
+
+    @Test("Save C → Discard B → Save A: C persists; A kept")
+    func saveDeepThenDiscardIntermediateThenSaveOuter() {
+        let (m, cMemberID, _, aMemberID, topInsertID) = seededThreeLevelModel()
+        m.enterBlockEditing(name: "A")
+        // Give A its own edit so its Save is meaningful.
+        var editedA = m.drawing.entity(aMemberID)!
+        editedA.kind = .line(LineData(start: Vector(0, 0), end: Vector(20, 4)))
+        m.applyInspectorEdits([editedA])
+        m.enterBlockEditing(name: "B")
+        m.enterBlockEditing(name: "C")
+        var editedC = m.drawing.entity(cMemberID)!
+        editedC.kind = .line(LineData(start: Vector(0, 0), end: Vector(1, 9)))
+        m.applyInspectorEdits([editedC])
+        m.exitBlockEditing(save: true)        // SAVE C
+        m.exitBlockEditing(save: false)       // DISCARD B
+        m.exitBlockEditing(save: true)        // SAVE A
+        #expect(m.isEditingBlock == false)
+        #expect(lineEnds(m.drawing.entity(cMemberID))!.1 == Vector(1, 9))   // C kept
+        #expect(lineEnds(m.drawing.entity(aMemberID))!.1 == Vector(20, 4))  // A kept
+        let pts = resolvedPoints(m.drawing.entity(topInsertID)!, m.drawing)
+        #expect(contains(pts, Vector(109, 117)))   // C saved, via deep resolve through A's new pos
+    }
 }

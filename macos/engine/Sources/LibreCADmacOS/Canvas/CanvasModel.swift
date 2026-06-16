@@ -1209,10 +1209,19 @@ final class CanvasModel {
         // Pop THIS level and restore its prior view (parent block-edit framing, or the
         // document view for the outermost level).
         editingSessionStack.removeLast()
-        // If this level Save&Closed with real edits AND a PARENT level remains open, those
-        // committed edits have folded into the parent's still-open undo group — mark the
-        // parent so its own Discard won't `undo()` them away (the finding-#1 data-loss fix).
-        if save && sessionChanged, let parentIdx = editingSessionStack.indices.last {
+        // Propagate the "committed nested work folded into me" signal UP the stack on EVERY
+        // pop that carries such work — not just the immediate child-save case. When a level
+        // closes while a PARENT remains open, any COMMITTED work in the popped level's group
+        // folds into the parent's still-open group. That committed work is either:
+        //   (a) THIS level's own Save&Close with real edits (`save && sessionChanged`), or
+        //   (b) saved DEEPER work this level had already absorbed (`level.hasSavedNestedWork`)
+        //       — which survives even if THIS level is itself Discarded (its Discard only
+        //       restores its own block's members; the deeper saved edits remain committed).
+        // In either case the parent must be marked so its own Discard won't `undo()` that
+        // committed work away (the deeper instance of the finding-#1 data-loss bug). Without
+        // (b), a Save C → Discard B → Discard A chain at depth ≥3 would silently revert C.
+        let foldedSavedWork = (save && sessionChanged) || level.hasSavedNestedWork
+        if foldedSavedWork, let parentIdx = editingSessionStack.indices.last {
             editingSessionStack[parentIdx].hasSavedNestedWork = true
         }
         activeSpace = level.priorSpace
