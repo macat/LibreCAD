@@ -18,6 +18,12 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 5. **Parts Library panel + "Insert Block from File"** — `BlockLibrary` engine built but unwired; slots into the new sidebar framework. M.
 Minors: base-point marker render, block list search, insert-time cyclic-insert guard. **NEXT:** engine wave (WBLOCK + block-freeze ops, UNWIRED) → UI wire-wave (insert-options + freeze-toggle + Parts Library panel + WBLOCK/from-file menus); attribute UI after.
 
+**— BLOCK-PARITY WAVES LANDED** (`native-macos @ 6a1270e3b`, **2339 tests**, `.app` rebuilt; all code-reviewed APPROVE):
+- Engine (UNWIRED): **WBLOCK** `BlockExport.writeBlock/writeRecords` (`29ad8267a`, re-based to origin, nested inserts emitted) + **block freeze/visibility ops** `CADDrawing.setBlockFrozen/toggleBlockFrozen/freezeAll/thawAll` (`2bca8bfc8`, undoable; resolve hides frozen).
+- UI wave A (`20728b9c1`): **insert scale/rotation/MINSERT array** options in the tool-options bar (config flows onto `InsertTool`, survives chained placement) + **per-block eye/freeze toggle** + Freeze-All/Thaw-All.
+- UI wave B (`49e8216`): **Insert Block from File** + **Save Block to File (WBLOCK)** menus (View-layer panels → `BlockLibrary.importDXF`/`BlockExport.writeBlock`); freeze menu moved to the Blocks panel header; **Parts Library panel** (new `SidebarPanelID.partsLibrary` in the rearrangeable framework — choose folder → scan `.dxf` → click/drag to place; last folder persisted).
+**LibreCAD block-dock parity reached at the UI level.** Remaining block items (for owner to prioritize): **block-attribute editing UI (EATTEDIT)** — M, the biggest, engine round-trip done; Parts Library per-file thumbnails; the canvas DROP handler for `PartLibraryDragItem` + its Info.plist UTI (small canvas wave); sidebar keyboard arrow-nav (single-`List` restructure); minors (base-point marker, block-list search, insert-time cyclic guard).
+
 ---
 
 ## 2026-06-16 — BLOCK-EDITING FLOW rebuilt (owner: "editing a block doesn't edit it; open in a tab") (`native-macos @ 128f7c7f2`, **2274 tests**, `.app` rebuilt)
