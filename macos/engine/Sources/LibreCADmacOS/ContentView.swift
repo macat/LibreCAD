@@ -665,12 +665,29 @@ struct ContentView: View {
     /// One group's toolbar section: its PINNED tools as buttons, then a `▾` overflow
     /// `Menu` carrying the whole group (every tool, with a pin toggle each). Split out
     /// per group so each toolbar sub-expression stays tiny for the type-checker.
+    ///
+    /// In the Draw group (#1), a pinned tool that has a registered FLYOUT
+    /// (`ToolCatalog.drawFlyout(for:)` — Line / Circle / Arc / Rectangle) renders as a
+    /// hold-to-open flyout instead of a plain button (click = its default tool/mode,
+    /// hold = the variant menu). All other tools stay plain buttons.
     @ViewBuilder
     private func groupSection(_ group: ToolGroup) -> some View {
         ForEach(pinnedTools(in: group), id: \.self) { kind in
-            toolButton(kind)
+            pinnedButton(kind, in: group)
         }
         groupOverflowMenu(group)
+    }
+
+    /// Renders one pinned toolbar entry: a Draw flyout when `kind` has one registered,
+    /// else a plain tool button. Split out so `groupSection`'s `ForEach` body stays a
+    /// single small expression for the type-checker.
+    @ViewBuilder
+    private func pinnedButton(_ kind: ToolKind, in group: ToolGroup) -> some View {
+        if group == .draw, let flyout = ToolCatalog.drawFlyout(for: kind) {
+            drawFlyoutButton(flyout)
+        } else {
+            toolButton(kind)
+        }
     }
 
     /// The `▾` overflow menu for one group: every tool in the group (so all are
@@ -745,6 +762,91 @@ struct ContentView: View {
     private func activeBadge(_ kind: ToolKind) -> some View {
         if model.activeToolKind == kind {
             RoundedRectangle(cornerRadius: 6).fill(.tint.opacity(0.25))
+        }
+    }
+
+    // MARK: - Draw flyouts (#1)
+
+    /// A Draw FLYOUT button: `Menu(content:label:primaryAction:)`, so a plain CLICK runs
+    /// the flyout's default (`primaryAction` → activate the primary kind) and a HOLD opens
+    /// the variant menu. The label shows the primary glyph, plus — when a variant is the
+    /// currently-active configuration — the active variant's title so the toolbar reflects
+    /// the live mode/kind. Reuses the same `activeBadge` highlight as a plain button.
+    @ViewBuilder
+    private func drawFlyoutButton(_ flyout: ToolCatalog.Flyout) -> some View {
+        let meta = ToolCatalog.metadata(for: flyout.primary)
+        Menu {
+            ForEach(flyout.variants, id: \.self) { variant in
+                flyoutVariantRow(variant)
+            }
+        } label: {
+            Label(flyoutLabelTitle(flyout), systemImage: meta.symbol)
+        } primaryAction: {
+            activate(flyout.primary)
+        }
+        .menuIndicator(.visible)
+        .help("\(flyout.primary.title) — click to draw; hold for variants")
+        .background(activeBadge(flyout.primary))
+    }
+
+    /// One row of a flyout's hold-menu: activates the variant (a separate KIND, or the
+    /// base kind RE-MINTED in a construction MODE) and shows a checkmark when it is the
+    /// active configuration.
+    @ViewBuilder
+    private func flyoutVariantRow(_ variant: ToolCatalog.FlyoutVariant) -> some View {
+        Button {
+            activateVariant(variant)
+        } label: {
+            Label(ToolCatalog.variantTitle(variant),
+                  systemImage: isActiveVariant(variant) ? "checkmark"
+                                                        : ToolCatalog.variantSymbol(variant))
+        }
+    }
+
+    /// The flyout button's title: the active variant's name when a variant is the live
+    /// configuration (e.g. "Circle · 2 Points", "Construction Line"), else the primary
+    /// kind's title. Lets the toolbar reflect the held-then-picked mode/kind.
+    private func flyoutLabelTitle(_ flyout: ToolCatalog.Flyout) -> String {
+        if let active = flyout.variants.first(where: { isActiveVariant($0) }) {
+            switch active {
+            case .kind(let k):     return k.title
+            case .circleMode, .arcMode:
+                return "\(flyout.primary.title) · \(ToolCatalog.variantTitle(active))"
+            }
+        }
+        return flyout.primary.title
+    }
+
+    /// Activates one flyout variant. A `.kind` variant routes through the normal
+    /// `activate(_:)` (so Image/Create-Block special-cases still hold); a `.circleMode`
+    /// / `.arcMode` variant sets the model's construction mode FIRST, then activates the
+    /// base Circle/Arc kind so `applyToolConfig` re-mints the tool in that mode — exactly
+    /// the ToolOptionsBar path (ToolOptionsBar.swift:214 / :243).
+    private func activateVariant(_ variant: ToolCatalog.FlyoutVariant) {
+        switch variant {
+        case .kind(let k):
+            activate(k)
+        case .circleMode(let mode):
+            model.circleConstructionMode = mode
+            controllerBox.controller?.activateTool(.circle)
+        case .arcMode(let mode):
+            model.arcMode = mode
+            controllerBox.controller?.activateTool(.arc)
+        }
+    }
+
+    /// Whether `variant` is the CURRENT live configuration (drives the hold-menu
+    /// checkmark + the button's active-variant title). A `.kind` variant is active when
+    /// it is the active tool kind; a mode variant is active when its base kind is active
+    /// AND the model's construction mode matches.
+    private func isActiveVariant(_ variant: ToolCatalog.FlyoutVariant) -> Bool {
+        switch variant {
+        case .kind(let k):
+            return model.activeToolKind == k
+        case .circleMode(let mode):
+            return model.activeToolKind == .circle && model.circleConstructionMode == mode
+        case .arcMode(let mode):
+            return model.activeToolKind == .arc && model.arcMode == mode
         }
     }
 
@@ -1292,6 +1394,102 @@ enum ToolCatalog {
         // Annotate essentials.
         .text, .linearDim, .leader,
     ]
+
+    // MARK: Draw flyouts (#1 — click = default tool, hold = variants)
+
+    /// One VARIANT inside a Draw flyout. A variant is EITHER:
+    ///   • `.kind` — a SEPARATE `ToolKind` (e.g. Ray / Construction Line / Polygon),
+    ///     activated directly via the toolbar's `activate(_:)` routing; OR
+    ///   • `.circleMode` / `.arcMode` — a CONSTRUCTION MODE of the SAME kind (Circle /
+    ///     Arc), which is NOT its own `ToolKind`. These set the model's
+    ///     `circleConstructionMode` / `arcMode` FIRST, then activate the base kind so
+    ///     `applyToolConfig` re-mints the tool in that mode (the ToolOptionsBar path).
+    ///
+    /// No new `ToolKind` / `EntityKind` / mode is introduced — every case resolves to
+    /// an EXISTING kind or an existing construction mode (verified against
+    /// `CircleConstructionMode` / `ArcCreationMode`, which have exactly the cases listed).
+    enum FlyoutVariant: Hashable {
+        case kind(ToolKind)
+        case circleMode(CircleConstructionMode)
+        case arcMode(ArcCreationMode)
+    }
+
+    /// A Draw-toolbar FLYOUT: a primary tool button (click = activate `primary`) that,
+    /// when held, opens a menu of `variants`. Replaces a plain pinned button so the
+    /// related tools/modes for a draw family are one hold away (#1).
+    struct Flyout: Identifiable {
+        /// The kind the flyout's button activates on a plain click (and whose glyph it
+        /// shows). Also the `id` so the toolbar `ForEach`/lookup is stable.
+        let primary: ToolKind
+        /// The hold-menu variants, in display order.
+        let variants: [FlyoutVariant]
+        var id: ToolKind { primary }
+    }
+
+    /// The Draw-group flyouts (#1), in toolbar order. ONLY the four pinned Draw tools
+    /// that have meaningful variants/modes are flyouts; every other Draw tool stays a
+    /// plain button (and the whole group stays reachable via the `▾` overflow menu).
+    ///   • Line ▸ {Construction Line (XLine), Ray}  — separate KINDS.
+    ///   • Rectangle ▸ {Polygon}                    — a separate KIND.
+    ///   • Circle ▸ {Center+Radius, 2 Points, 3 Points} — construction MODES.
+    ///   • Arc ▸ {Center/Start/End, 3 Points, Tangential} — construction MODES.
+    /// (Circle has no TTR mode and Rectangle has no rounded/chamfer KIND in this build,
+    /// so neither is offered — only existing kinds/modes are listed.)
+    static let drawFlyouts: [Flyout] = [
+        Flyout(primary: .line, variants: [.kind(.xline), .kind(.ray)]),
+        Flyout(primary: .circle, variants: [
+            .circleMode(.centerRadius), .circleMode(.twoPoint), .circleMode(.threePoint),
+        ]),
+        Flyout(primary: .arc, variants: [
+            .arcMode(.centerStartEnd), .arcMode(.threePoint), .arcMode(.tangential),
+        ]),
+        Flyout(primary: .rectangle, variants: [.kind(.polygon)]),
+    ]
+
+    /// The flyout (if any) whose PRIMARY button is `kind` — so `groupSection(.draw)` can
+    /// render a flyout in place of a plain button for the four flyout primaries.
+    static func drawFlyout(for kind: ToolKind) -> Flyout? {
+        drawFlyouts.first { $0.primary == kind }
+    }
+
+    /// A short display title for one flyout variant (the hold-menu row label / the
+    /// active-variant badge text). Mode variants read as their construction-mode name;
+    /// kind variants read as the kind's UI title.
+    static func variantTitle(_ variant: FlyoutVariant) -> String {
+        switch variant {
+        case .kind(let k):           return k.title
+        case .circleMode(let m):     return circleModeTitle(m)
+        case .arcMode(let m):        return arcModeTitle(m)
+        }
+    }
+
+    /// The SF Symbol for one flyout variant's hold-menu row.
+    static func variantSymbol(_ variant: FlyoutVariant) -> String {
+        switch variant {
+        case .kind(let k):       return metadata(for: k).symbol
+        case .circleMode:        return "circle"
+        case .arcMode:           return "point.topleft.down.to.point.bottomright.curvepath"
+        }
+    }
+
+    /// Display names for the Circle construction modes (mirrors the ToolOptionsBar
+    /// picker labels so the flyout and the options bar read identically).
+    static func circleModeTitle(_ mode: CircleConstructionMode) -> String {
+        switch mode {
+        case .centerRadius: return "Center, Radius"
+        case .twoPoint:     return "2 Points"
+        case .threePoint:   return "3 Points"
+        }
+    }
+
+    /// Display names for the Arc construction modes (mirrors the ToolOptionsBar picker).
+    static func arcModeTitle(_ mode: ArcCreationMode) -> String {
+        switch mode {
+        case .centerStartEnd: return "Center, Start, End"
+        case .threePoint:     return "3 Points"
+        case .tangential:     return "Tangential"
+        }
+    }
 
     // MARK: Group rosters (canonical order)
 
