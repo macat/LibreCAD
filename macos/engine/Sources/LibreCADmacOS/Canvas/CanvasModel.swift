@@ -246,6 +246,30 @@ final class CanvasModel {
     /// policy, not document content, so it is not undoable and not persisted.
     var currentPen: Pen = .byLayer
 
+    /// Whether POLAR tracking is on (LibreCAD's polar restriction, AutoCAD F10). When
+    /// on, a draw tool's candidate point is locked onto the ray from the last placed
+    /// point (`relativeZero`) at the NEAREST multiple of `polarAngleIncrement`,
+    /// preserving the cursor's distance from that reference — a finer-grained angular
+    /// lock than ortho's two fixed axes. ORTHO and POLAR are MUTUALLY EXCLUSIVE (like
+    /// LibreCAD / AutoCAD): turning one on turns the other off, so the canvas only ever
+    /// applies one angular constraint. Observed so the menu checkmark + status-bar chip
+    /// track it live. A live interaction policy (not persisted to the document, like
+    /// ortho / the cursor mode). UNWIRED here — the canvas hook is a later wire-wave.
+    var polarEnabled: Bool = false
+
+    /// The angular step POLAR snaps the candidate point to, in RADIANS. Defaults to 15°
+    /// (`.pi / 12`), LibreCAD's classic polar increment. A live drafting setting (not
+    /// persisted), consumed by `polarConstrained` via `PolarConstraint.constrain`.
+    var polarAngleIncrement: Double = .pi / 12
+
+    /// How the status-bar coordinate readout is rendered — ABSOLUTE world point,
+    /// RELATIVE offset from the last point, or POLAR `dist<angle` (backlog #5). The
+    /// single-keystroke "cycle coordinate mode" command advances this through
+    /// `absolute → relative → polar → absolute`. Observed so the status bar's coord
+    /// segment re-renders on a cycle. A live VIEW policy (not document content, not
+    /// undoable). UNWIRED — the status-bar button is a later wire-wave.
+    var coordinateDisplayMode: CoordinateDisplayMode = .absolute
+
     /// The grid step (world units) last seen via `updateSnap`/`snappedWorldPoint`.
     /// The renderer owns the live grid spacing and the canvas view passes it down
     /// on every cursor event; we cache the latest here so `handleToolInput` can put
@@ -1383,6 +1407,108 @@ final class CanvasModel {
         return "Layout\(n)"
     }
 
+    // MARK: - Layout tab ops (backlog #4c — Rename / Delete / Duplicate / Page Setup)
+    //
+    // Thin `CanvasModel` wrappers over the undoable engine layout ops
+    // (`CADDrawing.duplicateLayout` / `setLayoutPage` / `renameLayout` / `removeLayout`).
+    // Each performs ACTIVE-TAB FIXUP so the model's `activeLayout` pointer never dangles
+    // after the table changes — it re-resolves through `setActiveSpace`, which falls
+    // back to model space when a name no longer exists — and bumps `modelVersion` so the
+    // tab strip + chrome refresh. UNWIRED — the tab `.contextMenu` calls these in a
+    // later wire-wave. (These mutate the document table, so they are undoable via the
+    // engine ops; the active-tab re-home is a pure view change layered on top.)
+
+    /// Renames the layout `name` → `newName` (backlog #4c). On success, if the renamed
+    /// layout was the ACTIVE one, re-homes the active tab onto the new name (the old
+    /// name no longer resolves) so the canvas keeps showing the same sheet. No-op
+    /// (returns `false`) if the engine rename fails (absent source / taken target).
+    @discardableResult
+    func renameLayout(_ name: String, to newName: String) -> Bool {
+        let wasActive = activeSpace == .paper
+            && activeLayout?.caseInsensitiveCompare(name) == .orderedSame
+        guard drawing.renameLayout(from: name, to: newName) else { return false }
+        if wasActive {
+            // The old name is gone; point the active tab at the renamed sheet (its
+            // canonical stored casing). Falls back to model space if (defensively) the
+            // renamed layout can't be resolved.
+            setActiveSpace(.paper, layoutName: newName)
+        }
+        modelVersion &+= 1
+        return true
+    }
+
+    /// Deletes the layout `name` (backlog #4c). On success, re-resolves the active tab:
+    /// if the deleted layout was active, `setActiveSpace` falls back to model space (no
+    /// sheet to show); otherwise the active tab is unchanged. No-op (returns `false`) if
+    /// the layout is absent.
+    @discardableResult
+    func deleteLayout(_ name: String) -> Bool {
+        guard drawing.removeLayout(name: name) else { return false }
+        // Re-resolve the current active space/layout: if `activeLayout` named the just-
+        // removed sheet it no longer exists, so `setActiveSpace` falls back to model.
+        setActiveSpace(activeSpace, layoutName: activeLayout)
+        modelVersion &+= 1
+        return true
+    }
+
+    /// Duplicates the layout `name` into a fresh independent sheet (backlog #4c) and —
+    /// matching `newLayout` / AutoCAD's Duplicate behavior — ACTIVATES the new sheet so
+    /// the user lands on the copy. Returns the new layout's name on success, or `nil`
+    /// if the source layout is absent. The engine derives the copy name as `"<name>
+    /// (N)"`; this replicates that derivation to know which sheet to activate.
+    @discardableResult
+    func duplicateLayout(_ name: String) -> String? {
+        guard let source = drawing.layout(named: name) else { return nil }
+        let newName = duplicateLayoutName(for: source.name)
+        guard drawing.duplicateLayout(name: name) else { return nil }
+        modelVersion &+= 1
+        // Land on the freshly created sheet (active-tab fixup); `setActiveSpace` falls
+        // back to model space if the name can't be resolved (defensive).
+        setActiveSpace(.paper, layoutName: newName)
+        return newName
+    }
+
+    /// The name `CADDrawing.duplicateLayout` will mint for a copy of `baseName`:
+    /// `"<baseName> (2)"`, bumping the suffix until it does not clash
+    /// (case-insensitively). Kept in lockstep with the engine derivation so this
+    /// wrapper can activate the copy it just made.
+    private func duplicateLayoutName(for baseName: String) -> String {
+        var index = 2
+        var candidate = "\(baseName) (\(index))"
+        while drawing.hasLayout(candidate) {
+            index += 1
+            candidate = "\(baseName) (\(index))"
+        }
+        return candidate
+    }
+
+    /// Sets the per-layout page descriptor of the layout `name` (backlog #4c's "Page
+    /// Setup"). On success, if the edited layout is the ACTIVE sheet, re-applies
+    /// `setActiveSpace` so the camera re-frames to the new paper geometry. No-op
+    /// (returns `false`) if the layout is absent or the page is unchanged.
+    @discardableResult
+    func setLayoutPage(_ name: String, _ page: PageDescriptor) -> Bool {
+        guard drawing.setLayoutPage(name: name, page) else { return false }
+        modelVersion &+= 1
+        // If the edited layout is on screen, the sheet rect changed — re-frame it.
+        if activeSpace == .paper,
+           activeLayout?.caseInsensitiveCompare(name) == .orderedSame {
+            reframeActiveLayout()
+        }
+        return true
+    }
+
+    /// Re-frames the camera onto the ACTIVE layout's (possibly resized) paper sheet
+    /// without going through `setActiveSpace`'s already-active no-op guard. Used after a
+    /// `setLayoutPage` change to the on-screen sheet so the new page geometry frames.
+    private func reframeActiveLayout() {
+        guard activeSpace == .paper, let page = activeLayoutRecord?.page else { return }
+        viewport = PaperSpaceLayout.cameraFit(for: page, in: viewport.size)
+        renderOrigin = RendererGeometry.renderOrigin(for: activeSpaceBoundingBox)
+        modelDirty = true
+        modelVersion &+= 1
+    }
+
     // MARK: - Viewport history (F23 — Zoom Previous)
 
     /// A bounded back-stack of prior viewports for View ▸ Zoom Previous. A view
@@ -2094,16 +2220,58 @@ final class CanvasModel {
     /// The drawing's display unit (`$INSUNITS`), for the status bar's unit suffix.
     var drawingUnit: DrawingUnit { drawing.graphicVariables.unit }
 
-    /// The cursor's world position formatted as a unit-aware `"X 12.5   Y 8 mm"`
-    /// readout (the document's linear format/precision + unit sign), or `nil` when
-    /// the cursor is outside the canvas. Pure formatting via the engine's
-    /// `CoordinateFormatter` so the status bar stays a thin view.
+    /// The cursor coordinate formatted for the status bar, honoring the live
+    /// `coordinateDisplayMode` (backlog #5) — LibreCAD's classic cycle:
+    ///
+    ///  • `.absolute` — the cursor's world point `"X 12.5   Y 8 mm"` (the document's
+    ///    linear format/precision + unit sign). UNCHANGED from the prior behavior.
+    ///  • `.relative` — the signed `"@Δx, Δy"` offset of the cursor FROM the
+    ///    relative-zero (the last placed point), the same math as `relativeReadout`.
+    ///  • `.polar`    — the polar `"dist<angle"` of that same relative delta, via the
+    ///    engine `CoordinateFormatter.polarPair` (linear + angular format/precision).
+    ///
+    /// `.relative`/`.polar` need a `relativeZero` to measure from; with none yet (the
+    /// first point of a run, or select mode) they FALL BACK to the absolute readout so
+    /// the segment is never blank. `nil` only when the cursor is outside the canvas.
+    /// Pure formatting via the engine's `CoordinateFormatter` so the status bar stays a
+    /// thin view.
     var cursorReadout: String? {
         guard let w = cursorWorld else { return nil }
         let gv = drawing.graphicVariables
-        return CoordinateFormatter.coordinatePair(
+        switch coordinateDisplayMode {
+        case .absolute:
+            return absoluteCursorReadout(w, gv)
+        case .relative:
+            guard let zero = relativeZero else { return absoluteCursorReadout(w, gv) }
+            let dx = CoordinateFormatter.length(
+                w.x - zero.x, format: gv.linearFormat, precision: gv.linearPrecision)
+            let dy = CoordinateFormatter.length(
+                w.y - zero.y, format: gv.linearFormat, precision: gv.linearPrecision)
+            return "@\(dx), \(dy)"
+        case .polar:
+            guard let zero = relativeZero else { return absoluteCursorReadout(w, gv) }
+            return CoordinateFormatter.polarPair(
+                dx: w.x - zero.x, dy: w.y - zero.y,
+                format: gv.linearFormat, precision: gv.linearPrecision, unit: gv.unit,
+                angleFormat: gv.angleFormat, anglePrecision: gv.anglePrecision)
+        }
+    }
+
+    /// The absolute world-point readout — the original `cursorReadout` body, factored
+    /// out so the `.absolute` mode and the relative/polar no-reference fallback share
+    /// exactly one formatting path.
+    private func absoluteCursorReadout(_ w: Vector, _ gv: GraphicVariables) -> String {
+        CoordinateFormatter.coordinatePair(
             x: w.x, y: w.y,
             format: gv.linearFormat, precision: gv.linearPrecision, unit: gv.unit)
+    }
+
+    /// Cycles the status-bar coordinate display mode (backlog #5):
+    /// `absolute → relative → polar → absolute`. Bumps `modelVersion` so the status
+    /// bar's coord segment re-renders. A pure view-state change (not undoable).
+    func cycleCoordinateDisplayMode() {
+        coordinateDisplayMode = coordinateDisplayMode.next
+        modelVersion &+= 1
     }
 
     /// The signed `@Δx, Δy` offset of the cursor FROM the relative-zero (the last
@@ -4243,8 +4411,13 @@ final class CanvasModel {
     /// Toggles the persistent ortho flag (View ▸ Ortho / status bar). Bumps
     /// `modelVersion` so the menu checkmark + status chip refresh. (The transient
     /// hold-⇧ override is read live by the canvas — it does NOT flip this flag.)
+    ///
+    /// ORTHO and POLAR are MUTUALLY EXCLUSIVE: turning ortho ON clears `polarEnabled`
+    /// (LibreCAD / AutoCAD only apply one angular constraint at a time), so the canvas
+    /// never stacks both restrictions on a candidate point.
     func toggleOrtho() {
         orthoEnabled.toggle()
+        if orthoEnabled { polarEnabled = false }   // ortho ⊕ polar — mutually exclusive
         modelVersion &+= 1
     }
 
@@ -4322,4 +4495,46 @@ final class CanvasModel {
     /// is on, "—" when off (the transient ⇧ override is momentary and not shown here,
     /// mirroring how LibreCAD's status bar reflects the persistent mode).
     var orthoReadout: String { orthoEnabled ? "Ortho" : "\u{2014}" }
+
+    // MARK: - Polar tracking (LibreCAD Polar / AutoCAD F10)
+
+    /// Toggles the persistent polar-tracking flag (View ▸ Polar / status bar). Bumps
+    /// `modelVersion` so the menu checkmark + status chip refresh.
+    ///
+    /// ORTHO and POLAR are MUTUALLY EXCLUSIVE: turning polar ON clears `orthoEnabled`
+    /// (the mirror of `toggleOrtho`), so only one angular constraint is ever active.
+    func togglePolar() {
+        polarEnabled.toggle()
+        if polarEnabled { orthoEnabled = false }   // polar ⊕ ortho — mutually exclusive
+        modelVersion &+= 1
+    }
+
+    /// Applies the POLAR constraint to a candidate world point for the active draw run,
+    /// honoring the same CAD snap precedence as ortho (osnap > polar > free):
+    ///
+    ///   1. If a REAL geometry snap is under the cursor (`osnapActive`), polar is
+    ///      SKIPPED so the user can always bind to existing geometry.
+    ///   2. Else, with polar effective AND a reference point (`relativeZero`, the last
+    ///      placed point), the point is angle-locked via `PolarConstraint.constrain`
+    ///      onto the nearest multiple of `polarAngleIncrement` (15° by default),
+    ///      preserving the reference→cursor distance.
+    ///   3. Else the point passes through unchanged (free).
+    ///
+    /// `point` is the already-snapped world point the tool would otherwise receive;
+    /// `shiftHeld` is the live ⇧ flag from the point-input path — the SAME hold-⇧
+    /// on-the-fly flip as ortho (`orthoEffective`), so polar can be momentarily toggled
+    /// while drawing. With no `relativeZero` (the FIRST point of a run) there is nothing
+    /// to be polar to, so the point is returned unchanged. UNWIRED — the canvas calls
+    /// this next to `orthoConstrained` in a later wire-wave.
+    func polarConstrained(_ point: Vector, shiftHeld: Bool) -> Vector {
+        guard polarEnabled != shiftHeld else { return point }    // F10 XOR hold-⇧
+        guard !osnapActive else { return point }                 // osnap wins
+        guard let reference = relativeZero else { return point }  // need a last point
+        return PolarConstraint.constrain(
+            point, relativeTo: reference, incrementRadians: polarAngleIncrement)
+    }
+
+    /// Short status-bar label for the polar readout: "Polar" when the persistent flag
+    /// is on, "—" when off (mirrors `orthoReadout`).
+    var polarReadout: String { polarEnabled ? "Polar" : "\u{2014}" }
 }
