@@ -318,15 +318,24 @@ final class CanvasModel {
     var commandBarMRU: [ToolKind] = []
 
     /// The ordered tools the command bar should show as chips right now — the pure
-    /// `ToolSuggester` applied to the live query, the current selection state, and
-    /// the MRU. Empty query ⇒ the adaptive default set; otherwise the fuzzy matches.
-    /// A derived, side-effect-free read the chip row binds to.
+    /// `ToolSuggester` applied to the live query. Wave 4 de-mirror: an EMPTY query
+    /// returns NO chips (the bar shows a prompt hint + a labeled Recent row instead —
+    /// see `commandBarRecents(pinned:)`); only a non-empty query yields fuzzy-match
+    /// chips. A derived, side-effect-free read the chip row binds to.
     var commandBarSuggestions: [ToolKind] {
         ToolSuggester.suggestions(
             query: commandBarQuery,
             hasSelection: !selection.isEmpty,
             mru: commandBarMRU
         )
+    }
+
+    /// The most-recently-used tools to surface as a clearly-LABELED "Recent" row when
+    /// the query is empty (the de-mirror replacement for the dropped static chip set).
+    /// Excludes the tools already PINNED to the toolbar so the row never duplicates a
+    /// button the user already has. Pure read over the MRU + the pure `ToolSuggester`.
+    func commandBarRecents(pinned: Set<ToolKind>) -> [ToolKind] {
+        ToolSuggester.recents(mru: commandBarMRU, excluding: pinned)
     }
 
     /// The top-ranked suggestion for the current query — what ⏎ activates. `nil` when

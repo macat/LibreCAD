@@ -32,91 +32,65 @@ import Foundation
 @Suite("Command bar tool suggester")
 struct CommandBarTests {
 
-    // MARK: - Empty query → adaptive default set
+    // MARK: - Empty query → NO chips (Wave 4 de-mirror)
 
-    @Test("empty query returns the adaptive set, leading with the curated core")
-    func emptyQueryLeadsWithCore() {
+    @Test("empty query returns NO chips (the static mirror is gone)")
+    func emptyQueryReturnsNoChips() {
+        // De-mirror: the bar is a command LINE, not a mirror of a default tool set.
+        // Chips appear only while typing.
         let result = ToolSuggester.suggestions(query: "", hasSelection: false, mru: [])
-        // The curated core comes first, in order, regardless of selection/MRU.
-        #expect(Array(result.prefix(6)) == ToolSuggestionCatalog.default.core)
+        #expect(result.isEmpty)
     }
 
-    @Test("empty query is capped at ~10 chips")
-    func emptyQueryIsCapped() {
-        let result = ToolSuggester.suggestions(query: "", hasSelection: false, mru: [])
-        #expect(result.count <= ToolSuggester.defaultCap)
-        // With the default catalog (6 core + 10 draw, deduped) the cap actually binds.
-        #expect(result.count == ToolSuggester.defaultCap)
+    @Test("empty query returns no chips regardless of selection or MRU")
+    func emptyQueryIgnoresContext() {
+        // Neither selection state nor recents resurrect a pre-typed chip set.
+        #expect(ToolSuggester.suggestions(query: "", hasSelection: true, mru: [.move]).isEmpty)
+        #expect(ToolSuggester.suggestions(query: "", hasSelection: false, mru: [.line, .circle]).isEmpty)
     }
 
-    @Test("whitespace-only query is treated as empty (adaptive set)")
+    @Test("whitespace-only query is treated as empty (still no chips)")
     func whitespaceIsEmpty() {
-        let blank = ToolSuggester.suggestions(query: "   ", hasSelection: false, mru: [])
-        let empty = ToolSuggester.suggestions(query: "", hasSelection: false, mru: [])
-        #expect(blank == empty)
+        let blank = ToolSuggester.suggestions(query: "   ", hasSelection: false, mru: [.line])
+        #expect(blank.isEmpty)
     }
 
-    // MARK: - Selection context: Draw vs Modify bias
+    // MARK: - Empty query → labeled "Recent" row (replaces the mirror)
 
-    @Test("no selection surfaces Draw tools; a selection surfaces Modify tools")
-    func selectionContextChangesTheSet() {
-        let noSel = ToolSuggester.suggestions(query: "", hasSelection: false, mru: [])
-        let withSel = ToolSuggester.suggestions(query: "", hasSelection: true, mru: [])
-
-        // The two sets must differ — selection flips the context roster.
-        #expect(noSel != withSel)
-
-        // With a selection, Modify-only tools (not in the core/draw lists) appear.
-        // `.move` is a Modify tool and is NOT in the curated core or the draw roster.
-        #expect(withSel.contains(.move))
-        #expect(!noSel.contains(.move))
-
-        // Without a selection, a Draw-only tool beyond the core appears (e.g. Ellipse),
-        // and Modify-only Move does not.
-        #expect(noSel.contains(.ellipse))
-        #expect(!withSel.contains(.ellipse))
+    @Test("recents surfaces the MRU, most-recent first")
+    func recentsSurfacesMRU() {
+        let recents = ToolSuggester.recents(mru: [.hatch, .spline, .move])
+        #expect(recents == [.hatch, .spline, .move])
     }
 
-    @Test("the core is present in BOTH selection states")
-    func coreAlwaysPresent() {
-        let noSel = ToolSuggester.suggestions(query: "", hasSelection: false, mru: [])
-        let withSel = ToolSuggester.suggestions(query: "", hasSelection: true, mru: [])
-        for kind in ToolSuggestionCatalog.default.core {
-            #expect(noSel.contains(kind), "core \(kind) missing with no selection")
-            #expect(withSel.contains(kind), "core \(kind) missing with a selection")
-        }
+    @Test("recents excludes the pinned tools (no duplicate of a toolbar button)")
+    func recentsExcludesPinned() {
+        let recents = ToolSuggester.recents(
+            mru: [.line, .hatch, .circle, .spline],
+            excluding: [.line, .circle])
+        #expect(recents == [.hatch, .spline])
+        #expect(!recents.contains(.line))
+        #expect(!recents.contains(.circle))
     }
 
-    // MARK: - MRU influences ordering
+    @Test("recents dedupes and caps")
+    func recentsDedupesAndCaps() {
+        // Duplicate entries collapse to first-occurrence; the cap binds.
+        let recents = ToolSuggester.recents(mru: [.line, .line, .circle], cap: 5)
+        #expect(recents == [.line, .circle])
 
-    @Test("a recently-used tool surfaces right after the core")
-    func mruSurfacesAfterCore() {
-        // `.hatch` is neither core nor near the front of the draw roster; using it
-        // should pull it up to just behind the core.
-        let result = ToolSuggester.suggestions(query: "", hasSelection: false, mru: [.hatch])
-        let core = ToolSuggestionCatalog.default.core
-        #expect(result.contains(.hatch))
-        // It lands immediately after the curated core (index == core.count).
-        #expect(result.firstIndex(of: .hatch) == core.count)
+        let many: [ToolKind] = [
+            .line, .circle, .arc, .rectangle, .polyline, .point, .ellipse,
+            .polygon, .spline, .hatch, .move, .copy,
+        ]
+        let capped = ToolSuggester.recents(mru: many, cap: 3)
+        #expect(capped.count == 3)
+        #expect(capped == [.line, .circle, .arc])
     }
 
-    @Test("MRU order is honored (most-recent first), core still leads")
-    func mruOrderHonored() {
-        let result = ToolSuggester.suggestions(
-            query: "", hasSelection: false, mru: [.hatch, .spline])
-        let core = ToolSuggestionCatalog.default.core
-        // Core first, then the MRU in given order.
-        #expect(Array(result.prefix(core.count)) == core)
-        let iHatch = result.firstIndex(of: .hatch)!
-        let iSpline = result.firstIndex(of: .spline)!
-        #expect(iHatch < iSpline)         // most-recent (.hatch) precedes .spline
-        #expect(iHatch == core.count)     // and sits right after the core
-    }
-
-    @Test("an MRU tool already in the core is not duplicated")
-    func mruDoesNotDuplicateCore() {
-        let result = ToolSuggester.suggestions(query: "", hasSelection: false, mru: [.line])
-        #expect(result.filter { $0 == .line }.count == 1)
+    @Test("recents on an empty MRU is empty")
+    func recentsEmptyMRU() {
+        #expect(ToolSuggester.recents(mru: []).isEmpty)
     }
 
     // MARK: - Fuzzy narrowing on a non-empty query

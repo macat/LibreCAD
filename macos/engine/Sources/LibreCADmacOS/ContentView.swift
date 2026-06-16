@@ -297,6 +297,7 @@ struct ContentView: View {
                     CommandBar(
                         model: model,
                         focused: $commandBarFocused,
+                        pinned: pinnedToolsSet,
                         activateTool: { kind in controllerBox.controller?.activateTool(kind) },
                         placeImage: { chooseAndPlaceImage() },
                         returnFocusToCanvas: { controllerBox.controller?.returnFocusToCanvas() }
@@ -889,15 +890,14 @@ struct ContentView: View {
                 // Esc clears + returns focus to the canvas (so tool letters work).
                 .onExitCommand { returnFocusToCanvas() }
 
+            // De-dup (plan §3d): the syntax hint lives ONLY in the placeholder now;
+            // the trailing duplicate else-branch hint is removed. Keep the trailing
+            // slot for ERROR display (so a typo like `1,,2` is shown in red). The verb
+            // hints (⏎ / ⌫ / esc) live in the StatusBar only.
             if let error = model.lastCommandError, !error.isEmpty {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
-                    .lineLimit(1)
-            } else if model.isToolActive {
-                Text(commandPlaceholder)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
         }
@@ -908,11 +908,12 @@ struct ContentView: View {
     }
 
     /// The active tool's step prompt + the accepted coordinate syntax, shown as the
-    /// field's placeholder/hint. A neutral hint in select mode.
+    /// field's placeholder/hint (the SINGLE place the syntax hint appears). A short
+    /// neutral hint in select mode.
     private var commandPlaceholder: String {
         let hint = model.commandHint
         return hint.isEmpty
-            ? "Command line — start a tool, then type a coordinate (x,y · @dx,dy · dist<angle)"
+            ? "Command — type a coordinate (x,y · @dx,dy · dist<angle)"
             : hint
     }
 
