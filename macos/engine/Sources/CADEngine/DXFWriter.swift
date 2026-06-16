@@ -216,7 +216,8 @@ extension CADEngine {
             UnsafeMutablePointer<Int32>?,
             UnsafePointer<LCHeader>?,
             UnsafePointer<LCDimStyle>?, Int32,
-            UnsafePointer<LCViewport>?, Int32
+            UnsafePointer<LCViewport>?, Int32,
+            UnsafePointer<LCHeaderVar>?, Int32
         ) -> LCStatus
     ) throws -> DXFWriteResult {
         guard !path.isEmpty else { throw CADWriteError.invalidPath }
@@ -242,6 +243,11 @@ extension CADEngine {
         // The HEADER var POD (units + $DIM* incl. ext-line offsets) + the DIMSTYLE
         // table PODs, so a Save preserves units / dim styles / ext offsets.
         let headerPOD = builder.makeHeader(graphicVariables, dimStyles: dimStyles)
+        // R4b: the GENERIC document-settings header vars (the ones the fixed header
+        // POD doesn't carry — $GRIDMODE/$GRIDUNIT/$PDMODE/$PDSIZE/$ANGBASE/$ANGDIR/
+        // $PINSBASE). Their `name` C-strings are interned in `builder`, so this must
+        // be built while `builder` is alive (it is, through the write call below).
+        let headerVarPODs = builder.makeHeaderVars(graphicVariables)
         let dimStylePODs = dimStyles.styles.map { builder.makeDimStyle($0) }
         // Paper-space P3: flatten every layout's viewports into LCViewport PODs (the
         // bridge emits them as DXF VIEWPORT entities). Empty unless the caller passed
@@ -276,19 +282,22 @@ extension CADEngine {
                         blockEntityPODs.withUnsafeBufferPointer { blkEnts -> LCStatus in
                             dimStylePODs.withUnsafeBufferPointer { dsty -> LCStatus in
                                 viewportPODs.withUnsafeBufferPointer { vps -> LCStatus in
-                                    withUnsafePointer(to: &headerPODVar) { hdr -> LCStatus in
-                                        writer(
-                                            cpath,
-                                            ents.baseAddress, Int32(ents.count),
-                                            lays.baseAddress, Int32(lays.count),
-                                            blks.baseAddress, Int32(blks.count),
-                                            blkEnts.baseAddress, Int32(blkEnts.count),
-                                            version.rawValue,
-                                            &skipped,
-                                            hdr,
-                                            dsty.baseAddress, Int32(dsty.count),
-                                            vps.baseAddress, Int32(vps.count)
-                                        )
+                                    headerVarPODs.withUnsafeBufferPointer { hvars -> LCStatus in
+                                        withUnsafePointer(to: &headerPODVar) { hdr -> LCStatus in
+                                            writer(
+                                                cpath,
+                                                ents.baseAddress, Int32(ents.count),
+                                                lays.baseAddress, Int32(lays.count),
+                                                blks.baseAddress, Int32(blks.count),
+                                                blkEnts.baseAddress, Int32(blkEnts.count),
+                                                version.rawValue,
+                                                &skipped,
+                                                hdr,
+                                                dsty.baseAddress, Int32(dsty.count),
+                                                vps.baseAddress, Int32(vps.count),
+                                                hvars.baseAddress, Int32(hvars.count)
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -887,6 +896,60 @@ private final class PODBuilder {
         let activeName = dimStyles.activeName ?? gv.string("$DIMSTYLE", default: "")
         if !activeName.isEmpty { h.dimStyle = intern(activeName) }
         return h
+    }
+
+    /// R4b: builds the GENERIC extra-var `LCHeaderVar` PODs — the document-settings
+    /// header vars the fixed `LCHeader` POD does NOT carry. Only vars the bag
+    /// actually holds (`has`) are emitted, so an absent var stays at the file/engine
+    /// default. The 7 standard targets are in libdxfrw's curated emit list, so they
+    /// emit for free once they ride in `DRW_Header.vars`. COORD-typed vars
+    /// ($GRIDUNIT/$PINSBASE) preserve the full vector (their `.vectorValue`).
+    ///
+    /// `$LC_SNAPMODE` is INTENTIONALLY NOT emitted here: it is a non-standard private
+    /// `$`-var, and libdxfrw's writer only emits its curated standard var list (never
+    /// `customVars`), so it would silently drop on a .dxf write. It is persisted only
+    /// in memory / the Codable payload (decision: do not patch libdxfrw for an
+    /// app-local preference).
+    ///
+    /// The vended PODs' `name` C-strings are interned in this builder, so the
+    /// returned array is only valid while the builder lives (asserted by the caller).
+    func makeHeaderVars(_ gv: GraphicVariables) -> [LCHeaderVar] {
+        var out: [LCHeaderVar] = []
+
+        func appendInt(_ key: String, _ value: Int) {
+            var v = LCHeaderVar()
+            v.name = intern(key)
+            v.type = Int32(LC_HVAR_INT.rawValue)
+            v.i = Int(value)        // C `long`
+            out.append(v)
+        }
+        func appendDouble(_ key: String, _ value: Double) {
+            var v = LCHeaderVar()
+            v.name = intern(key)
+            v.type = Int32(LC_HVAR_DOUBLE.rawValue)
+            v.d = value
+            out.append(v)
+        }
+        func appendCoord(_ key: String, _ vec: Vector) {
+            var v = LCHeaderVar()
+            v.name = intern(key)
+            v.type = Int32(LC_HVAR_COORD.rawValue)
+            v.coord = (vec.x, vec.y, 0.0)   // doc-settings coords are 2D (z = 0)
+            out.append(v)
+        }
+
+        // Int-typed doc-settings vars.
+        if gv.has("$GRIDMODE") { appendInt("$GRIDMODE", gv.int("$GRIDMODE")) }
+        if gv.has("$PDMODE")   { appendInt("$PDMODE",   gv.int("$PDMODE")) }
+        if gv.has("$ANGDIR")   { appendInt("$ANGDIR",   gv.int("$ANGDIR")) }
+        // Double-typed doc-settings vars.
+        if gv.has("$PDSIZE")   { appendDouble("$PDSIZE",  gv.double("$PDSIZE")) }
+        if gv.has("$ANGBASE")  { appendDouble("$ANGBASE", gv.double("$ANGBASE")) }
+        // COORD-typed doc-settings vars (codes 10/20/30) — preserve the vector.
+        if gv.has("$GRIDUNIT") { appendCoord("$GRIDUNIT", gv.vector("$GRIDUNIT", default: Vector(0, 0))) }
+        if gv.has("$PINSBASE") { appendCoord("$PINSBASE", gv.vector("$PINSBASE", default: Vector(0, 0))) }
+
+        return out
     }
 
     /// Builds an `LCDimStyle` POD from a `NamedDimStyle` (the inverse of
