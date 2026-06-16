@@ -67,9 +67,10 @@ struct BlocksSectionContent: View {
     var body: some View {
         let blocks = model.drawing.blocks.blocks
         if blocks.isEmpty {
-            Text("No blocks")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            // Unified empty state. No CTA here: block creation needs the selection-gated
+            // host flow (`onCreateBlock`, owned by ContentView/LayersSidebar) which this
+            // body can't reach, so the panel header's ＋ stays the single create affordance.
+            SidebarEmptyState(icon: "square.on.square.dashed", title: "No blocks defined")
         } else {
             // (The Freeze-All / Thaw-All overflow menu used to sit at the top of the
             // body as a Wave-A stopgap; it now lives in the Blocks panel HEADER — see

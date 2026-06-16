@@ -85,14 +85,18 @@ struct SidebarPanelStack: View {
 
     var body: some View {
         List {
-            customizeSection
-            ForEach(orderedVisiblePanels) { panel in
-                panelSection(panel)
+            ForEach(Array(orderedVisiblePanels.enumerated()), id: \.element.id) { index, panel in
+                // The Customize (show/hide) menu rides in the FIRST panel header's
+                // trailing actions instead of a dedicated top band — that empty "tune"
+                // row is gone (plan §3a). The first panel always exists (an all-hidden
+                // config re-shows everything via `reconciled`), so the customize entry
+                // never becomes unreachable.
+                panelSection(panel, isFirst: index == 0)
             }
             .onMove(perform: movePanels)
         }
         .listStyle(.sidebar)
-        .environment(\.defaultMinListRowHeight, 4)
+        .environment(\.defaultMinListRowHeight, DS.Size.listRowMin)
     }
 
     // MARK: Ordered, visible panels
@@ -104,32 +108,27 @@ struct SidebarPanelStack: View {
         return config.visibleOrder.compactMap { map[$0] }
     }
 
-    // MARK: Customize (show/hide) — the top ⋯ menu
-
-    /// A compact top row carrying the "Customize…" (⋯) menu, which toggles each panel's
-    /// visibility. Lets a hidden panel be brought back (it would otherwise be
-    /// unreachable). Rendered as a borderless, low-chrome control so it reads as part of
-    /// the source list, not a heavy toolbar.
-    @ViewBuilder
-    private var customizeSection: some View {
-        HStack(spacing: 6) {
-            Spacer(minLength: 0)
-            customizeMenu
-        }
-        .listRowSeparator(.hidden)
-        .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 6))
-    }
+    // MARK: Customize (show/hide) — the ⋯ menu (now in the first panel header)
 
     /// The ⋯ menu: one toggle per panel (checkmark = shown), plus a "Show All" reset.
     /// Iterates the FULL order (not just visible) so a hidden panel can be re-shown.
+    ///
+    /// Now that this menu rides in the FIRST visible panel's header (the empty top band is
+    /// gone), the LAST remaining visible panel's "hide" toggle is DISABLED — hiding it
+    /// would leave zero panels, and with no first header the menu itself would become
+    /// unreachable (you could never re-show anything). This keeps the customize entry
+    /// always reachable without a dedicated top row (or any ContentView change).
     @ViewBuilder
     private var customizeMenu: some View {
+        let onlyVisible = config.visibleOrder.count <= 1
         Menu {
             ForEach(config.order, id: \.self) { id in
                 if let panel = byID[id] {
                     Toggle(isOn: hiddenBinding(id).inverted) {
                         Label(panel.title, systemImage: panel.symbol)
                     }
+                    // Don't let the user hide the last visible panel (would orphan this menu).
+                    .disabled(onlyVisible && !config.isHidden(id))
                 }
             }
             Divider()
@@ -151,32 +150,39 @@ struct SidebarPanelStack: View {
 
     /// A single panel as a `Section` whose header is the disclosure row and whose
     /// content is the panel body (shown only when expanded). `.tag(panel.id)` keeps the
-    /// `ForEach`/`onMove` identity stable for drag-reorder.
+    /// `ForEach`/`onMove` identity stable for drag-reorder. `isFirst` injects the
+    /// Customize (show/hide) ⋯ menu into THIS panel's header (it replaced the top band).
     @ViewBuilder
-    private func panelSection(_ panel: SidebarPanel) -> some View {
+    private func panelSection(_ panel: SidebarPanel, isFirst: Bool) -> some View {
         Section {
             if !config.isCollapsed(panel.id) {
                 panel.body
+                    // A touch of vertical breathing room around each panel's body rows.
+                    .padding(.vertical, DS.Space.xs)
             }
         } header: {
-            panelHeader(panel)
+            panelHeader(panel, isFirst: isFirst)
                 .tag(panel.id)
         }
     }
 
     /// The panel header row: a tappable disclosure chevron + icon + title (toggles
-    /// collapse), then the host-supplied trailing action slot (＋ / − / ⋯). The chevron
-    /// + label area is one button so the whole left side toggles; the trailing slot is
-    /// independent so its buttons don't also collapse the panel.
+    /// collapse), then the host-supplied trailing action slot (＋ / − / ⋯). On the FIRST
+    /// panel the Customize ⋯ menu is appended (the relocated top-band control). The
+    /// chevron + label area is one button so the whole left side toggles; the trailing
+    /// slot is independent so its buttons don't also collapse the panel.
     @ViewBuilder
-    private func panelHeader(_ panel: SidebarPanel) -> some View {
-        HStack(spacing: 6) {
+    private func panelHeader(_ panel: SidebarPanel, isFirst: Bool) -> some View {
+        HStack(spacing: DS.Space.sm) {
             disclosureLabel(panel)
-            Spacer(minLength: 4)
+            Spacer(minLength: DS.Space.xs)
             panel.header
                 .buttonStyle(.borderless)
+            if isFirst {
+                customizeMenu
+            }
         }
-        .padding(.vertical, 1)
+        .padding(.vertical, DS.Space.xxs)
         .contentShape(Rectangle())
     }
 
@@ -191,16 +197,17 @@ struct SidebarPanelStack: View {
                 config = config.togglingCollapsed(panel.id)
             }
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: DS.Space.sm) {
                 Image(systemName: "chevron.right")
-                    .font(.caption2.weight(.semibold))
+                    .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .rotationEffect(.degrees(config.isCollapsed(panel.id) ? 0 : 90))
                     .animation(.easeInOut(duration: 0.15), value: config.isCollapsed(panel.id))
                 Image(systemName: panel.symbol)
                     .foregroundStyle(.secondary)
+                    .frame(width: DS.Size.rowIcon, alignment: .center)
                 Text(panel.title)
-                    .font(.headline)
+                    .font(DS.Font.panelTitle)
                     .foregroundStyle(.primary)
             }
             .contentShape(Rectangle())
