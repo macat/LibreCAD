@@ -3,6 +3,14 @@
 Status: PLAN (read-only analysis, 2026-06-15). Headline feature: a **Block Editor** —
 open a block definition, edit its member geometry, save back so EVERY insert updates.
 
+> **⚠️ SCOPE SUPERSEDED 2026-06-16:** the owner approved **FULL scope** (Block Editor MVP +
+> attributes ATTDEF/ATTRIB + parts library/import), NOT the MVP-only cut this doc's later
+> "Deferred" section describes. The **authoritative** wave structure + owned-file map is the
+> `decision-log.md` 2026-06-16 entry ("BLOCK EDITING project APPROVED"): B0 editor scope · B-ATTR
+> attributes (incl. a vendored libdxfrw ATTRIB/ATTDEF reader+writer patch — stock libdxfrw does
+> NOT parse/write `DRW_Insert.attlist`) · B-LIB library/import · B-WIRE wire-wave. The architecture
+> findings below remain valid; treat the scope/wave-numbering below as historical.
+
 ## TL;DR for the coordinator
 
 The keystone is ALREADY DONE. `EntityKind.insert` exists and round-trips DXF; create-block,
