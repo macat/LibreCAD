@@ -205,8 +205,10 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     private var overlayBuffer: MTLBuffer?
     private var overlayVertexCount = 0
     private var overlayCapacity = 0
-    /// Grid line span [0, gridCount), selection span next, snap span next, tool-
-    /// preview span last. All drawn as `.line` primitives in one buffer.
+    /// Overlay buffer spans, in DRAW (and storage) order: the paper SHEET (paper-
+    /// space P2 — drawn FIRST, under everything), then grid, selection, snap, and the
+    /// tool-preview last. All drawn as `.line` primitives in one buffer.
+    private var sheetVertexCount = 0
     private var gridVertexCount = 0
     private var selectionVertexCount = 0
     private var snapVertexCount = 0
@@ -417,12 +419,24 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             return
         }
 
-        // ---- 1. Grid (under the model).
+        // ---- 0. Paper SHEET + margin border (paper-space P2) — drawn FIRST, under
+        // the grid/model, so on a layout the sheet reads as the page the geometry
+        // sits on. Empty (zero verts) in model space, so model-space rendering is
+        // byte-for-byte unchanged. Lives at the FRONT of the overlay buffer.
+        if let flatPipeline, let overlayBuffer, sheetVertexCount >= 2 {
+            encoder.setRenderPipelineState(flatPipeline)
+            encoder.setVertexBuffer(overlayBuffer, offset: 0, index: 0)
+            encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
+            encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: sheetVertexCount)
+        }
+
+        // ---- 1. Grid (under the model, over the sheet).
         if let flatPipeline, let overlayBuffer, gridVertexCount >= 2 {
             encoder.setRenderPipelineState(flatPipeline)
             encoder.setVertexBuffer(overlayBuffer, offset: 0, index: 0)
             encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
-            encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: gridVertexCount)
+            encoder.drawPrimitives(type: .line, vertexStart: sheetVertexCount,
+                                   vertexCount: gridVertexCount)
         }
 
         // ---- 1b. Fills (hatch/solid triangles) — UNDER the model lines so stroked
@@ -452,24 +466,26 @@ final class LineRenderer: NSObject, MTKViewDelegate {
                                    vertexCount: 4, instanceCount: lineInstanceCount)
         }
 
-        // ---- 3. Selection highlight + snap marker (over the model).
+        // ---- 3. Selection highlight + snap marker (over the model). Spans follow
+        // the sheet + grid in the buffer, so each start offset includes both.
         if let flatPipeline, let overlayBuffer {
             encoder.setRenderPipelineState(flatPipeline)
             encoder.setVertexBuffer(overlayBuffer, offset: 0, index: 0)
             encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
+            let afterGrid = sheetVertexCount + gridVertexCount
             if selectionVertexCount >= 2 {
-                encoder.drawPrimitives(type: .line, vertexStart: gridVertexCount,
+                encoder.drawPrimitives(type: .line, vertexStart: afterGrid,
                                        vertexCount: selectionVertexCount)
             }
             if snapVertexCount >= 2 {
                 encoder.drawPrimitives(type: .line,
-                                       vertexStart: gridVertexCount + selectionVertexCount,
+                                       vertexStart: afterGrid + selectionVertexCount,
                                        vertexCount: snapVertexCount)
             }
             if previewVertexCount >= 2 {
                 encoder.drawPrimitives(
                     type: .line,
-                    vertexStart: gridVertexCount + selectionVertexCount + snapVertexCount,
+                    vertexStart: afterGrid + selectionVertexCount + snapVertexCount,
                     vertexCount: previewVertexCount)
             }
         }
@@ -514,14 +530,24 @@ final class LineRenderer: NSObject, MTKViewDelegate {
         let ctx = resolveContext(modelChanged: modelChanged)
         let origin = model.renderOrigin
         let layers = model.drawing.layers
+        // Paper-space P2: pack ONLY the active space's entities. The quadtree is
+        // already scoped to the active space (so the cull query returns only its
+        // ids), but the degenerate-index FALLBACK below iterates the raw drawing, and
+        // a stale id could in theory survive a lagging index — so the per-entity
+        // space gate in `packEntity` is the authoritative filter (model space ⇒
+        // model entities; a layout ⇒ only that layout's paper entities).
+        let activeSpace = model.activeSpace
+        let activeLayout = model.activeLayout
         let visibleIDs = model.quadtree.query(region: cullRect)
 
         if visibleIDs.isEmpty && model.quadtree.isEmpty {
             // Index empty (e.g. entities with degenerate boxes / no model) — fall
-            // back to resolving everything so a small/degenerate drawing still
-            // shows. Cheap for tiny drawings; large ones populate the index.
-            for e in model.drawing.entities {
-                packEntity(e, ctx: ctx, origin: origin, layers: layers)
+            // back to resolving the ACTIVE space's entities so a small/degenerate
+            // drawing still shows. Cheap for tiny drawings; large ones populate the
+            // index.
+            for e in model.activeSpaceEntities {
+                packEntity(e, ctx: ctx, origin: origin, layers: layers,
+                           activeSpace: activeSpace, activeLayout: activeLayout)
             }
         } else {
             // Honor DRAW ORDER (F16): the spatial query returns ids in quadtree-
@@ -536,7 +562,8 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             }
             for id in ordered {
                 guard let e = model.drawing.entity(id) else { continue }
-                packEntity(e, ctx: ctx, origin: origin, layers: layers)
+                packEntity(e, ctx: ctx, origin: origin, layers: layers,
+                           activeSpace: activeSpace, activeLayout: activeLayout)
             }
         }
 
@@ -552,7 +579,15 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     /// actually hides them — a layer's `isVisible == false` ⇔ `isFrozen`). A
     /// model-version bump (which the sidebar performs on a visibility change)
     /// re-triggers this rebuild, so toggling re-packs the visible set.
-    private func packEntity(_ e: EntityRecord, ctx: ResolveContext, origin: Vector, layers: LayerTable) {
+    private func packEntity(_ e: EntityRecord, ctx: ResolveContext, origin: Vector,
+                            layers: LayerTable,
+                            activeSpace: EntitySpace, activeLayout: String?) {
+        // Paper-space P2 space gate: only the active space's entities are packed. The
+        // pure `PaperSpaceLayout.entities` predicate is the single source of truth for
+        // "does this record belong on screen"; applied per-entity here so even a
+        // stale/leaked id never paints geometry from the wrong space.
+        guard PaperSpaceLayout.isInActiveSpace(e, space: activeSpace, layoutName: activeLayout)
+        else { return }
         // Layer-visibility filter: a frozen/hidden layer contributes neither lines
         // nor fills. An entity referencing an unknown layer (no record) still draws
         // (resolve() already falls back to the default pen for a missing layer). The
@@ -732,6 +767,16 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     private func rebuildOverlay(viewport: Viewport) {
         let origin = model.renderOrigin
 
+        // Paper SHEET + margin border (paper-space P2): when a layout is active, draw
+        // its page as a sheet rectangle plus the printable-area border. Empty in model
+        // space (and when the active layout has no record), so model-space rendering is
+        // unchanged. Built GPU-free from the engine `PageDescriptor` via the pure
+        // `PaperSheetGeometry`.
+        var sheetVerts: [FlatVertex] = []
+        if let page = model.activeLayoutRecord?.page {
+            sheetVerts = PaperSheetGeometry.sheetOutline(for: page, renderOrigin: origin)
+        }
+
         // Honor the Inspector's grid settings: the preferred spacing (when set)
         // overrides the adaptive step, and `gridVisible` toggles whether the grid is
         // DRAWN. The spacing is computed either way and fed to `lastGridSpacing` so
@@ -762,12 +807,15 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             previewVerts = OverlayGeometry.toolPreview(tool.preview, renderOrigin: origin)
         }
 
+        sheetVertexCount = sheetVerts.count
         gridVertexCount = drawnGridVerts.count
         selectionVertexCount = selVerts.count
         snapVertexCount = snapVerts.count
         previewVertexCount = previewVerts.count
 
-        let all = drawnGridVerts + selVerts + snapVerts + previewVerts
+        // Storage order MUST match the draw order in `draw(in:)`: sheet, grid,
+        // selection, snap, preview.
+        let all = sheetVerts + drawnGridVerts + selVerts + snapVerts + previewVerts
         overlayVertexCount = all.count
         guard !all.isEmpty else { return }
 
@@ -797,5 +845,70 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             viewportPx: SIMD2<Float>(Float(drawableSize.width), Float(drawableSize.height))
         )
         buffer.contents().copyMemory(from: &u, byteCount: MemoryLayout<CanvasUniforms>.stride)
+    }
+}
+
+// MARK: - Paper sheet geometry (PURE, GPU-free, unit-tested)
+
+/// GPU-free builder for the paper-space SHEET overlay (paper-space P2): turns an
+/// engine `PageDescriptor` into the `FlatVertex` line-list the flat pipeline draws
+/// under the model — the page rectangle plus the printable-area (margin) border.
+///
+/// Mirrors `OverlayGeometry`'s contract: outputs render-space f32 offsets from the
+/// per-view `renderOrigin` (ADR-003) and has NO Metal/AppKit dependency, so the
+/// rect→vertices mapping is unit-testable headlessly (`PaperSpaceUITests`). The
+/// sheet geometry itself (its world rect / margin rect) comes from the pure
+/// `PaperSpaceLayout` so "where the sheet is" has one source of truth across the
+/// camera-fit, the index, and the render.
+enum PaperSheetGeometry {
+
+    /// The paper edge color — a near-white sheet outline (a printed page reads as a
+    /// bright rectangle on the dark canvas). Static (not appearance-swapped) for P2;
+    /// a light-mode variant can follow `OverlayStyle`'s pattern later.
+    static let sheetColor = SIMD4<Float>(0.92, 0.92, 0.95, 0.85)
+    /// The printable-area (margin) border color — a dimmer dashed-looking inset edge
+    /// (drawn solid here; a distinct, lower-alpha tone so it reads as the inner
+    /// "plot border" vs the paper edge).
+    static let marginColor = SIMD4<Float>(0.55, 0.65, 0.85, 0.55)
+
+    /// The sheet outline + margin border as a `.line` vertex list (pairs), offset to
+    /// render space against `renderOrigin`. Returns the page rectangle (4 edges) and,
+    /// when the page has a positive margin that leaves a non-degenerate printable
+    /// area, the inset border (4 more edges). A degenerate page (zero size) yields no
+    /// vertices.
+    static func sheetOutline(for page: PageDescriptor, renderOrigin: Vector) -> [FlatVertex] {
+        var v: [FlatVertex] = []
+        let sheet = PaperSpaceLayout.sheetRect(for: page)
+        guard !sheet.isEmpty, sheet.size.x > 0, sheet.size.y > 0 else { return v }
+        appendRect(sheet, color: sheetColor, renderOrigin: renderOrigin, into: &v)
+
+        // The printable-area border, only when it is a real inset (not the full sheet,
+        // and not collapsed to a line by an oversized margin).
+        let margin = PaperSpaceLayout.marginRect(for: page)
+        if !margin.isEmpty, margin.size.x > 0, margin.size.y > 0,
+           margin != sheet {
+            appendRect(margin, color: marginColor, renderOrigin: renderOrigin, into: &v)
+        }
+        return v
+    }
+
+    /// Appends a rectangle's 4 edges as `.line` vertex PAIRS (8 vertices), each edge
+    /// offset to render space. Counter-clockwise from the lower-left corner.
+    private static func appendRect(
+        _ rect: AABB, color: SIMD4<Float>, renderOrigin: Vector, into v: inout [FlatVertex]
+    ) {
+        let ll = Vector(rect.min.x, rect.min.y)
+        let lr = Vector(rect.max.x, rect.min.y)
+        let ur = Vector(rect.max.x, rect.max.y)
+        let ul = Vector(rect.min.x, rect.max.y)
+        for (a, b) in [(ll, lr), (lr, ur), (ur, ul), (ul, ll)] {
+            v.append(FlatVertex(position: off(a, renderOrigin), color: color))
+            v.append(FlatVertex(position: off(b, renderOrigin), color: color))
+        }
+    }
+
+    @inline(__always)
+    private static func off(_ world: Vector, _ origin: Vector) -> SIMD2<Float> {
+        SIMD2<Float>(Float(world.x - origin.x), Float(world.y - origin.y))
     }
 }

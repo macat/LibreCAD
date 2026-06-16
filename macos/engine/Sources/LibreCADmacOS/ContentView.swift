@@ -216,6 +216,27 @@ struct ContentView: View {
             // the status bar never takes focus, so the two coexist cleanly.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
+                    // Paper-space P2: the Model / Layout tab strip, pinned at the
+                    // BOTTOM of the detail pane just above the status bar (the
+                    // AutoCAD/LibreCAD tab position). A "Model" tab + one tab per
+                    // layout + a "+" to add one; selecting a tab switches the active
+                    // space on the live model (camera re-frame + index rebuild +
+                    // render filter) and asks the canvas to repaint.
+                    LayoutTabStrip(
+                        model: model,
+                        onSelectModel: {
+                            model.activateModel()
+                            controllerBox.controller?.requestRedraw()
+                        },
+                        onSelectLayout: { name in
+                            model.activateLayout(name: name)
+                            controllerBox.controller?.requestRedraw()
+                        },
+                        onAddLayout: {
+                            model.newLayout()
+                            controllerBox.controller?.requestRedraw()
+                        }
+                    )
                     StatusBar(model: model)
                     commandBar
                     // The AutoCAD-style tool LAUNCHER bar — ADDED below the U1
@@ -1406,5 +1427,120 @@ struct TemplateChooserView: View {
     private var chosenTemplate: DrawingTemplate? {
         if let id = selection, let t = templates.first(where: { $0.id == id }) { return t }
         return templates.first
+    }
+}
+
+// MARK: - Layout tab strip (paper-space P2)
+
+/// The Model / Layout tab strip at the bottom of the detail pane (the AutoCAD/
+/// LibreCAD tab position, just above the status bar): a "Model" tab, one tab per
+/// `drawing.layouts` (in `tabOrder`), and a trailing "+" that adds a layout. The
+/// view is purely presentational — it reads the live `CanvasModel`'s active space
+/// and calls back to the host (ContentView) to perform the actual switch / add (so
+/// the redraw hook lives with the controller). Kept small + decomposed into small
+/// `@ViewBuilder` helpers so the SwiftUI type-checker stays comfortable.
+struct LayoutTabStrip: View {
+    /// The live canvas state — observed for `activeSpace` / `activeLayout` (which tab
+    /// reads as selected) and `orderedLayouts` (the tab list).
+    let model: CanvasModel
+    /// Switch to model space.
+    let onSelectModel: () -> Void
+    /// Switch to the named layout's sheet.
+    let onSelectLayout: (String) -> Void
+    /// Add (and switch to) a new layout.
+    let onAddLayout: () -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 2) {
+                modelTab
+                ForEach(model.orderedLayouts) { layout in
+                    layoutTab(named: layout.name)
+                }
+                addButton
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+        }
+        .frame(maxWidth: .infinity)
+        .background(.bar)
+        .overlay(alignment: .top) { Divider() }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Model and layout tabs")
+    }
+
+    // MARK: - Tabs
+
+    /// The always-present "Model" tab — selected when the active space is model.
+    @ViewBuilder
+    private var modelTab: some View {
+        tabButton(
+            title: "Model",
+            systemImage: "square.dashed",
+            isActive: model.activeSpace == .model,
+            action: onSelectModel
+        )
+        .accessibilityIdentifier("tab.model")
+    }
+
+    /// One tab per layout (keyed by name — the engine `Layout`'s stable id) —
+    /// selected when it is the active paper layout. Takes the name (not the engine
+    /// `Layout` value) so the helper never has to NAME the engine type, which is
+    /// ambiguous in this file (SwiftUI's `Layout` protocol is also in scope, and the
+    /// module-qualified form resolves to the `CADEngine` actor).
+    @ViewBuilder
+    private func layoutTab(named name: String) -> some View {
+        let isActive = model.activeSpace == .paper
+            && (model.activeLayout?.caseInsensitiveCompare(name) == .orderedSame)
+        tabButton(
+            title: name,
+            systemImage: "doc",
+            isActive: isActive,
+            action: { onSelectLayout(name) }
+        )
+        .accessibilityIdentifier("tab.layout.\(name)")
+    }
+
+    /// The trailing "+" that adds a new layout (and switches to it).
+    @ViewBuilder
+    private var addButton: some View {
+        Button(action: onAddLayout) {
+            Image(systemName: "plus")
+                .font(.callout)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+        }
+        .buttonStyle(.plain)
+        .help("New layout")
+        .accessibilityIdentifier("tab.add")
+    }
+
+    /// A single tab pill — shared chrome for the Model tab + each layout tab. The
+    /// active tab reads with the accent tint + a filled background; inactive tabs are
+    /// secondary. A plain button so the whole pill is the hit target.
+    @ViewBuilder
+    private func tabButton(
+        title: String,
+        systemImage: String,
+        isActive: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: systemImage)
+                Text(title)
+            }
+            .font(.callout)
+            .lineLimit(1)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .foregroundStyle(isActive ? Color.accentColor : .secondary)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(isActive ? Color.accentColor.opacity(0.15) : Color.clear)
+            )
+        }
+        .buttonStyle(.plain)
     }
 }
