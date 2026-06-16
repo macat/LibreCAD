@@ -211,6 +211,18 @@ struct ContentView: View {
         CADCanvasView(model: model, controllerBox: controllerBox)
             .ignoresSafeArea()
             .frame(minWidth: 480, minHeight: 320)
+            // #6: drag a Parts Library symbol onto the CANVAS to import + place it at the
+            // drop point. The drop `location` is in the canvas view's LOCAL coordinate
+            // space (top-left origin, Y-down) — the SAME convention `Viewport.screenToWorld`
+            // expects (the host `CADCanvasView` is `isFlipped`, so its point space is
+            // top-left Y-down), so the location maps straight through. `PartLibraryDragItem`
+            // is the panel's existing `Transferable` (W5); the import + insert run via the
+            // engine `BlockLibrary.importItem` → `CanvasModel.insertBlock(named:at:)` path.
+            .dropDestination(for: PartLibraryDragItem.self) { items, location in
+                guard let item = items.first else { return false }
+                dropPartLibraryItem(item, atScreenPoint: location)
+                return true
+            }
             // U3 replaces the transient corner HUD chips (coordinateHUD /
             // toolPromptHUD) with the persistent bottom status bar; the small
             // top-leading file-status chip stays (it is the load/export status, not a
@@ -282,6 +294,31 @@ struct ContentView: View {
                             // The block-edit tab is already the active context; clicking it
                             // just repaints (leaving is via the BlockEditBar).
                             controllerBox.controller?.requestRedraw()
+                        },
+                        // #4c: the tab context-menu actions route to the P0-D `CanvasModel`
+                        // layout wrappers (rename/delete/duplicate handle the active-tab
+                        // fixup internally) + redraw. Page Setup is STUBBED to opening the
+                        // document settings sheet (the per-layout page editor is deferred).
+                        onRenameLayout: { name, newName in
+                            if model.renameLayout(name, to: newName) {
+                                controllerBox.controller?.requestRedraw()
+                            }
+                        },
+                        onDeleteLayout: { name in
+                            if model.deleteLayout(name) {
+                                controllerBox.controller?.requestRedraw()
+                            }
+                        },
+                        onDuplicateLayout: { name in
+                            if model.duplicateLayout(name) != nil {
+                                controllerBox.controller?.requestRedraw()
+                            }
+                        },
+                        onPageSetup: { _ in
+                            // STUB: open the document-wide Document Settings (Paper tab) —
+                            // a per-layout page editor is deferred; `CanvasModel.setLayoutPage`
+                            // exists for that later wire.
+                            showSettings = true
                         }
                     )
                     StatusBar(
@@ -560,8 +597,13 @@ struct ContentView: View {
         model.setDrawing(drawing, viewSize: model.viewport.size)
         adoptEnvironmentUndo()
         controllerBox.controller?.zoomToFit()
+        // #4a: the old "New drawing (mm)" canvas chip is GONE — W2 relocated the unit to
+        // the persistent status bar (StatusBar.docStatusSegment) and the file name lives
+        // in the window title bar, so a fresh drawing shows NO top-leading chip. Only a
+        // non-empty drawing surfaces a transient load count here (the chip's documented
+        // load/export status role).
         let n = model.entityCount
-        status = n == 0 ? "New drawing (\(DrawingUnit(rawValue: prefDefaultUnitRaw)?.sign ?? ""))" : "\(n) entities"
+        status = n == 0 ? "" : "\(n) entities"
     }
 
     /// Pushes the Preferences ▸ Text defaults (font style + height) into the pure
@@ -1234,6 +1276,44 @@ struct ContentView: View {
             } catch {
                 status = "Insert block failed: \(error.localizedDescription)"
                 NSLog("CADCanvas: insert block from file failed: \(error)")
+            }
+        }
+    }
+
+    /// #6: import a dragged Parts Library symbol and place ONE insert at the drop's WORLD
+    /// point. `screenPoint` is the SwiftUI drop `location` in the canvas view's local
+    /// space (top-left origin, Y-down) — the same convention `Viewport.screenToWorld`
+    /// expects (the host is `isFlipped`), so it maps straight through to world. Mirrors the
+    /// Parts panel's drag-to-place `insert(_:)`: import the file (which drops a placeholder
+    /// insert at the origin), remove that placeholder, then re-insert at the world point
+    /// via the model's selectable/snappable `insertBlock` path. Collision-safe (the engine
+    /// de-dups a clashing block name). Security-scoped read; errors land in the HUD chip.
+    @MainActor
+    private func dropPartLibraryItem(_ dragItem: PartLibraryDragItem, atScreenPoint screenPoint: CGPoint) {
+        let world = model.viewport.screenToWorld(screenPoint)
+        let url = URL(fileURLWithPath: dragItem.filePath)
+        let item = BlockLibraryItem(name: dragItem.name, url: url)
+        Task { @MainActor in
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            do {
+                guard let result = try await BlockLibrary.importItem(item, into: model.drawing) else {
+                    status = "“\(dragItem.name)” has no importable geometry"
+                    return
+                }
+                // The import added the block + a placeholder insert at the origin; drop it
+                // and re-place at the drop point via the model's insert path (selectable/
+                // snappable, index-synced, undoable).
+                model.drawing.remove(result.insertID)
+                model.quadtree.remove(result.insertID)
+                _ = model.insertBlock(named: result.blockName, at: world)
+                model.modelDirty = true
+                model.modelVersion &+= 1
+                controllerBox.controller?.requestRedraw()
+                status = "Inserted “\(result.blockName)”"
+            } catch {
+                status = "Drop import failed: \(error.localizedDescription)"
+                NSLog("CADCanvas: parts-library drop import failed: \(error)")
             }
         }
     }
@@ -2150,6 +2230,33 @@ struct LayoutTabStrip: View {
     /// Discard. Defaults to a no-op so existing call sites need not pass it.
     var onSelectBlockEdit: () -> Void = {}
 
+    // #4c — layout-tab context-menu actions (Rename / Delete / Duplicate / Page Setup).
+    // Each forwards a LAYOUT name to the call site (ContentView), which calls the
+    // matching P0-D `CanvasModel` wrapper + redraws. Defaulted to no-ops so the pure
+    // unit tests (which construct the strip without these) need not supply them.
+
+    /// Rename the named layout to a new name (Rename → the View-layer rename sheet).
+    var onRenameLayout: (_ name: String, _ newName: String) -> Void = { _, _ in }
+    /// Delete the named layout (never the Model tab — only layout tabs show the menu).
+    var onDeleteLayout: (_ name: String) -> Void = { _ in }
+    /// Duplicate the named layout into a fresh sheet (and activate the copy).
+    var onDuplicateLayout: (_ name: String) -> Void = { _ in }
+    /// Page Setup for the named layout — STUBBED to opening Document Settings for now
+    /// (the per-layout page editor is deferred; `setLayoutPage` exists for a later wire).
+    var onPageSetup: (_ name: String) -> Void = { _ in }
+
+    /// The layout whose Rename sheet is open (View-layer only — never reached by the
+    /// headless tests, which exercise the `CanvasModel` rename wrapper directly). `nil`
+    /// when no rename is in progress. Wrapped so it is `Identifiable` for `.sheet(item:)`.
+    @State private var renameTarget: RenameTarget?
+
+    /// An `Identifiable` carrier for the layout name being renamed (so `.sheet(item:)`
+    /// can present the rename sheet keyed off the target name).
+    private struct RenameTarget: Identifiable {
+        let name: String
+        var id: String { name }
+    }
+
     /// Whether the strip is shown at all (plan §3d): HIDE it entirely until there is a
     /// paper-space layout to switch to — with only the implicit "Model" space there is
     /// nothing to tab between, so a lone "Model" pill is noise. The strip also appears
@@ -2200,6 +2307,21 @@ struct LayoutTabStrip: View {
         .overlay(alignment: .top) { Divider() }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Model and layout tabs")
+        // #4c: the layout RENAME sheet — raised from a tab's context menu (View-layer
+        // modal only; never reachable from the headless tests, which call the model
+        // rename wrapper directly). Confirming forwards (name → newName) to the call
+        // site's `onRenameLayout` (the P0-D `CanvasModel.renameLayout` wrapper).
+        .sheet(item: $renameTarget) { target in
+            LayoutRenameSheet(
+                currentName: target.name,
+                existingNames: model.orderedLayouts.map(\.name),
+                onConfirm: { newName in
+                    renameTarget = nil
+                    onRenameLayout(target.name, newName)
+                },
+                onCancel: { renameTarget = nil }
+            )
+        }
     }
 
     // MARK: - Tabs
@@ -2237,7 +2359,25 @@ struct LayoutTabStrip: View {
             isActive: isActive,
             action: { onSelectLayout(name) }
         )
+        // #4c: the layout-tab right-click menu (LAYOUT tabs only — the Model tab + BEDIT
+        // tab have no menu, so Delete can never target the Model space). Rename raises a
+        // View-layer sheet; Delete / Duplicate / Page Setup forward to the call site's
+        // P0-D `CanvasModel` wrappers (Page Setup is stubbed to Document Settings).
+        .contextMenu { layoutTabContextMenu(name) }
         .accessibilityIdentifier("tab.layout.\(name)")
+    }
+
+    /// The context-menu content for one LAYOUT tab (#4c): Rename / Delete / Duplicate /
+    /// Page Setup. Split into its own `@ViewBuilder` so `layoutTab`'s body stays small.
+    @ViewBuilder
+    private func layoutTabContextMenu(_ name: String) -> some View {
+        Button("Rename…") { renameTarget = RenameTarget(name: name) }
+        Button("Duplicate") { onDuplicateLayout(name) }
+        // Page Setup is a STUB for now (the per-layout page editor is deferred): it opens
+        // the document-wide settings; the `…` marks it as not-yet-the-full editor.
+        Button("Page Setup…") { onPageSetup(name) }
+        Divider()
+        Button("Delete", role: .destructive) { onDeleteLayout(name) }
     }
 
     /// The transient BLOCK-EDIT tab (BEDIT, STAGE 2). Present ONLY while

@@ -39,6 +39,11 @@ struct LibreCADApp: App {
     /// fires the Ortho toggle. (The canvas `keyDown` also handles F8 via keyCode 100,
     /// so it works whether the menu or the canvas has key focus.)
     private static let f8Key = KeyEquivalent(Character(UnicodeScalar(NSF8FunctionKey)!))
+    /// The F7 key as a SwiftUI `KeyEquivalent` (#8 — grid toggle). Built from AppKit's
+    /// `NSF7FunctionKey` Unicode scalar (same construction as `f8Key`), so ⌥-free F7 in
+    /// the View menu fires the grid toggle. (W4's canvas `keyDown` also handles F7 via
+    /// keyCode 98, so it works whether the menu or the canvas has key focus.)
+    private static let f7Key = KeyEquivalent(Character(UnicodeScalar(NSF7FunctionKey)!))
     /// The "open command palette" (⌘K) action published by the focused window.
     @FocusedValue(\.commandPalette) private var commandPalette
     @FocusedValue(\.focusCommandLine) private var focusCommandLine
@@ -321,6 +326,17 @@ struct LibreCADApp: App {
                     NSApp.sendAction(Selector(("toggleOrthoAction:")), to: nil, from: nil)
                 }
                 .keyboardShortcut(Self.f8Key, modifiers: [])
+                // View ▸ Show Grid (F7 — #8) — toggles the canvas grid. Routed through the
+                // responder chain to the focused canvas exactly like Ortho above (same
+                // `NSApp.sendAction` mechanism), targeting W4's `@objc
+                // CADCanvasView.toggleGridAction(_:)` (selector `toggleGridAction:`), which
+                // also drives the menu checkmark via `validateUserInterfaceItem`. The
+                // canvas `keyDown` handles F7 (keyCode 98) too, so it works whether the
+                // menu or the canvas has key focus.
+                Button("Show Grid") {
+                    NSApp.sendAction(Selector(("toggleGridAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut(Self.f7Key, modifiers: [])
 
                 Divider()
                 // Relative-zero (LibreCAD's "Set relative zero") — the datum the
