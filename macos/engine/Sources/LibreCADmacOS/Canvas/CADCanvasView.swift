@@ -601,9 +601,24 @@ final class CADCanvasController {
     /// `refreshGizmo` (a dynamic insert suppresses the gizmo and shows ONLY this overlay).
     private(set) var dynamicGrip: DynamicGripOverlayView?
 
+    /// The UCS AXIS INDICATOR overlay (backlog #4b, a subview of the MTKView). Draws a
+    /// small fixed-screen-size L-shaped X/Y gizmo anchored at the world origin
+    /// (`worldToScreen(Vector(0,0))`). Always click-through (`hitTest` returns nil) so it
+    /// never affects select/draw/pan; refreshed on every `redraw` so it tracks pan/zoom.
+    private(set) var ucsAxis: UCSAxisOverlayView?
+
     func attach(view: FlippedMTKView, renderer: LineRenderer) {
         self.view = view
         self.renderer = renderer
+
+        // Float the UCS axis gizmo at the very bottom (added first). It is fully
+        // click-through, so ordering only matters for paint layering — keeping it
+        // below the other overlays means the crosshair/gizmo paint over its arms.
+        let ucsAxisView = UCSAxisOverlayView(model: model)
+        ucsAxisView.frame = view.bounds
+        ucsAxisView.autoresizingMask = [.width, .height]
+        view.addSubview(ucsAxisView)
+        ucsAxis = ucsAxisView
 
         // Float the CAD crosshair UNDER the gizmo (added first). It is fully
         // click-through, so ordering only matters for paint layering — keeping it
@@ -721,6 +736,9 @@ final class CADCanvasController {
         // Keep the marquee/hover overlay glued across pan/zoom (its box + highlight
         // are `worldToScreen`-mapped, so they move when the viewport does).
         marqueeOverlay?.refresh()
+        // Keep the UCS axis gizmo anchored at the (panned/zoomed) world origin (its
+        // anchor is `worldToScreen(0,0)`, which moves when the viewport does).
+        ucsAxis?.refresh()
         view?.setNeedsDisplay(view?.bounds ?? .zero)
     }
 
