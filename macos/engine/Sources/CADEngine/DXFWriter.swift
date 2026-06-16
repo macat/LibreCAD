@@ -151,12 +151,14 @@ extension CADEngine {
         blockMembers: [String: [EntityRecord]] = [:],
         graphicVariables: GraphicVariables = GraphicVariables(),
         dimStyles: DimStyleTable = DimStyleTable(),
+        layouts: [Layout] = [],
         toPath path: String,
         version: DXFVersion = .r2000
     ) throws -> DXFWriteResult {
         try writeEntities(entities, layers: layers, blocks: blocks,
                           blockMembers: blockMembers,
                           graphicVariables: graphicVariables, dimStyles: dimStyles,
+                          layouts: layouts,
                           toPath: path, version: version, writer: lc_dxf_write)
     }
 
@@ -181,11 +183,13 @@ extension CADEngine {
         blockMembers: [String: [EntityRecord]] = [:],
         graphicVariables: GraphicVariables = GraphicVariables(),
         dimStyles: DimStyleTable = DimStyleTable(),
+        layouts: [Layout] = [],
         toDWGPath path: String
     ) throws -> DXFWriteResult {
         try writeEntities(entities, layers: layers, blocks: blocks,
                           blockMembers: blockMembers,
                           graphicVariables: graphicVariables, dimStyles: dimStyles,
+                          layouts: layouts,
                           toPath: path, version: .r2000, writer: lc_dwg_write)
     }
 
@@ -199,6 +203,7 @@ extension CADEngine {
         blockMembers: [String: [EntityRecord]],
         graphicVariables: GraphicVariables,
         dimStyles: DimStyleTable,
+        layouts: [Layout],
         toPath path: String,
         version: DXFVersion,
         writer: (
@@ -210,7 +215,8 @@ extension CADEngine {
             Int32,
             UnsafeMutablePointer<Int32>?,
             UnsafePointer<LCHeader>?,
-            UnsafePointer<LCDimStyle>?, Int32
+            UnsafePointer<LCDimStyle>?, Int32,
+            UnsafePointer<LCViewport>?, Int32
         ) -> LCStatus
     ) throws -> DXFWriteResult {
         guard !path.isEmpty else { throw CADWriteError.invalidPath }
@@ -237,6 +243,15 @@ extension CADEngine {
         // table PODs, so a Save preserves units / dim styles / ext offsets.
         let headerPOD = builder.makeHeader(graphicVariables, dimStyles: dimStyles)
         let dimStylePODs = dimStyles.styles.map { builder.makeDimStyle($0) }
+        // Paper-space P3: flatten every layout's viewports into LCViewport PODs (the
+        // bridge emits them as DXF VIEWPORT entities). Empty unless the caller passed
+        // layouts that carry viewports, so all other write paths are byte-identical.
+        var viewportPODs: [LCViewport] = []
+        for layout in layouts {
+            for vp in layout.viewports {
+                viewportPODs.append(builder.makeViewport(vp))
+            }
+        }
 
         // Build the block definitions + a flat array of their member PODs. Each
         // block windows into `blockEntityPODs`; only non-anonymous user blocks are
@@ -260,18 +275,21 @@ extension CADEngine {
                     blockPODs.withUnsafeBufferPointer { blks -> LCStatus in
                         blockEntityPODs.withUnsafeBufferPointer { blkEnts -> LCStatus in
                             dimStylePODs.withUnsafeBufferPointer { dsty -> LCStatus in
-                                withUnsafePointer(to: &headerPODVar) { hdr -> LCStatus in
-                                    writer(
-                                        cpath,
-                                        ents.baseAddress, Int32(ents.count),
-                                        lays.baseAddress, Int32(lays.count),
-                                        blks.baseAddress, Int32(blks.count),
-                                        blkEnts.baseAddress, Int32(blkEnts.count),
-                                        version.rawValue,
-                                        &skipped,
-                                        hdr,
-                                        dsty.baseAddress, Int32(dsty.count)
-                                    )
+                                viewportPODs.withUnsafeBufferPointer { vps -> LCStatus in
+                                    withUnsafePointer(to: &headerPODVar) { hdr -> LCStatus in
+                                        writer(
+                                            cpath,
+                                            ents.baseAddress, Int32(ents.count),
+                                            lays.baseAddress, Int32(lays.count),
+                                            blks.baseAddress, Int32(blks.count),
+                                            blkEnts.baseAddress, Int32(blkEnts.count),
+                                            version.rawValue,
+                                            &skipped,
+                                            hdr,
+                                            dsty.baseAddress, Int32(dsty.count),
+                                            vps.baseAddress, Int32(vps.count)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -319,9 +337,13 @@ public func writeDrawing(
     // offsets are preserved on save (symmetric to the read path).
     let graphicVariables = drawing.graphicVariables
     let dimStyles = drawing.dimStyles
+    // Paper-space P3: the layout table (with each layout's viewports) so a Save
+    // persists viewports as DXF VIEWPORT entities.
+    let layouts = drawing.layouts
     return try await CADEngine.shared.writeEntities(
         entities, layers: layers, blocks: blocks, blockMembers: blockMembers,
         graphicVariables: graphicVariables, dimStyles: dimStyles,
+        layouts: layouts,
         toPath: path, version: version
     )
 }
@@ -828,6 +850,28 @@ private final class PODBuilder {
         d.dimExe = s.style.extensionBeyond
         d.dimGap = s.style.textGap
         return d
+    }
+
+    // MARK: Viewport mapping (paper-space P3; inverse of DXFReader.mapViewports)
+
+    /// Maps one `LayoutViewport` to an `LCViewport` POD. The paper frame center +
+    /// size come from `paperRect`; the model view center/height from `viewCenter`/
+    /// `viewHeight`. `vpID`/`vpStatus` are set to real-viewport values (> 1) so a
+    /// round-trip read keeps it (the reader skips the overview viewport, vpID <= 1).
+    func makeViewport(_ vp: LayoutViewport) -> LCViewport {
+        var v = LCViewport()
+        let c = vp.paperCenter
+        v.centerX = c.x
+        v.centerY = c.y
+        v.width = vp.paperWidth
+        v.height = vp.paperHeight
+        v.viewCenterX = vp.viewCenter.x
+        v.viewCenterY = vp.viewCenter.y
+        v.viewHeight = vp.viewHeight
+        v.vpID = 2          // a real (non-overview) viewport
+        v.vpStatus = 2      // on/active
+        v.layoutName = nil  // the writer keys layouts by emission order, not name
+        return v
     }
 
     // MARK: Layer mapping (inverse of DXFReader.mapLayers)

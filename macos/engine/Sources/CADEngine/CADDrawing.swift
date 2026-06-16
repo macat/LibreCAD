@@ -1206,6 +1206,72 @@ public final class CADDrawing {
         return true
     }
 
+    // MARK: - Viewport mutations (paper-space P3 — undoable via the layout funnel)
+    //
+    // Paper-space viewports (paperspace-plan §3 row P3) live in `Layout.viewports`
+    // (a per-layout list, NOT an `EntityKind` case). Because they ride inside the
+    // `Layout` value, every viewport edit routes through `mutateLayouts` and so
+    // inherits the layout table's value-snapshot undo for FREE: one ⌘Z reverts a
+    // viewport add/remove/update, and rename-/remove-layout keep working (the
+    // viewports travel with the `Layout` value). Lookup of the host layout is
+    // case-insensitive (matching the engine's case-insensitive LAYOUT names).
+
+    /// Adds `viewport` to the named layout (case-insensitive). No-op (no undo) if no
+    /// such layout exists. Undoable (one ⌘Z removes it). Returns `true` if added.
+    @discardableResult
+    public func addViewport(_ viewport: LayoutViewport, toLayout layoutName: String) -> Bool {
+        guard hasLayout(layoutName) else { return false }
+        var added = false
+        mutateLayouts {
+            if let i = $0.firstIndex(where: {
+                $0.name.caseInsensitiveCompare(layoutName) == .orderedSame
+            }) {
+                $0[i].viewports.append(viewport)
+                added = true
+            }
+        }
+        return added
+    }
+
+    /// Removes the viewport with `id` from the named layout (case-insensitive). No-op
+    /// (no undo) if the layout or the viewport is absent. Undoable. Returns `true` if
+    /// a viewport was removed.
+    @discardableResult
+    public func removeViewport(id: UUID, fromLayout layoutName: String) -> Bool {
+        guard hasLayout(layoutName) else { return false }
+        var removed = false
+        mutateLayouts {
+            if let i = $0.firstIndex(where: {
+                $0.name.caseInsensitiveCompare(layoutName) == .orderedSame
+            }) {
+                let before = $0[i].viewports.count
+                $0[i].viewports.removeAll { $0.id == id }
+                removed = $0[i].viewports.count != before
+            }
+        }
+        return removed
+    }
+
+    /// Replaces the viewport with the same `id` in the named layout (case-
+    /// insensitive) with `viewport` (an in-place edit — move/reframe/rescale). No-op
+    /// (no undo) if the layout or a viewport with that id is absent. Undoable.
+    /// Returns `true` if a viewport was updated.
+    @discardableResult
+    public func updateViewport(_ viewport: LayoutViewport, inLayout layoutName: String) -> Bool {
+        guard hasLayout(layoutName) else { return false }
+        var updated = false
+        mutateLayouts {
+            if let i = $0.firstIndex(where: {
+                $0.name.caseInsensitiveCompare(layoutName) == .orderedSame
+            }),
+               let j = $0[i].viewports.firstIndex(where: { $0.id == viewport.id }) {
+                $0[i].viewports[j] = viewport
+                updated = true
+            }
+        }
+        return updated
+    }
+
     // MARK: - Graphic-variable mutations (value-snapshot undo of the whole bag)
 
     /// Whole-bag graphic-variable mutation with undo — the same value-snapshot

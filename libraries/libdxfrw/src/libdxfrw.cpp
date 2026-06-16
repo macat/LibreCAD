@@ -1565,6 +1565,11 @@ bool dxfRW::writeViewport(DRW_Viewport *ent) {
     writer->writeInt16(69, ent->vpID);
     writer->writeDouble(12, ent->centerPX);//RLZ: verify if exist in V12
     writer->writeDouble(22, ent->centerPY);//RLZ: verify if exist in V12
+    // LibreCAD macOS (paper-space P3): emit the model view height (code 45) so a
+    // viewport's view scale round-trips. Stock libdxfrw parses code 45 on read but
+    // omitted it on write, dropping the view height; emit it here. (DRW_Viewport
+    // already carries `viewHeight`; this writes the value the reader expects.)
+    writer->writeDouble(45, ent->viewHeight);
     return true;
 }
 

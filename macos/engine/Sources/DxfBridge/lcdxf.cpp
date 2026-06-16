@@ -73,6 +73,12 @@ struct LCEntityList {
     // (the LAYOUT dictionary is not parsed — see LCLayout).
     std::vector<LCLayout> layouts;
 
+    // Paper-space VIEWPORT entities (paper-space P3). Collected by the reader's
+    // addViewport hook for REAL viewports (vpID>1) only — the AutoCAD overview
+    // viewport (vpID<=1) is skipped as UNSUPPORTED. Kept in a SEPARATE list (not
+    // `entities`) so the Swift reader's per-entity EntityKind mapping is untouched.
+    std::vector<LCViewport> viewports;
+
     // Stable-address backing pools (deque: pointers survive growth).
     std::deque<std::string>          strings;
     std::deque<std::vector<LCVertex>> vertexPool;
@@ -689,7 +695,40 @@ public:
     void addDimOrdinate(const DRW_DimOrdinate *data) override { emitDimOrdinate(data); }
     void addLeader(const DRW_Leader *data) override { emitLeader(data); }
     void addHatch(const DRW_Hatch *data) override { emitHatch(data); }
-    void addViewport(const DRW_Viewport &data) override { addUnsupportedEntity(data, "VIEWPORT"); }
+    // VIEWPORT entity (DRW_Viewport, paper-space P3): a window on a layout sheet.
+    // The DXF ENTITIES section always carries an AutoCAD "overview" viewport
+    // (vpID == 1 / vpstatus <= 1) that represents the whole paper space, NOT a real
+    // user viewport — we SKIP it (keep the historical UNSUPPORTED skip behavior) so
+    // it does not appear as a stray viewport. Only a REAL viewport (vpID > 1)
+    // becomes an LCViewport in the separate `lc_viewports` list. The model-view
+    // center/height (codes 12/22/45) describe what model space the window shows; the
+    // paper frame center/size (codes 10/20/40/41) describe the window on the sheet.
+    void addViewport(const DRW_Viewport &data) override {
+        // The AutoCAD overview viewport (id 1) is bookkeeping, not a user viewport.
+        if (data.vpID <= 1) { addUnsupportedEntity(data, "VIEWPORT"); return; }
+        ++m_out->geometryCount;
+        m_sawPaperContent = true;   // a viewport implies a paper-space layout
+        LCViewport v{};
+        v.centerX = data.basePoint.x;
+        v.centerY = data.basePoint.y;
+        v.width = data.pswidth;
+        v.height = data.psheight;
+        v.viewCenterX = data.centerPX;
+        v.viewCenterY = data.centerPY;
+        v.viewHeight = data.viewHeight;
+        v.vpID = data.vpID;
+        v.vpStatus = data.vpstatus;
+        // The layout the viewport belongs to: the `*Paper_Space` block being read,
+        // else the single reconstructed layout name (matching how paper-space
+        // entities are stamped). Borrows the list's string pool.
+        if (m_currentBlock != nullptr && m_currentBlock->paperSpace
+            && !m_currentBlock->paperLayoutName.empty()) {
+            v.layoutName = intern(m_currentBlock->paperLayoutName);
+        } else {
+            v.layoutName = intern(std::string(kReconstructedLayoutName));
+        }
+        m_out->viewports.push_back(v);
+    }
     // IMAGE entity (DRW_Image): captured into a PENDING image (POD + its IMAGEDEF
     // hard-ref handle, code 340) here; finalizeImages() links it to its IMAGEDEF
     // (linkImage, by code-5 handle) afterward and pushes the finished POD into the
@@ -1327,7 +1366,8 @@ public:
                      const LCBlock *blocks, int blockCount,
                      const LCEntity *blockEntities, int blockEntityCount,
                      const LCHeader *header,
-                     const LCDimStyle *dimStyles, int dimStyleCount)
+                     const LCDimStyle *dimStyles, int dimStyleCount,
+                     const LCViewport *viewports, int viewportCount)
         : m_dxf(dxf),
           m_entities(entities), m_entityCount(entityCount < 0 ? 0 : entityCount),
           m_layers(layers), m_layerCount(layerCount < 0 ? 0 : layerCount),
@@ -1336,7 +1376,9 @@ public:
           m_blockEntityCount(blockEntityCount < 0 ? 0 : blockEntityCount),
           m_header(header),
           m_dimStyles(dimStyles),
-          m_dimStyleCount(dimStyleCount < 0 ? 0 : dimStyleCount) {}
+          m_dimStyleCount(dimStyleCount < 0 ? 0 : dimStyleCount),
+          m_viewports(viewports),
+          m_viewportCount(viewportCount < 0 ? 0 : viewportCount) {}
 
     // DWG mode: drive the DWG writer (`dwgRW`). The SAME per-kind geometry
     // mapping runs; the only differences are routed through the `emit*` helpers
@@ -1349,7 +1391,8 @@ public:
                      const LCBlock *blocks, int blockCount,
                      const LCEntity *blockEntities, int blockEntityCount,
                      const LCHeader *header,
-                     const LCDimStyle *dimStyles, int dimStyleCount)
+                     const LCDimStyle *dimStyles, int dimStyleCount,
+                     const LCViewport *viewports, int viewportCount)
         : m_dwg(dwg),
           m_entities(entities), m_entityCount(entityCount < 0 ? 0 : entityCount),
           m_layers(layers), m_layerCount(layerCount < 0 ? 0 : layerCount),
@@ -1358,7 +1401,9 @@ public:
           m_blockEntityCount(blockEntityCount < 0 ? 0 : blockEntityCount),
           m_header(header),
           m_dimStyles(dimStyles),
-          m_dimStyleCount(dimStyleCount < 0 ? 0 : dimStyleCount) {}
+          m_dimStyleCount(dimStyleCount < 0 ? 0 : dimStyleCount),
+          m_viewports(viewports),
+          m_viewportCount(viewportCount < 0 ? 0 : viewportCount) {}
 
     int skipped() const { return m_skipped; }
 
@@ -1439,6 +1484,12 @@ public:
     void writeEntities() override {
         for (int i = 0; i < m_entityCount; ++i) {
             writeEntity(m_entities[i]);
+        }
+        // Paper-space P3: emit any VIEWPORT entities at the end of the ENTITIES
+        // section (they are paper-space entities). DXF only — the DWG writer has no
+        // writeViewport path, so on DWG each is skipped + counted (like leaders).
+        for (int i = 0; i < m_viewportCount; ++i) {
+            writeViewport(m_viewports[i]);
         }
     }
 
@@ -1641,6 +1692,9 @@ private:
     const LCHeader *m_header = nullptr;
     const LCDimStyle *m_dimStyles = nullptr;
     int m_dimStyleCount = 0;
+    // Paper-space VIEWPORT entities to emit (paper-space P3; optional / NULL).
+    const LCViewport *m_viewports = nullptr;
+    int m_viewportCount = 0;
     int m_skipped = 0;
 
     // DWG-only: block name -> block_record handle from `dwgRW::defineBlock`, so a
@@ -1768,6 +1822,36 @@ private:
         // Carry the pixel size into the IMAGEDEF (written in writeObjects).
         if (e.imgSizeU > 0) def->u = e.imgSizeU;
         if (e.imgSizeV > 0) def->v = e.imgSizeV;
+    }
+
+    // ----- VIEWPORT (paper-space window) ---------------------------------
+    // Emit a DXF VIEWPORT (DRW_Viewport) via dxfRW::writeViewport. The paper frame
+    // center -> basePoint (codes 10/20); the frame size -> pswidth/psheight (40/41);
+    // the model view center -> centerPX/PY (12/22); the model view height -> code 45.
+    // vpID/vpStatus are forced > 1 so a re-read treats it as a REAL viewport (the
+    // reader skips the overview viewport vpID<=1). The viewport is marked paper-space
+    // (DXF code 67 == 1) so it lands in paper space. DXF only — dwgWriter15 has no
+    // writeViewport path, so on DWG it is skipped + counted (like a leader/image).
+    void writeViewport(const LCViewport &v) {
+        if (m_dwg != nullptr) { ++m_skipped; return; }   // DWG: no viewport writer.
+        DRW_Viewport vp;
+        // Mark the entity paper-space (code 67 == 1) + layer "0" by default.
+        vp.space = DRW::PaperSpace;
+        vp.layer = std::string("0");
+        vp.lineType = std::string("BYLAYER");
+        vp.basePoint.x = v.centerX;
+        vp.basePoint.y = v.centerY;
+        vp.basePoint.z = 0.0;
+        vp.pswidth = v.width;
+        vp.psheight = v.height;
+        vp.centerPX = v.viewCenterX;
+        vp.centerPY = v.viewCenterY;
+        vp.viewHeight = v.viewHeight;
+        // Force real-viewport id/status so the round-trip read keeps it (the reader
+        // skips vpID <= 1 as the AutoCAD overview viewport).
+        vp.vpID = (v.vpID > 1) ? v.vpID : 2;
+        vp.vpstatus = (v.vpStatus > 1) ? v.vpStatus : 2;
+        m_dxf->writeViewport(&vp);
     }
 
     // ----- INSERT (block reference) --------------------------------------
@@ -2394,6 +2478,15 @@ extern "C" const LCLayout *lc_layouts(const LCEntityList *list) {
     return list->layouts.data();
 }
 
+extern "C" int lc_viewport_count(const LCEntityList *list) {
+    return list ? static_cast<int>(list->viewports.size()) : 0;
+}
+
+extern "C" const LCViewport *lc_viewports(const LCEntityList *list) {
+    if (list == nullptr || list->viewports.empty()) return nullptr;
+    return list->viewports.data();
+}
+
 extern "C" void lc_entity_list_free(LCEntityList *list) {
     delete list;
 }
@@ -2431,7 +2524,8 @@ extern "C" LCStatus lc_dxf_write(const char *path,
                                  int version,
                                  int *out_skipped,
                                  const LCHeader *header,
-                                 const LCDimStyle *dimStyles, int dimStyleCount) {
+                                 const LCDimStyle *dimStyles, int dimStyleCount,
+                                 const LCViewport *viewports, int viewportCount) {
     if (out_skipped != nullptr) {
         *out_skipped = 0;
     }
@@ -2444,7 +2538,8 @@ extern "C" LCStatus lc_dxf_write(const char *path,
         (layerCount  > 0 && layers   == nullptr) ||
         (blockCount  > 0 && blocks   == nullptr) ||
         (blockEntityCount > 0 && blockEntities == nullptr) ||
-        (dimStyleCount > 0 && dimStyles == nullptr)) {
+        (dimStyleCount > 0 && dimStyles == nullptr) ||
+        (viewportCount > 0 && viewports == nullptr)) {
         return LC_ERR_INVALID_PATH;
     }
     // try/catch keeps any libdxfrw exception (or std::bad_alloc) from crossing
@@ -2454,7 +2549,8 @@ extern "C" LCStatus lc_dxf_write(const char *path,
         dxfRW dxf(path);
         WritingInterface iface(&dxf, entities, entityCount, layers, layerCount,
                                blocks, blockCount, blockEntities, blockEntityCount,
-                               header, dimStyles, dimStyleCount);
+                               header, dimStyles, dimStyleCount,
+                               viewports, viewportCount);
         // bin=false -> ASCII DXF (matches the reader and rs_filterdxfrw).
         const bool ok = dxf.write(&iface, toDrwVersion(version), /*bin=*/false);
         if (!ok) {
@@ -2477,7 +2573,8 @@ extern "C" LCStatus lc_dwg_write(const char *path,
                                  int version,
                                  int *out_skipped,
                                  const LCHeader *header,
-                                 const LCDimStyle *dimStyles, int dimStyleCount) {
+                                 const LCDimStyle *dimStyles, int dimStyleCount,
+                                 const LCViewport *viewports, int viewportCount) {
     (void)version;   // DWG write is R2000-only; the arg is accepted for ABI symmetry.
     if (out_skipped != nullptr) {
         *out_skipped = 0;
@@ -2489,7 +2586,8 @@ extern "C" LCStatus lc_dwg_write(const char *path,
         (layerCount  > 0 && layers   == nullptr) ||
         (blockCount  > 0 && blocks   == nullptr) ||
         (blockEntityCount > 0 && blockEntities == nullptr) ||
-        (dimStyleCount > 0 && dimStyles == nullptr)) {
+        (dimStyleCount > 0 && dimStyles == nullptr) ||
+        (viewportCount > 0 && viewports == nullptr)) {
         return LC_ERR_INVALID_PATH;
     }
     // The DWG counterpart of lc_dxf_write: same PODs, same WritingInterface, but
@@ -2499,7 +2597,8 @@ extern "C" LCStatus lc_dwg_write(const char *path,
         dwgRW dwg(path);
         WritingInterface iface(&dwg, entities, entityCount, layers, layerCount,
                                blocks, blockCount, blockEntities, blockEntityCount,
-                               header, dimStyles, dimStyleCount);
+                               header, dimStyles, dimStyleCount,
+                               viewports, viewportCount);
         // bin is ignored by dwgRW (DWG is always binary); pass false for symmetry.
         const bool ok = dwg.write(&iface, DRW::AC1015, /*bin=*/false);
         if (!ok) {

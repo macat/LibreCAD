@@ -144,6 +144,18 @@ typedef enum LCEntityKind {
      *  size in. Distinct from LC_ENT_UNSUPPORTED so the reader maps it to `.image`
      *  (was previously dropped as unsupported). */
     LC_ENT_IMAGE = 17,
+    /** A paper-space VIEWPORT (DXF VIEWPORT / DRW_Viewport): a rectangular window on
+     *  a layout sheet showing a scaled view of model space. The paper-frame CENTER
+     *  (basePoint, code 10/20) is in p1; the paper frame size (pswidth/psheight,
+     *  codes 40/41) in `vpWidth`/`vpHeight`; the MODEL view center (centerPX/PY,
+     *  codes 12/22) in `vpCenterX`/`vpCenterY`; the model view height (code 45) in
+     *  `vpViewHeight`; the viewport id/status (codes 69/68) in `vpID`/`vpStatus`.
+     *  The reader SKIPS the AutoCAD "overview" viewport (vpID<=1 / vpstatus<=1) —
+     *  only a real viewport (vpID>1) becomes LC_ENT_VIEWPORT; the overview stays an
+     *  UNSUPPORTED skip. Viewports are emitted in the SEPARATE `lc_viewports` list
+     *  (NOT the entity list) so DXFReader.mapKind's `EntityKind?` contract is
+     *  intact (it never sees this kind). The Swift reader zips them onto Layouts. */
+    LC_ENT_VIEWPORT = 18,
     /** An entity libdxfrw delivered but the reader does not flatten
      *  (ordinate-DIMENSION/...). Carries only its `typeName` so Swift
      *  can collect a warning; geometry fields are unset. */
@@ -489,6 +501,39 @@ typedef struct LCLayout {
     int32_t tabOrder;       /**< left-to-right tab position (0-based); always 0. */
 } LCLayout;
 
+/* ------------------------------------------------------------------------- *
+ *  Paper-space VIEWPORT entities (paper-space P3)
+ *
+ *  A DXF VIEWPORT (DRW_Viewport) is a window on a layout sheet that shows a scaled
+ *  view of model space. Read viewports flow through a SEPARATE flat list
+ *  (`lc_viewports`), NOT the entity list, so the Swift reader's per-entity
+ *  `EntityKind?` mapping is untouched (viewports are not an EntityKind). Each
+ *  carries the layout name it was read on (the `*Paper_Space` block / code-67
+ *  context) so the Swift reader can zip it onto the matching Layout.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * One paper-space viewport (read OR write POD). All linear values are in the
+ * drawing's units (paper space for the frame, model space for the view). The
+ * mapping to DRW_Viewport: `centerX/Y` -> basePoint (codes 10/20, the paper frame
+ * center); `width/height` -> pswidth/psheight (codes 40/41); `viewCenterX/Y` ->
+ * centerPX/PY (codes 12/22, the model view center); `viewHeight` -> code 45;
+ * `vpID`/`vpStatus` -> codes 69/68. `layoutName` borrows the owning list's string
+ * pool (read only; NULL on a write POD — the writer keys the layout by emission
+ * order). A WRITE POD sets vpID/vpStatus to real-viewport values (>1) so a
+ * round-trip read does not skip it as the AutoCAD overview viewport.
+ */
+typedef struct LCViewport {
+    double centerX, centerY;     /**< paper frame center (basePoint, codes 10/20). */
+    double width, height;        /**< paper frame size (pswidth/psheight, 40/41). */
+    double viewCenterX, viewCenterY; /**< model view center (centerPX/PY, 12/22). */
+    double viewHeight;           /**< model view height (code 45). */
+    int32_t vpID;                /**< viewport id (code 69); >1 for a real viewport. */
+    int32_t vpStatus;            /**< viewport status (code 68); >1 == on/active. */
+    const char *layoutName;      /**< layout the viewport was read on (read only;
+                                      NULL on a write POD). Borrows the list pool. */
+} LCViewport;
+
 /** Opaque owned result handle. Free with `lc_entity_list_free`. */
 typedef struct LCEntityList LCEntityList;
 
@@ -600,6 +645,16 @@ int lc_layout_count(const LCEntityList *list);
  *  `lc_entity_list_free`. NULL-safe. */
 const LCLayout *lc_layouts(const LCEntityList *list);
 
+/** Number of paper-space VIEWPORT entities read (paper-space P3). 0 for a drawing
+ *  with no real viewports (the AutoCAD overview viewport, vpID<=1, is skipped).
+ *  NULL-safe. */
+int lc_viewport_count(const LCEntityList *list);
+
+/** Pointer to the contiguous flat array of `lc_viewport_count` viewports, or NULL.
+ *  The pointer (and each viewport's `layoutName`) stays valid until
+ *  `lc_entity_list_free`. NULL-safe. */
+const LCViewport *lc_viewports(const LCEntityList *list);
+
 /** Frees a handle returned by `lc_dxf_read`. NULL-safe. */
 void lc_entity_list_free(LCEntityList *list);
 
@@ -675,6 +730,11 @@ LCStatus lc_dxf_count_entities(const char *path, int *out_count);
  *                      offsets round-trip). NULL / 0 ⇒ only the default "Standard"
  *                      style libdxfrw always writes.
  * @param dimStyleCount Number of dimension styles (>= 0).
+ * @param viewports     Optional pointer to `viewportCount` LCViewport PODs to emit
+ *                      as paper-space VIEWPORT entities (paper-space P3). Each is
+ *                      written as a real viewport (vpID/vpStatus forced > 1) so a
+ *                      round-trip read keeps it. NULL / 0 ⇒ no viewports written.
+ * @param viewportCount Number of viewports (>= 0).
  * @return LC_OK on success; LC_ERR_INVALID_PATH for a null/empty path or a
  *         negative count with a NULL array; LC_ERR_WRITE_FAILED if libdxfrw
  *         fails to write (also covers any exception escaping the export).
@@ -687,7 +747,8 @@ LCStatus lc_dxf_write(const char *path,
                       int version,
                       int *out_skipped,
                       const LCHeader *header,
-                      const LCDimStyle *dimStyles, int dimStyleCount);
+                      const LCDimStyle *dimStyles, int dimStyleCount,
+                      const LCViewport *viewports, int viewportCount);
 
 /**
  * Write a DWG file from flat POD entity + layer arrays. The DWG counterpart of
@@ -741,6 +802,13 @@ LCStatus lc_dxf_write(const char *path,
  *                      The header `$DIM*` vars ARE applied where the DWG writer
  *                      honors them.
  * @param dimStyleCount Number of dimension styles (>= 0).
+ * @param viewports     Optional pointer to `viewportCount` LCViewport PODs (paper-
+ *                      space P3). NOTE: libdxfrw's DWG writer (dwgWriter15) has no
+ *                      VIEWPORT write path, so these are accepted for ABI symmetry
+ *                      with `lc_dxf_write` but NOT written to DWG (the documented
+ *                      DWG table gap, like user blocks / dim styles). Use DXF for a
+ *                      viewport round-trip.
+ * @param viewportCount Number of viewports (>= 0).
  * @return LC_OK on success; LC_ERR_INVALID_PATH for a null/empty path or a
  *         negative count with a NULL array; LC_ERR_WRITE_FAILED if libdxfrw
  *         fails to write (also covers any exception escaping the export).
@@ -753,7 +821,8 @@ LCStatus lc_dwg_write(const char *path,
                       int version,
                       int *out_skipped,
                       const LCHeader *header,
-                      const LCDimStyle *dimStyles, int dimStyleCount);
+                      const LCDimStyle *dimStyles, int dimStyleCount,
+                      const LCViewport *viewports, int viewportCount);
 
 #ifdef __cplusplus
 }

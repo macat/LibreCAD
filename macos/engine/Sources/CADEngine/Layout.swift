@@ -144,6 +144,16 @@ public struct Layout: Sendable, Hashable, Codable, Identifiable {
     /// The sheet's paper size / margin / plot scale (engine-level values, mm).
     public var page: PageDescriptor
 
+    /// The paper-space VIEWPORTS on this sheet — rectangular windows that each show
+    /// a scaled view of MODEL space (paper-space P3, paperspace-plan §3). Viewports
+    /// live HERE (a per-layout list), NOT as an `EntityKind` case (that enum is
+    /// switched exhaustively in ~28 files), so they ride inside the `Layout` value:
+    /// the layout's add/remove/rename undo carries them for free, and the document
+    /// payload + DXF round-trip serialize them alongside the sheet. Empty for a
+    /// layout with no viewports (the default), so a sheet with only direct paper
+    /// geometry is unchanged.
+    public var viewports: [LayoutViewport] = []
+
     /// `Identifiable` by name (names are unique within the drawing), so SwiftUI tab
     /// lists key on a stable id without a separate uuid.
     public var id: String { name }
@@ -151,10 +161,37 @@ public struct Layout: Sendable, Hashable, Codable, Identifiable {
     public init(
         name: String,
         tabOrder: Int = 0,
-        page: PageDescriptor = PageDescriptor()
+        page: PageDescriptor = PageDescriptor(),
+        viewports: [LayoutViewport] = []
     ) {
         self.name = name
         self.tabOrder = tabOrder
         self.page = page
+        self.viewports = viewports
+    }
+}
+
+// MARK: - Decodable (back-compat: tolerate missing `viewports`)
+//
+// `viewports` is an ADDITIVE field (paper-space P3): a Layout encoded BEFORE it
+// existed (every old saved payload) has no `viewports` key. A hand-written
+// `init(from:)` with `decodeIfPresent` (the SAME pattern `EntityRecord` uses for
+// its additive `space`/`layoutName`) decodes that absent key as `[]`, so old
+// payloads round-trip unchanged. `encode(to:)` and `Hashable`/`Equatable` stay
+// synthesized (the `CodingKeys` cover every field, so the synthesized encode
+// includes `viewports`; Hashable/Equatable auto-include the new stored property).
+
+extension Layout {
+    private enum CodingKeys: String, CodingKey {
+        case name, tabOrder, page, viewports
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        tabOrder = try c.decode(Int.self, forKey: .tabOrder)
+        page = try c.decode(PageDescriptor.self, forKey: .page)
+        // Additive paper-space P3 field: absent in old payloads ⇒ no viewports.
+        viewports = try c.decodeIfPresent([LayoutViewport].self, forKey: .viewports) ?? []
     }
 }
