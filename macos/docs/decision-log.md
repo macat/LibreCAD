@@ -6,6 +6,21 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-16 — BLOCK UX + paper-space WIRE-WAVES LANDED + owner's AutoCAD spec adopted (`native-macos @ 90633e3d0`, **2069 tests**)
+
+Owner feedback: "blocks don't work as well as AutoCAD — convert selection→block, edit a block + reinsert, and show the block as visual content (a text name is hard to see)"; then authored `macos/docs/block-features.md` (1798-line AutoCAD-LT block spec w/ an Appendix-B P0–P7 matrix) — now the authoritative reference; `block-ux-plan.md` aligned to it. Owner decisions (AskUserQuestion): Create-Block uses a **name sheet**; dynamic blocks = **full authoring** (params/actions/grips), sequenced DB-1..DB-5 per Appendix B (P6 constraints/BTABLE deferred = full-AutoCAD-only).
+
+Landed this push (all code-reviewed, serial-gated):
+- **Block thumbnails** `4e509fe78` (+8) — sidebar rows render each block's actual geometry (engine-pure `blockThumbnailScene` block-subset `ExportScene` → bitmap `NSImage` via shared `CGSceneRenderer`, `(name,modelVersion,size)` cache auto-invalidated on edit). Directly answers "hard to see what it is." (Review nits: inert min-stroke param, stale-tile prune, test name — non-blocking follow-ups.)
+- **WIRE-WAVE 1** `1a113aaf6` (+17) — paper-space made usable in the GUI: **⌥V viewport tool** (2-click → `addViewport` on active layout, paper-space only), **Export Layout PDF (⌥⌘E) / Print Layout (⇧⌘P)** menus (panels View-layer only), **Circle 2P/3P · Arc tangential · Line by-angle** mode pickers in the options bar. *(Salvaged: built on a stale base; a 3-way `--no-ff` merge preserved the interim block suites — verified 2056 incl. BlockAttributeTests.)*
+- **Block UI wire-wave (BW)** `90633e3d0` (+13) — the owner's top 3: **Create Block from Selection** (right-click verb gated on selection + Blocks menu ⌥B + ⌘K → **name sheet** prefilled `Block-N`, existing-name→redefine warning per spec §20 → base-point pick), **double-click an insert / sidebar "Edit"** → in-place **Block Editor** with a **BlockEditBar** (Save & Close updates ALL references via live-member resolve / Discard reverts; document-close auto-saves via `ContentView.onDisappear`), and **reinsert** (sidebar primary + now-functional `InsertTool` via `beginInsert(name:)`). No new `EntityKind`/`ToolKind` case. Reviewer APPROVE; the close-hook is best-effort (edits land live in `CADDrawing` immediately, so no data-loss path).
+
+**Block status vs spec Appendix B:** P0 (foundation) + P1 (editor/attributes/nested/explode) DONE incl. UI; thumbnails + library/import DONE (engine; library browser UI = BW2). **Acceptance pass in flight** (block create/edit-propagation/reinsert/attributes round-trip + `.app` smoke).
+
+**NEXT:** BW2 (attributes UI — EATTEDIT double-click value editor + ATTSYNC + prompt-on-insert; library browser gallery + WBLOCK; additive `Block` metadata: description/unit/flags) → then the **dynamic-block authoring program** DB-1 (params/actions/grips) → DB-2 (visibility states) → DB-3 (value-sets/lookup) → DB-4 (polar/XY/array/chain) → DB-5 (extended). GUI-only interactions (name sheet, double-click-edit, BlockEditBar, viewport drag) need owner verification in the rebuilt `.app`.
+
+---
+
 ## 2026-06-15 — PAPER SPACE P3/P4 WAVE dispatched (owner: "find the gaps, parallel-implement next steps, commit + merge worktrees")
 
 **Baseline at start:** `native-macos @ 5291ae797`, **1887 tests** green, build clean, tree clean. Gap audit (this session): paper space P0 (model) + P1 (DXF code-67 r/w, single Layout1) + P2 (Model/Layout tab + sheet render, pure helpers) are LANDED; **P3 (viewport entities) + P4 (per-layout plot) remain**, and P1/P2 (salvaged "tests follow") had **zero dedicated tests**.
