@@ -172,25 +172,96 @@ struct InspectorSummaryTests {
         #expect(a.statusWord == "Loaded")
     }
 
-    // MARK: - 4. Master "Snap on" toggle — the inverse-of-.free contract
+    // MARK: - 4. Master "Object Snap" toggle — the REAL F3 contract
+    //
+    // The old test just round-tripped a local `.free` binding (tautological): it
+    // proved the bit flipped, NOT that snapping changed — and it couldn't, because
+    // `.free` is the always-on fallback the pipeline never gates on. These drive the
+    // ACTUAL snap pipeline (`Snapping.snap`, the same call `updateSnap` makes with the
+    // model's live `snapModes`): with the master ON a nearby endpoint snaps; after
+    // `setObjectSnapEnabled(false)` the SAME cursor yields the FREE/raw point.
 
-    @Test("the master Snap-on toggle is the inverse of the .free (no-snap) mode")
-    func snapMasterTogglesFreeMode() {
+    /// Runs the real snapper with the model's live `snapModes` (the contract
+    /// `updateSnap`/`snappedWorldPoint` exercise) against the model's own drawing +
+    /// quadtree.
+    @MainActor
+    private func snap(_ model: CanvasModel, at cursor: Vector, tol: Double) -> SnapResult {
+        Snapping.snap(worldPoint: cursor,
+                      modes: model.snapModes,
+                      worldTolerance: tol,
+                      gridSpacing: nil,
+                      in: model.drawing,
+                      using: model.quadtree)
+    }
+
+    @Test("master Object-Snap OFF makes Snapping.snap return the raw cursor point")
+    func objectSnapMasterReallyGatesSnapping() {
+        let model = CanvasModel()
+        // A line whose endpoint we want to snap to.
+        let endA = Vector(0, 0), endB = Vector(10, 0)
+        _ = model.drawing.add(EntityRecord(id: EntityID(0),
+                                           kind: .line(LineData(start: endA, end: endB))))
+        model.rebuildIndex()
+
+        // Ensure a clean known starting mode set: endpoint snap on, master ON.
+        model.snapModes = [.endpoint, .free]
+        let cursor = Vector(0.04, 0.04)   // within tolerance of endA
+        let tol = 0.5
+
+        // Master ON ⇒ snaps to the endpoint (NOT the raw cursor).
+        #expect(model.objectSnapEnabled)
+        let on = snap(model, at: cursor, tol: tol)
+        #expect(on.kind == .endpoint)
+        #expect((on.point - endA).magnitude < 1e-9)
+
+        // Master OFF ⇒ the SAME cursor now yields the FREE/raw point (no object snap).
+        model.setObjectSnapEnabled(false)
+        #expect(!model.objectSnapEnabled)
+        let off = snap(model, at: cursor, tol: tol)
+        #expect(off.kind == .free)
+        #expect((off.point - cursor).magnitude < 1e-9)
+    }
+
+    @Test("toggling Object Snap off→on restores the prior osnap selection (not a wipe)")
+    func objectSnapMasterRestoresPriorSelection() {
         let model = CanvasModel()
 
-        // The binding the section drives: GET = !isSnapModeOn(.free),
-        //                                 SET = setSnapMode(.free, !on).
-        func snapEnabled() -> Bool { !model.isSnapModeOn(.free) }
-        func setSnapEnabled(_ on: Bool) { model.setSnapMode(.free, !on) }
+        // A distinctive selection: endpoint + center + grid (grid is non-object).
+        model.snapModes = [.endpoint, .center, .grid, .free]
+        #expect(model.objectSnapEnabled)
 
-        // Turning the master OFF sets the .free (no-snap) mode.
-        setSnapEnabled(false)
+        // OFF: positive object-snap bits cleared; .grid/.free preserved.
+        model.setObjectSnapEnabled(false)
+        #expect(!model.objectSnapEnabled)
+        #expect(!model.isSnapModeOn(.endpoint))
+        #expect(!model.isSnapModeOn(.center))
+        #expect(model.isSnapModeOn(.grid))   // separate grid snap untouched
         #expect(model.isSnapModeOn(.free))
-        #expect(!snapEnabled())
 
-        // Turning it back ON clears .free again.
-        setSnapEnabled(true)
-        #expect(!model.isSnapModeOn(.free))
-        #expect(snapEnabled())
+        // ON: the EXACT prior object-snap selection comes back (endpoint+center),
+        // and the grid snap is still on (it was never touched).
+        model.setObjectSnapEnabled(true)
+        #expect(model.objectSnapEnabled)
+        #expect(model.isSnapModeOn(.endpoint))
+        #expect(model.isSnapModeOn(.center))
+        #expect(!model.isSnapModeOn(.middle))        // was NOT selected → stays off
+        #expect(!model.isSnapModeOn(.intersection))  // was NOT selected → stays off
+        #expect(model.isSnapModeOn(.grid))
+    }
+
+    @Test("Object Snap on with nothing stashed restores a sensible default set")
+    func objectSnapMasterDefaultsWhenNothingStashed() {
+        let model = CanvasModel()
+        // Start fully OFF (no positive object-snap bits), nothing ever stashed.
+        model.snapModes = [.free]
+        #expect(!model.objectSnapEnabled)
+
+        model.setObjectSnapEnabled(true)
+        #expect(model.objectSnapEnabled)
+        // The default set: endpoint + center + middle + intersection.
+        #expect(model.isSnapModeOn(.endpoint))
+        #expect(model.isSnapModeOn(.center))
+        #expect(model.isSnapModeOn(.middle))
+        #expect(model.isSnapModeOn(.intersection))
     }
 }
