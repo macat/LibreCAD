@@ -282,9 +282,9 @@ struct CommandPalette: View {
             palette
                 .frame(width: 560)
                 .frame(maxHeight: 460)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: DS.Radius.modal))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 14)
+                    RoundedRectangle(cornerRadius: DS.Radius.modal)
                         .strokeBorder(.separator, lineWidth: 0.5)
                 )
                 .shadow(radius: 30, y: 12)
@@ -353,26 +353,26 @@ struct CommandPalette: View {
     }
 
     private func row(_ cmd: PaletteCommand, isSelected: Bool) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: DS.Space.md) {
             Image(systemName: cmd.systemImage)
-                .frame(width: 20)
-                .foregroundStyle(isSelected ? Color.white : .secondary)
+                .frame(width: DS.Size.rowIcon)
+                .foregroundStyle(isSelected ? DS.Palette.onAccent : .secondary)
             Text(cmd.title)
-                .foregroundStyle(isSelected ? Color.white : .primary)
-            Spacer(minLength: 12)
+                .foregroundStyle(isSelected ? DS.Palette.onAccent : .primary)
+            Spacer(minLength: DS.Space.lg)
             if let shortcut = cmd.shortcut {
                 Text(shortcut)
                     .font(.callout.monospaced())
-                    .foregroundStyle(isSelected ? Color.white.opacity(0.85) : .secondary)
+                    .foregroundStyle(isSelected ? DS.Palette.onAccent.opacity(0.85) : .secondary)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.horizontal, DS.Space.xl)
+        .padding(.vertical, DS.Space.md)
         .background {
             if isSelected {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.accentColor)
-                    .padding(.horizontal, 8)
+                RoundedRectangle(cornerRadius: DS.Radius.selection)
+                    .fill(DS.Palette.accent)
+                    .padding(.horizontal, DS.Space.md)
             }
         }
     }

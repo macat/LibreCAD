@@ -1878,9 +1878,35 @@ struct LayoutTabStrip: View {
     /// Discard. Defaults to a no-op so existing call sites need not pass it.
     var onSelectBlockEdit: () -> Void = {}
 
+    /// Whether the strip is shown at all (plan §3d): HIDE it entirely until there is a
+    /// paper-space layout to switch to — with only the implicit "Model" space there is
+    /// nothing to tab between, so a lone "Model" pill is noise. The strip also appears
+    /// while a block-edit session is open so its transient BEDIT tab has a home.
+    /// `LayoutTabStrip.shouldShow(layoutCount:isEditingBlock:)` is the pure predicate
+    /// (unit-tested); this is its live read.
+    private var isVisible: Bool {
+        Self.shouldShow(layoutCount: model.orderedLayouts.count,
+                        isEditingBlock: model.editingBlock != nil)
+    }
+
+    /// Pure visibility predicate (plan §3d): show the strip iff there is at least one
+    /// paper-space layout to switch to, OR a block-edit session is active (so the
+    /// transient BEDIT tab is reachable). With only model space (`layoutCount == 0`)
+    /// and no session, the strip is hidden — there is nothing to tab between.
+    static func shouldShow(layoutCount: Int, isEditingBlock: Bool) -> Bool {
+        layoutCount > 0 || isEditingBlock
+    }
+
     var body: some View {
+        if isVisible {
+            stripBody
+        }
+    }
+
+    /// The actual tab strip (only built when `isVisible`).
+    private var stripBody: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 2) {
+            HStack(spacing: DS.Space.xxs) {
                 modelTab
                 ForEach(model.orderedLayouts) { layout in
                     layoutTab(named: layout.name)
@@ -1894,8 +1920,8 @@ struct LayoutTabStrip: View {
                 blockEditTab
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .padding(.horizontal, DS.Size.barPadH)
+            .padding(.vertical, DS.Space.xs)
         }
         .frame(maxWidth: .infinity)
         .background(.bar)
@@ -1975,9 +2001,9 @@ struct LayoutTabStrip: View {
     private var addButton: some View {
         Button(action: onAddLayout) {
             Image(systemName: "plus")
-                .font(.callout)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
+                .font(DS.Font.rowLabel)
+                .padding(.horizontal, DS.Space.md)
+                .padding(.vertical, DS.Space.xs)
         }
         .buttonStyle(.plain)
         .help("New layout")
@@ -1985,8 +2011,9 @@ struct LayoutTabStrip: View {
     }
 
     /// A single tab pill — shared chrome for the Model tab + each layout tab. The
-    /// active tab reads with the accent tint + a filled background; inactive tabs are
-    /// secondary. A plain button so the whole pill is the hit target.
+    /// active tab reads with the accent tint, a `selectionFill` background, a
+    /// `.semibold` title, and a 2pt accent underline (plan §3d); inactive tabs are
+    /// secondary and underline-free. A plain button so the whole pill is the hit target.
     @ViewBuilder
     private func tabButton(
         title: String,
@@ -1995,19 +2022,28 @@ struct LayoutTabStrip: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            HStack(spacing: 5) {
+            HStack(spacing: DS.Space.sm) {
                 Image(systemName: systemImage)
                 Text(title)
             }
-            .font(.callout)
+            .font(DS.Font.rowLabel)
+            .fontWeight(isActive ? .semibold : .regular)
             .lineLimit(1)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .foregroundStyle(isActive ? Color.accentColor : .secondary)
+            .padding(.horizontal, DS.Space.md)
+            .padding(.vertical, DS.Space.xs)
+            .foregroundStyle(isActive ? DS.Palette.accent : .secondary)
             .background(
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(isActive ? Color.accentColor.opacity(0.15) : Color.clear)
+                RoundedRectangle(cornerRadius: DS.Radius.selection)
+                    .fill(isActive ? DS.Palette.selectionFill : Color.clear)
             )
+            .overlay(alignment: .bottom) {
+                // The 2pt accent underline marks the active tab (AutoCAD/Chrome-style).
+                if isActive {
+                    Rectangle()
+                        .fill(DS.Palette.accent)
+                        .frame(height: 2)
+                }
+            }
         }
         .buttonStyle(.plain)
     }

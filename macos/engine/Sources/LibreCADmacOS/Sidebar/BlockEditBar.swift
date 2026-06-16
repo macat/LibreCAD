@@ -46,9 +46,9 @@ struct BlockEditBar: View {
     }
 
     @ViewBuilder private var bar: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: DS.Space.lg) {
             Image(systemName: "square.on.square.dashed")
-                .foregroundStyle(.tint)
+                .foregroundStyle(DS.Palette.accent)
             Text("Editing block:")
                 .foregroundStyle(.secondary)
             // For a NESTED session show the breadcrumb (e.g. "A ▸ B"), so it is clear
@@ -56,7 +56,7 @@ struct BlockEditBar: View {
             Text(breadcrumb)
                 .font(.body.weight(.semibold))
                 .foregroundStyle(.primary)
-            Spacer(minLength: 8)
+            Spacer(minLength: DS.Space.md)
             Button("Discard", role: .cancel) { exit(save: false) }
                 .help("Discard this block's changes and leave (pops one nested level)")
             Button("Save & Close") { exit(save: true) }
@@ -65,13 +65,9 @@ struct BlockEditBar: View {
                 .help("Apply this block's changes — every reference to it updates "
                       + "(pops one nested level)")
         }
-        .font(.callout)
+        .font(DS.Font.rowLabel)
         .lineLimit(1)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .frame(maxWidth: .infinity)
-        .background(.thinMaterial)
-        .overlay(alignment: .bottom) { Divider() }
+        .barStrip(dividerEdge: .bottom)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Editing block \(breadcrumb)")
     }
