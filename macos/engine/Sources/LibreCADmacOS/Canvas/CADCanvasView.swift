@@ -453,6 +453,13 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
         controller?.toggleOrtho()
     }
 
+    /// View ▸ Show Grid (F7) — toggles the canvas grid visibility. The selector name
+    /// is EXACTLY `toggleGridAction:` so the View-menu item (wired by the menu wave)
+    /// can target it through the responder chain.
+    @objc func toggleGridAction(_ sender: Any?) {
+        controller?.contextToggleGrid()
+    }
+
     /// View ▸ Zoom Window (F23) — arm the transient drag-box zoom.
     @objc func zoomWindowAction(_ sender: Any?) {
         controller?.enterZoomWindow()
@@ -511,6 +518,12 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
             // Reflect the persistent ortho state as the menu checkmark.
             if let menuItem = item as? NSMenuItem {
                 menuItem.state = controller.model.orthoEnabled ? .on : .off
+            }
+            return true
+        case #selector(toggleGridAction(_:)):
+            // Reflect the grid-visible state as the menu checkmark.
+            if let menuItem = item as? NSMenuItem {
+                menuItem.state = controller.isGridVisible ? .on : .off
             }
             return true
         case #selector(zoomWindowAction(_:)):
@@ -1498,12 +1511,21 @@ final class CADCanvasController {
         let isDelete = event.keyCode == 51 || event.keyCode == 117 // Delete / Forward-Delete
         let isSpace = event.keyCode == 49
         let isF8 = event.keyCode == 100                            // F8 → toggle Ortho
+        let isF7 = event.keyCode == 98                             // F7 → toggle Grid
 
         // F8 toggles ortho (AutoCAD/LibreCAD convention), in any mode and regardless
         // of modifiers, so a draw run can flip ortho mid-operation without leaving the
         // canvas. Handled before the tool keys so it never collides with a letter.
         if isF8 {
             toggleOrtho()
+            return true
+        }
+
+        // F7 toggles the grid (AutoCAD/LibreCAD convention), in any mode and regardless
+        // of modifiers — same handling as F8. Handled before the tool keys so it never
+        // collides with a letter.
+        if isF7 {
+            contextToggleGrid()
             return true
         }
 
