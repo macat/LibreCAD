@@ -1305,6 +1305,167 @@ public final class CADDrawing {
         }
     }
 
+    // MARK: - Block attributes (ATTDEF defs + ATTRIB values; undoable)
+    //
+    // Block ATTRIBUTES are split across two stores, mirroring DXF: a block declares
+    // ATTDEF *templates* (`Block.attributeDefs` — tag/prompt/default/placement) and
+    // every `INSERT` of that block carries one ATTRIB *value* per tag
+    // (`InsertData.attributes`). The MODEL + resolve + DXF round-trip already exist;
+    // these are the undoable EDIT ops that were missing:
+    //   • set/replace an insert's ATTRIB value (EATTEDIT core) — entity-replace funnel.
+    //   • CRUD a block's ATTDEF defs (BATTMAN/Define-Attribute) — `mutateBlocks` funnel.
+    //   • reconcile every insert to a block's defs (ATTSYNC) — one undo group.
+    // Each routes through the SAME value-snapshot undo funnels every other edit uses,
+    // so each is exactly one ⌘Z and a genuine no-op registers nothing.
+
+    /// Sets (or appends) the ATTRIB **value** for `tag` on the `.insert` entity `id`
+    /// (the EATTEDIT core — the value editor a user types into in the Inspector).
+    /// Undoable via the entity-replace funnel (one ⌘Z reverts).
+    ///
+    /// Behavior:
+    ///   - No-op (no undo) if `id` is absent or not an `.insert`.
+    ///   - If the insert already has an ATTRIB with this `tag` (case-insensitive,
+    ///     matching the DXF round-trip's tag comparison), its `text` is replaced in
+    ///     place (position/height/rotation/flags preserved).
+    ///   - Otherwise a new `BlockAttributeValue` is APPENDED, seeded from the block's
+    ///     matching `attributeDef` (so it inherits the def's placement/height/rotation/
+    ///     flags); if the block declares no such def, a plain value at the origin is
+    ///     appended so the edit is never silently dropped.
+    ///   - A genuine no-op (the value already equals `text` for an existing tag)
+    ///     registers nothing (the entity-replace funnel skips an unchanged record).
+    public func setInsertAttributeValue(insertID id: EntityID, tag: String, text: String) {
+        guard let record = entity(id), case .insert(var data) = record.kind else { return }
+
+        if let idx = data.attributes.firstIndex(where: {
+            $0.tag.caseInsensitiveCompare(tag) == .orderedSame
+        }) {
+            guard data.attributes[idx].text != text else { return }  // no-op
+            data.attributes[idx].text = text
+        } else {
+            // New value — seed placement/height/rotation/flags from the block's def
+            // (so an authored ATTDEF lands where it was designed), else a plain value.
+            let def = blocks.block(named: data.blockName)?.attributeDefs.first {
+                $0.tag.caseInsensitiveCompare(tag) == .orderedSame
+            }
+            let value = BlockAttributeValue(
+                tag: def?.tag ?? tag,
+                text: text,
+                position: def?.position ?? Vector(0, 0),
+                height: def?.height ?? 2.5,
+                rotation: def?.rotation ?? 0,
+                flags: def?.flags ?? 0)
+            data.attributes.append(value)
+        }
+
+        var updated = record
+        updated.kind = .insert(data)
+        replace(updated)
+    }
+
+    /// Adds a new ATTDEF **definition** to a block (the Define-Attribute authoring op).
+    /// Undoable via `mutateBlocks`. No-op (no undo) if the block is unknown or already
+    /// declares a def with this tag (case-insensitive — ATTDEF tags are unique within a
+    /// block). Returns `true` if added.
+    @discardableResult
+    public func addBlockAttributeDef(block name: String, _ def: BlockAttributeDef) -> Bool {
+        var added = false
+        mutateBlocks { table in
+            guard var block = table.block(named: name) else { return }
+            guard !block.attributeDefs.contains(where: {
+                $0.tag.caseInsensitiveCompare(def.tag) == .orderedSame
+            }) else { return }
+            block.attributeDefs.append(def)
+            table.upsert(block)
+            added = true
+        }
+        return added
+    }
+
+    /// Updates an existing ATTDEF **definition** on a block, matched by `def.tag`
+    /// (case-insensitive). Undoable via `mutateBlocks`. No-op (no undo) if the block is
+    /// unknown, no def with that tag exists, or the def is unchanged. Returns `true` if
+    /// updated. (To rename a tag, remove the old + add the new.)
+    @discardableResult
+    public func updateBlockAttributeDef(block name: String, _ def: BlockAttributeDef) -> Bool {
+        var updated = false
+        mutateBlocks { table in
+            guard var block = table.block(named: name),
+                  let idx = block.attributeDefs.firstIndex(where: {
+                      $0.tag.caseInsensitiveCompare(def.tag) == .orderedSame
+                  }) else { return }
+            guard block.attributeDefs[idx] != def else { return }   // no-op
+            block.attributeDefs[idx] = def
+            table.upsert(block)
+            updated = true
+        }
+        return updated
+    }
+
+    /// Removes the ATTDEF **definition** with `tag` (case-insensitive) from a block.
+    /// Undoable via `mutateBlocks`. No-op (no undo) if the block is unknown or has no
+    /// def with that tag. (Existing inserts keep their ATTRIB values until `syncBlockAttributes`.)
+    public func removeBlockAttributeDef(block name: String, tag: String) {
+        mutateBlocks { table in
+            guard var block = table.block(named: name) else { return }
+            let before = block.attributeDefs.count
+            block.attributeDefs.removeAll { $0.tag.caseInsensitiveCompare(tag) == .orderedSame }
+            guard block.attributeDefs.count != before else { return }   // no-op
+            table.upsert(block)
+        }
+    }
+
+    /// Reconciles every `.insert` of `name` to that block's current `attributeDefs`
+    /// (the ATTSYNC op). For each insert of the block:
+    ///   - tags present in the defs but MISSING on the insert are added with the def's
+    ///     default text + the def's placement/height/rotation/flags,
+    ///   - tags on the insert that are NO LONGER defined are dropped,
+    ///   - tags present in both keep their existing VALUE (the user's typed text), but
+    ///     adopt the def's placement/height/rotation/flags (so a def-edit propagates),
+    ///   - the reconciled list is ORDERED to match the defs' order.
+    /// Undoable as ONE group: every changed insert is one entity-replace, all of which
+    /// reverse together within a single undo grouping (the UndoManager groups the calls
+    /// made in one turn, exactly like `makeBlockFromEntities`). Unchanged inserts are
+    /// not touched (the entity-replace funnel skips identical records), so a sync that
+    /// changes nothing registers no undo.
+    public func syncBlockAttributes(block name: String) {
+        guard let block = blocks.block(named: name) else { return }
+        let defs = block.attributeDefs
+
+        // Snapshot the matching insert ids first (we mutate records as we go).
+        let insertIDs: [EntityID] = entities.compactMap { rec in
+            guard case .insert(let d) = rec.kind,
+                  d.blockName.caseInsensitiveCompare(name) == .orderedSame else { return nil }
+            return rec.id
+        }
+
+        for id in insertIDs {
+            guard let record = entity(id), case .insert(var data) = record.kind else { continue }
+
+            // Build the reconciled, def-ordered attribute list, preserving each tag's
+            // existing value where it matches a def.
+            var reconciled: [BlockAttributeValue] = []
+            reconciled.reserveCapacity(defs.count)
+            for def in defs {
+                let existing = data.attributes.first {
+                    $0.tag.caseInsensitiveCompare(def.tag) == .orderedSame
+                }
+                reconciled.append(BlockAttributeValue(
+                    tag: def.tag,
+                    text: existing?.text ?? def.defaultText,
+                    position: def.position,
+                    height: def.height,
+                    rotation: def.rotation,
+                    flags: def.flags))
+            }
+
+            guard data.attributes != reconciled else { continue }   // unchanged insert
+            data.attributes = reconciled
+            var updated = record
+            updated.kind = .insert(data)
+            replace(updated)
+        }
+    }
+
     // MARK: - Create block from a selection (CreateBlockTool's model op)
 
     /// The outcome of a `makeBlockFromEntities` call: the (possibly de-duplicated)

@@ -46,6 +46,8 @@ struct InspectorView: View {
     var body: some View {
         Form {
             selectionSection
+            // §14 ATTDEF authoring — only while a block is being edited (Block Editor).
+            attributeDefsSection
             propertyPainterSection
             snapGridSection
             toolOptionsSection
@@ -104,6 +106,11 @@ struct InspectorView: View {
         // selected entity is an `.insert` whose block carries visibility states; switches
         // the insert's active state through the undoable `setInsertVisibilityState` funnel.
         dynamicInsertSection(record)
+
+        // §14 ATTRIBUTES — the EATTEDIT core. When the selected entity is an `.insert`
+        // whose block declares ATTDEF templates, list each attribute's editable VALUE.
+        // Values commit through the same undoable record-replace funnel (`commit`).
+        attributeValuesSection(record)
 
         // The font/style editor — the user-facing payoff of the font system.
         switch record.kind {
@@ -166,6 +173,55 @@ struct InspectorView: View {
                 }
             }
         )
+    }
+
+    // MARK: Block attributes — VALUE editor (§14, EATTEDIT core)
+
+    /// The Inspector's block-attribute VALUE editor — rendered only when `record` is an
+    /// `.insert` whose referenced block declares `attributeDefs`. Each def's value is
+    /// editable (constant-mode defs are read-only); a typed value commits an updated
+    /// `.insert` record through the undoable `commit` funnel + a redraw.
+    @ViewBuilder
+    private func attributeValuesSection(_ record: EntityRecord) -> some View {
+        if case .insert(let data) = record.kind,
+           let block = model.drawing.blocks.block(named: data.blockName),
+           !block.attributeDefs.isEmpty {
+            BlockAttributeValuesEditor(
+                record: record,
+                defs: block.attributeDefs,
+                onCommit: commit)
+            .id(record.id)   // re-seed the editor's drafts when the selection changes
+        }
+    }
+
+    // MARK: Block attributes — ATTDEF authoring (§14, Block Editor)
+
+    /// The ATTDEF authoring panel — rendered only while a block is being edited
+    /// (`model.isEditingBlock`). Lets the user add / edit / remove the EDITING block's
+    /// attribute definitions through the undoable def-CRUD ops on the drawing, then
+    /// redraws (placeholder ATTDEF text re-resolves; existing inserts pick the defs up
+    /// via the user's "Sync Attributes" action / next ATTSYNC).
+    @ViewBuilder
+    private var attributeDefsSection: some View {
+        if let blockName = model.editingBlock,
+           let block = model.drawing.blocks.block(named: blockName) {
+            BlockAttributeDefsEditor(
+                defs: block.attributeDefs,
+                onAdd: { def in
+                    let ok = model.drawing.addBlockAttributeDef(block: blockName, def)
+                    if ok { requestRedraw() }
+                    return ok
+                },
+                onUpdate: { def in
+                    if model.drawing.updateBlockAttributeDef(block: blockName, def) {
+                        requestRedraw()
+                    }
+                },
+                onRemove: { tag in
+                    model.drawing.removeBlockAttributeDef(block: blockName, tag: tag)
+                    requestRedraw()
+                })
+        }
     }
 
     // MARK: Multi selection (common fields only)

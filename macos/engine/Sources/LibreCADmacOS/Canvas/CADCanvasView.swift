@@ -311,6 +311,12 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
             // Forwards to the View-layer name sheet via the controller hook.
             menu.addItem(item("Create Block from Selection…",
                               #selector(ctxCreateBlockFromSelection(_:))))
+            // §14: edit a selected attributed insert's attribute VALUES (EATTEDIT) — only
+            // when a single insert whose block declares ATTDEFs is selected. Opens the
+            // Inspector's Attributes section; does NOT hijack double-click (Block Editor).
+            if controller.canEditSelectedInsertAttributes {
+                menu.addItem(item("Edit Attributes…", #selector(ctxEditAttributes(_:))))
+            }
             menu.addItem(.separator())
             menu.addItem(item("Properties…", #selector(ctxProperties(_:))))
             menu.addItem(.separator())
@@ -337,6 +343,7 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
     @objc private func ctxDuplicate(_ sender: Any?)  { controller?.contextDuplicate() }
     @objc private func ctxDelete(_ sender: Any?)     { controller?.contextDelete() }
     @objc private func ctxProperties(_ sender: Any?) { controller?.contextProperties() }
+    @objc private func ctxEditAttributes(_ sender: Any?) { controller?.contextEditAttributes() }
     @objc private func ctxCreateBlockFromSelection(_ sender: Any?) { controller?.contextCreateBlockFromSelection() }
     @objc private func ctxPaste(_ sender: Any?)      { controller?.contextPaste() }
     @objc private func ctxSelectAll(_ sender: Any?)  { controller?.contextSelectAll() }
@@ -1014,6 +1021,15 @@ final class CADCanvasController {
     /// Whether the context menu's selection-dependent verbs (Cut/Copy/Duplicate/
     /// Delete/Properties) should appear.
     var hasSelection: Bool { !model.selection.isEmpty }
+    /// Whether the "Edit Attributes…" verb (§14) should appear: a SINGLE `.insert` is
+    /// selected whose referenced block declares ATTDEF attribute definitions.
+    var canEditSelectedInsertAttributes: Bool {
+        guard model.selection.ids.count == 1, let id = model.selection.ids.first,
+              let record = model.drawing.entity(id), case .insert(let data) = record.kind,
+              let block = model.drawing.blocks.block(named: data.blockName)
+        else { return false }
+        return !block.attributeDefs.isEmpty
+    }
     /// Whether Paste is enabled (clipboard has content).
     var canPaste: Bool { model.hasClipboard }
     /// Whether the grid is shown (drives the menu checkmark).
@@ -1027,6 +1043,11 @@ final class CADCanvasController {
     func contextDuplicate() { if model.duplicateSelection() { refreshGizmo(); redraw() } }
     func contextDelete() { if model.deleteSelection() { refreshGizmo(); redraw() } }
     func contextProperties() { requestShowInspector?() }
+    /// §14 "Edit Attributes…": reveal the Inspector so its Attributes section (shown for
+    /// the selected attributed insert) is in front. View-layer only — opens the existing
+    /// inspector pane; no modal, no double-click hijack (double-click still opens the
+    /// Block Editor).
+    func contextEditAttributes() { requestShowInspector?() }
     func contextPaste() {
         let ok = contextMenuWorld.map { model.paste(at: $0) } ?? model.paste()
         if ok { refreshGizmo(); redraw() }
