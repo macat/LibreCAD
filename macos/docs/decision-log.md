@@ -6,6 +6,20 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-16 — BLOCK-EDITING FLOW rebuilt (owner: "editing a block doesn't edit it; open in a tab") (`native-macos @ 128f7c7f2`, **2274 tests**, `.app` rebuilt)
+
+Owner reported the in-place Block Editor was wrong: (1) drawing in it added LOOSE document objects instead of block members ("editing a block doesn't change the block"); (2) it replaced the document view instead of opening a TAB. Owner directed: **plan the whole flow first** (don't point-fix). Did: full-flow design (`block-edit-flow-plan.md`) → **critic GO-WITH-FIXES** (caught: `applyCommit` mints+discards the new id so the add-to-block needs an explicit seam; tab "active" coupled to `activeSpace`; tab-switch doesn't auto-finish; paste/delete are separate funnels; a small engine helper is required) → owner decisions (auto Save&Close on switch · **support nested now** · per-edit undo · base-point marker deferred) → built in 3 staged commits.
+
+**Landed** (`128f7c7f2`; two review rounds each found + drove a fix):
+- **Correctness:** new undoable `CADDrawing.addEntityToBlock`/`removeEntityFromBlock`; `applyCommit` `.add` + `paste(records:)` thread the minted id INTO the editing block (same undo group, before the `modelVersion` bump); `.remove` drops it. Drawing/pasting/deleting in the editor now mutates the BLOCK — no loose document objects, all inserts update live, Discard reverts added members. **This is the owner's #1 fix.**
+- **Tab UX:** the editor is a distinct "✎ <Block>" tab in `LayoutTabStrip` (Model/Layout `isActive` gated on `editingBlock == nil` → exactly one active tab; document tabs intact); `activate*` call `finishBlockEditingIfNeeded()` so switching auto-Saves&Closes and the tab pick sticks.
+- **Nested editing:** single `editingBlock` → a `BlockEditSession` STACK; double-click a nested insert pushes; exit pops; per-level entry snapshot + undo group; cyclic-open rejected; breadcrumb "A ▸ B".
+- **Review caught 2 data-loss-class bugs** (both fixed + pinned): Save-inner→Discard-outer reverted inner's saved edits (depth-2); then a depth-≥3 case (Save C→Discard B→Discard A). Final fix = INDUCTIVE `hasSavedNestedWork` propagation on any pop carrying saved subtree work (correct at arbitrary depth; load-bearing-verified by revert→fail→restore). Tests cover depths 1/2/3 × all save/discard combos.
+
+**Known v1 cut:** the block base point is framed but not rendered/editable (deferred). **Acceptance pass on the nested data-loss + `.app` smoke in flight; owner to GUI-verify** (draw-in-block-stays-in-block, tab open, nested drill, Discard).
+
+---
+
 ## 2026-06-16 — "Move beyond blocks" wave: block-member-editability FIX + utility tools (`native-macos @ HEAD`, **2221 tests**)
 
 Owner: "blocks should be edited only when OPENED, not loose in the document." Plus owner chose to move beyond blocks → a fresh code-grounded gap audit (catalog is **~entirely stale**: measure/hatch-engine/construction-lines/all-dim-subtypes/image/stretch-break-join-align/polyline-node-edit/advanced-snaps/ortho/multi-select-edit/MTEXT-write are all already DONE). The genuinely-remaining gaps are persistence/fidelity/power-editing follow-ups.
