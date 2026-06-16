@@ -106,19 +106,26 @@ public struct Block: Sendable, Hashable, Codable, Identifiable {
     /// block born without it — and every old saved file — decodes to `[]`, so
     /// existing blocks are 100% unaffected.
     public var attributeDefs: [BlockAttributeDef]
+    /// The block's DYNAMIC authoring bundle (visibility states this wave; params /
+    /// actions / lookup later — see `DynamicBlockDef`). ADDITIVE optional field: a
+    /// plain (non-dynamic) block — and every old saved file — carries `nil`, so a
+    /// block born without it is byte-identical (dynamic-blocks-plan §2a).
+    public var dynamic: DynamicBlockDef?
 
     public init(
         name: String,
         basePoint: Vector = Vector(0, 0),
         entityIDs: [EntityID] = [],
         isFrozen: Bool = false,
-        attributeDefs: [BlockAttributeDef] = []
+        attributeDefs: [BlockAttributeDef] = [],
+        dynamic: DynamicBlockDef? = nil
     ) {
         self.name = name
         self.basePoint = basePoint
         self.entityIDs = entityIDs
         self.isFrozen = isFrozen
         self.attributeDefs = attributeDefs
+        self.dynamic = dynamic
     }
 
     /// Visibility — the inverse of `isFrozen` (`RS_Block::toggle` flips frozen).
@@ -126,6 +133,10 @@ public struct Block: Sendable, Hashable, Codable, Identifiable {
         get { !isFrozen }
         set { isFrozen = !newValue }
     }
+
+    /// Whether this block carries any dynamic authoring (a non-empty bundle). A
+    /// `nil`-vs-empty `dynamic` reads the same — both are a plain block.
+    public var isDynamic: Bool { dynamic?.isEmpty == false }
 }
 
 // MARK: - Decodable (back-compat: tolerate missing newer fields)
@@ -134,6 +145,7 @@ extension Block {
     private enum CodingKeys: String, CodingKey {
         case name, basePoint, entityIDs, isFrozen
         case attributeDefs
+        case dynamic
     }
 
     public init(from decoder: any Decoder) throws {
@@ -144,6 +156,8 @@ extension Block {
         isFrozen = try c.decodeIfPresent(Bool.self, forKey: .isFrozen) ?? false
         // ADDITIVE: old files (no `attributeDefs` key) decode to an empty list.
         attributeDefs = try c.decodeIfPresent([BlockAttributeDef].self, forKey: .attributeDefs) ?? []
+        // ADDITIVE: old files (no `dynamic` key) decode to nil — a plain block.
+        dynamic = try c.decodeIfPresent(DynamicBlockDef.self, forKey: .dynamic)
     }
 }
 
