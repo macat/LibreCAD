@@ -203,6 +203,15 @@ final class CanvasModel {
     /// both reflect and drive this live; `updateSnap` reads it on every cursor event.
     var snapModes: SnapMode = [.endpoint, .center, .middle, .intersection, .onEntity, .free]
 
+    /// The positive object-snap bits remembered when the master "Object Snap"
+    /// toggle is switched OFF, so flipping it back ON restores the user's exact
+    /// prior selection (AutoCAD OSNAP / F3). This is ONLY a remembered mask — the
+    /// live modes always stay in `snapModes` (the single source of truth, persisted
+    /// via `$LC_SNAPMODE`); the stash never holds the non-object `.free`/`.grid`
+    /// bits. Empty when the master is currently ON (nothing is stashed).
+    @ObservationIgnored
+    var stashedObjectSnapModes: SnapMode = []
+
     /// Whether the grid is drawn / used as a visual guide. The live grid SPACING is
     /// owned by the renderer (passed into `updateSnap` per event); this is the
     /// user-facing on/off the Inspector toggles. (Render-side consumption of this
@@ -3679,6 +3688,51 @@ final class CanvasModel {
 
     /// Whether a snap mode is currently enabled.
     func isSnapModeOn(_ mode: SnapMode) -> Bool { snapModes.contains(mode) }
+
+    /// The non-object snap bits: `.free` (the always-on raw-cursor fallback the
+    /// pipeline never gates on) and `.grid` (the SEPARATE grid snap / F9). Neither
+    /// counts as "object snapping"; subtracting them from `snapModes` leaves only
+    /// the POSITIVE object-snap bits.
+    static let nonObjectSnapModes: SnapMode = [.free, .grid]
+
+    /// The default object-snap set restored by the master toggle when nothing was
+    /// previously stashed — the interactive defaults (endpoint + center + middle +
+    /// intersection). Object-snap bits only (never `.free`/`.grid`).
+    static let defaultObjectSnapModes: SnapMode = [.endpoint, .center, .middle, .intersection]
+
+    /// Whether OBJECT snapping is currently active (AutoCAD OSNAP / F3): true iff
+    /// any POSITIVE object-snap bit is set. `.free` (raw-cursor fallback) and
+    /// `.grid` (the separate grid snap) do NOT count, since the snap pipeline only
+    /// gates on positive object-snap bits — when none are set, `Snapping.snap`
+    /// returns the free (raw) cursor point. This is the master toggle's GET.
+    var objectSnapEnabled: Bool {
+        !snapModes.subtracting(Self.nonObjectSnapModes).isEmpty
+    }
+
+    /// Master object-snap on/off (AutoCAD OSNAP / F3), the Inspector's "Object Snap"
+    /// toggle SET. Turning it OFF stashes the current positive object-snap bits and
+    /// CLEARS them from `snapModes` (so `Snapping.snap` falls back to the free/raw
+    /// point), while preserving `.grid`/`.free`. Turning it ON restores the stashed
+    /// bits — or `defaultObjectSnapModes` if nothing was stashed (e.g. a fresh-loaded
+    /// file). Routes every mutation through the existing `setSnapMode`/`persistSnapModes`
+    /// funnel so persistence (`$LC_SNAPMODE`) and undo stay consistent.
+    func setObjectSnapEnabled(_ on: Bool) {
+        if on {
+            // Already on (some object-snap bit set) → nothing to restore.
+            guard !objectSnapEnabled else { return }
+            let restore = stashedObjectSnapModes.isEmpty
+                ? Self.defaultObjectSnapModes
+                : stashedObjectSnapModes
+            stashedObjectSnapModes = []
+            // Funnel through setSnapMode so the change persists + is undoable.
+            setSnapMode(restore, true)
+        } else {
+            let current = snapModes.subtracting(Self.nonObjectSnapModes)
+            guard !current.isEmpty else { return }  // already off
+            stashedObjectSnapModes = current
+            setSnapMode(current, false)
+        }
+    }
 
     /// Enables/disables a single snap mode (the Inspector's per-mode toggles + the
     /// Document Settings sheet). Persists the resulting set to the document's private

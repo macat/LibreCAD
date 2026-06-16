@@ -377,15 +377,19 @@ struct InspectorView: View {
     @ViewBuilder
     private var snapGridSection: some View {
         Section("Snap & Grid") {
-            // Master snap on/off — pulled OUT of the grid (the old "Free (no snap)"
-            // mode, inverted) so it reads as the section's primary switch (AutoCAD
-            // DSETTINGS ▸ Object Snap "Object Snap On"). When snapping is OFF the
-            // per-mode grid below is disabled (it has no effect anyway).
-            Toggle("Snap on", isOn: snapEnabledBinding)
-                .help("Master object-snap toggle — off = free cursor (no snap)")
+            // Master OBJECT-snap on/off (AutoCAD OSNAP / F3) — the section's primary
+            // switch. ON ⇒ at least one positive object-snap bit is set; OFF ⇒ the
+            // object-snap bits are stashed + cleared so `Snapping.snap` returns the
+            // raw cursor point (a real F3, not the old inert `.free` flip). The grid
+            // below stays READABLE when off (just unchecked) so the user can re-check
+            // an osnap, which naturally turns the master back on. Grid snap ("Show
+            // grid"/"Grid spacing") is a SEPARATE control group below the divider.
+            Toggle("Object Snap", isOn: objectSnapEnabledBinding)
+                .help("Master object-snap toggle (F3) — off = free cursor (no object snap)")
 
             // The per-mode toggles as a 2-column checkbox grid so the long labels
-            // (Endpoint…Parallel) stop clipping in a single tall column (§3c).
+            // (Endpoint…Parallel) stop clipping in a single tall column (§3c). NOT
+            // disabled when the master is off: re-checking any osnap re-enables it.
             LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading),
                                 GridItem(.flexible(), alignment: .leading)],
                       alignment: .leading, spacing: DS.Space.xs) {
@@ -395,7 +399,6 @@ struct InspectorView: View {
                         .lineLimit(1)
                 }
             }
-            .disabled(!snapEnabledBinding.wrappedValue)
 
             Divider()
 
@@ -426,13 +429,14 @@ struct InspectorView: View {
         )
     }
 
-    /// The master "Snap on" toggle — the INVERSE of the `.free` (no-snap) mode, so the
-    /// section reads as a primary switch over the per-mode grid. ON ⇒ `.free` cleared
-    /// (object snap active); OFF ⇒ `.free` set (free cursor).
-    private var snapEnabledBinding: Binding<Bool> {
+    /// The master "Object Snap" toggle (AutoCAD OSNAP / F3). GET reports whether any
+    /// positive object-snap bit is set; SET stashes+clears them (off) or restores the
+    /// stashed/default set (on) via `CanvasModel.setObjectSnapEnabled`. Unlike the old
+    /// inert `.free`-flip, this REALLY gates `Snapping.snap`: off ⇒ raw cursor point.
+    private var objectSnapEnabledBinding: Binding<Bool> {
         Binding(
-            get: { !model.isSnapModeOn(.free) },
-            set: { model.setSnapMode(.free, !$0) }
+            get: { model.objectSnapEnabled },
+            set: { model.setObjectSnapEnabled($0) }
         )
     }
 
