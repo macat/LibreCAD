@@ -676,9 +676,6 @@ struct MultiCommonEditor: View {
     let records: [EntityRecord]
     let layerNames: [String]
     let onCommitAll: ([EntityRecord]) -> Void
-    /// Resets every selected entity's pen to `.byLayer` (one undo step). Supplied by
-    /// the Inspector (routes through `CanvasModel.resetSelectionPenToLayer`).
-    var onResetPenToLayer: (() -> Void)?
 
     @State private var layer: String = ""
     @State private var color: Color = .green
@@ -764,10 +761,8 @@ struct MultiCommonEditor: View {
             } label: {
                 Text("Line width (mm)").lineLimit(1)
             }
-
-            if let reset = onResetPenToLayer {
-                Button("Reset Pen to Layer", action: reset)
-            }
+            // NOTE: the "Reset Pen to Layer" action lives ONLY in the Match Properties
+            // section now (it applied to the same selection — this was a duplicate).
         }
         .onAppear(perform: seed)
         .onChange(of: records.map(\.id)) { _, _ in seed() }

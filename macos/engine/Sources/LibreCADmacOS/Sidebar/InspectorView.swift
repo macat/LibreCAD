@@ -305,51 +305,70 @@ struct InspectorView: View {
     private func multiSelectionEditor(_ records: [EntityRecord]) -> some View {
         Section("Selection") {
             LabeledContent("Entities", value: "\(records.count) selected")
+                .lineLimit(1)
         }
         // Common fields that apply to ALL: layer + pen color/mode/type/width. Each
-        // picker writes the chosen value onto every selected record in one undo step;
-        // a "Reset Pen to Layer" action routes through the painter path.
+        // picker writes the chosen value onto every selected record in one undo step.
+        // (The "Reset Pen to Layer" action lives in the Match Properties section.)
         MultiCommonEditor(
             records: records,
             layerNames: model.drawing.layers.layers.map(\.name),
-            onCommitAll: commit,
-            onResetPenToLayer: {
-                if model.resetSelectionPenToLayer() { requestRedraw() }
-            }
+            onCommitAll: commit
         )
     }
 
-    // MARK: Property painter (F20 — match properties / eyedropper)
+    // MARK: Match Properties (F20 — AutoCAD MATCHPROP / eyedropper)
 
-    /// The property-painter controls: pick up pen + layer from the current single
-    /// selection (the brush), then apply it to a later selection. Always visible so
-    /// the affordance is discoverable; the buttons enable/disable on context (one
-    /// entity to pick up; a brush loaded + a selection to apply). Routes entirely
-    /// through `CanvasModel`'s undoable painter ops.
+    /// The Match-Properties controls (renamed from "Property Painter" — AutoCAD's
+    /// MATCHPROP): pick up pen + layer from the current single selection (the brush),
+    /// then apply it to a later selection, or reset the selection's pen back to its
+    /// layer. Always visible so the affordance is discoverable; each action enables on
+    /// context via the pure `MatchPropertiesAvailability` predicate. When NOTHING is
+    /// actionable the section collapses to a single hint line (not three greyed
+    /// buttons). Routes entirely through `CanvasModel`'s undoable painter ops.
     @ViewBuilder
     private var propertyPainterSection: some View {
-        Section("Property Painter") {
-            LabeledContent("Brush") {
-                Text(model.hasPaintBrush ? "Loaded" : "Empty")
-                    .foregroundStyle(model.hasPaintBrush ? .primary : .secondary)
+        let avail = MatchPropertiesAvailability(hasBrush: model.hasPaintBrush,
+                                                selectionCount: model.selection.ids.count)
+        Section("Match Properties") {
+            LabeledContent("Source") {
+                Text(avail.statusWord)
+                    .foregroundStyle(avail.hasBrush ? .primary : .secondary)
             }
-            Button("Pick Up Properties") {
-                _ = model.loadPaintBrushFromSelection()
-            }
-            .disabled(model.selection.ids.count != 1)
-            .help("Copy the selected entity's pen + layer into the brush")
+            .lineLimit(1)
 
-            Button("Apply to Selection") {
-                if model.applyPaintBrushToSelection() { requestRedraw() }
-            }
-            .disabled(!model.hasPaintBrush || model.selection.isEmpty)
-            .help("Stamp the brush's pen + layer onto every selected entity")
+            if avail.isAllUnavailable {
+                // One hint instead of three disabled buttons.
+                Label(avail.unavailableHint, systemImage: "eyedropper")
+                    .font(DS.Font.hint)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Button {
+                    _ = model.loadPaintBrushFromSelection()
+                } label: {
+                    Label("Pick Up", systemImage: "eyedropper")
+                }
+                .disabled(!avail.canPickUp)
+                .help("Copy the selected entity's pen + layer into the brush")
 
-            Button("Reset Pen to Layer") {
-                if model.resetSelectionPenToLayer() { requestRedraw() }
+                Button {
+                    if model.applyPaintBrushToSelection() { requestRedraw() }
+                } label: {
+                    Label("Apply", systemImage: "paintbrush.pointed")
+                }
+                .disabled(!avail.canApply)
+                .help("Stamp the brush's pen + layer onto every selected entity")
+
+                Button {
+                    if model.resetSelectionPenToLayer() { requestRedraw() }
+                } label: {
+                    Label("Reset", systemImage: "arrow.uturn.backward")
+                }
+                .disabled(!avail.canReset)
+                .help("Make the selection inherit each layer's pen again")
             }
-            .disabled(model.selection.isEmpty)
-            .help("Make the selection inherit each layer's pen again")
         }
     }
 
@@ -358,6 +377,28 @@ struct InspectorView: View {
     @ViewBuilder
     private var snapGridSection: some View {
         Section("Snap & Grid") {
+            // Master snap on/off — pulled OUT of the grid (the old "Free (no snap)"
+            // mode, inverted) so it reads as the section's primary switch (AutoCAD
+            // DSETTINGS ▸ Object Snap "Object Snap On"). When snapping is OFF the
+            // per-mode grid below is disabled (it has no effect anyway).
+            Toggle("Snap on", isOn: snapEnabledBinding)
+                .help("Master object-snap toggle — off = free cursor (no snap)")
+
+            // The per-mode toggles as a 2-column checkbox grid so the long labels
+            // (Endpoint…Parallel) stop clipping in a single tall column (§3c).
+            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading),
+                                GridItem(.flexible(), alignment: .leading)],
+                      alignment: .leading, spacing: DS.Space.xs) {
+                ForEach(SnapModeOption.gridModes, id: \.label) { option in
+                    Toggle(option.label, isOn: snapBinding(option.mode))
+                        .toggleStyle(.checkbox)
+                        .lineLimit(1)
+                }
+            }
+            .disabled(!snapEnabledBinding.wrappedValue)
+
+            Divider()
+
             Toggle("Show grid", isOn: $model.gridVisible)
                 .onChange(of: model.gridVisible) { _, _ in requestRedraw() }
 
@@ -374,10 +415,6 @@ struct InspectorView: View {
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
             }
-
-            ForEach(SnapModeOption.all, id: \.label) { option in
-                Toggle(option.label, isOn: snapBinding(option.mode))
-            }
         }
     }
 
@@ -386,6 +423,16 @@ struct InspectorView: View {
         Binding(
             get: { model.isSnapModeOn(mode) },
             set: { model.setSnapMode(mode, $0) }
+        )
+    }
+
+    /// The master "Snap on" toggle — the INVERSE of the `.free` (no-snap) mode, so the
+    /// section reads as a primary switch over the per-mode grid. ON ⇒ `.free` cleared
+    /// (object snap active); OFF ⇒ `.free` set (free cursor).
+    private var snapEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { !model.isSnapModeOn(.free) },
+            set: { model.setSnapMode(.free, !$0) }
         )
     }
 
@@ -617,4 +664,8 @@ private struct SnapModeOption {
         SnapModeOption(label: "Grid", mode: .grid),
         SnapModeOption(label: "Free (no snap)", mode: .free),
     ]
+
+    /// The per-mode toggles shown in the 2-column grid — every mode EXCEPT `.free`,
+    /// which is surfaced as the master "Snap on" toggle above the grid (§3c).
+    static let gridModes: [SnapModeOption] = all.filter { $0.mode != .free }
 }

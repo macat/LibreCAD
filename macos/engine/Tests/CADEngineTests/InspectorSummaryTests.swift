@@ -171,4 +171,26 @@ struct InspectorSummaryTests {
         #expect(a.canApply)
         #expect(a.statusWord == "Loaded")
     }
+
+    // MARK: - 4. Master "Snap on" toggle — the inverse-of-.free contract
+
+    @Test("the master Snap-on toggle is the inverse of the .free (no-snap) mode")
+    func snapMasterTogglesFreeMode() {
+        let model = CanvasModel()
+
+        // The binding the section drives: GET = !isSnapModeOn(.free),
+        //                                 SET = setSnapMode(.free, !on).
+        func snapEnabled() -> Bool { !model.isSnapModeOn(.free) }
+        func setSnapEnabled(_ on: Bool) { model.setSnapMode(.free, !on) }
+
+        // Turning the master OFF sets the .free (no-snap) mode.
+        setSnapEnabled(false)
+        #expect(model.isSnapModeOn(.free))
+        #expect(!snapEnabled())
+
+        // Turning it back ON clears .free again.
+        setSnapEnabled(true)
+        #expect(!model.isSnapModeOn(.free))
+        #expect(snapEnabled())
+    }
 }
