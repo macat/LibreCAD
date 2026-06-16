@@ -53,6 +53,15 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 - **B-WIRE wire-wave** — `ContentView`/`CADCanvasView`/`BlocksSidebar`/`ToolKind` etc.: BlockEditBar + double-click-insert-to-edit + sidebar "Edit", attribute display/edit UI, library browser panel. After the 3 engine waves merge.
 Critic-gating the disjointness before dispatch; launches as the paper-space hot files are now free.
 
+**Critic verdict GO-WITH-FIXES — folded in:** B-ATTR's DXF work needs VENDORED libdxfrw patches (there is NO `addAttrib` callback — ATTRIB rides in `DRW_Insert.attlist`, which stock libdxfrw neither parses nor writes); attributes modeled as ADDITIVE `InsertData`/`Block` fields (NO new `EntityKind` case) with back-compat `decodeIfPresent`; B0 Discard must drop the net-identity undo group; B-LIB import must always route `makeBlockFromEntities`/`newName` (no in-place overwrite → data loss); `setBlockMembers` on `CADDrawing` not `Block.swift`. (`DxfBridge/libdxfrw` is a symlink → the real files are `libraries/libdxfrw/src/`.)
+
+**— ENGINE WAVES LANDED** (`native-macos @ fb622c5ea`, **2031 tests** green; 3 worktrees pruned; each code-reviewed APPROVE/APPROVE-WITH-NITS, fixes applied):
+- **B-LIB** `f3fd50067` (+14) — engine-pure `BlockLibrary` (`BlockLibraryItem`/`scan(directory:)`) + import-block-from-`.dxf` (`importRecords`/`importDXF`/`importItem`) reusing `readEntities` + `makeBlockFromEntities`; collision-safe via `newName` (both blocks survive, proven). UNWIRED. *Cuts:* no `$INSUNITS` unit-scaling on import; unflattened nested-INSERT symbols import supported geometry only.
+- **B0** `e726ea4c2` (+14) — in-place Block Editor SCOPE on `CanvasModel` (`enterBlockEditing`/`exitBlockEditing(save:)`/`finishBlockEditingIfNeeded`) reusing the paper-space active-space pattern; `CADDrawing.setBlockMembers` undoable via `mutateBlocks`. **Save&Close/Discard** is one undo group; Discard restores the entry snapshot AND drops the net-identity group so `canUndo` returns to pre-enter (tested). Single-block (no nested REFEDIT); re-enter-while-open rejected. UNWIRED.
+- **B-ATTR** `fb622c5ea` (+13) — block attributes: `InsertData.attributes` (ATTRIB values) + `Block.attributeDefs` (ATTDEF templates), additive + back-compat; `resolveInsert` emits ATTRIB via the shared `.text` arm (once per MINSERT cell, guards intact); full DXF round-trip via **vendored libdxfrw reader+writer patch** (`processInsert` consumes ATTRIB→attlist + swallows SEQEND; `processEntities` ATTDEF→new `addAttdef` interface hook; `writeInsert` emits code-66+ATTRIB+SEQEND; `writeBlock` emits ATTDEFs) — reviewer APPROVE, patch safe to carry. Flagged + carried one non-owned 1-line `drw_interface.h` defaulted-no-op virtual. **DXF only** (no DWG attribute fidelity). UNWIRED.
+
+**REMAINING:** WIRE-WAVE 1 (paper-space viewport tool + per-layout plot menu + draw-variant mode pickers) — IN FLIGHT; then WIRE-WAVE BLOCK (double-click-insert→edit, BlockEditBar Save&Close/Discard, sidebar "Edit", attribute display/edit + prompt-on-insert, library browser gallery + drag-to-place + file picker); then final acceptance + `.app`.
+
 ---
 
 ---
