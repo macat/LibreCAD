@@ -51,6 +51,11 @@ struct LibreCADApp: App {
     /// Export (PDF/PNG/SVG) and Print actions published by the focused window.
     @FocusedValue(\.exportDocument) private var exportDocument
     @FocusedValue(\.printDocument) private var printDocument
+    /// Per-LAYOUT plot actions published by the focused window (File ▸ Export Layout to
+    /// PDF… / Print Layout…). Present only when a layout TAB is active (paper space);
+    /// `nil` in model space, which disables the items.
+    @FocusedValue(\.exportLayout) private var exportLayout
+    @FocusedValue(\.printLayout) private var printLayout
     /// The tool-activation action published by the focused window.
     @FocusedValue(\.activateTool) private var activateTool
     /// The "begin Image placement" action published by the focused window (Tools ▸
@@ -109,6 +114,17 @@ struct LibreCADApp: App {
                 Button("Print…") { printDocument?() }
                     .keyboardShortcut("p", modifiers: .command)
                     .disabled(printDocument == nil)
+
+                // File ▸ Export Layout to PDF… / Print Layout… — the per-LAYOUT plot
+                // (Paper Space P4). Each plots the ACTIVE layout sheet at its own plot
+                // scale, so these are ENABLED only when a layout TAB is active (the
+                // focused value is published only in paper space; `nil` ⇒ disabled).
+                Button("Export Layout to PDF…") { exportLayout?() }
+                    .keyboardShortcut("e", modifiers: [.command, .option])
+                    .disabled(exportLayout == nil)
+                Button("Print Layout…") { printLayout?() }
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                    .disabled(printLayout == nil)
 
                 Divider()
                 // File ▸ Document Settings… (⌥⌘, — decision D8). The per-document
@@ -396,6 +412,12 @@ struct LibreCADApp: App {
             toolItem(.xline, "i", .option)
             toolItem(.ray, "y", .option)
             toolItem(.insert, "i", .shift)
+
+            Divider()
+            // Paper-space Viewport placement (⌥V) — only meaningful in a layout tab
+            // (the model-space activation is an inert no-op). Routes via the same
+            // `activateTool` path as every other tool; the model gates it on paper space.
+            toolItem(.viewport, "v", .option)
         }
     }
 

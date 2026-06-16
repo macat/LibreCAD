@@ -770,7 +770,13 @@ final class CADCanvasController {
         // the snap marker / HUD is all that updates. Ortho (if effective) axis-locks
         // the point to the last placed point BEFORE the tool sees it, so the preview
         // is already constrained; osnap still wins (see `orthoConstrained`).
-        if model.isToolActive {
+        // Paper-space VIEWPORT placement is an OUT-OF-BAND mode (no `Tool`): feed its
+        // own move handler so the rubber-band frame tracks the (snapped) PAPER-space
+        // cursor. Only active + meaningful in a layout tab (model space ⇒ inert).
+        if model.isViewportPlacementActive {
+            let p = model.snappedWorldPoint(atScreenPoint: point, gridSpacing: spacing)
+            model.handleViewportMove(p)
+        } else if model.isToolActive {
             let p = model.snappedWorldPoint(atScreenPoint: point, gridSpacing: spacing)
             let constrained = model.orthoConstrained(p, shiftHeld: Self.shiftHeld)
             model.handleToolInput(.move(constrained))
@@ -814,6 +820,15 @@ final class CADCanvasController {
             let p = model.snappedWorldPoint(atScreenPoint: point, gridSpacing: spacing)
             beginTextEditing(atWorldPoint: p, editing: nil, initialText: "")
             redraw()
+            return
+        }
+        // Paper-space VIEWPORT placement (out-of-band): the two clicks define the
+        // viewport frame on the sheet; the second click commits a `LayoutViewport` to
+        // the active layout (undoable). The snapped PAPER-space point feeds the tool.
+        if model.isViewportPlacementActive {
+            let spacing = renderer?.lastGridSpacing
+            let p = model.snappedWorldPoint(atScreenPoint: point, gridSpacing: spacing)
+            if model.handleViewportClick(p) { redraw() }
             return
         }
         if model.isToolActive {

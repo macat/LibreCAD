@@ -150,6 +150,8 @@ enum CommandRegistry {
         case .continueDim:     return ("arrow.left.and.line.vertical.and.arrow.right", "⌥C")
         // Image: place a reference to an image file (picked up front), ⇧Y.
         case .image:           return ("photo", "⇧Y")
+        // Paper-space Viewport placement (⌥V) — only meaningful in a layout tab.
+        case .viewport:        return ("rectangle.dashed", "⌥V")
         }
     }
 

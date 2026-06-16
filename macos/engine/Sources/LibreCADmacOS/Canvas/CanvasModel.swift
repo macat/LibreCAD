@@ -473,8 +473,36 @@ final class CanvasModel {
     var circleSizeMode: CircleSizeMode = .radius
     var circleFixedSize: Double = 0
 
-    /// Arc tool: the construction mode (center→start→end default, or 3-point).
+    /// Circle tool: the geometric CONSTRUCTION mode (center+radius default, 2-point
+    /// diameter, or 3-point circumcircle). Fixed at construction (it seeds the start
+    /// state), so `applyToolConfig` RE-MINTS the tool with this mode (the DivideTool/
+    /// ArcTool pattern). The default `.centerRadius` keeps the original two-click flow.
+    var circleConstructionMode: CircleConstructionMode = .centerRadius
+
+    /// Arc tool: the construction mode (center→start→end default, 3-point, or
+    /// tangential — start tangent to a picked edge).
     var arcMode: ArcCreationMode = .centerStartEnd
+
+    /// Line tool: the angle-constraint mode, split into a UI-simple case INDEX +
+    /// an angle scalar (the same split the Polygon/Rectangle/Ellipse/Trim pickers
+    /// use, since `LineAngleMode` carries an associated value and isn't a Picker tag).
+    /// 0 = free (default — back-compatible), 1 = absolute, 2 = relative. `applyToolConfig`
+    /// assembles `LineAngleMode` from this index + `lineAngle` (radians).
+    var lineAngleModeIndex: Int = 0
+    /// Line tool: the constraint angle (RADIANS, CCW from +X) used by the absolute /
+    /// relative angle modes. The options bar edits a friendlier degrees value over this.
+    var lineAngle: Double = 0
+
+    /// Assembles the Line tool's `LineAngleMode` from the split UI state
+    /// (`lineAngleModeIndex` + `lineAngle`). The single mapping the live tool +
+    /// the wiring test share, so the options bar and `applyToolConfig` never drift.
+    var lineAngleModeValue: LineAngleMode {
+        switch lineAngleModeIndex {
+        case 1:  return .absolute(lineAngle)
+        case 2:  return .relative(lineAngle)
+        default: return .free
+        }
+    }
 
     /// Point tool: the on-screen marker style for placed points.
     var pointStyle: PointStyle = .dot
@@ -742,6 +770,160 @@ final class CanvasModel {
             box = box.union(e.boundingBox())
         }
         return box
+    }
+
+    /// The MODEL-space extents a newly placed paper-space viewport frames (the whole
+    /// model fit). Public so the View layer can seed the `ViewportTool` (which needs
+    /// the model AABB to derive the view center + height). Falls back to `.empty`,
+    /// which the tool clamps to a unit view at the world origin.
+    var modelExtentsForViewport: AABB { modelSpaceBoundingBox }
+
+    // MARK: - Paper-space VIEWPORT placement (OUT-OF-BAND tool — wire-wave-1)
+    //
+    // `ViewportTool` is a STANDALONE value type (NOT a `Tool` conformer): its result
+    // is a `LayoutViewport`, which lives in `Layout.viewports` (off `EntityKind`), so
+    // it cannot flow through the frozen `Tool`/`ToolEdit` contract. The app therefore
+    // drives the 2-click flow HERE, keyed off `activeToolKind == .viewport`, exactly
+    // as the CreateBlock out-of-band path routes through a model op rather than a
+    // `ToolEdit`. The tool is ONLY meaningful in PAPER space with an active layout; in
+    // model space (or with no layout) the flow is an inert no-op.
+
+    /// The live `ViewportTool` value, owned by the model while `.viewport` is the
+    /// active kind. A value type — the mutated copy is stored back after each input.
+    /// `nil` when `.viewport` is not active.
+    @ObservationIgnored
+    private var viewportTool: ViewportTool?
+
+    /// Whether the paper-space viewport-placement mode is BOTH active and meaningful:
+    /// the active kind is `.viewport` AND we are in paper space on a real layout.
+    /// In model space (or with no active layout) `.viewport` is inert, so the canvas
+    /// keeps select-mode behavior.
+    var isViewportPlacementActive: Bool {
+        activeToolKind == .viewport && activeSpace == .paper && activeLayout != nil
+    }
+
+    /// The viewport tool's live rubber-band preview (a closed paper-space polyline),
+    /// or empty when not placing. Drives the canvas overlay so the user sees the frame
+    /// being dragged. Empty when `.viewport` is inactive / inert.
+    var viewportPreview: [ResolvedPolyline] {
+        guard isViewportPlacementActive else { return [] }
+        return viewportTool?.preview ?? []
+    }
+
+    /// Arms / re-arms the `ViewportTool` for the current model extents. Called when
+    /// `.viewport` becomes the active kind (and after a placement re-arm) so the
+    /// freshly seeded tool frames the CURRENT model. A no-op when `.viewport` is not
+    /// the active kind.
+    func armViewportTool() {
+        guard activeToolKind == .viewport else { viewportTool = nil; return }
+        viewportTool = ViewportTool(modelExtents: modelExtentsForViewport)
+        toolStatus = viewportTool?.status ?? ""
+    }
+
+    /// Feeds the viewport tool a MOVE at a paper-space point (the rubber-band tracks
+    /// the cursor). Returns whether the canvas should redraw (the preview changed).
+    /// No-op (returns `false`) unless viewport placement is active + meaningful.
+    @discardableResult
+    func handleViewportMove(_ paperPoint: Vector) -> Bool {
+        guard isViewportPlacementActive, viewportTool != nil else { return false }
+        let outcome = viewportTool!.handle(.move(paperPoint))
+        toolStatus = viewportTool!.status
+        switch outcome {
+        case .none:    return false
+        default:       return true
+        }
+    }
+
+    /// Feeds the viewport tool a CLICK at a paper-space point. On the second click the
+    /// tool yields a finished `LayoutViewport`, which this routes to the active layout
+    /// via the undoable `CADDrawing.addViewport` (one ⌘Z removes it), rebuilds nothing
+    /// (viewports aren't in the quadtree — they render directly), and re-arms the tool
+    /// for the next placement. Returns whether the canvas should redraw. No-op
+    /// (returns `false`) unless viewport placement is active + meaningful.
+    @discardableResult
+    func handleViewportClick(_ paperPoint: Vector) -> Bool {
+        guard isViewportPlacementActive, let layoutName = activeLayout,
+              viewportTool != nil else { return false }
+        let outcome = viewportTool!.handle(.click(paperPoint))
+        toolStatus = viewportTool!.status
+        switch outcome {
+        case .none:
+            return false
+        case .preview, .cancelled:
+            return true
+        case .placed(let viewport):
+            // Route the finished viewport to the active layout (undoable). The tool
+            // already reset to its initial state, so the next two clicks place another.
+            let explicitGroup = !undoManager.groupsByEvent
+            if explicitGroup { undoManager.beginUndoGrouping() }
+            defer { if explicitGroup { undoManager.endUndoGrouping() } }
+            drawing.addViewport(viewport, toLayout: layoutName)
+            // Re-seed the tool for the current model extents for the next placement.
+            viewportTool = ViewportTool(modelExtents: modelExtentsForViewport)
+            toolStatus = viewportTool?.status ?? ""
+            modelDirty = true
+            modelVersion &+= 1
+            return true
+        }
+    }
+
+    /// Cancels an in-progress viewport placement (Esc), discarding the rubber-band and
+    /// re-arming the tool. Returns whether the canvas should redraw. No-op unless
+    /// viewport placement is active.
+    @discardableResult
+    func cancelViewportPlacement() -> Bool {
+        guard isViewportPlacementActive, viewportTool != nil else { return false }
+        let outcome = viewportTool!.handle(.cancel)
+        toolStatus = viewportTool!.status
+        return outcome != .none
+    }
+
+    // MARK: - Per-layout export scene (PURE — no panel; wire-wave-1)
+
+    /// Builds the `ExportScene` for one paper-space `layout` sheet: the resolved
+    /// paper-space drawables on that layout (`space == .paper` AND `layoutName ==
+    /// layout.name`, case-insensitively — the `PaperSpaceLayout` predicate). PURE (no
+    /// `NSSavePanel`/modal), so it is reachable from a unit test AND from the
+    /// View-layer Export-Layout / Print-Layout closures, which keep the panel.
+    ///
+    /// v1 cut: the sheet CONTENT only (paper-space entities on the layout). Model
+    /// geometry seen THROUGH viewports is rendered on-screen but NOT plotted here — a
+    /// documented follow-up; the on-screen viewport contents are a draw-only mapping.
+    func layoutExportScene(for layout: Layout) -> ExportScene {
+        let ctx = drawing.makeResolveContext()
+        let layers = drawing.layers
+        var polylines: [ResolvedPolyline] = []
+        var fills: [ResolvedFill] = []
+        var images: [ResolvedImage] = []
+        var bounds = AABB.empty
+
+        for e in drawing.entities {
+            // Scope to THIS layout's paper-space records (the single source-of-truth
+            // predicate the renderer + quadtree use).
+            guard PaperSpaceLayout.isInActiveSpace(e, space: .paper, layoutName: layout.name)
+            else { continue }
+            // Layer-visibility / printability filter — identical policy to
+            // `ExportSceneBuilder.build` (a frozen/hidden or non-printable layer
+            // contributes nothing; an unknown layer still draws via the default pen).
+            if let layer = layers.layer(e.layer) {
+                if !layer.isVisible { continue }
+                if !layer.isPrintable { continue }
+            }
+            let geo = e.resolve(ctx)
+            for poly in geo.polylines {
+                polylines.append(poly)
+                for p in poly.points { bounds.expand(toInclude: p) }
+            }
+            for fill in geo.fills {
+                fills.append(fill)
+                for loop in fill.loops { for p in loop { bounds.expand(toInclude: p) } }
+            }
+            for image in geo.images {
+                images.append(image)
+                for p in image.corners { bounds.expand(toInclude: p) }
+            }
+        }
+        return ExportScene(polylines: polylines, fills: fills, images: images, bounds: bounds)
     }
 
     // MARK: - In-place block editing (REFEDIT / BEDIT-style; built UNWIRED)
@@ -1350,7 +1532,11 @@ final class CanvasModel {
         activeToolKind = kind
         tool = kind.makeTool()
         applyToolConfig()
-        toolStatus = tool?.status ?? ""
+        // `.viewport` is an OUT-OF-BAND kind (no `Tool`): arm the standalone
+        // `ViewportTool` so the 2-click paper-space placement flow is ready. Switching
+        // to any other kind clears it (a no-op when it was already nil).
+        armViewportTool()
+        toolStatus = tool?.status ?? viewportTool?.status ?? ""
         // A fresh tool has placed no point yet — clear any stale relative-zero so the
         // command line's `@`/polar/distance input has no leftover reference. A LOCKED
         // datum survives the tool change (the user pinned it deliberately).
@@ -1465,7 +1651,12 @@ final class CanvasModel {
             t.mode = trimModeValue
             t.amount = trimAmount
             tool = t
-        case var t as CircleTool:
+        case is CircleTool:
+            // CircleTool's CONSTRUCTION `mode` (centerRadius / twoPoint / threePoint)
+            // is fixed at construction (it seeds the start state), so RE-MINT with the
+            // chosen mode (the DivideTool/ArcTool/EllipseTool pattern). The size mode +
+            // optional fixed size are settable `var`s, applied after the mint.
+            var t = CircleTool(mode: circleConstructionMode)
             t.sizeMode = circleSizeMode
             t.fixedSize = circleFixedSize > 0 ? circleFixedSize : nil
             tool = t
@@ -1473,6 +1664,12 @@ final class CanvasModel {
             // ArcTool's `mode` is fixed at construction (it seeds the start state),
             // so re-mint with the configured mode (mirrors the DivideTool pattern).
             tool = ArcTool(mode: arcMode)
+        case is LineTool:
+            // LineTool's `angleMode` is fixed at construction (it seeds the angle
+            // constraint applied to each segment), so re-mint with the assembled mode
+            // (the DivideTool/ArcTool re-mint pattern). The default `.free` mode keeps
+            // the original unconstrained behavior, so this is fully back-compatible.
+            tool = LineTool(angleMode: lineAngleModeValue)
         case var t as PointTool:
             t.style = pointStyle
             tool = t
@@ -1540,13 +1737,14 @@ final class CanvasModel {
         guard tool != nil else { return }
         let savedStatus = toolStatus
         applyToolConfig()
-        // Some tools are RE-MINTED by `applyToolConfig` (DivideTool's count, ArcTool's
-        // mode, EllipseTool's mode, BaselineDimTool's spacing, ImageTool's file are fixed
-        // at construction), which resets their state/status to the initial prompt. For
-        // those, take the fresh tool's status; for the in-place tools (which keep their
-        // state) restore the prior prompt text.
-        if tool is DivideTool || tool is ArcTool || tool is EllipseTool
-            || tool is BaselineDimTool || tool is ImageTool {
+        // Some tools are RE-MINTED by `applyToolConfig` (DivideTool's count, Circle's
+        // construction mode, ArcTool's mode, Line's angle mode, EllipseTool's mode,
+        // BaselineDimTool's spacing, ImageTool's file are fixed at construction), which
+        // resets their state/status to the initial prompt. For those, take the fresh
+        // tool's status; for the in-place tools (which keep their state) restore the
+        // prior prompt text.
+        if tool is DivideTool || tool is CircleTool || tool is ArcTool || tool is LineTool
+            || tool is EllipseTool || tool is BaselineDimTool || tool is ImageTool {
             toolStatus = tool?.status ?? ""
         } else {
             toolStatus = savedStatus

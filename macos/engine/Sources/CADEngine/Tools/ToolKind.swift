@@ -178,6 +178,16 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     /// file-picker (the app presents `NSOpenPanel`, reads the pixel size, and pushes
     /// path + pixel size onto the minted tool through `CanvasModel.applyToolConfig`).
     case image
+    // --- Wire-wave-1 (paper space) OUT-OF-BAND kind ---
+    /// The paper-space Viewport placement mode (`ViewportTool`) — a 2-click drag on a
+    /// layout sheet that creates a `LayoutViewport` framing the model. Unlike every
+    /// other kind, `.viewport` is NOT backed by a `Tool` conformer (`makeTool()`
+    /// returns `nil`, like `.select`): `ViewportTool` is a STANDALONE value type whose
+    /// result (`LayoutViewport`) lives in `Layout.viewports`, off `EntityKind`, so it
+    /// cannot flow through `ToolEdit`. The app drives its 2-click flow OUT OF BAND in
+    /// `CanvasModel` and routes the finished viewport to `CADDrawing.addViewport`. Only
+    /// meaningful in PAPER space with an active layout (a no-op in model space).
+    case viewport
     // Append new draw tools here (one `case` per tool) — see the collision note.
 
     /// A short title for the UI (toolbar button / menu).
@@ -237,6 +247,7 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .baselineDim:     return "Baseline Dimension"
         case .continueDim:     return "Continue Dimension"
         case .image:           return "Image"
+        case .viewport:        return "Viewport"
         // Append a title arm per new case.
         }
     }
@@ -320,6 +331,12 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         // ExplodeInsertTool use). A bare `makeTool()` never crashes: with no path the
         // tool ignores every input until the picker provides one.
         case .image:           return ImageTool()
+        // `.viewport` is an OUT-OF-BAND kind (paper-space viewport placement): like
+        // `.select` it mints NO `Tool`. `ViewportTool` is a standalone value type the
+        // app drives directly (its `LayoutViewport` result is not an entity, so it
+        // cannot flow through the `Tool`/`ToolEdit` contract). The app keys off
+        // `activeToolKind == .viewport` and runs `ViewportTool` itself.
+        case .viewport:        return nil
         // Append a `case <kind>: return <Name>Tool()` arm per new tool.
         }
     }
