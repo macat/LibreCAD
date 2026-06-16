@@ -633,8 +633,8 @@ final class CADCanvasController {
         view.addSubview(ucsAxisView)
         ucsAxis = ucsAxisView
 
-        // Float the CAD crosshair UNDER the gizmo (added first). It is fully
-        // click-through, so ordering only matters for paint layering — keeping it
+        // Float the CAD crosshair UNDER the gizmo (added above the UCS axis). It is
+        // fully click-through, so ordering only matters for paint layering — keeping it
         // below the gizmo means the gizmo handles paint over the crosshair lines.
         let crosshairView = CrosshairOverlayView(model: model)
         crosshairView.frame = view.bounds
@@ -871,9 +871,11 @@ final class CADCanvasController {
             let p = model.snappedWorldPoint(atScreenPoint: point, gridSpacing: spacing)
             // Angular constraint: ortho axis-locks, polar angle-locks (15° increments).
             // The two are MUTUALLY EXCLUSIVE in the model (turning one on clears the
-            // other — see `togglePolar`), and each call gates internally on its own
-            // enabled flag (returning the point unchanged when not effective), so it is
-            // safe to chain them: at most one ever mutates the point.
+            // other — see `togglePolar`) and each call gates internally on its own
+            // enabled flag, so it is safe to chain ortho→polar: at most one mutates the
+            // point. ⇧ disengages ortho (its XOR → free) and ALSO releases polar (its
+            // guard is `polarEnabled && !shiftHeld`), so hold-⇧ over ortho is free
+            // movement — not a silent 15° polar lock.
             let constrained = model.polarConstrained(
                 model.orthoConstrained(p, shiftHeld: Self.shiftHeld),
                 shiftHeld: Self.shiftHeld)
@@ -935,7 +937,9 @@ final class CADCanvasController {
             // Apply the angular constraint to the CLICKED point too (osnap > ortho/polar
             // > free), so the committed point matches the constrained preview the user is
             // looking at. Ortho and polar are mutually exclusive in the model and each
-            // gates internally, so chaining them mutates the point with at most one.
+            // gates internally, so chaining ortho→polar mutates the point with at most
+            // one. ⇧ disengages ortho AND releases polar (`polarEnabled && !shiftHeld`),
+            // so hold-⇧ is free movement — never a silent polar lock.
             let constrained = model.polarConstrained(
                 model.orthoConstrained(p, shiftHeld: Self.shiftHeld),
                 shiftHeld: Self.shiftHeld)
@@ -1100,7 +1104,10 @@ final class CADCanvasController {
     /// raise the block-name prompt for the current selection.
     func contextCreateBlockFromSelection() { requestCreateBlockFromSelection?() }
     func contextZoomToFit() { zoomToFit() }
-    func contextToggleGrid() { model.gridVisible.toggle(); redraw() }
+    // Route through `model.toggleGrid()` (not a bare `gridVisible.toggle()`) so it bumps
+    // `modelVersion` — the same op the GRID status chip observes — and the chip refreshes
+    // live when toggled from F7 / the context menu, not just on the next model edit.
+    func contextToggleGrid() { model.toggleGrid(); redraw() }
     func contextToggleOrtho() { toggleOrtho() }
     func contextDocumentSettings() { requestDocumentSettings?() }
 

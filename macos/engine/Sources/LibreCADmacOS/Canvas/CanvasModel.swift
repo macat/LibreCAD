@@ -4521,13 +4521,16 @@ final class CanvasModel {
     ///   3. Else the point passes through unchanged (free).
     ///
     /// `point` is the already-snapped world point the tool would otherwise receive;
-    /// `shiftHeld` is the live ⇧ flag from the point-input path — the SAME hold-⇧
-    /// on-the-fly flip as ortho (`orthoEffective`), so polar can be momentarily toggled
-    /// while drawing. With no `relativeZero` (the FIRST point of a run) there is nothing
-    /// to be polar to, so the point is returned unchanged. UNWIRED — the canvas calls
-    /// this next to `orthoConstrained` in a later wire-wave.
+    /// `shiftHeld` is the live ⇧ flag from the point-input path. Unlike ortho's hold-⇧
+    /// XOR *flip*, ⇧ here only ever RELEASES polar (AutoCAD semantics: ⇧ forces ortho /
+    /// releases polar) — it never engages polar when the persistent flag is off. So this
+    /// is `polarEnabled && !shiftHeld`, NOT the `!= shiftHeld` XOR: that lets the canvas
+    /// safely chain ortho-then-polar without ⇧-over-ortho being hijacked into a 15° lock
+    /// (ortho's own XOR disengages on ⇧ → free; polar must stay off so the point passes
+    /// through). With no `relativeZero` (the FIRST point of a run) there is nothing to be
+    /// polar to, so the point is returned unchanged.
     func polarConstrained(_ point: Vector, shiftHeld: Bool) -> Vector {
-        guard polarEnabled != shiftHeld else { return point }    // F10 XOR hold-⇧
+        guard polarEnabled, !shiftHeld else { return point }     // ⇧ releases polar
         guard !osnapActive else { return point }                 // osnap wins
         guard let reference = relativeZero else { return point }  // need a last point
         return PolarConstraint.constrain(

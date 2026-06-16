@@ -296,17 +296,24 @@ struct PolarTrackingTests {
         #expect(abs(snappedAngle - 15 * .pi / 180) < 1e-9)
     }
 
-    @Test("hold-⇧ flips polar on-the-fly (XOR), matching ortho")
-    func shiftFlipsPolarOnTheFly() {
+    @Test("⇧ NEVER engages polar (it only releases it) — AutoCAD: ⇧ forces ortho")
+    func shiftReleasesPolarNeverEngages() {
+        // Corrected from the original `!= shiftHeld` XOR contract: polar's guard is
+        // `polarEnabled && !shiftHeld`, so ⇧ over OFF-polar leaves the point free (it
+        // must NOT angle-lock — that was the ⇧-over-ortho hijack), and ⇧ over ON-polar
+        // releases polar (point passes through). See the OrthoPolarShiftTests suite for
+        // the full truth table incl. the chained ortho→polar canvas call.
         let m = makeModel()
         m.setRelativeZero(Vector(0, 0))
         let raw = Vector(10 * cos(20 * .pi / 180), 10 * sin(20 * .pi / 180))
-        // Polar OFF + ⇧ held ⇒ constraint APPLIES (XOR). It should move the point.
+        // Polar OFF + ⇧ held ⇒ polar does NOT engage. Point passes through unchanged.
         #expect(m.polarEnabled == false)
-        #expect(m.polarConstrained(raw, shiftHeld: true) != raw)
-        // Polar ON + ⇧ held ⇒ constraint SUPPRESSED. Point passes through.
+        #expect(m.polarConstrained(raw, shiftHeld: true) == raw)
+        // Polar ON + ⇧ held ⇒ polar RELEASED. Point passes through.
         m.togglePolar()
         #expect(m.polarConstrained(raw, shiftHeld: true) == raw)
+        // Polar ON + no ⇧ ⇒ polar APPLIES (the live drawing case). It moves the point.
+        #expect(m.polarConstrained(raw, shiftHeld: false) != raw)
     }
 }
 
@@ -421,5 +428,107 @@ struct LayoutTabWrapperTests {
         _ = m.newLayout()
         let current = m.drawing.layout(named: "Layout1")!.page
         #expect(m.setLayoutPage("Layout1", current) == false)
+    }
+}
+
+// MARK: - Ortho/Polar ⇧ semantics at the cursor input path (W4 #7)
+
+/// The canvas chains `model.polarConstrained(model.orthoConstrained(p, ⇧), ⇧)` at the
+/// cursor move/click sites. For that chain to honor AutoCAD semantics — **⇧ always
+/// forces ortho / releases polar** — `polarConstrained`'s guard is `polarEnabled &&
+/// !shiftHeld` (NOT the `!= shiftHeld` XOR ortho uses). These pin the model-level
+/// constraint result for the full ⇧ × {ortho,polar} truth table; the regression they
+/// guard is the ⇧-over-ortho hijack (⇧ to release ortho was silently angle-locking to
+/// 15° polar). `CanvasModel` is reached via the `_SharedCanvasModel` symlink; `@MainActor`.
+@MainActor
+@Suite("ortho/polar ⇧ semantics (⇧ forces ortho / releases polar)")
+struct OrthoPolarShiftTests {
+
+    private func makeModel() -> CanvasModel {
+        CanvasModel(drawing: CADDrawing(), viewSize: CGSize(width: 800, height: 600))
+    }
+
+    /// A reference (last placed point) so both constraints have something to lock to,
+    /// and a candidate that is OFF-axis and OFF a 15° multiple, so the three outcomes
+    /// (free / ortho-locked / polar-locked) are mutually distinct.
+    private let reference = Vector(0, 0)
+    private let candidate = Vector(10, 3)      // 16.7° from +x, not on an axis nor a 15° step
+
+    private func armed(_ m: CanvasModel) { m.setRelativeZero(reference); m.snap = nil }
+
+    // The expected oracles, straight from the pure constraint primitives the model delegates to.
+    private var orthoLocked: Vector { OrthoConstraint.constrain(candidate, relativeTo: reference) }
+    private func polarLocked(_ m: CanvasModel) -> Vector {
+        PolarConstraint.constrain(candidate, relativeTo: reference,
+                                  incrementRadians: m.polarAngleIncrement)
+    }
+
+    // MARK: both off
+
+    @Test("both off, no ⇧ → point unchanged (free)")
+    func bothOffNoShift() {
+        let m = makeModel(); armed(m)
+        #expect(m.orthoConstrained(candidate, shiftHeld: false) == candidate)
+        #expect(m.polarConstrained(candidate, shiftHeld: false) == candidate)
+    }
+
+    @Test("both off, ⇧ → ortho engages (existing XOR), polar stays free")
+    func bothOffShiftEngagesOrthoOnly() {
+        let m = makeModel(); armed(m)
+        // ⇧ flips ortho ON (orthoEffective XOR) — the established hold-⇧ behavior.
+        #expect(m.orthoConstrained(candidate, shiftHeld: true) == orthoLocked)
+        // …and polar must NOT engage on ⇧ when its persistent flag is off.
+        #expect(m.polarConstrained(candidate, shiftHeld: true) == candidate)
+    }
+
+    // MARK: ortho on — the fixed case
+
+    @Test("ortho on, ⇧ → FREE (the ⇧-over-ortho hijack is gone, not a 15° polar lock)")
+    func orthoOnShiftIsFree() {
+        let m = makeModel(); armed(m); m.orthoEnabled = true
+        // ortho's own XOR disengages on ⇧ → the point passes through ortho unchanged…
+        let afterOrtho = m.orthoConstrained(candidate, shiftHeld: true)
+        #expect(afterOrtho == candidate)
+        // …and polar (persistent flag OFF) must leave it unchanged too — NOT angle-lock.
+        // This is the regression: with the old `!= shiftHeld` XOR this returned a 15° lock.
+        #expect(m.polarConstrained(afterOrtho, shiftHeld: true) == candidate)
+        #expect(m.polarConstrained(afterOrtho, shiftHeld: true) != polarLocked(m))
+    }
+
+    @Test("ortho on, no ⇧ → ortho axis-lock")
+    func orthoOnNoShiftLocks() {
+        let m = makeModel(); armed(m); m.orthoEnabled = true
+        #expect(m.orthoConstrained(candidate, shiftHeld: false) == orthoLocked)
+    }
+
+    // MARK: polar on
+
+    @Test("polar on, no ⇧ → angle-lock to a 15° multiple")
+    func polarOnNoShiftLocks() {
+        let m = makeModel(); armed(m); m.polarEnabled = true
+        let out = m.polarConstrained(candidate, shiftHeld: false)
+        #expect(out == polarLocked(m))
+        #expect(out != candidate)               // it really moved (15° snap)
+    }
+
+    @Test("polar on, ⇧ → ortho-locked, NOT polar (⇧ releases polar / forces ortho)")
+    func polarOnShiftIsOrtho() {
+        let m = makeModel(); armed(m); m.polarEnabled = true
+        // ⇧ releases polar — `polarConstrained` returns the point unchanged…
+        #expect(m.polarConstrained(candidate, shiftHeld: true) == candidate)
+        // …and ortho's XOR engages on ⇧, so the chained result is the ORTHO lock.
+        let chained = m.polarConstrained(
+            m.orthoConstrained(candidate, shiftHeld: true), shiftHeld: true)
+        #expect(chained == orthoLocked)
+        #expect(chained != polarLocked(m))
+    }
+
+    // MARK: osnap precedence is preserved for polar (a real geometry snap wins)
+
+    @Test("polar on, no ⇧, osnap active → polar is skipped (osnap wins)")
+    func polarYieldsToOsnap() {
+        let m = makeModel(); armed(m); m.polarEnabled = true
+        m.snap = SnapResult(point: candidate, kind: .endpoint)   // a real geometry snap
+        #expect(m.polarConstrained(candidate, shiftHeld: false) == candidate)
     }
 }
