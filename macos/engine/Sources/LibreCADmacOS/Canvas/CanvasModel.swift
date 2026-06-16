@@ -637,8 +637,15 @@ final class CanvasModel {
     /// Model space (the default) returns the model-space records — identical to the
     /// whole drawing for a drawing with no paper entities, so existing behavior is
     /// preserved.
+    ///
+    /// During an in-place BLOCK EDIT session (`editingBlock != nil`) this is instead the
+    /// block's member records (`editingBlockEntities`), so the index/snapping/selection
+    /// — and any renderer that keys off this subset — operate on the block's contents,
+    /// exactly the way paper space scopes to a sheet. The scope is restored to the
+    /// prior space on `exitBlockEditing`.
     var activeSpaceEntities: [EntityRecord] {
-        PaperSpaceLayout.entities(
+        if editingBlock != nil { return editingBlockEntities }
+        return PaperSpaceLayout.entities(
             in: drawing.entities, space: activeSpace, layoutName: activeLayout)
     }
 
@@ -735,6 +742,243 @@ final class CanvasModel {
             box = box.union(e.boundingBox())
         }
         return box
+    }
+
+    // MARK: - In-place block editing (REFEDIT / BEDIT-style; built UNWIRED)
+    //
+    // AutoCAD-grade in-place block editing. The CRUX: a block's members are SHARED
+    // id-refs into `drawing.entities` (ADR-001) and `blockMembersSnapshot()` resolves
+    // them LIVE at every `makeResolveContext`, so editing a member record instantly
+    // updates EVERY insert of that block — the edit IS the save-back. Our job here is
+    // only the transient EDIT SESSION + the Save&Close / Discard semantics, reusing the
+    // proven paper-space active-space pattern (scope the index/renderer to the members,
+    // re-frame the camera, drop transient interaction state). No UI is wired here — a
+    // later wire-wave adds double-click / a menu / a BlockEditBar that call these.
+    //
+    // Undo coherence: the whole session is ONE undo group (begin on enter, end on exit)
+    // so a single ⌘Z after Save&Close reverts the entire session. Discard restores the
+    // entry-state snapshot deterministically (through the undoable funnels) and then
+    // drops the now-net-identity session group off the undo stack so `canUndo` returns
+    // to its pre-enter value — no stranded half-session steps.
+
+    /// The name of the block currently being edited in place, or `nil` when not in a
+    /// block-edit session. Drives `activeSpaceEntities` (which scopes the index /
+    /// snapping / selection to the block's members) and is what the (future) chrome
+    /// reads to show a "Editing block …" affordance. Purely live VIEW/session state —
+    /// the member EDITS themselves are document mutations (undoable); this flag is not.
+    private(set) var editingBlock: String?
+
+    /// The member records (deep value copies) the block held when the session was
+    /// entered, used to restore entry-state geometry on Discard. Empty when not editing.
+    @ObservationIgnored
+    private var editingEntrySnapshot: [EntityRecord] = []
+
+    /// The block's ordered member-id list at session entry, restored on Discard so the
+    /// block (and every insert) re-point at exactly the entry members.
+    @ObservationIgnored
+    private var editingEntryIDs: [EntityID] = []
+
+    /// The view state (active space + layout + viewport) to restore when the session
+    /// ends, so leaving the block returns the canvas to wherever it was on entry.
+    @ObservationIgnored
+    private var editingPriorView: (space: EntitySpace, layout: String?, viewport: Viewport)?
+
+    /// `modelVersion` captured the instant the session opened (after the enter bump).
+    /// The edit funnels (`applyCommit` / `applyInspectorEdits`) bump `modelVersion` on
+    /// every committed change, so `modelVersion != editingEntryModelVersion` at exit
+    /// means the session registered at least one undo step. We use this to AVOID
+    /// stranding an empty (no-edit) session group on the undo stack: an untouched
+    /// Save & Close (or the document-close guard firing with no edits) drops its empty
+    /// group instead of leaving a no-op ⌘Z step.
+    @ObservationIgnored
+    private var editingEntryModelVersion = 0
+
+    /// Whether a block-edit session is active.
+    var isEditingBlock: Bool { editingBlock != nil }
+
+    /// The member `EntityRecord`s of the block being edited (looked up LIVE via the
+    /// block's `entityIDs`), or `[]` when not editing / the block vanished. This is the
+    /// scoped subset `activeSpaceEntities` returns during a session — a stale member id
+    /// (no longer in the drawing) is skipped, matching `blockMembersSnapshot`.
+    var editingBlockEntities: [EntityRecord] {
+        guard let name = editingBlock,
+              let block = drawing.blocks.block(named: name) else { return [] }
+        return block.entityIDs.compactMap { drawing.entity($0) }
+    }
+
+    /// The bounding box of the block being edited (its live members) — what the camera
+    /// frames on enter so the members fill the view.
+    private var editingBlockBoundingBox: AABB {
+        var box = AABB.empty
+        for e in editingBlockEntities { box = box.union(e.boundingBox()) }
+        return box
+    }
+
+    /// Enters an in-place edit session for the named block (REFEDIT/BEDIT). Mirrors the
+    /// `setActiveSpace` body: it scopes the spatial index to the block's members (so
+    /// snapping/selection operate on the contents), re-frames the camera to the members'
+    /// bounds, drops transient selection/snap/hover, and marks the GPU buffer dirty +
+    /// bumps `modelVersion`. It also snapshots the entry-state members (deep value
+    /// copies) + the entry member-id list for Discard, remembers the prior view to
+    /// restore on exit, and OPENS one undo group so the whole session collapses to a
+    /// single ⌘Z.
+    ///
+    /// While editing, member edits go through the UNCHANGED undoable funnels
+    /// (`applyCommit` / `applyInspectorEdits`); every committed edit immediately updates
+    /// all inserts via the next `makeResolveContext` (the live-member resolve crux). The
+    /// previously-active tool's `relativeZero` etc. are untouched — only the canvas
+    /// scope changes. No-op (returns `false`) if the block is unknown or a session is
+    /// already active (re-entering must go through exit first, so the undo group + the
+    /// entry snapshot stay coherent). Returns `true` on a started session.
+    @discardableResult
+    func enterBlockEditing(name: String) -> Bool {
+        guard editingBlock == nil else { return false }            // already editing
+        guard let block = drawing.blocks.block(named: name) else { return false }
+
+        // Remember where to return on exit (the prior space/layout + camera).
+        editingPriorView = (activeSpace, activeLayout, viewport)
+
+        // Deep value snapshot of the entry-state members + the entry id list (for Discard).
+        editingEntryIDs = block.entityIDs
+        editingEntrySnapshot = block.entityIDs.compactMap { drawing.entity($0) }
+
+        // Enter the scope (canonicalize to the stored block name's casing).
+        editingBlock = block.name
+
+        // ONE undo group for the whole session — a single ⌘Z reverts it all. Mirrors the
+        // explicit-grouping rationale in `applyCommit` (the inner per-commit groups nest).
+        undoManager.beginUndoGrouping()
+
+        // Re-frame the camera to the members; re-home the floating origin near them.
+        viewport = Viewport.fit(editingBlockBoundingBox, in: viewport.size)
+        renderOrigin = RendererGeometry.renderOrigin(for: editingBlockBoundingBox)
+
+        // Scope the index to the members; drop transient interaction state.
+        rebuildIndex()
+        selection.clear()
+        snap = nil
+        hoverID = nil
+        modelDirty = true
+        modelVersion &+= 1
+        // Capture the post-bump version: any later change is a session edit (used at
+        // exit to drop an empty no-edit group rather than strand a no-op ⌘Z step).
+        editingEntryModelVersion = modelVersion
+        return true
+    }
+
+    /// Leaves the current block-edit session.
+    ///
+    /// - `save == true` (Save & Close): keep the edits — they are already applied to the
+    ///   live member records and already undoable. The session undo group is closed so a
+    ///   single ⌘Z reverts the whole session.
+    /// - `save == false` (Discard): restore the entry-state members + member-id list from
+    ///   the snapshot (so the block AND every insert return to entry geometry), close the
+    ///   session group, then drop that now-net-identity group off the undo stack so
+    ///   `canUndo` returns to its pre-enter value (no stranded half-session steps).
+    ///
+    /// A session that made NO edits (the user double-clicked, looked around, and left)
+    /// drops its empty group on EITHER path so it never strands a no-op ⌘Z step that
+    /// would silently consume the user's prior real undo — the change is detected via
+    /// `modelVersion` (only the edit funnels bump it during a session).
+    ///
+    /// Either way the canvas scope + camera are restored to the prior view, the index is
+    /// rebuilt for that space, and transient interaction state is cleared. No-op (returns
+    /// `false`) if no session is active. Presents NO modal — the (future) view layer asks
+    /// the user Save/Discard and calls this with the answer.
+    @discardableResult
+    func exitBlockEditing(save: Bool) -> Bool {
+        guard let name = editingBlock else { return false }
+
+        // Did any edit funnel commit during the session? (Only `applyCommit` /
+        // `applyInspectorEdits` bump `modelVersion` between enter and here.)
+        let sessionChanged = modelVersion != editingEntryModelVersion
+
+        if save && sessionChanged {
+            // Keep edits: just close the session group (one ⌘Z reverts the session).
+            undoManager.endUndoGrouping()
+        } else if save {
+            // Save & Close with NO edits: close the empty group and drop it so the undo
+            // stack stays at its pre-enter depth (no stranded no-op step).
+            undoManager.endUndoGrouping()
+            if undoManager.canUndo { undoManager.undo() }
+        } else if sessionChanged {
+            // Discard: restore the entry snapshot through the undoable funnels (so the
+            // restorations are captured INSIDE the still-open session group), making the
+            // group net-identity.
+            restoreBlockEntrySnapshot(name: name)
+            undoManager.endUndoGrouping()
+            // Drop the net-identity session group off the undo stack so the stack depth
+            // matches the pre-enter state (canUndo back to its prior value). Undoing a
+            // net-identity group leaves geometry at the entry state.
+            if undoManager.canUndo { undoManager.undo() }
+        } else {
+            // Discard with NO edits: nothing to restore — just drop the empty group.
+            undoManager.endUndoGrouping()
+            if undoManager.canUndo { undoManager.undo() }
+        }
+
+        // Restore the prior view scope + camera, then leave the session.
+        let prior = editingPriorView
+        editingBlock = nil
+        editingEntrySnapshot = []
+        editingEntryIDs = []
+        editingPriorView = nil
+        if let prior {
+            activeSpace = prior.space
+            activeLayout = prior.layout
+            viewport = prior.viewport
+        }
+        renderOrigin = RendererGeometry.renderOrigin(for: activeSpaceBoundingBox)
+
+        rebuildIndex()
+        selection.clear()
+        snap = nil
+        hoverID = nil
+        modelDirty = true
+        modelVersion &+= 1
+        return true
+    }
+
+    /// Auto-saves and closes an active block-edit session if one is open (a no-op
+    /// otherwise). The (future) view layer calls this when the session must end
+    /// unexpectedly — e.g. the document is being closed — because the member edits are
+    /// already in the document (the live-member crux), so Save&Close is the safe,
+    /// non-destructive default. Presents NO modal (it is reachable from the document
+    /// lifecycle, which a unit test exercises). Returns whether a session was closed.
+    @discardableResult
+    func finishBlockEditingIfNeeded() -> Bool {
+        guard editingBlock != nil else { return false }
+        return exitBlockEditing(save: true)
+    }
+
+    /// Restores a block's members + member-id list to the entry snapshot, through the
+    /// undoable `CADDrawing` funnels so the restorations register inside the open session
+    /// group (Discard). Member records present at entry are `replace`d back (re-added if
+    /// they were deleted during the session); members ADDED during the session (ids not
+    /// in the entry set) are removed; then the member-id list is re-pointed to the entry
+    /// list via `setBlockMembers`. A block that vanished entirely is skipped.
+    private func restoreBlockEntrySnapshot(name: String) {
+        guard drawing.blocks.contains(name) else { return }
+
+        let entryIDSet = Set(editingEntryIDs)
+        // Remove members that were ADDED during the session (not part of entry).
+        let currentIDs = drawing.blocks.block(named: name)?.entityIDs ?? []
+        for id in currentIDs where !entryIDSet.contains(id) {
+            drawing.remove(id)
+            quadtree.remove(id)
+            selection.remove(id)
+        }
+        // Restore each entry member's full record (re-adds any that were deleted). NOTE:
+        // a member deleted mid-session is re-added at the draw-order TAIL (drawing.replace
+        // falls back to add for an absent id), not its original storage index. This is
+        // harmless for block/insert resolution (members resolve in `entityIDs` order,
+        // which is restored by `setBlockMembers` below) — only the raw draw-order index of
+        // a re-added member is not preserved.
+        for record in editingEntrySnapshot {
+            drawing.replace(record)
+        }
+        // Re-point the block at exactly the entry member-id list.
+        drawing.setBlockMembers(name: name, ids: editingEntryIDs)
     }
 
     // MARK: - New layout (paper-space P2 — the "+" tab)
