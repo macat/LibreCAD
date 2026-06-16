@@ -179,6 +179,73 @@ struct MoveToolTests {
         }
     }
 
+    // MARK: - Reference segments (dashed base → cursor guide)
+
+    @Test("referenceSegments is empty before the base point is fixed")
+    func referenceEmptyBeforeBase() {
+        var tool = MoveTool()
+        let ctx = selectionContext()
+        // No base picked yet: a move alone gives no reference line.
+        _ = tool.handle(.move(Vector(3, 3)), context: ctx)
+        #expect(tool.referenceSegments.isEmpty)
+    }
+
+    @Test("referenceSegments returns the base → cursor displacement after the base is fixed")
+    func referenceBaseToCursor() {
+        var tool = MoveTool()
+        let ctx = selectionContext()
+        let base = Vector(2, 2)
+        _ = tool.handle(.click(base), context: ctx)
+
+        let cursor = Vector(7, 5)
+        _ = tool.handle(.move(cursor), context: ctx)
+
+        let segs = tool.referenceSegments
+        #expect(segs.count == 1)
+        #expect(segs.first?.0 == base)
+        #expect(segs.first?.1 == cursor)
+    }
+
+    @Test("referenceSegments is empty after commit (does not leak past the drag)")
+    func referenceEmptyAfterCommit() {
+        var tool = MoveTool()
+        let ctx = selectionContext()
+        _ = tool.handle(.click(Vector(2, 2)), context: ctx)
+        _ = tool.handle(.move(Vector(7, 5)), context: ctx)
+        #expect(!tool.referenceSegments.isEmpty)   // present mid-drag
+
+        _ = tool.handle(.click(Vector(7, 5)), context: ctx)   // commit
+        #expect(tool.referenceSegments.isEmpty)
+    }
+
+    @Test("referenceSegments is empty after cancel and after backspace to base-pick")
+    func referenceEmptyAfterCancelAndBackspace() {
+        var tool = MoveTool()
+        let ctx = selectionContext()
+        _ = tool.handle(.click(Vector(2, 2)), context: ctx)
+        _ = tool.handle(.move(Vector(7, 5)), context: ctx)
+
+        // Backspace steps back to base-pick → cursor invalidated → no reference line.
+        _ = tool.handle(.backspace, context: ctx)
+        #expect(tool.referenceSegments.isEmpty)
+
+        // Re-run, then cancel → no reference line.
+        _ = tool.handle(.click(Vector(0, 0)), context: ctx)
+        _ = tool.handle(.move(Vector(4, 4)), context: ctx)
+        #expect(!tool.referenceSegments.isEmpty)
+        _ = tool.handle(.cancel, context: ctx)
+        #expect(tool.referenceSegments.isEmpty)
+    }
+
+    @Test("empty selection: no reference line even after a click")
+    func referenceEmptyWithoutSelection() {
+        var tool = MoveTool()
+        let ctx = emptyContext()
+        _ = tool.handle(.click(Vector(2, 2)), context: ctx)   // no base fixed (no selection)
+        _ = tool.handle(.move(Vector(7, 5)), context: ctx)
+        #expect(tool.referenceSegments.isEmpty)
+    }
+
     // MARK: - Empty selection no-op
 
     @Test("empty selection: clicks and moves are no-ops, no commit, no preview")

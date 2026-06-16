@@ -115,6 +115,18 @@ public struct MoveTool: Tool {
         }
     }
 
+    /// A dashed guide from the BASE point to the current cursor — the displacement
+    /// vector, so the user sees "where we started from" while dragging the ghost to
+    /// the destination. Present only while a base is fixed and the cursor is valid
+    /// (the `.pickingDest` drag phase); empty before the base is picked and after
+    /// commit/cancel, so it never shows outside the active operation.
+    public var referenceSegments: [(Vector, Vector)] {
+        guard case .pickingDest(let base) = state, cursor.valid, base.valid else {
+            return []
+        }
+        return [(base, cursor)]
+    }
+
     /// A MODIFY tool: it reads `context.selected` (the entities to translate) and
     /// emits `.replace(id, newKind)` edits — never `.add`.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
