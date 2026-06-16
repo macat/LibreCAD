@@ -51,16 +51,19 @@ struct BlockEditBar: View {
                 .foregroundStyle(.tint)
             Text("Editing block:")
                 .foregroundStyle(.secondary)
-            Text(model.editingBlock ?? "")
+            // For a NESTED session show the breadcrumb (e.g. "A ▸ B"), so it is clear
+            // which level Save&Close / Discard acts on (the deepest/right-most block).
+            Text(breadcrumb)
                 .font(.body.weight(.semibold))
                 .foregroundStyle(.primary)
             Spacer(minLength: 8)
             Button("Discard", role: .cancel) { exit(save: false) }
-                .help("Discard all changes and leave the block editor")
+                .help("Discard this block's changes and leave (pops one nested level)")
             Button("Save & Close") { exit(save: true) }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
                 .buttonStyle(.borderedProminent)
-                .help("Apply changes — every reference to this block updates")
+                .help("Apply this block's changes — every reference to it updates "
+                      + "(pops one nested level)")
         }
         .font(.callout)
         .lineLimit(1)
@@ -70,7 +73,17 @@ struct BlockEditBar: View {
         .background(.thinMaterial)
         .overlay(alignment: .bottom) { Divider() }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Editing block \(model.editingBlock ?? "")")
+        .accessibilityLabel("Editing block \(breadcrumb)")
+    }
+
+    /// The session breadcrumb shown in the bar: the open block names OUTERMOST → innermost
+    /// joined by " ▸ " (e.g. "A ▸ B"), or just the single block when not nested. Falls back
+    /// to the top block name if the stack read is empty (defensive — `bar` only renders
+    /// while a session is open).
+    private var breadcrumb: String {
+        let stack = model.editingBlockStack
+        if !stack.isEmpty { return stack.joined(separator: " ▸ ") }
+        return model.editingBlock ?? ""
     }
 
     /// Leaves the session (keep or revert) and repaints the canvas.

@@ -780,12 +780,24 @@ final class CanvasModel {
 
     /// Activates the named layout's paper sheet (a tab pick). No-op if the layout is
     /// absent. Convenience over `setActiveSpace(.paper, layoutName:)`.
+    ///
+    /// If a block-edit session is open, picking a Model/Layout tab AUTO Save&Closes it
+    /// first (owner decision: switch-away mid-edit keeps the live edits) so the user's
+    /// tab pick sticks. `finishBlockEditingIfNeeded` pops every open level, restoring each
+    /// level's prior view (`BlockEditSession.priorSpace/priorLayout/priorViewport` — the
+    /// space active when that level opened); the subsequent `setActiveSpace` then applies
+    /// THIS pick on top — so the pick wins, not the stale prior view. (If the pick equals
+    /// the prior view, `setActiveSpace` is a no-op, which is correct: exit already left us
+    /// there.)
     func activateLayout(name: String) {
+        finishBlockEditingIfNeeded()
         setActiveSpace(.paper, layoutName: name)
     }
 
     /// Returns to model space (the "Model" tab). Convenience over `setActiveSpace`.
+    /// Auto Save&Closes an open block-edit session first (see `activateLayout`).
     func activateModel() {
+        finishBlockEditingIfNeeded()
         setActiveSpace(.model)
     }
 
@@ -978,40 +990,59 @@ final class CanvasModel {
     // drops the now-net-identity session group off the undo stack so `canUndo` returns
     // to its pre-enter value — no stranded half-session steps.
 
-    /// The name of the block currently being edited in place, or `nil` when not in a
-    /// block-edit session. Drives `activeSpaceEntities` (which scopes the index /
-    /// snapping / selection to the block's members) and is what the (future) chrome
-    /// reads to show a "Editing block …" affordance. Purely live VIEW/session state —
-    /// the member EDITS themselves are document mutations (undoable); this flag is not.
-    private(set) var editingBlock: String?
+    /// One level of the block-edit session STACK (STAGE 3 — nested editing). Each level
+    /// captures everything needed to restore THAT level on its own Save&Close / Discard:
+    /// the block name, the entry-state member records + id list (for Discard), the view
+    /// to restore when the level closes, and the `modelVersion` at the level's open (for
+    /// the no-edit empty-group drop). Nested editing PUSHES a level; exit POPS one.
+    private struct BlockEditSession {
+        /// The block being edited at this level.
+        var name: String
+        /// Deep value copies of the block's members at this level's entry (Discard).
+        var entrySnapshot: [EntityRecord]
+        /// The block's ordered member-id list at this level's entry (Discard).
+        var entryIDs: [EntityID]
+        /// The active space + layout + camera to restore when THIS level closes. For a
+        /// nested level this is the PARENT block-edit context's camera (so popping returns
+        /// to the parent's framing); for the outermost level it is the document view.
+        var priorSpace: EntitySpace
+        var priorLayout: String?
+        var priorViewport: Viewport
+        /// `modelVersion` captured the instant this level opened (after its enter bump).
+        var entryModelVersion: Int
+        /// `true` once a NESTED child level Save&Closed with real edits while THIS level
+        /// was its open parent — i.e. committed child work has folded into this level's
+        /// still-open undo group. A Discard of this level must then NOT drop its group via
+        /// `undoManager.undo()` (that would revert the child's SAVED edits — silent data
+        /// loss); the entry-snapshot restore alone produces correct geometry (it touches
+        /// only THIS block's members, never the child block's). Set on a child's
+        /// Save&Close pop; default `false`.
+        var hasSavedNestedWork: Bool = false
+    }
 
-    /// The member records (deep value copies) the block held when the session was
-    /// entered, used to restore entry-state geometry on Discard. Empty when not editing.
-    @ObservationIgnored
-    private var editingEntrySnapshot: [EntityRecord] = []
+    /// The open block-edit sessions, OUTERMOST → innermost. Empty when no session is open;
+    /// the LAST element is the level currently being edited. A nested open pushes; an exit
+    /// pops one level. Observed (stored) so the tab strip / chrome update on push/pop.
+    /// Fully private (its element type is private); external readers use the public
+    /// computed views `editingBlock` / `editingBlockStack` / `isEditingBlock`.
+    private var editingSessionStack: [BlockEditSession] = []
 
-    /// The block's ordered member-id list at session entry, restored on Discard so the
-    /// block (and every insert) re-point at exactly the entry members.
-    @ObservationIgnored
-    private var editingEntryIDs: [EntityID] = []
-
-    /// The view state (active space + layout + viewport) to restore when the session
-    /// ends, so leaving the block returns the canvas to wherever it was on entry.
-    @ObservationIgnored
-    private var editingPriorView: (space: EntitySpace, layout: String?, viewport: Viewport)?
-
-    /// `modelVersion` captured the instant the session opened (after the enter bump).
-    /// The edit funnels (`applyCommit` / `applyInspectorEdits`) bump `modelVersion` on
-    /// every committed change, so `modelVersion != editingEntryModelVersion` at exit
-    /// means the session registered at least one undo step. We use this to AVOID
-    /// stranding an empty (no-edit) session group on the undo stack: an untouched
-    /// Save & Close (or the document-close guard firing with no edits) drops its empty
-    /// group instead of leaving a no-op ⌘Z step.
-    @ObservationIgnored
-    private var editingEntryModelVersion = 0
+    /// The name of the block currently being edited in place (the TOP of the session
+    /// stack), or `nil` when not in a block-edit session. Drives `activeSpaceEntities`
+    /// (which scopes the index / snapping / selection to the block's members) and is what
+    /// the chrome reads to show the "Editing block …" affordance. Computed over the
+    /// observed `editingSessionStack`, so it stays a live, observable read.
+    var editingBlock: String? { editingSessionStack.last?.name }
 
     /// Whether a block-edit session is active.
-    var isEditingBlock: Bool { editingBlock != nil }
+    var isEditingBlock: Bool { !editingSessionStack.isEmpty }
+
+    /// The open block-edit sessions by NAME, OUTERMOST → innermost (a breadcrumb for the
+    /// tab strip, e.g. `["A", "B"]` while editing B nested inside A). Empty when no
+    /// session is open.
+    var editingBlockStack: [String] {
+        editingSessionStack.map(\.name)
+    }
 
     /// The member `EntityRecord`s of the block being edited (looked up LIVE via the
     /// block's `entityIDs`), or `[]` when not editing / the block vanished. This is the
@@ -1044,27 +1075,44 @@ final class CanvasModel {
     /// (`applyCommit` / `applyInspectorEdits`); every committed edit immediately updates
     /// all inserts via the next `makeResolveContext` (the live-member resolve crux). The
     /// previously-active tool's `relativeZero` etc. are untouched — only the canvas
-    /// scope changes. No-op (returns `false`) if the block is unknown or a session is
-    /// already active (re-entering must go through exit first, so the undo group + the
-    /// entry snapshot stay coherent). Returns `true` on a started session.
+    /// scope changes.
+    ///
+    /// NESTED editing (STAGE 3): if a session is ALREADY open, this PUSHES a new level for
+    /// `name` (e.g. double-clicking an insert of block B while editing block A opens B
+    /// nested inside A). Each level keeps its own entry snapshot + undo group + prior view,
+    /// so its Save&Close/Discard affects only that level. A CYCLIC open — `name` is already
+    /// somewhere in the stack — is rejected (it would nest a block inside itself forever).
+    ///
+    /// No-op (returns `false`) if the block is unknown or the open would be cyclic. Returns
+    /// `true` on a started (or pushed) session.
     @discardableResult
     func enterBlockEditing(name: String) -> Bool {
-        guard editingBlock == nil else { return false }            // already editing
         guard let block = drawing.blocks.block(named: name) else { return false }
+        // Cyclic-nesting guard: refuse to open a block already in the session stack
+        // (case-insensitive, matching the block-name identity). Opening A within A — at any
+        // depth — would recurse without bound.
+        if editingSessionStack.contains(where: {
+            $0.name.caseInsensitiveCompare(block.name) == .orderedSame
+        }) { return false }
 
-        // Remember where to return on exit (the prior space/layout + camera).
-        editingPriorView = (activeSpace, activeLayout, viewport)
+        // This level returns to the CURRENT view on close (for the outermost level that is
+        // the document view; for a nested level it is the parent block-edit framing).
+        var session = BlockEditSession(
+            name: block.name,
+            entrySnapshot: block.entityIDs.compactMap { drawing.entity($0) },
+            entryIDs: block.entityIDs,
+            priorSpace: activeSpace,
+            priorLayout: activeLayout,
+            priorViewport: viewport,
+            entryModelVersion: 0   // set after the enter bump below
+        )
 
-        // Deep value snapshot of the entry-state members + the entry id list (for Discard).
-        editingEntryIDs = block.entityIDs
-        editingEntrySnapshot = block.entityIDs.compactMap { drawing.entity($0) }
-
-        // Enter the scope (canonicalize to the stored block name's casing).
-        editingBlock = block.name
-
-        // ONE undo group for the whole session — a single ⌘Z reverts it all. Mirrors the
-        // explicit-grouping rationale in `applyCommit` (the inner per-commit groups nest).
+        // ONE undo group for THIS level — a single ⌘Z reverts this level's edits. Mirrors
+        // the explicit-grouping rationale in `applyCommit` (inner per-commit groups nest).
         undoManager.beginUndoGrouping()
+
+        // Push the level (the top now drives `editingBlock` / the scoped subset).
+        editingSessionStack.append(session)
 
         // Re-frame the camera to the members; re-home the floating origin near them.
         viewport = Viewport.fit(editingBlockBoundingBox, in: viewport.size)
@@ -1077,78 +1125,115 @@ final class CanvasModel {
         hoverID = nil
         modelDirty = true
         modelVersion &+= 1
-        // Capture the post-bump version: any later change is a session edit (used at
-        // exit to drop an empty no-edit group rather than strand a no-op ⌘Z step).
-        editingEntryModelVersion = modelVersion
+        // Capture the post-bump version on the pushed level: any later change is a
+        // session edit (used at exit to drop an empty no-edit group rather than strand a
+        // no-op ⌘Z step). Re-assign the top element (value type).
+        session.entryModelVersion = modelVersion
+        editingSessionStack[editingSessionStack.count - 1] = session
         return true
     }
 
-    /// Leaves the current block-edit session.
+    /// Leaves the CURRENT (innermost) block-edit session level, POPPING one level.
     ///
-    /// - `save == true` (Save & Close): keep the edits — they are already applied to the
-    ///   live member records and already undoable. The session undo group is closed so a
-    ///   single ⌘Z reverts the whole session.
-    /// - `save == false` (Discard): restore the entry-state members + member-id list from
-    ///   the snapshot (so the block AND every insert return to entry geometry), close the
-    ///   session group, then drop that now-net-identity group off the undo stack so
-    ///   `canUndo` returns to its pre-enter value (no stranded half-session steps).
+    /// - `save == true` (Save & Close): keep the level's edits — they are already applied to
+    ///   the live member records and already undoable. The level's undo group is closed so a
+    ///   single ⌘Z reverts that level.
+    /// - `save == false` (Discard): restore THIS level's entry-state members + member-id
+    ///   list (so the block AND every insert return to this level's entry geometry), close
+    ///   the level's group, then drop that now-net-identity group off the undo stack so
+    ///   `canUndo` returns to its pre-level value (no stranded half-session steps) —
+    ///   EXCEPT when the level absorbed a nested child's SAVED edits (see
+    ///   `hasSavedNestedWork`), in which case the group is kept so those committed edits
+    ///   are not reverted (the snapshot restore alone fixes THIS block's geometry).
     ///
-    /// A session that made NO edits (the user double-clicked, looked around, and left)
-    /// drops its empty group on EITHER path so it never strands a no-op ⌘Z step that
-    /// would silently consume the user's prior real undo — the change is detected via
-    /// `modelVersion` (only the edit funnels bump it during a session).
+    /// A level that made NO edits drops its empty group on EITHER path so it never strands a
+    /// no-op ⌘Z step — detected via `modelVersion` (only the edit funnels bump it).
     ///
-    /// Either way the canvas scope + camera are restored to the prior view, the index is
-    /// rebuilt for that space, and transient interaction state is cleared. No-op (returns
-    /// `false`) if no session is active. Presents NO modal — the (future) view layer asks
-    /// the user Save/Discard and calls this with the answer.
+    /// When the popped level was NESTED, the canvas returns to the PARENT block-edit context
+    /// (its framing + scope); when it was the outermost level, the canvas returns to the
+    /// document view. No-op (returns `false`) if no session is active. Presents NO modal —
+    /// the view layer asks Save/Discard and calls this with the answer.
     @discardableResult
     func exitBlockEditing(save: Bool) -> Bool {
-        guard let name = editingBlock else { return false }
+        guard let level = editingSessionStack.last else { return false }
 
-        // Did any edit funnel commit during the session? (The edit funnels —
+        // Is THIS the outermost level being popped? Only then is no PARENT level's undo
+        // group still open, so only then may we call `undoManager.undo()` to DROP a
+        // net-identity / empty group (UndoManager forbids `undo()` while a group is open —
+        // "too many nested undo groups"). For an INNER level we just close its group: its
+        // (possibly net-identity) work folds into the parent's still-open group, which
+        // reverts atomically when the parent is undone/discarded. Geometry is correct
+        // either way because Discard restores the entry snapshot through the undoable
+        // funnels BEFORE the group closes.
+        let isOutermost = editingSessionStack.count == 1
+
+        // Did any edit funnel commit during THIS level? (The edit funnels —
         // `applyCommit` / `applyInspectorEdits` — and the in-session authoring mutators
-        // (DB-1W: `addEditingBlockVisibilityState` / `removeEditingBlockVisibilityState` /
-        // `renameEditingBlockVisibilityState` / `setSelectedMembersVisibility`) all bump
-        // `modelVersion` between enter and here, so any session edit is detected.)
-        let sessionChanged = modelVersion != editingEntryModelVersion
+        // all bump `modelVersion` between this level's enter and here.)
+        let sessionChanged = modelVersion != level.entryModelVersion
+
+        // A Discard MUST NOT drop this level's group via `undo()` when committed nested
+        // child work has folded into it (a child Save&Closed inside this level) — that
+        // would revert the child's SAVED edits (silent data loss). The snapshot restore
+        // alone yields correct geometry (it touches only THIS block's members). So the
+        // group-drop is allowed only when THIS is the outermost level AND it carries no
+        // saved nested work.
+        let mayDropGroup = isOutermost && !level.hasSavedNestedWork
 
         if save && sessionChanged {
-            // Keep edits: just close the session group (one ⌘Z reverts the session).
+            // Keep edits: just close the level's group (one ⌘Z reverts the level).
             undoManager.endUndoGrouping()
         } else if save {
-            // Save & Close with NO edits: close the empty group and drop it so the undo
-            // stack stays at its pre-enter depth (no stranded no-op step).
+            // Save & Close with NO edits: close the empty group; drop it (outermost only)
+            // so the stack stays at its pre-level depth (no stranded no-op step).
             undoManager.endUndoGrouping()
-            if undoManager.canUndo { undoManager.undo() }
+            if mayDropGroup && undoManager.canUndo { undoManager.undo() }
         } else if sessionChanged {
-            // Discard: restore the entry snapshot through the undoable funnels (so the
-            // restorations are captured INSIDE the still-open session group), making the
-            // group net-identity.
-            restoreBlockEntrySnapshot(name: name)
+            // Discard: restore THIS level's entry snapshot through the undoable funnels (so
+            // the restorations are captured INSIDE the still-open level group), making the
+            // group net-identity for THIS block's members. Geometry is now at this level's
+            // entry state regardless of whether we can drop the group.
+            restoreBlockEntrySnapshot(level)
             undoManager.endUndoGrouping()
-            // Drop the net-identity session group off the undo stack so the stack depth
-            // matches the pre-enter state (canUndo back to its prior value). Undoing a
-            // net-identity group leaves geometry at the entry state.
-            if undoManager.canUndo { undoManager.undo() }
+            // Drop the net-identity level group when safe (outermost + no saved nested
+            // work). For an inner level the work folds into the parent group; for an outer
+            // level that absorbed a child's SAVED edits we keep the group (dropping it
+            // would revert that saved work).
+            if mayDropGroup && undoManager.canUndo { undoManager.undo() }
         } else {
-            // Discard with NO edits: nothing to restore — just drop the empty group.
+            // Discard with NO edits: nothing to restore — drop the empty group (when safe).
             undoManager.endUndoGrouping()
-            if undoManager.canUndo { undoManager.undo() }
+            if mayDropGroup && undoManager.canUndo { undoManager.undo() }
         }
 
-        // Restore the prior view scope + camera, then leave the session.
-        let prior = editingPriorView
-        editingBlock = nil
-        editingEntrySnapshot = []
-        editingEntryIDs = []
-        editingPriorView = nil
-        if let prior {
-            activeSpace = prior.space
-            activeLayout = prior.layout
-            viewport = prior.viewport
+        // Pop THIS level and restore its prior view (parent block-edit framing, or the
+        // document view for the outermost level).
+        editingSessionStack.removeLast()
+        // Propagate the "committed nested work folded into me" signal UP the stack on EVERY
+        // pop that carries such work — not just the immediate child-save case. When a level
+        // closes while a PARENT remains open, any COMMITTED work in the popped level's group
+        // folds into the parent's still-open group. That committed work is either:
+        //   (a) THIS level's own Save&Close with real edits (`save && sessionChanged`), or
+        //   (b) saved DEEPER work this level had already absorbed (`level.hasSavedNestedWork`)
+        //       — which survives even if THIS level is itself Discarded (its Discard only
+        //       restores its own block's members; the deeper saved edits remain committed).
+        // In either case the parent must be marked so its own Discard won't `undo()` that
+        // committed work away (the deeper instance of the finding-#1 data-loss bug). Without
+        // (b), a Save C → Discard B → Discard A chain at depth ≥3 would silently revert C.
+        let foldedSavedWork = (save && sessionChanged) || level.hasSavedNestedWork
+        if foldedSavedWork, let parentIdx = editingSessionStack.indices.last {
+            editingSessionStack[parentIdx].hasSavedNestedWork = true
         }
-        renderOrigin = RendererGeometry.renderOrigin(for: activeSpaceBoundingBox)
+        activeSpace = level.priorSpace
+        activeLayout = level.priorLayout
+        viewport = level.priorViewport
+        // If a parent level remains open, re-home the origin to its members; otherwise to
+        // the restored active space.
+        if editingSessionStack.isEmpty {
+            renderOrigin = RendererGeometry.renderOrigin(for: activeSpaceBoundingBox)
+        } else {
+            renderOrigin = RendererGeometry.renderOrigin(for: editingBlockBoundingBox)
+        }
 
         rebuildIndex()
         selection.clear()
@@ -1159,29 +1244,34 @@ final class CanvasModel {
         return true
     }
 
-    /// Auto-saves and closes an active block-edit session if one is open (a no-op
-    /// otherwise). The (future) view layer calls this when the session must end
-    /// unexpectedly — e.g. the document is being closed — because the member edits are
-    /// already in the document (the live-member crux), so Save&Close is the safe,
-    /// non-destructive default. Presents NO modal (it is reachable from the document
-    /// lifecycle, which a unit test exercises). Returns whether a session was closed.
+    /// Auto-saves and closes ALL open block-edit session levels if any are open (a no-op
+    /// otherwise). The view layer calls this when the session must end unexpectedly — e.g.
+    /// the document is being closed, or the user picks a Model/Layout tab mid-edit — because
+    /// the member edits are already in the document (the live-member crux), so Save&Close is
+    /// the safe, non-destructive default. Pops every nested level (each kept). Presents NO
+    /// modal (it is reachable from the document lifecycle, which a unit test exercises).
+    /// Returns whether at least one level was closed.
     @discardableResult
     func finishBlockEditingIfNeeded() -> Bool {
-        guard editingBlock != nil else { return false }
-        return exitBlockEditing(save: true)
+        guard !editingSessionStack.isEmpty else { return false }
+        while !editingSessionStack.isEmpty {
+            _ = exitBlockEditing(save: true)
+        }
+        return true
     }
 
-    /// Restores a block's members + member-id list to the entry snapshot, through the
-    /// undoable `CADDrawing` funnels so the restorations register inside the open session
-    /// group (Discard). Member records present at entry are `replace`d back (re-added if
-    /// they were deleted during the session); members ADDED during the session (ids not
-    /// in the entry set) are removed; then the member-id list is re-pointed to the entry
-    /// list via `setBlockMembers`. A block that vanished entirely is skipped.
-    private func restoreBlockEntrySnapshot(name: String) {
+    /// Restores a block's members + member-id list to a session LEVEL's entry snapshot,
+    /// through the undoable `CADDrawing` funnels so the restorations register inside the
+    /// open level group (Discard). Member records present at entry are `replace`d back
+    /// (re-added if they were deleted during the level); members ADDED during the level
+    /// (ids not in the entry set) are removed; then the member-id list is re-pointed to the
+    /// level's entry list via `setBlockMembers`. A block that vanished entirely is skipped.
+    private func restoreBlockEntrySnapshot(_ level: BlockEditSession) {
+        let name = level.name
         guard drawing.blocks.contains(name) else { return }
 
-        let entryIDSet = Set(editingEntryIDs)
-        // Remove members that were ADDED during the session (not part of entry).
+        let entryIDSet = Set(level.entryIDs)
+        // Remove members that were ADDED during the level (not part of entry).
         let currentIDs = drawing.blocks.block(named: name)?.entityIDs ?? []
         for id in currentIDs where !entryIDSet.contains(id) {
             drawing.remove(id)
@@ -1189,16 +1279,16 @@ final class CanvasModel {
             selection.remove(id)
         }
         // Restore each entry member's full record (re-adds any that were deleted). NOTE:
-        // a member deleted mid-session is re-added at the draw-order TAIL (drawing.replace
+        // a member deleted mid-level is re-added at the draw-order TAIL (drawing.replace
         // falls back to add for an absent id), not its original storage index. This is
         // harmless for block/insert resolution (members resolve in `entityIDs` order,
         // which is restored by `setBlockMembers` below) — only the raw draw-order index of
         // a re-added member is not preserved.
-        for record in editingEntrySnapshot {
+        for record in level.entrySnapshot {
             drawing.replace(record)
         }
-        // Re-point the block at exactly the entry member-id list.
-        drawing.setBlockMembers(name: name, ids: editingEntryIDs)
+        // Re-point the block at exactly the level's entry member-id list.
+        drawing.setBlockMembers(name: name, ids: level.entryIDs)
     }
 
     // MARK: - New layout (paper-space P2 — the "+" tab)
@@ -2154,6 +2244,17 @@ final class CanvasModel {
                 let id = drawing.add(added)            // undoable; mints a real id
                 let box = drawing.entity(id)?.boundingBox() ?? added.boundingBox()
                 if !box.isEmpty { quadtree.insert(id, bounds: box) }
+                // BLOCK EDITOR: any geometry drawn (or copied) while a block-edit
+                // session is open becomes a MEMBER of the editing block — not a loose
+                // top-level document entity. We thread the freshly-minted id into the
+                // editing block's `entityIDs` in this SAME undo group (the
+                // `addEntityToBlock` registration nests with the add's), and BEFORE the
+                // `modelVersion` bump below so `exitBlockEditing`'s `sessionChanged`
+                // detection counts it. The new member is then excluded from model space
+                // via `blockMemberIDs` and drawn only through the block's inserts.
+                if let editing = editingBlock {
+                    drawing.addEntityToBlock(name: editing, entityID: id)
+                }
 
             case .replace(let id, let newKind):
                 // Preserve the entity's layer/pen/flags; swap only its geometry.
@@ -2164,6 +2265,15 @@ final class CanvasModel {
                 if box.isEmpty { quadtree.remove(id) } else { quadtree.update(id, bounds: box) }
 
             case .remove(let id):
+                // BLOCK EDITOR: deleting a member must also drop its id from the editing
+                // block's `entityIDs` (same undo group as the entity removal) so the
+                // block's membership stays in sync — otherwise the block would keep a
+                // stale id that resolves to nothing. Do this BEFORE `drawing.remove` so
+                // the member record still exists for any membership checks, and inside
+                // the same group so one ⌘Z restores both the entity and its membership.
+                if let editing = editingBlock {
+                    drawing.removeEntityFromBlock(name: editing, entityID: id)
+                }
                 drawing.remove(id)                     // undoable (no-op if absent)
                 quadtree.remove(id)
                 selection.remove(id)
@@ -3772,6 +3882,12 @@ final class CanvasModel {
             let id = drawing.add(added)             // undoable; mints a real id
             let box = drawing.entity(id)?.boundingBox() ?? added.boundingBox()
             if !box.isEmpty { quadtree.insert(id, bounds: box) }
+            // BLOCK EDITOR: paste/duplicate INSIDE a block-edit session targets the
+            // BLOCK — the pasted/duplicated geometry joins the editing block's members
+            // (same undo group, before the `modelVersion` bump), not the document.
+            if let editing = editingBlock {
+                drawing.addEntityToBlock(name: editing, entityID: id)
+            }
             newIDs.insert(id)
         }
         selection = Selection(ids: newIDs)
