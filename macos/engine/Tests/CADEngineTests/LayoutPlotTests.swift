@@ -272,17 +272,16 @@ struct LayoutPlotTransformTests {
         #expect(result.setup.paperSize.height > 0)
     }
 
-    @Test("an oversize sheet at 1:1 overflows the (smaller, snapped) page")
+    @Test("a sheet whose margins exceed its size overflows at 1:1")
     func oversizeSheetOverflows() {
-        // A large custom sheet kept literal (no snap) so its 1:1 print is bigger than
-        // its own imageable area only if margins exceed... use a tall margin to force
-        // overflow deterministically: a 50 mm sheet with a 40 mm margin has a 1×1
-        // floor imageable but the sheet is 50 mm → overflow.
+        // A 50 mm sheet with a 40 mm margin: 50 − 2·40 < 0, so the imageable area
+        // floors to ≥ 1×1 pt, while the sheet at 1:1 is 50 mm ≈ 141.7 pt — far larger
+        // than the floored imageable area, so the plot overflows. (No snap, so the
+        // literal 50 mm sheet drives the math.)
         let layout = Layout(name: "L",
                             page: PageDescriptor(widthMM: 50, heightMM: 50,
                                                  marginMM: 40, plotScale: .ratio(1)))
         let result = PrintLayout.makeLayout(for: layout, snapToStandard: false)
-        // Imageable is clamped to ≥1×1; the 50 mm sheet at 1:1 far exceeds it.
         #expect(result.layout.overflows)
         #expect(abs(result.layout.scale - ptPerMM) < 1e-9)
     }
