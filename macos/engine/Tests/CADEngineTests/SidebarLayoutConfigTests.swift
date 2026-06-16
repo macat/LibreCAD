@@ -56,8 +56,11 @@ struct SidebarLayoutConfigTests {
 
     @Test("a config round-trips through encode → decode unchanged")
     func roundTrip() {
+        // A config carrying EVERY live panel id (in reversed declaration order) so the
+        // decode's reconciliation is a no-op and the test measures pure encode/decode
+        // fidelity, independent of how many panel ids the build defines.
         let original = SidebarLayoutConfig(
-            order: [.blocks, .layers, .layerStates],
+            order: SidebarPanelID.allCases.reversed(),
             collapsed: [.layerStates],
             hidden: [.blocks]
         )
@@ -81,13 +84,15 @@ struct SidebarLayoutConfigTests {
 
     @Test("reordering the visible list moves a panel and persists through a round-trip")
     func reorder() {
-        // Move the first panel (layers) to the end.
-        let moved = SidebarLayoutConfig.default
-            .movingVisible(fromOffsets: IndexSet(integer: 0), toOffset: 3)
+        // A fixed three-panel config (independent of how many panels the build defines)
+        // so the assertion stays stable as new panel ids are added. Move layers to the end.
+        let base = SidebarLayoutConfig(order: [.layers, .layerStates, .blocks])
+        let moved = base.movingVisible(fromOffsets: IndexSet(integer: 0), toOffset: 3)
         #expect(moved.order == [.layerStates, .blocks, .layers])
-        // Survives persistence.
+        // Survives persistence (decode reconciles against the live roster — any panel id
+        // not in `base` is appended, so check the moved trio keeps its relative order).
         let restored = SidebarLayoutConfig.decoded(from: moved.encoded())
-        #expect(restored.order == [.layerStates, .blocks, .layers])
+        #expect(restored.order.prefix(3) == [.layerStates, .blocks, .layers])
     }
 
     @Test("reordering the VISIBLE list leaves hidden panels in their original slots")
@@ -123,7 +128,9 @@ struct SidebarLayoutConfigTests {
         #expect(!cfg.isHidden(.blocks))
         cfg = cfg.togglingHidden(.blocks)
         #expect(cfg.isHidden(.blocks))
-        #expect(cfg.visibleOrder == [.layers, .layerStates])
+        // The hidden panel drops from the visible order; every OTHER panel stays visible
+        // (robust to how many panels the build defines — derived from `allCases`).
+        #expect(cfg.visibleOrder == SidebarPanelID.allCases.filter { $0 != .blocks })
         // Hiding keeps the slot in `order` so re-showing restores its place.
         #expect(cfg.order == SidebarPanelID.allCases)
         cfg = cfg.togglingHidden(.blocks)
@@ -214,10 +221,71 @@ struct SidebarLayoutConfigTests {
     @Test("reconciliation dedups a stored order that somehow carries duplicates")
     func reconcileDedups() {
         let stored = SidebarLayoutConfig(order: [.layers, .layers, .blocks, .blocks])
-        let reconciled = stored.reconciled(withAvailable: SidebarPanelID.allCases)
+        // Pin the roster (independent of the live panel count) so the assertion is stable.
+        let reconciled = stored.reconciled(withAvailable: [.layers, .layerStates, .blocks])
         // No duplicates; missing `.layerStates` appended.
         #expect(reconciled.order == [.layers, .blocks, .layerStates])
         #expect(Set(reconciled.order).count == reconciled.order.count)
+    }
+
+    // MARK: Reconciliation — the newly-added .partsLibrary panel
+
+    @Test("a stored config WITHOUT .partsLibrary absorbs it (appended, visible & expanded)")
+    func partsLibraryAppendedToOlderConfig() {
+        // A config saved by a build that predates the Parts Library panel (only the
+        // original three ids). Reconciling against the live roster (which now includes
+        // .partsLibrary) appends it without disturbing the stored order/flags.
+        let stored = SidebarLayoutConfig(
+            order: [.blocks, .layers, .layerStates],   // user had reordered
+            collapsed: [.blocks],
+            hidden: [.layers]
+        )
+        #expect(!stored.order.contains(.partsLibrary))
+        let reconciled = stored.reconciled(withAvailable: SidebarPanelID.allCases)
+        // The new panel appears (at the end, in `allCases` order), visible + expanded.
+        #expect(reconciled.order.contains(.partsLibrary))
+        #expect(reconciled.order.last == .partsLibrary)
+        #expect(!reconciled.isHidden(.partsLibrary))
+        #expect(!reconciled.isCollapsed(.partsLibrary))
+        // The user's prior order + flags are preserved for the panels they had.
+        #expect(reconciled.order.prefix(3) == [.blocks, .layers, .layerStates])
+        #expect(reconciled.isCollapsed(.blocks))
+        #expect(reconciled.isHidden(.layers))
+        // The default layout already lists it (a fresh install sees the panel).
+        #expect(SidebarLayoutConfig.default.order.contains(.partsLibrary))
+        // It round-trips through encode/decode like any panel id.
+        let restored = SidebarLayoutConfig.decoded(from: reconciled.encoded())
+        #expect(restored.order.contains(.partsLibrary))
+    }
+
+    @Test("a stored config carrying an UNKNOWN id (and missing .partsLibrary) is reconciled cleanly")
+    func unknownIdIgnoredWhileNewPanelAppears() {
+        // A stored config from a HYPOTHETICAL build with an id this build no longer
+        // offers — modeled by reconciling against a roster that EXCLUDES one stored id
+        // while INCLUDING the new .partsLibrary. The unknown id drops; .partsLibrary
+        // appears; the surviving ids keep their order.
+        let stored = SidebarLayoutConfig(
+            order: [.layers, .layerStates, .blocks],
+            collapsed: [.blocks],
+            hidden: [.blocks]
+        )
+        // Available roster: drop `.blocks` (simulating a removed/unknown stored id), add
+        // `.partsLibrary` (the new panel).
+        let available: [SidebarPanelID] = [.layers, .layerStates, .partsLibrary]
+        let reconciled = stored.reconciled(withAvailable: available)
+        // The dropped id is gone from the order AND every flag set.
+        #expect(!reconciled.order.contains(.blocks))
+        #expect(!reconciled.collapsed.contains(.blocks))
+        #expect(!reconciled.hidden.contains(.blocks))
+        // The surviving stored ids keep their order; the new panel is appended.
+        #expect(reconciled.order == [.layers, .layerStates, .partsLibrary])
+        #expect(!reconciled.isHidden(.partsLibrary))
+    }
+
+    @Test(".partsLibrary has a non-empty default title and SF-Symbol")
+    func partsLibraryMetadata() {
+        #expect(SidebarPanelID.partsLibrary.defaultTitle == "Parts Library")
+        #expect(!SidebarPanelID.partsLibrary.defaultSymbol.isEmpty)
     }
 
     // MARK: PanelID metadata

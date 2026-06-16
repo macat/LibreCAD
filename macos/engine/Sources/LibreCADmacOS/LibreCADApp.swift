@@ -65,6 +65,18 @@ struct LibreCADApp: App {
     /// (WAVE BW, Ask #1) — raises the block-name sheet, then arms a base-point pick.
     /// `nil` when there is no selection, which disables the menu item.
     @FocusedValue(\.createBlockFromSelection) private var createBlockFromSelection
+    /// "Insert Block from File… (DXF)" action published by the focused window (Blocks
+    /// menu) — presents an `NSOpenPanel`, imports the chosen `.dxf` as a named block,
+    /// and places it at the view center. `nil` when no canvas is focused.
+    @FocusedValue(\.insertBlockFromFile) private var insertBlockFromFile
+    /// "Save Block to File… (WBLOCK)" action published by the focused window — presents
+    /// an `NSSavePanel` and writes the named block to a standalone `.dxf`. Paired with
+    /// `saveBlockTargetName` (the block to save); the item is disabled when either is nil.
+    @FocusedValue(\.saveBlockToFile) private var saveBlockToFile
+    /// The block name the "Save Block to File…" item targets on the focused window (the
+    /// selected insert's block, else the first defined block). `nil` ⇒ no blocks ⇒
+    /// disable the item.
+    @FocusedValue(\.saveBlockTargetName) private var saveBlockTargetName
     /// Undo / redo actions published by the focused window.
     @FocusedValue(\.undoAction) private var undoAction
     @FocusedValue(\.redoAction) private var redoAction
@@ -523,6 +535,16 @@ struct LibreCADApp: App {
                 .keyboardShortcut("b", modifiers: .option)
                 .disabled(createBlockFromSelection == nil)
             toolItem(.explodeInsert, "x", .option)
+
+            Divider()
+            // Block file I/O (LibreCAD "Insert Block from File" / WBLOCK). Both present
+            // their NSOpenPanel/NSSavePanel in the focused window's View layer.
+            Button("Insert Block from File…") { insertBlockFromFile?() }
+                .disabled(insertBlockFromFile == nil)
+            Button("Save Block to File…") {
+                if let name = saveBlockTargetName { saveBlockToFile?(name) }
+            }
+            .disabled(saveBlockToFile == nil || saveBlockTargetName == nil)
         }
     }
 
