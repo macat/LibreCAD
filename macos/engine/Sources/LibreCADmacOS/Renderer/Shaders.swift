@@ -51,11 +51,17 @@ struct Uniforms {
 // ============================================================================
 
 // Matches Swift `struct LineInstance` (RendererGeometry.swift), interleaved.
+// LAYOUT IS A BYTE-MATCHED CONTRACT — keep field order/types identical to the Swift
+// struct or the canvas renders BLANK. (size/stride 48, align 16: the three trailing
+// floats fill the padding after `color`'s 16-byte slot.)
 struct LineInstance {
-    float2 p0;          // segment start, f32(world - renderOrigin)
-    float2 p1;          // segment end
-    float4 color;       // rgba
-    float  halfWidthPx; // half stroke width in device pixels
+    float2 p0;             // segment start, f32(world - renderOrigin)
+    float2 p1;             // segment end
+    float4 color;          // rgba
+    float  halfWidthPx;    // half stroke width in device pixels
+    float  dashPeriodPx;   // full dash cycle (ON+OFF) in device px; 0 => solid
+    float  dashOnPx;       // ON (drawn) length within a cycle, device px
+    float  startOffsetWorld; // running arc-length of this segment's start (world units)
 };
 
 struct LineVaryings {
@@ -65,7 +71,13 @@ struct LineVaryings {
     // as (perpendicular, alongPastEnd) so the fragment shader can round the caps.
     float2 distPx;
     float  halfWidthPx;
-    float  halfLenPx;   // half the segment length in pixels (for cap rounding)
+    float  halfLenPx;        // half the segment length in pixels (for cap rounding)
+    // Dash state (PIXELS). `dashPeriodPx == 0` ⇒ solid. `dashStartPx` is this
+    // segment's START arc-length in pixels (the running per-polyline offset converted
+    // via the world→pixel scale), so the dash phase is continuous across segments.
+    float  dashPeriodPx;
+    float  dashOnPx;
+    float  dashStartPx;
 };
 
 // A unit quad as a triangle strip: (-1,-1)(+1,-1)(-1,+1)(+1,+1).
@@ -119,11 +131,37 @@ vertex LineVaryings line_vertex(uint vid [[vertex_id]],
     out.distPx = float2(side, along);
     out.halfWidthPx = inst.halfWidthPx;
     out.halfLenPx = halfLen;
+
+    // Dash state. Convert the per-polyline running arc-length offset (WORLD units)
+    // to pixels using this segment's world→pixel ratio (a uniform 2D affine scale),
+    // so the dash phase is continuous across the polyline's segments while the period
+    // stays a fixed device-pixel size (zoom-fixed). A degenerate (zero-length) world
+    // segment can't define a ratio → fall back to 0 (it draws as a dot anyway).
+    float worldLen = length(inst.p1 - inst.p0);
+    float pxPerWorld = (worldLen > 1e-9) ? (len / worldLen) : 0.0;
+    out.dashPeriodPx = inst.dashPeriodPx;
+    out.dashOnPx = inst.dashOnPx;
+    out.dashStartPx = inst.startOffsetWorld * pxPerWorld;
     return out;
 }
 
 fragment float4 line_fragment(LineVaryings in [[stage_in]]) {
     float feather = 1.0;
+
+    // Dash gap: if this segment has a dash pattern, compute the along-segment
+    // distance from the segment START (midpoint-relative + halfLen), add the running
+    // per-polyline offset (so the phase is continuous across segments), reduce modulo
+    // the cycle, and DISCARD fragments in the OFF (gap) part. The period/on lengths
+    // are device pixels → the dashes are a fixed size on screen (zoom-fixed). The
+    // existing AA/round-cap below still feathers the body and the on-dash ends.
+    if (in.dashPeriodPx > 0.0) {
+        float alongFromStart = in.distPx.y + in.halfLenPx + in.dashStartPx;
+        // fmod can be negative for a negative input; bias positive before the modulo.
+        float phase = fmod(alongFromStart, in.dashPeriodPx);
+        if (phase < 0.0) phase += in.dashPeriodPx;
+        if (phase >= in.dashOnPx) discard_fragment();
+    }
+
     // Perpendicular distance from the centerline.
     float dPerp = abs(in.distPx.x);
     // Distance past the segment end along its axis (0 within the body).

@@ -278,6 +278,139 @@ struct RendererGeometryTests {
     }
 }
 
+// MARK: - Line-type dashes (Metal screen-space pipeline)
+
+/// Exercises the Metal dash packing: `RendererGeometry.dashParamsPx` (the pure
+/// case→device-px pattern map) and the per-segment dash fields packed by
+/// `appendInstances` (period/on/startOffset), including the cross-segment arc-length
+/// accumulation that keeps the dash phase continuous along a polyline. Domain-
+/// namespaced suite name so it cannot collide with another fan-out's test type.
+@Suite("Renderer geometry — line-type dashes")
+struct RendererDashTests {
+
+    private func pen(_ lt: PenLineType) -> ResolvedPen {
+        ResolvedPen(color: .librecadGreen, lineType: lt, lineWidth: .default)
+    }
+
+    private func pack(_ lt: PenLineType, points: [Vector], closed: Bool = false,
+                      backingScale: CGFloat = 2) -> [LineInstance] {
+        let poly = ResolvedPolyline(points: points, closed: closed, pen: pen(lt))
+        var out: [LineInstance] = []
+        RendererGeometry.appendInstances(for: poly, renderOrigin: Vector(0, 0),
+                                         backingScale: backingScale, into: &out)
+        return out
+    }
+
+    // MARK: - dashParamsPx pure map
+
+    @Test("solid (and residual byLayer/byBlock) → (0, 0): no dash, shader strokes solid")
+    func solidParamsAreZero() {
+        for lt in [PenLineType.solid, .byLayer, .byBlock] {
+            let (period, on) = RendererGeometry.dashParamsPx(for: lt, backingScale: 2)
+            #expect(period == 0)
+            #expect(on == 0)
+        }
+    }
+
+    @Test("every non-solid line type → period > on > 0 (a real on/off cycle)")
+    func dashedParamsAreValid() {
+        for lt in [PenLineType.dashed, .dotted, .dashDot, .center, .border, .divide] {
+            let (period, on) = RendererGeometry.dashParamsPx(for: lt, backingScale: 2)
+            #expect(period > 0, "\(lt) needs a positive period")
+            #expect(on > 0, "\(lt) needs a positive ON length")
+            #expect(on < period, "\(lt) ON must be shorter than the full cycle (a gap exists)")
+        }
+    }
+
+    @Test("dotted's ON pip is shorter than dashed's ON dash")
+    func dottedShorterThanDashed() {
+        let dotOn = RendererGeometry.dashParamsPx(for: .dotted, backingScale: 2).on
+        let dashOn = RendererGeometry.dashParamsPx(for: .dashed, backingScale: 2).on
+        #expect(dotOn < dashOn)
+    }
+
+    @Test("dash params scale with backingScale (Retina dashes are 2× the 1× device px)")
+    func dashScalesWithBacking() {
+        let at1 = RendererGeometry.dashParamsPx(for: .dashed, backingScale: 1)
+        let at2 = RendererGeometry.dashParamsPx(for: .dashed, backingScale: 2)
+        #expect(at2.period > at1.period)
+        #expect(abs(at2.period - at1.period * 2) < 1e-3)
+    }
+
+    // MARK: - appendInstances dash packing
+
+    @Test("a .dashed polyline packs dashPeriodPx > 0 on every segment")
+    func dashedPacksPositivePeriod() {
+        let out = pack(.dashed, points: [Vector(0, 0), Vector(10, 0), Vector(10, 10)])
+        #expect(out.count == 2)
+        for inst in out {
+            #expect(inst.dashPeriodPx > 0)
+            #expect(inst.dashOnPx > 0)
+            #expect(inst.dashOnPx < inst.dashPeriodPx)
+        }
+    }
+
+    @Test("a .solid polyline packs dashPeriodPx == 0 (unchanged solid render)")
+    func solidPacksZeroPeriod() {
+        let out = pack(.solid, points: [Vector(0, 0), Vector(10, 0), Vector(10, 10)])
+        #expect(out.count == 2)
+        for inst in out {
+            #expect(inst.dashPeriodPx == 0)
+            #expect(inst.dashOnPx == 0)
+        }
+    }
+
+    @Test("startOffsetWorld accumulates the running arc-length across segments")
+    func arcLengthAccumulates() {
+        // Segment lengths: (0,0)->(3,0)=3, (3,0)->(3,4)=4, (3,4)->(3,9)=5.
+        let out = pack(.dashed, points: [Vector(0, 0), Vector(3, 0), Vector(3, 4), Vector(3, 9)])
+        #expect(out.count == 3)
+        #expect(abs(out[0].startOffsetWorld - 0) < 1e-4)   // starts at 0
+        #expect(abs(out[1].startOffsetWorld - 3) < 1e-4)   // after the 3-long segment
+        #expect(abs(out[2].startOffsetWorld - 7) < 1e-4)   // after 3 + 4
+    }
+
+    @Test("a closed polyline's closing edge continues the running arc-length")
+    func closedEdgeContinuesArcLength() {
+        // A unit square: 3 explicit segments (each length 1) + 1 closing edge.
+        let out = pack(.dashed, points: [Vector(0, 0), Vector(1, 0), Vector(1, 1), Vector(0, 1)],
+                       closed: true)
+        #expect(out.count == 4)
+        // Closing edge (last instance) starts after the 3 leading unit segments.
+        #expect(abs(out.last!.startOffsetWorld - 3) < 1e-4)
+    }
+
+    @Test("a solid polyline still packs a 0 startOffsetWorld baseline (no dash phase)")
+    func solidOffsetIsZeroBaseline() {
+        let out = pack(.solid, points: [Vector(0, 0), Vector(5, 0), Vector(10, 0)])
+        // The field still accumulates (it's harmless when period == 0), but the FIRST
+        // segment's offset is the 0 baseline.
+        #expect(out[0].startOffsetWorld == 0)
+    }
+
+    @Test("a single-point .dashed polyline is solid (period 0) — a dash on a dot is meaningless")
+    func singlePointIsSolid() {
+        let out = pack(.dashed, points: [Vector(3, 4)])
+        #expect(out.count == 1)
+        #expect(out[0].dashPeriodPx == 0)
+    }
+
+    // MARK: - Byte-match contract guard
+
+    @Test("LineInstance memory layout is the byte-matched 48-byte/16-align contract")
+    func lineInstanceLayoutContract() {
+        // The MSL `struct LineInstance` MUST match this layout or the canvas renders
+        // blank. The three dash floats fill the trailing padding after `color`'s
+        // 16-byte slot, so the stride stays 48 (same as before the dash fields).
+        #expect(MemoryLayout<LineInstance>.stride == 48)
+        #expect(MemoryLayout<LineInstance>.alignment == 16)
+        #expect(MemoryLayout<LineInstance>.offset(of: \.halfWidthPx) == 32)
+        #expect(MemoryLayout<LineInstance>.offset(of: \.dashPeriodPx) == 36)
+        #expect(MemoryLayout<LineInstance>.offset(of: \.dashOnPx) == 40)
+        #expect(MemoryLayout<LineInstance>.offset(of: \.startOffsetWorld) == 44)
+    }
+}
+
 @Suite("Overlay geometry — grid + snap markers")
 struct OverlayGeometryTests {
 
