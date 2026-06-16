@@ -1103,6 +1103,132 @@ public final class CADDrawing {
         }
     }
 
+    // MARK: - Dynamic-block PARAMETER + ACTION authoring (DB-2; undoable via mutateBlocks)
+    //
+    // Block-DEFINITION authoring of the DB-2 linear/flip parameters + stretch/flip
+    // actions. Per-INSTANCE state (`parameterValues`/`flipStates`) is NOT written
+    // here — the wire-wave drives it through the entity-edit funnel by replacing the
+    // `.insert` record's `InsertData.dynamic` (which is reachable: see the additive
+    // `InsertData.dynamic` field). These mutators only touch the `Block.dynamic`
+    // definition bundle, routed through the same `mutateBlocks` value-snapshot funnel
+    // as the visibility mutators — one ⌘Z reverts each.
+
+    /// Adds a LINEAR parameter (§5.2.2) to a block, creating its dynamic bundle if
+    /// absent. The parameter's base distance is `|end - base|` and its direction is
+    /// `(end - base)`. Undoable. No-op (no undo) if the block is unknown or already
+    /// has a parameter with this id (ids are the per-instance value key, so they must
+    /// be unique within a block). Returns `true` if added.
+    @discardableResult
+    public func addLinearParameter(toBlock name: String, id: BlockParameterID,
+                                   label: String, base: Vector, end: Vector) -> Bool {
+        addParameter(toBlock: name,
+                     .linear(id: id, label: label, base: base, end: end))
+    }
+
+    /// Adds a FLIP parameter (§5.2.7) to a block, creating its dynamic bundle if
+    /// absent. `lineStart`→`lineEnd` is the reflection line a flip action mirrors
+    /// across. Undoable. No-op if the block is unknown or already has a parameter with
+    /// this id. Returns `true` if added.
+    @discardableResult
+    public func addFlipParameter(toBlock name: String, id: BlockParameterID,
+                                 label: String, lineStart: Vector, lineEnd: Vector) -> Bool {
+        addParameter(toBlock: name,
+                     .flip(id: id, label: label, lineStart: lineStart, lineEnd: lineEnd))
+    }
+
+    /// Shared parameter-append funnel: appends `param` to the block's dynamic bundle
+    /// unless its id is already present. Returns `true` if added.
+    @discardableResult
+    private func addParameter(toBlock name: String, _ param: BlockParameter) -> Bool {
+        var added = false
+        mutateBlocks { table in
+            guard var block = table.block(named: name) else { return }
+            var def = block.dynamic ?? DynamicBlockDef()
+            guard def.parameter(param.id) == nil else { return }
+            def.parameters.append(param)
+            block.dynamic = def
+            table.upsert(block)
+            added = true
+        }
+        return added
+    }
+
+    /// Adds a STRETCH action (§6.2.3) to a block, associated with `parameterID` (a
+    /// linear parameter) and transforming `memberIDs` whose defining points fall
+    /// inside `frame`. `distanceMultiplier`/`angleOffset` are the §13.4 overrides
+    /// (defaults 1 / 0). Undoable. No-op if the block is unknown or already has an
+    /// action with this id. Returns `true` if added.
+    @discardableResult
+    public func addStretchAction(toBlock name: String, id: BlockActionID,
+                                 parameterID: BlockParameterID, frame: AABB,
+                                 memberIDs: Set<EntityID>,
+                                 distanceMultiplier: Double = 1,
+                                 angleOffset: Double = 0) -> Bool {
+        addAction(toBlock: name,
+                  .stretch(id: id, parameterID: parameterID, stretchFrame: frame,
+                           memberIDs: memberIDs,
+                           distanceMultiplier: distanceMultiplier,
+                           angleOffset: angleOffset))
+    }
+
+    /// Adds a FLIP action (§6.2.6) to a block, associated with `parameterID` (a flip
+    /// parameter) and mirroring `memberIDs` when the instance flip state is `true`.
+    /// Undoable. No-op if the block is unknown or already has an action with this id.
+    /// Returns `true` if added.
+    @discardableResult
+    public func addFlipAction(toBlock name: String, id: BlockActionID,
+                              parameterID: BlockParameterID,
+                              memberIDs: Set<EntityID>) -> Bool {
+        addAction(toBlock: name,
+                  .flip(id: id, parameterID: parameterID, memberIDs: memberIDs))
+    }
+
+    /// Shared action-append funnel: appends `action` to the block's dynamic bundle
+    /// unless its id is already present. Returns `true` if added.
+    @discardableResult
+    private func addAction(toBlock name: String, _ action: BlockAction) -> Bool {
+        var added = false
+        mutateBlocks { table in
+            guard var block = table.block(named: name) else { return }
+            var def = block.dynamic ?? DynamicBlockDef()
+            guard !def.actions.contains(where: { $0.id == action.id }) else { return }
+            def.actions.append(action)
+            block.dynamic = def
+            table.upsert(block)
+            added = true
+        }
+        return added
+    }
+
+    /// Removes the parameter with `id` from a block's dynamic bundle. Undoable.
+    /// No-op (no undo) if the block, its dynamic bundle, or the parameter is absent.
+    /// NOTE: actions still referencing the removed parameter become inert (the
+    /// evaluator treats a missing parameter as a no-op) rather than being cascaded —
+    /// the wire-wave/authoring UI prunes orphaned actions explicitly.
+    public func removeParameter(fromBlock name: String, id: BlockParameterID) {
+        mutateBlocks { table in
+            guard var block = table.block(named: name), var def = block.dynamic,
+                  let idx = def.parameters.firstIndex(where: { $0.id == id })
+            else { return }
+            def.parameters.remove(at: idx)
+            block.dynamic = def
+            table.upsert(block)
+        }
+    }
+
+    /// Removes the action with `id` from a block's dynamic bundle. Undoable. No-op
+    /// (no undo) if the block, its dynamic bundle, or the action is absent.
+    public func removeAction(fromBlock name: String, id: BlockActionID) {
+        mutateBlocks { table in
+            guard var block = table.block(named: name), var def = block.dynamic,
+                  let idx = def.actions.firstIndex(where: { $0.id == id })
+            else { return }
+            def.actions.remove(at: idx)
+            block.dynamic = def
+            table.upsert(block)
+        }
+    }
+
     // MARK: - Create block from a selection (CreateBlockTool's model op)
 
     /// The outcome of a `makeBlockFromEntities` call: the (possibly de-duplicated)
