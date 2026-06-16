@@ -115,6 +115,57 @@ public struct BlockLibrary: Sendable, Hashable, Codable {
         items = BlockLibrary.scan(directory: directory)
     }
 
+    // MARK: - Bundled starter-symbol directory (backlog #6)
+
+    /// The directory that holds the bundled STARTER symbol library — the ~dozen
+    /// recognizable `.dxf` symbols shipped so the Parts Library isn't empty on
+    /// first launch. Resolved bundle-first, then an in-repo dev fallback, exactly
+    /// like the bundled hatch-pattern / font / template directories:
+    ///
+    ///   1. The app bundle's `Contents/Resources/symbols`
+    ///      (`Bundle.main.resourceURL/symbols`, copied in by `make-app.sh`).
+    ///   2. The in-repo `macos/assets/symbols`, derived from THIS source file's
+    ///      path (the dev fallback for the bare binary / the test suite, where
+    ///      there is no app bundle).
+    ///
+    /// Returns the FIRST that exists, or `nil` if neither does (a missing library
+    /// just means the Parts gallery shows an empty starter section — graceful, no
+    /// crash). Engine-pure: Foundation only, no `Bundle.module`, no SwiftPM
+    /// resources stanza — the assets are bundled by `make-app.sh`.
+    public static func bundledSymbolsDirectory() -> URL? {
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("symbols"),
+           FileManager.default.fileExists(atPath: bundled.path) {
+            return bundled
+        }
+        if let repo = repoSymbolsDirectory() {
+            return repo
+        }
+        return nil
+    }
+
+    /// Scans the bundled starter-symbol directory into catalog items, or returns
+    /// an empty array if it cannot be resolved (never throws). A convenience for
+    /// the Parts gallery's "starter" section.
+    public static func bundledSymbols() -> [BlockLibraryItem] {
+        guard let dir = bundledSymbolsDirectory() else { return [] }
+        return scan(directory: dir)
+    }
+
+    /// The in-repo `macos/assets/symbols` directory, derived from this file's
+    /// source path (dev fallback for the bare binary / tests). `nil` if absent.
+    static func repoSymbolsDirectory() -> URL? {
+        // <repo>/macos/engine/Sources/CADEngine/BlockLibrary.swift
+        //   -> drop the filename + 3 dirs (CADEngine, Sources, engine) -> macos
+        let thisFile = URL(fileURLWithPath: #filePath)
+        let macosDir = thisFile
+            .deletingLastPathComponent()   // .../CADEngine   (drop filename)
+            .deletingLastPathComponent()   // .../Sources
+            .deletingLastPathComponent()   // .../engine
+            .deletingLastPathComponent()   // .../macos
+        let dir = macosDir.appendingPathComponent("assets/symbols")
+        return FileManager.default.fileExists(atPath: dir.path) ? dir : nil
+    }
+
     // MARK: - Directory scan (NO file-picker — the URL is caller-supplied)
 
     /// Enumerates the `.dxf` files directly inside `directory` into catalog items

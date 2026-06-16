@@ -21,6 +21,7 @@ SAMPLE_DXF_SRC="${REPO_DIR}/librecad/res/dxf/dim_sample.dxf"
 FONTS_SRC_DIR="${REPO_DIR}/librecad/support/fonts"
 HATCHPAT_SRC_DIR="${MACOS_DIR}/assets/hatchpatterns"   # bundled .pat hatch patterns (F6)
 TEMPLATES_SRC_DIR="${MACOS_DIR}/assets/templates"      # bundled .dxf new-doc templates (F24)
+SYMBOLS_SRC_DIR="${MACOS_DIR}/assets/symbols"          # bundled .dxf starter symbols (#6)
 ICON_DIR="${MACOS_DIR}/assets/AppIcon"
 ICON_GEN="${ICON_DIR}/make-icon.swift"      # programmatic, offline icon generator
 ICON_ICNS="${ICON_DIR}/AppIcon.icns"        # committed fallback (regenerated below)
@@ -103,6 +104,21 @@ if [[ -d "${TEMPLATES_SRC_DIR}" ]]; then
     echo "    bundled ${tpl_count} .dxf template(s): Contents/Resources/templates/"
 else
     echo "warning: templates dir not found at ${TEMPLATES_SRC_DIR}; New from Template will fall back to the repo path" >&2
+fi
+
+# Bundle the `.dxf` starter symbol library (#6) so the Parts Library isn't empty
+# on first launch. BlockLibrary.bundledSymbolsDirectory() looks them up under
+# Contents/Resources/symbols (Bundle.main), falling back to the in-repo
+# macos/assets/symbols for the bare binary. A missing dir just means the Parts
+# gallery's starter section is empty (no crash).
+SYMBOLS_DST_DIR="${APP_DIR}/Contents/Resources/symbols"
+if [[ -d "${SYMBOLS_SRC_DIR}" ]]; then
+    mkdir -p "${SYMBOLS_DST_DIR}"
+    cp "${SYMBOLS_SRC_DIR}"/*.dxf "${SYMBOLS_DST_DIR}/" 2>/dev/null || true
+    sym_count=$(find "${SYMBOLS_DST_DIR}" -name '*.dxf' | wc -l | tr -d ' ')
+    echo "    bundled ${sym_count} .dxf starter symbol(s): Contents/Resources/symbols/"
+else
+    echo "warning: symbols dir not found at ${SYMBOLS_SRC_DIR}; the Parts Library starter section will fall back to the repo path" >&2
 fi
 
 # App icon (Info.plist sets CFBundleIconFile = AppIcon, so the bundle needs
