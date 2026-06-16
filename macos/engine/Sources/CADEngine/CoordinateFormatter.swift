@@ -109,6 +109,108 @@ public enum CoordinateFormatter {
         }
     }
 
+    // MARK: - Angle
+
+    /// Formats an angle (given in RADIANS) per the document's `AngleFormat` and
+    /// `precision` (decimal places, clamped 0…8), mirroring LibreCAD's
+    /// `RS_Units::formatAngle` conventions:
+    ///
+    /// - `.degreesDecimal`: decimal degrees with a `°` suffix (`π/2 → "90°"`,
+    ///   trailing zeros stripped like `length`).
+    /// - `.degreesMinutesSeconds`: `D°M'S"` (`0.5° → "0°30'0\""`); minutes/seconds
+    ///   are integers, the degrees term carries the sign, and a `60` carry rolls up.
+    /// - `.gradians`: decimal gradians with a `g` suffix (`π/2 → "100g"`).
+    /// - `.radians`: decimal radians with an `r` suffix (`π → "3.1416r"`).
+    /// - `.surveyors`: quadrant bearing `N D°M'S" E` (`0 → "E"`, `π/2 → "N"`;
+    ///   off-axis headings read `N D°M'S" E` etc. measured from the N/S axis).
+    ///
+    /// The input is normalized into `[0, 2π)` first (LibreCAD `correctAngle`), so a
+    /// negative or multi-turn angle renders the same as its principal value.
+    public static func angle(_ radians: Double,
+                             format: AngleFormat = .degreesDecimal,
+                             precision: Int = 4) -> String {
+        let p = clampPrecision(precision)
+        let a = MathUtils.correctAngle(radians)
+        switch format {
+        case .degreesDecimal:
+            let deg = MathUtils.rad2deg(a)
+            return "\(decimal(deg, precision: p))°"
+        case .gradians:
+            let gra = MathUtils.rad2gra(a)
+            return "\(decimal(gra, precision: p))g"
+        case .radians:
+            return "\(decimal(a, precision: p))r"
+        case .degreesMinutesSeconds:
+            return degreesMinutesSeconds(MathUtils.rad2deg(a))
+        case .surveyors:
+            return surveyors(a)
+        }
+    }
+
+    /// Renders a non-negative decimal-degree value as `D°M'S"`, integer minutes
+    /// and seconds, carrying `60`s up. (Used by `.degreesMinutesSeconds` and, via
+    /// the bearing magnitude, `.surveyors`.)
+    static func degreesMinutesSeconds(_ degrees: Double) -> String {
+        let negative = degrees < 0
+        var d = Int(abs(degrees))
+        let remMinutes = (abs(degrees) - Double(d)) * 60
+        var m = Int(remMinutes)
+        var s = Int((remMinutes - Double(m)) * 60 + 0.5)
+        if s >= 60 { s -= 60; m += 1 }   // seconds carry
+        if m >= 60 { m -= 60; d += 1 }   // minutes carry
+        let body = "\(d)°\(m)'\(s)\""
+        return negative ? "-\(body)" : body
+    }
+
+    /// Surveyor's bearing for an angle in `[0, 2π)` (radians, CCW from east).
+    /// Folds the heading into the nearer of the N/S half and reports the deviation
+    /// toward E/W: `N D°M'S" E`, etc. Pure cardinal headings collapse to a single
+    /// letter (`"N"`, `"E"`, `"S"`, `"W"`).
+    static func surveyors(_ radians: Double) -> String {
+        let deg = MathUtils.rad2deg(radians)              // 0…360, 0 == east (CCW)
+        // Distance from the cardinal axes (within a small tolerance) → collapse.
+        let tol = 1e-9
+        func near(_ x: Double, _ y: Double) -> Bool { abs(x - y) < tol }
+        if near(deg, 0) || near(deg, 360) { return "E" }
+        if near(deg, 90) { return "N" }
+        if near(deg, 180) { return "W" }
+        if near(deg, 270) { return "S" }
+        // Quadrant + deviation from the N/S axis toward E/W.
+        let ns: String
+        let ew: String
+        let dev: Double
+        if deg > 0 && deg < 90 {            // NE quadrant (above east axis)
+            ns = "N"; ew = "E"; dev = 90 - deg
+        } else if deg > 90 && deg < 180 {   // NW quadrant
+            ns = "N"; ew = "W"; dev = deg - 90
+        } else if deg > 180 && deg < 270 {  // SW quadrant
+            ns = "S"; ew = "W"; dev = 270 - deg
+        } else {                            // SE quadrant (270 < deg < 360)
+            ns = "S"; ew = "E"; dev = deg - 270
+        }
+        return "\(ns) \(degreesMinutesSeconds(dev)) \(ew)"
+    }
+
+    // MARK: - Polar pair (the status-bar dist<angle readout)
+
+    /// Formats a relative offset `(dx, dy)` as a polar `"dist<angle"` readout for the
+    /// status bar — distance via `length` (honoring the linear `format`/`precision`/
+    /// `unit`), angle via `angle` (honoring the angular `angleFormat`/`anglePrecision`).
+    /// The `<` is LibreCAD's polar separator. A zero offset reads `"0<…"` at the base
+    /// angle (`atan2(0,0) == 0`).
+    public static func polarPair(dx: Double, dy: Double,
+                                 format: LinearFormat = .decimal,
+                                 precision: Int = 4,
+                                 unit: DrawingUnit = .none,
+                                 angleFormat: AngleFormat = .degreesDecimal,
+                                 anglePrecision: Int = 4) -> String {
+        let dist = (dx * dx + dy * dy).squareRoot()
+        let theta = atan2(dy, dx)
+        let distStr = length(dist, format: format, precision: precision, unit: unit)
+        let angStr = angle(theta, format: angleFormat, precision: anglePrecision)
+        return "\(distStr)<\(angStr)"
+    }
+
     // MARK: - Decimal (mirrors DimensionResolver.dimFormat)
 
     /// Rounds to `precision` decimal places and strips trailing zeros: `10.0 → "10"`,
