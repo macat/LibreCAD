@@ -151,7 +151,7 @@ Where lenses conflict, the **Call** column states the decision.
 | **"Grid spacing" wraps to "Spaci\nng"** (confirmed bug) | `.lineLimit(1).fixedSize(horizontal:true,vertical:false)` on the label; **drop the "Spacing" placeholder**; field 80 → 72. Apply the label-lineLimit fix to **every** `LabeledContent` in the file. | InspectorView.swift:289-295 | S | Low. High-value quick win. |
 | Systemic fixed-width fields (70/80/90/120/140) | Route widths through `DS.Field.*` (narrow 72 / std 96 / wide 130; paired x/y → `xy` 56); `.lineLimit(1)` every label; long labels stack above field at narrow width | InspectorEditors:68,274,311,318,387,824-859, InspectorView:392-411 | M | Med. Wide blast radius — keep self-contained. |
 | 11 stacked snap toggles clip "Endpoint…Free" | 2-column `LazyVGrid([.flexible(),.flexible()])` of `.checkbox` toggles; pull "Free (no snap)" out as a master "Snap on/off" above the grid | InspectorView:285-300,514-531 | M | Low. Mirrors AutoCAD DSETTINGS ▸ Object Snap. |
-| Oversized "No Selection" empty state | Lift out of the `Section`; compact `VStack(spacing:8)`: icon `.title2/.secondary` (`cursorarrow`), title `panelTitle`, hint `hint` | InspectorView:72-79 | S | Low |
+| Oversized "No Selection" empty state wastes prime real estate | ✅ **Upgraded (2nd review):** instead of a decorative empty state, show **drawing-level properties** when nothing is selected — Units, Scale, entity count, layer count, drawing extents (read from `CanvasModel.drawing`). Compact `LabeledContent` rows under a "Drawing" header. A tiny `cursorarrow` + one-line hint only if there's no document. | InspectorView:72-79 | S→M | Low |
 | Property Painter naming + all-greyed + dup action | ✅ Rename → **"Match Properties"** (AutoCAD MATCHPROP). `Label` icons (Pick Up `eyedropper`, Apply `paintbrush.pointed`, Reset `arrow.uturn.backward`); status "Source: Empty/Loaded"; collapse to one hint line when unavailable; remove the dup "Reset Pen to Layer" | InspectorView:256-278, InspectorEditors:748-750 | M | Low |
 | Inconsistent section vocabulary | ✅ Standardize on **"Entity"** app-wide (matches the engine + the existing empty-state copy); "Selection" (summary), "Common" (shared; "(applies to all)" → caption subtitle) | InspectorView/InspectorEditors | S | Low |
 | Redundant inner-frame width | Drop `InspectorView:56` self `.frame(minWidth:260…)`; keep only host `.inspectorColumnWidth` (ContentView:312) | InspectorView:56 | S | Low |
@@ -234,3 +234,40 @@ always-on top strip; serial green; `.app` rebuilt.
 6. **Layer-row inline flags:** the name-truncation fix **requires** demoting **printer + construction**
    to the row context menu (the 220pt arithmetic depends on it). Confirm those two are rare-enough to
    hide (vs needing them always visible like eye/lock). _This gates the P1 layer-row reorg._
+   ✅ **Owner answered (2026-06-16):** keep two-tone (intentional) · drop the bottom chip mirror ·
+   demote printer/construction · build Waves 1–4.
+
+---
+
+## 6. Cross-checked follow-ups (2nd independent review, 2026-06-16)
+
+A second design review (AutoCAD/BricsCAD + Sketch/Figma/Linear lens) independently reached the **same
+core conclusions** — validating the plan (compact color swatch · disambiguate the "By Layer" dropdowns ·
+simplified/name-first layer rows · status-bar Ortho/Polar/OSNAP toggles · drop the redundant bottom tool
+pills · stronger type hierarchy + 8pt grid · useful empty states · command autocomplete). Those are all
+already P0 or Waves 1–4. Genuinely-NEW items it surfaced, banked here:
+
+- ✅ **[folded into Wave 3]** Inspector "No Selection" → **drawing-level properties** (units, scale,
+  entity count, layer count, extents), not a decorative empty state.
+- **[P1 follow-up] Toolbar flyouts for tool variants** — Line▸{Ray, XLine}, Circle▸{center-radius,
+  2-pt, 3-pt, TTR}, Arc▸{3-pt, start-center-end, …}, Rectangle▸{Rectangle, Polygon}. Click = default,
+  hold = flyout. A real feature (many variants already exist as engine tools — this is UI surfacing);
+  conserves toolbar width and kills the `>>` overflow.
+- **[P1 follow-up] "Match Properties" → toolbar button + shortcuts** (⌘⇧C pick up / ⌘⇧V apply,
+  MATCHPROP-style) instead of a permanent inspector section. Wave 3 renames + compacts it; the full
+  move-to-command is the follow-up.
+- **[P2 follow-up] Snap & Grid → status-bar gear popover.** Once Wave 4's status toggles land, the
+  inspector Snap & Grid section is largely redundant; move detailed settings behind a popover, leaving
+  quick toggles in the bar.
+- **[P2 follow-up] Canvas chrome:** move the "New drawing (mm)" label to the status bar; add a
+  layout-tab context menu (Rename / Delete / Duplicate / Page Setup); add a small UCS/axis indicator at
+  the origin.
+- **[P2 follow-up] Coordinate readout click-to-toggle** absolute / relative / polar.
+- **[P3 content] Starter symbol library** — ship ~20–30 bundled DXF symbols (doors/windows/fixtures/
+  electrical) so Parts Library isn't empty on first launch + Finder drag-drop into the panel.
+
+**Already covered / in-flight (not re-opened):** crosshair cursor (preference shipped, default
+full-window) · command palette (⌘K `CommandPalette.swift`, polished in Wave 4) · dark mode + light-on-
+dark canvas (theme system in `AppSettings`) · Ortho/Polar/OSNAP status toggles (Wave 4) · labeled/
+disambiguated pen dropdowns (Wave 3) · window-vs-crossing selection + trackpad navigation (engine —
+already implemented).
