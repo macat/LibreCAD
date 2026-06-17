@@ -6,6 +6,29 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-17 — LIVE DIMENSIONS while drawing — SHIPPED (`native-macos @ fcb0a85bf`, **3012 tests**, `.app` rebuilt)
+
+Owner (with an AutoCAD screenshot of a dotted dimension line + angle): "when drawing a line or any other object I'd like to see the sizing." Planned via the `live-dimension-probe` workflow; built as W1a→(W1b∥W2)→W3, reused the proven additive `referenceSegments` pattern (NO new EntityKind/ToolKind, NO Metal byte-match). All reviewed/serial-gated/merged-by-hash.
+
+- **W1a — contract** `92406efca`: `LiveDimension` (Kind: linear/radius/diameter/angle/size(w,h); from/to/label/labelAnchor) + `LiveDimensionContext` (linear/angle format+precision+unit) + additive `Tool.liveDimensions(_:)` protocol member (default `[]`) — the frozen contract.
+- **W1b — per-tool** `f1fdb093b` (+16): Line (length `.linear` + `.angle`), Circle (`.radius`/`.diameter` across all 3 construction modes), Rectangle (`.size(w,h)` unsigned), Polygon (`.radius`+N). Labels formatted in-engine via `CoordinateFormatter` threading ctx (architectural feet-inches verified). Empty before first pick / after commit.
+- **W2 — overlay** `d561e4d7f` (+10): `Canvas/LiveDimensionOverlay.swift` — AppKit click-through (`hitTest→nil`, `isFlipped`) NSView drawing the dotted dim line (screen-fixed dash, gizmo style) + witness ticks / sweep arc + a translucent value-label chip (first text-over-canvas via `NSAttributedString.draw`). Injected providers (liveDimensionsProvider/viewportProvider) + `isEnabled`/`refresh`. Pure `labelBox` placement unit-tested; CG draw is GUI-only.
+- **W3 — wire** `7f00ce1f` (+11): mounts the overlay TOPMOST in `CADCanvasController.attach` + `refresh()` each `redraw()` (re-anchors on cursor/pan/zoom); `CanvasModel.currentLiveDimensions()` (gated `dynamicInputEnabled && isToolActive && tool != nil`; ctx 1:1 from `GraphicVariables` LUNITS/LUPREC/INSUNITS/AUNITS/AUPREC); **DYN** status-bar chip + `AppSettings.dynamicInput` pref (default ON, `boolPreference` honors missing-key default). Did NOT touch ContentView (seeded in `CanvasModel.init`) to stay disjoint from the concurrent command-line redesign.
+
+Arc/Ellipse/Polyline live-dims = fast-follow (not yet). `.app` rebuilt for GUI verification (dotted readout + DYN toggle while drawing Line/Circle/Rectangle/Polygon).
+
+---
+
+## 2026-06-17 — BOTTOM-CHROME REDESIGN (status→bottom + merged smart command line) — IN PROGRESS
+
+Owner (AutoCAD screenshots): move the status row to the bottom (it's a status bar), merge the two command rows into ONE smart command line (commands + coordinates), autocomplete dropdown with tool icons as you type, keep recent 3-5 tools as chips that LOAD the command into the line (not execute), and make it parameter-smart (active tool prompt + clickable bracketed keyword options, AutoCAD `[Undo]`/`[Close]`/construction-modes). Planned via `command-bar-redesign-probe` (→ `git diff`-grounded plan; seams confirmed at ContentView:274-348 bottom VStack + the `referenceSegments`/`liveDimensions` additive pattern for keywords). **Coordinator decisions:** build the full feature via waves (incrementally verifiable); keyword dispatch rides EXISTING inputs (no `ToolInput.keyword` → avoids the ~50-file exhaustive-switch tax); keyword chips render in the command line (StatusBar untouched, keeps the live-dim DYN chip clean); no command transcript/scrollback in v1.
+- **Wave 1 (engine) DONE** `81639dd65` (**3001 tests**): W1A `CommandParser.looksLikeCoordinate` `8f6c2d1f` · W1B `ToolSuggester.resolve(command:)` + single-letter AutoCAD aliases (threshold = substring tier 150) `ca47e0cf` · W1C `ToolKeyword` + additive `Tool.keywordOptions` member `224cedd5e`.
+- **Wave 2 (per-tool keywordOptions) DONE** `b4b6aa431` (**3039 tests**): W2A Polyline/Spline verb `[Close]/[Undo]` (mid-draw; Close has NO standalone input → re-feed first vertex as `.click`; Spline Close gated ≥3) `e1cdcb15` · W2B Circle/Arc/Ellipse construction-mode keywords (initial-state-only → safe re-mint via config+`reapplyActiveToolConfig`; full mapping table captured) `ef127ca2`. (W2B fixed W1C's `severalToolsInheritEmptyDefault` test by swapping Circle/Arc→Rectangle/Polygon/Point, which still inherit the `[]` default.)
+- **Wave 3 (CanvasModel dispatch + `Tool.closeAnchor` accessor) — building.** Adds `interpretCommandLine(_:) -> CommandLineResult` (coordinate / keyword / `.activateTool` [View activates, so `.image` modal stays in the View] / error), `invokeToolKeyword`, `activeToolKeywordOptions`, and the `closeAnchor` engine accessor (first vertex/point) for Close dispatch.
+- **Wave 4 (merged `CommandLineBar` UI) — pending:** reorder StatusBar to the bottom VStack child; one TextField/@FocusState; autocomplete popover (reuse `CommandPalette.row` + `ToolCatalog.metadata` icons); recent chips LOAD-not-execute; keyword chips; route old commandBar styling through `.barStrip`.
+
+---
+
 ## 2026-06-16 — LibreCAD FEATURE-GAP Waves 1–3 shipped (catalog was stale) (`native-macos @ 38e0702a0`, **2850 tests**, `.app` rebuilt)
 
 Owner: "check the catalog and parallel-implement the missing ones." The `feature-catalog.md` was confirmed stale; ran the `librecad-feature-gap-audit` workflow (10 code-grounded category auditors → synthesis → disjointness critic) → `macos/docs/feature-gap-plan.md` (the refreshed authoritative gap list). Finding: most of LibreCAD is already implemented; genuine gaps = cheap wire-waves + grip editing + a deferred heavy/niche tail. Executed engine-first then parallel UI waves, all reviewed/serial-gated/merged-by-hash.
