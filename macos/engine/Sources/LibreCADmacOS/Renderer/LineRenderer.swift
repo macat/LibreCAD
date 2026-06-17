@@ -201,6 +201,19 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     private var fillVertexCount = 0
     private var fillBufferCapacity = 0
 
+    /// The WIPEOUT mask triangle buffer (`FlatVertex`). Separate from the fill buffer
+    /// because a wipeout must paint the CANVAS BACKGROUND color in a dedicated pass
+    /// drawn AFTER the model lines (so it masks lower fills AND lower strokes — the
+    /// fill pass at 1b is unconditionally UNDER the lines, so a normal fill could
+    /// never hide a stroke). Packed in the SAME cull rebuild as the fill buffer (from
+    /// `ResolvedFill.isMask` fills), then RE-COLORED + uploaded each frame with the
+    /// live `view.clearColor` (the engine is view-free, so the resolve carries only a
+    /// fallback color + the `isMask` flag; the renderer supplies the real background).
+    /// Empty for every drawing with no wipeout, so non-wipeout rendering is unchanged.
+    private var wipeoutVertexBuffer: MTLBuffer?
+    private var wipeoutVertexCount = 0
+    private var wipeoutBufferCapacity = 0
+
     /// The overlay vertex buffer (grid + selection + snap marker, flat-shaded).
     private var overlayBuffer: MTLBuffer?
     private var overlayVertexCount = 0
@@ -251,6 +264,12 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     /// Persistent scratch for the fill triangle vertices, packed in the SAME cull
     /// rebuild as `instanceScratch` (cleared keepingCapacity → no per-frame churn).
     private var fillScratch: [FlatVertex] = []
+
+    /// Persistent scratch for the WIPEOUT mask triangle vertices (the `isMask` fills),
+    /// packed in the SAME cull rebuild as `fillScratch`. Its vertices carry a
+    /// placeholder color; the draw pass re-stamps the live `view.clearColor` before
+    /// uploading. Cleared keepingCapacity → no per-frame churn.
+    private var wipeoutScratch: [FlatVertex] = []
 
     /// Resolved raster-image quads from the current cull rebuild (one per visible
     /// IMAGE entity). Drawn by the textured-quad pass after the fills, under the
@@ -407,6 +426,14 @@ final class LineRenderer: NSObject, MTKViewDelegate {
         rebuildLineInstancesIfNeeded(visibleRect: visibleRect)
         rebuildOverlay(viewport: model.viewport)
 
+        // Re-color + upload the WIPEOUT masks every frame with the LIVE canvas
+        // background (`view.clearColor`), so a wipeout paints exactly the background
+        // color even after a theme / preference change (no cull rebuild needed). The
+        // mask TRIANGLES come from the cull rebuild; only their color varies per frame.
+        let cc = view.clearColor
+        let bg = SIMD4<Float>(Float(cc.red), Float(cc.green), Float(cc.blue), Float(cc.alpha))
+        uploadWipeoutVertices(backgroundColor: bg)
+
         // ---- Triple-buffered uniform write, gated so we never overwrite a
         // uniform buffer the GPU is still reading.
         _ = inFlightSemaphore.wait(timeout: .distantFuture)
@@ -466,6 +493,26 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0,
                                    vertexCount: 4, instanceCount: lineInstanceCount)
+        }
+
+        // ---- 2b. WIPEOUT masks — background-colored triangles drawn AFTER the model
+        // lines (and fills/images) so a wipeout HIDES every lower-draw-order entity
+        // beneath its boundary (fills AND strokes), the AutoCAD WIPEOUT behavior.
+        // Drawn BEFORE the selection/snap/preview overlay (pass 3) so a selected
+        // wipeout still shows its highlight on top. The triangles were re-colored to
+        // the live `view.clearColor` in `uploadWipeoutVertices`. Empty (no draw) for
+        // any drawing without a wipeout, so non-wipeout rendering is unchanged.
+        //
+        // LIMITATION (documented): a single post-line pass masks everything below it
+        // in the WHOLE drawing, so a stroke deliberately raised ABOVE a wipeout in
+        // draw order is still masked (true per-entity draw-order interleaving would
+        // need splitting the line batch per wipeout — deferred). For the common case
+        // (a wipeout placed on top of what it hides) this is correct.
+        if let flatPipeline, let wipeoutVertexBuffer, wipeoutVertexCount >= 3 {
+            encoder.setRenderPipelineState(flatPipeline)
+            encoder.setVertexBuffer(wipeoutVertexBuffer, offset: 0, index: 0)
+            encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: wipeoutVertexCount)
         }
 
         // ---- 3. Selection highlight + snap marker (over the model). Spans follow
@@ -537,6 +584,7 @@ final class LineRenderer: NSObject, MTKViewDelegate {
         // cached resolve context (rebuilt only on model change, not per cull).
         instanceScratch.removeAll(keepingCapacity: true)
         fillScratch.removeAll(keepingCapacity: true)
+        wipeoutScratch.removeAll(keepingCapacity: true)
         imageScratch.removeAll(keepingCapacity: true)
         let ctx = resolveContext(modelChanged: modelChanged)
         let origin = model.renderOrigin
@@ -709,7 +757,16 @@ final class LineRenderer: NSObject, MTKViewDelegate {
                                              into: &instanceScratch)
         }
         for fill in geo.fills {
-            RendererGeometry.appendFillVertices(for: fill, renderOrigin: origin, into: &fillScratch)
+            // A WIPEOUT mask (`isMask`) packs into the SEPARATE wipeout buffer (drawn
+            // AFTER the model lines so it hides lower fills AND strokes); every normal
+            // fill packs into the fill buffer (drawn UNDER the lines). The wipeout
+            // triangles carry a placeholder color here; the draw pass re-stamps the
+            // live `view.clearColor` before uploading.
+            if fill.isMask {
+                RendererGeometry.appendFillVertices(for: fill, renderOrigin: origin, into: &wipeoutScratch)
+            } else {
+                RendererGeometry.appendFillVertices(for: fill, renderOrigin: origin, into: &fillScratch)
+            }
         }
         // Raster images: collect one ImageQuad per resolved image (drawn by the
         // textured-quad pass, which binds the cached texture per quad).
@@ -781,6 +838,32 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             verts.withUnsafeBytes { raw in
                 buf.contents().copyMemory(from: raw.baseAddress!, byteCount: raw.count)
             }
+        }
+    }
+
+    /// Re-stamps the wipeout mask triangles with the live canvas background `color`
+    /// and uploads them into the persistent wipeout buffer (same growth policy as the
+    /// fill buffer). Called every frame from `draw(in:)` so a theme / background
+    /// change recolors the masks without a cull rebuild. A drawing with no wipeout
+    /// has an empty `wipeoutScratch`, so this is a cheap no-op there.
+    private func uploadWipeoutVertices(backgroundColor color: SIMD4<Float>) {
+        wipeoutVertexCount = wipeoutScratch.count
+        guard !wipeoutScratch.isEmpty else { return }
+        let needed = wipeoutScratch.count
+        if wipeoutVertexBuffer == nil || needed > wipeoutBufferCapacity {
+            let cap = Swift.max(needed, Int(Double(needed) * 1.5))
+            wipeoutVertexBuffer = device.makeBuffer(
+                length: MemoryLayout<FlatVertex>.stride * cap,
+                options: .storageModeShared
+            )
+            wipeoutBufferCapacity = cap
+        }
+        guard let buf = wipeoutVertexBuffer else { return }
+        // Re-color in place (positions are stable from the cull rebuild; only the
+        // background color varies per frame) and copy into the GPU buffer.
+        let dst = buf.contents().bindMemory(to: FlatVertex.self, capacity: needed)
+        for i in 0..<needed {
+            dst[i] = FlatVertex(position: wipeoutScratch[i].position, color: color)
         }
     }
 

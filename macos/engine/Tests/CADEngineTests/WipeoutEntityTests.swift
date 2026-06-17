@@ -33,6 +33,7 @@
 
 import Testing
 import Foundation
+import simd
 @testable import CADEngine
 
 @Suite("wipeout masking-polygon entity")
@@ -325,6 +326,47 @@ struct WipeoutEntityTests {
         let world = d.worldBoundary
         #expect(approx(world[0], Vector(100, 50), 1e-6))
         #expect(approx(world[2], Vector(150, 90), 1e-6))   // 100 + 0.5·100, 50 + 0.5·80
+    }
+
+    // MARK: - Masking correctness (renderer fill path + draw-order routing)
+
+    @Test("the mask fill triangulates through the renderer's SOLID/HATCH fill path")
+    func maskFillTriangulates() {
+        // Sub-phase 4 requirement: the wipeout's boundary (3+ verts) must flow through
+        // the SAME triangulated-fill path as SOLID/HATCH (FillTriangulation +
+        // appendFillVertices), so the renderer can rasterize the mask. Drive it on a
+        // concave 5-vertex boundary to prove a non-rectangular mask tiles correctly.
+        let pts = [Vector(0, 0), Vector(4, 0), Vector(4, 4),
+                   Vector(2, 2), Vector(0, 4)]   // a concave "arrow notch" polygon
+        let geo = EntityKind.wipeout(WipeoutData(worldBoundary: pts)).resolve(pen: pen, ctx: ctx)
+        let mask = try! #require(geo.fills.first)
+        #expect(mask.isMask)
+        // The renderer fill packer triangulates the mask loop into a flat tri list.
+        var verts: [FlatVertex] = []
+        RendererGeometry.appendFillVertices(for: mask, renderOrigin: Vector(0, 0), into: &verts)
+        // A simple polygon of N vertices → N−2 triangles × 3 verts. (5 → 9.)
+        #expect(verts.count == (5 - 2) * 3)
+    }
+
+    @Test("a wipeout mask is flagged isMask; SOLID / HATCH fills are NOT")
+    func onlyWipeoutFillIsMask() {
+        // The renderer routes `isMask` fills to the dedicated AFTER-the-lines wipeout
+        // pass (masking lower strokes), and non-mask fills to the UNDER-the-lines fill
+        // pass. So a wipeout's fill must be the ONLY kind flagged isMask.
+        let w = EntityKind.wipeout(rect()).resolve(pen: pen, ctx: ctx)
+        #expect(w.fills.allSatisfy { $0.isMask })
+
+        // A SOLID's fill is a NORMAL (non-mask) fill — it must NOT route to the
+        // wipeout pass (it draws under the lines, like every other fill).
+        let solid = EntityKind.solid(SolidData(corners: [
+            Vector(0, 0), Vector(2, 0), Vector(2, 2)])).resolve(pen: pen, ctx: ctx)
+        #expect(solid.fills.allSatisfy { !$0.isMask })
+
+        // A solid HATCH's fill is likewise a normal fill.
+        let hatch = EntityKind.hatch(HatchData(loops: [[
+            PolylineVertex(point: Vector(0, 0)), PolylineVertex(point: Vector(2, 0)),
+            PolylineVertex(point: Vector(2, 2))]], solidFill: true)).resolve(pen: pen, ctx: ctx)
+        #expect(hatch.fills.allSatisfy { !$0.isMask })
     }
 
     @Test("a degenerate (no-boundary) wipeout still writes + rereads without crashing")
