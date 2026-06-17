@@ -548,8 +548,19 @@ enum RendererGeometry {
 
         // Per-polyline dash params (device pixels, fixed on zoom). `(0, 0)` ⇒ solid,
         // so an existing solid polyline packs `dashPeriodPx == 0` (unchanged render).
-        let (dashPeriodPx, dashOnPx) = dashParamsPx(for: polyline.pen.lineType,
+        //
+        // W4B Stage 3 — LINETYPE SCALE: multiply the dash period + on-length by the
+        // resolved linetype scale (`ResolvedPen.linetypeScale` == entity DXF-48 scale ×
+        // drawing $LTSCALE) so a `2`-scale dashed line draws dashes twice as long. We
+        // SCALE THE EXISTING `dashPeriodPx`/`dashOnPx` here — no new `LineInstance`
+        // field, so the packed instance layout / `Shaders.swift` MSL struct are
+        // UNTOUCHED (no byte-match change). A scale of 1 (the default) leaves the
+        // values bit-for-bit unchanged (regression). A solid pen's `(0, 0)` stays 0.
+        let dashScale = Float(polyline.pen.linetypeScale > 0 ? polyline.pen.linetypeScale : 1)
+        let (basePeriodPx, baseOnPx) = dashParamsPx(for: polyline.pen.lineType,
                                                     backingScale: backingScale)
+        let dashPeriodPx = basePeriodPx * dashScale
+        let dashOnPx = baseOnPx * dashScale
 
         // Degenerate single point → zero-length segment (drawn as a dot). A point is
         // always solid (a dash pattern on a zero-length stub is meaningless).
