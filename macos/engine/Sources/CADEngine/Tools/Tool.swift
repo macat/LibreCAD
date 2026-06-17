@@ -274,6 +274,29 @@ public protocol Tool: Sendable {
     /// the anchor is fixed and after commit) so the line only shows mid-operation
     /// and never leaks into exports (exports never read a tool's overlay).
     var referenceSegments: [(Vector, Vector)] { get }
+
+    /// Optional LIVE DIMENSIONAL FEEDBACK to draw in the overlay while a draw/modify
+    /// tool runs — the AutoCAD-style dotted dimension line plus a pre-formatted value
+    /// label that tracks the cursor (e.g. a Line tool showing its running length, a
+    /// Circle tool showing radius/diameter, a Rectangle tool showing W×H). Each
+    /// `LiveDimension` carries the MEASURED quantity, the dotted dim-line endpoints,
+    /// and a label string the tool already formatted IN-ENGINE from `ctx`.
+    ///
+    /// `ctx` is a tiny value snapshot of the document's display formatting variables
+    /// (linear/angle format, precision, unit) so the tool can format the label with
+    /// `CoordinateFormatter` WITHOUT reaching into `CADDrawing` — keeping the tool a
+    /// pure value type. The engine never renders the label; it returns a plain
+    /// `String` and the app's overlay (a LATER wave) draws it. No AppKit/SwiftUI.
+    ///
+    /// Append-only extension of the frozen contract (the SAME additive-default pattern
+    /// as `referenceSegments`): a default implementation in the protocol extension
+    /// below returns `[]`, so EVERY existing tool inherits "no live dimension" with no
+    /// per-tool change — only tools that opt in (Line / Circle / Rectangle / …, in a
+    /// later wave) override it. Like `referenceSegments`, it must be empty outside the
+    /// active operation (before the first point is fixed and after commit) so the
+    /// feedback only shows mid-operation and never leaks into exports (exports never
+    /// read a tool's overlay).
+    func liveDimensions(_ ctx: LiveDimensionContext) -> [LiveDimension]
 }
 
 // MARK: - Default reference segments (additive: all tools inherit "none")
@@ -284,6 +307,106 @@ public extension Tool {
     /// original reference radius). Keeps the contract append-only — no existing tool
     /// file needs to change to gain a conforming (empty) `referenceSegments`.
     var referenceSegments: [(Vector, Vector)] { [] }
+
+    /// Default: tools emit no live dimensional feedback. Only the draw/modify tools
+    /// that opt in (Line / Circle / Rectangle / …, in a later wave) override this.
+    /// Keeps the contract append-only — no existing tool file needs to change to gain
+    /// a conforming (empty) `liveDimensions`, exactly like `referenceSegments`.
+    func liveDimensions(_ ctx: LiveDimensionContext) -> [LiveDimension] { [] }
+}
+
+// MARK: - Live dimensional feedback (additive value types)
+
+/// A single piece of AutoCAD-style LIVE dimensional feedback a tool exposes while it
+/// runs: a dotted dimension line (`from` → `to`, WORLD coords) plus a PRE-FORMATTED
+/// value `label` placed at `labelAnchor`. The `kind` carries the raw measured
+/// quantity (world units / radians) so the overlay (or a test) can reason about the
+/// number independently of the display string.
+///
+/// A pure value type with NO UI dependency: `label` is a plain `String` the tool
+/// formats in-engine (via `CoordinateFormatter`) from a `LiveDimensionContext`; the
+/// app's overlay decides typeface/placement when it draws. The engine never touches
+/// AppKit/SwiftUI. Mirrors the append-only, value-only design of `referenceSegments`.
+public struct LiveDimension: Sendable, Equatable {
+    /// The kind of quantity being shown, carrying the raw measured value(s) in WORLD
+    /// units (lengths) or RADIANS (angles) — already in document units, NOT a display
+    /// string (that's `label`). A `size(w:h:)` carries a rectangle's two extents.
+    public enum Kind: Sendable, Equatable {
+        /// A single linear distance (world units) — e.g. a Line's running length.
+        case linear(Double)
+        /// A circle/arc radius (world units).
+        case radius(Double)
+        /// A circle diameter (world units).
+        case diameter(Double)
+        /// An angle (RADIANS) — e.g. a rotation or an arc sweep.
+        case angle(Double)
+        /// A rectangle's width × height (world units).
+        case size(w: Double, h: Double)
+    }
+
+    /// The measured quantity, in world units (lengths) / radians (angles).
+    public let kind: Kind
+    /// The dotted dim-line anchor (WORLD coords) — usually the operation's fixed point.
+    public let from: Vector
+    /// The dotted dim-line end (WORLD coords) — usually the cursor / the on-curve point.
+    public let to: Vector
+    /// The value text, PRE-FORMATTED in-engine (e.g. `"12.5"`, `"R8"`, `"45°"`). The
+    /// app's overlay draws this verbatim — the engine does no UI-side formatting.
+    public let label: String
+    /// Where to place the `label` (WORLD coords) — usually the dim-line midpoint or a
+    /// small offset from `to`. The overlay may nudge it for legibility.
+    public let labelAnchor: Vector
+
+    public init(kind: Kind, from: Vector, to: Vector, label: String, labelAnchor: Vector) {
+        self.kind = kind
+        self.from = from
+        self.to = to
+        self.label = label
+        self.labelAnchor = labelAnchor
+    }
+}
+
+/// A tiny value snapshot of the document's display-formatting variables, handed to
+/// `Tool.liveDimensions(_:)` so a tool can format its live label IN-ENGINE (via
+/// `CoordinateFormatter`) without reaching into `CADDrawing`. These mirror the
+/// `CADDrawing.GraphicVariables` typed header accessors the formatter consumes:
+/// `linearFormat`/`linearPrecision`/`unit` for lengths and `angleFormat`/
+/// `anglePrecision` for angles — i.e. exactly the inputs of
+/// `CoordinateFormatter.length(_:)` / `.angle(_:)` / `.polarPair(...)`.
+///
+/// A pure value type (no `CADDrawing`, no UI): the app builds one from its live
+/// `GraphicVariables` and passes it down; defaults match the formatter's own defaults
+/// (Decimal / 4 dp / unitless / decimal-degrees) so a test can use `.default`.
+public struct LiveDimensionContext: Sendable, Equatable {
+    /// Linear display format (`$LUNITS`) — drives length labels.
+    public let linearFormat: LinearFormat
+    /// Linear precision (`$LUPREC`, decimal places).
+    public let linearPrecision: Int
+    /// Drawing unit (`$INSUNITS`) — the unit length labels render in.
+    public let unit: DrawingUnit
+    /// Angle display format (`$AUNITS`) — drives angle labels.
+    public let angleFormat: AngleFormat
+    /// Angle precision (`$AUPREC`, decimal places).
+    public let anglePrecision: Int
+
+    public init(
+        linearFormat: LinearFormat = .decimal,
+        linearPrecision: Int = 4,
+        unit: DrawingUnit = .none,
+        angleFormat: AngleFormat = .degreesDecimal,
+        anglePrecision: Int = 4
+    ) {
+        self.linearFormat = linearFormat
+        self.linearPrecision = linearPrecision
+        self.unit = unit
+        self.angleFormat = angleFormat
+        self.anglePrecision = anglePrecision
+    }
+
+    /// A default context matching `CoordinateFormatter`'s own defaults (Decimal,
+    /// 4 dp, unitless, decimal degrees) — handy for tools/tests that ignore document
+    /// formatting.
+    public static let `default` = LiveDimensionContext()
 }
 
 // MARK: - Placeholder id convention
