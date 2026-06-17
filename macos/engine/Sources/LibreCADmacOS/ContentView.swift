@@ -1341,10 +1341,23 @@ struct ContentView: View {
     /// Print… (⌘P): present the system print dialog for the current drawing,
     /// fitted to the chosen paper. Attaches to the key window as a sheet when one
     /// is available.
+    ///
+    /// PRINT #6 (export-parity print half): scope the print to the ACTIVE drawing
+    /// space so a plain Print follows the on-screen Model/Layout tab — exactly like
+    /// the live canvas + Export now do — instead of always plotting every space
+    /// (`.all`, model + every layout unioned). The same
+    /// `DrawingExporter.exportSpace(forActiveSpace:layout:)` helper used by Export
+    /// maps `CanvasModel.activeSpace` / `.activeLayout` to the printer's `ExportSpace`
+    /// (model → `.model`; a layout tab → `.paper(layoutName:)`). The dedicated
+    /// per-layout "Print Layout…" path (`printActiveLayout`) is untouched — it already
+    /// targets a specific sheet.
     @MainActor
     private func printDrawing() {
         let window = NSApp.keyWindow ?? NSApp.mainWindow
-        if !DrawingPrinter.print(model.drawing, in: window) {
+        if !DrawingPrinter.print(model.drawing, in: window,
+                                 space: DrawingExporter.exportSpace(
+                                     forActiveSpace: model.activeSpace,
+                                     layout: model.activeLayout)) {
             status = "Print cancelled"
         }
     }

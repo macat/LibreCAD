@@ -45,11 +45,22 @@ enum DrawingPrinter {
     /// chose), so the existing `ContentView` call site stays source-compatible while
     /// still honoring the user's plot scale. `.fit` (the store's default) reproduces
     /// the legacy fit-to-page behavior exactly.
+    ///
+    /// `space` selects WHICH drawing space the print captures — `.model` /
+    /// `.paper(layoutName:)` builds the scene from ONLY that space (like the live
+    /// canvas's active space), instead of unioning model + every layout. It defaults
+    /// to `.all` (the historical behavior) so existing callers are unchanged; the
+    /// general "Print…" call site passes the live `CanvasModel`'s active space (via
+    /// `DrawingExporter.exportSpace(forActiveSpace:layout:)`) so a plain print follows
+    /// the on-screen Model/Layout tab — mirroring `DrawingExporter.export(…, space:)`.
+    /// (The dedicated per-layout `printLayout(…)` path is unaffected — it already
+    /// plots a specific sheet.)
     @discardableResult
     static func print(_ drawing: CADDrawing,
                       in window: NSWindow? = nil,
-                      setup: PageSetup? = nil) -> Bool {
-        let scene = ExportSceneBuilder.build(drawing)
+                      setup: PageSetup? = nil,
+                      space: ExportSpace = .all) -> Bool {
+        let scene = ExportSceneBuilder.build(drawing, space: space)
         let unit = drawing.graphicVariables.unit
         let info = NSPrintInfo.shared.copy() as! NSPrintInfo
         // We position the drawing ourselves (scale-correct, anchored), so let the
