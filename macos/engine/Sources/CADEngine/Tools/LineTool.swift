@@ -154,14 +154,52 @@ public struct LineTool: Tool {
         )
 
         // Length dim runs along the segment, labeled at its midpoint; the angle
-        // dim shares the segment and is labeled near the cursor end.
+        // dim shares the segment and is labeled near the cursor end. Both are
+        // editable (dynamic input): the user can type a length and/or an angle and
+        // Tab between them — `applyDynamicInput` turns the typed values into the next
+        // point. In a constrained angle mode the angle is read-only (the constraint
+        // owns it) but still stamped editable so the overlay surfaces it; the typed
+        // angle is ignored by `applyDynamicInput` in that mode.
         let midpoint = (last + end) * 0.5
         return [
             LiveDimension(kind: .linear(length), from: last, to: end,
-                          label: lengthLabel, labelAnchor: midpoint),
+                          label: lengthLabel, labelAnchor: midpoint,
+                          field: .length, isEditable: true),
             LiveDimension(kind: .angle(angle), from: last, to: end,
-                          label: angleLabel, labelAnchor: end),
+                          label: angleLabel, labelAnchor: end,
+                          field: .angle, isEditable: true),
         ]
+    }
+
+    // MARK: - Dynamic input (typed length / angle → the next point)
+
+    /// Resolves typed LENGTH / ANGLE values into the next segment's endpoint, measured
+    /// from the running endpoint (`reference`). A field the user did not type falls back
+    /// to the live value the cursor currently implies.
+    ///
+    /// - FREE mode (`constraintAngle == nil`): both fields are honored — the point is
+    ///   `reference + Vector(angle: typedOrLiveAngle) * typedOrLiveLength`.
+    /// - CONSTRAINED mode (`.absolute` / `.relative`, `constraintAngle != nil`): the
+    ///   angle is OWNED by the constraint (a typed `.angle` is ignored), and the typed
+    ///   length is laid along the locked ray. The result is routed through the SAME
+    ///   `constrained(_:_:)` the click-commit path uses, so a typed length lands exactly
+    ///   where a click of that reach would.
+    ///
+    /// Returns `nil` until the first point is fixed (no running endpoint to measure from).
+    public func applyDynamicInput(_ values: [LiveDimensionField: Double],
+                                  cursor: Vector, reference: Vector) -> Vector? {
+        guard case .settingEnd = state else { return nil }
+        let liveDelta = cursor - reference
+        let len = values[.length] ?? liveDelta.magnitude
+        if let lockedAngle = constraintAngle {
+            // Angle is fixed by the constraint; lay the typed/live length along the ray,
+            // then route through the identical constraint projection the commit uses so a
+            // typed length lands precisely on the locked ray.
+            let along = reference + Vector(angle: lockedAngle) * len
+            return constrained(reference, along)
+        }
+        let ang = values[.angle] ?? liveDelta.angle
+        return reference + Vector(angle: ang) * len
     }
 
     // MARK: - Angle constraint (pure)

@@ -68,6 +68,48 @@ struct LiveDimensionTests {
         #expect(dim.labelAnchor == Vector(6.25, 0.5))
     }
 
+    /// A plain dim built WITHOUT the new editing args defaults to "not an editable
+    /// field": `field == nil`, `isEditable == false`, `editState == .idle`,
+    /// `typedString == nil` — so every pre-existing emit site is unchanged.
+    @Test("LiveDimension's editing fields default to a non-editable idle dim")
+    func liveDimensionEditingFieldDefaults() {
+        let dim = LiveDimension(kind: .linear(5), from: Vector(0, 0), to: Vector(5, 0),
+                                label: "5", labelAnchor: Vector(2.5, 0))
+        #expect(dim.field == nil)
+        #expect(dim.isEditable == false)
+        #expect(dim.editState == .idle)
+        #expect(dim.typedString == nil)
+    }
+
+    /// `withEditing` replaces ONLY `editState` + `typedString`, preserving every other
+    /// field (kind / geometry / label / `field` / `isEditable`) — the seam the model
+    /// uses to re-stamp a tool-emitted dim with live editing display state.
+    @Test("withEditing copies editState + typedString and preserves everything else")
+    func liveDimensionWithEditing() {
+        let base = LiveDimension(kind: .linear(5), from: Vector(0, 0), to: Vector(5, 0),
+                                 label: "5", labelAnchor: Vector(2.5, 0),
+                                 field: .width, isEditable: true)
+        let edited = base.withEditing(editState: .active, typedString: "12")
+        // Replaced.
+        #expect(edited.editState == .active)
+        #expect(edited.typedString == "12")
+        // Preserved.
+        #expect(edited.kind == .linear(5))
+        #expect(edited.from == Vector(0, 0))
+        #expect(edited.to == Vector(5, 0))
+        #expect(edited.label == "5")
+        #expect(edited.labelAnchor == Vector(2.5, 0))
+        #expect(edited.field == .width)
+        #expect(edited.isEditable)
+        // A second re-stamp can clear the buffer / move to locked.
+        let locked = edited.withEditing(editState: .locked, typedString: "12")
+        #expect(locked.editState == .locked)
+        #expect(locked.typedString == "12")
+        let cleared = edited.withEditing(editState: .idle, typedString: nil)
+        #expect(cleared.editState == .idle)
+        #expect(cleared.typedString == nil)
+    }
+
     @Test("LiveDimension is Equatable (equal + unequal)")
     func liveDimensionEquatable() {
         let a = LiveDimension(kind: .radius(8), from: Vector(0, 0), to: Vector(8, 0),
@@ -276,6 +318,43 @@ struct LiveDimensionTests {
         #expect(dims[0].label == "4")
     }
 
+    /// Only the interactive center+radius dim is editable; the 2P/3P derived radii have
+    /// no well-defined typed direction, so they stay read-only (`field == nil`,
+    /// `isEditable == false`). The center+radius dim, by contrast, IS editable.
+    @Test("CircleTool: only the center+radius dim is editable (2P/3P stay read-only)")
+    func circleLiveDimensionsEditability() {
+        // center+radius → editable, field `.radius`.
+        let cr = drive(CircleTool(), [.click(Vector(0, 0)), .move(Vector(8, 0))])
+        let crDims = cr.liveDimensions(.default)
+        #expect(crDims.count == 1)
+        #expect(crDims[0].field == .radius)
+        #expect(crDims[0].isEditable)
+
+        // center+radius in diameter size mode → editable, field `.diameter`.
+        var crd = CircleTool()
+        crd.sizeMode = .diameter
+        crd = drive(crd, [.click(Vector(0, 0)), .move(Vector(8, 0))])
+        let crdDims = crd.liveDimensions(.default)
+        #expect(crdDims[0].field == .diameter)
+        #expect(crdDims[0].isEditable)
+
+        // 2-point mode → NOT editable.
+        let twoP = drive(CircleTool(mode: .twoPoint),
+                         [.click(Vector(0, 0)), .move(Vector(8, 0))])
+        let twoPDims = twoP.liveDimensions(.default)
+        #expect(twoPDims.count == 1)
+        #expect(twoPDims[0].field == nil)
+        #expect(twoPDims[0].isEditable == false)
+
+        // 3-point mode → NOT editable.
+        let threeP = drive(CircleTool(mode: .threePoint),
+                           [.click(Vector(0, 0)), .click(Vector(8, 0)), .move(Vector(4, 4))])
+        let threePDims = threeP.liveDimensions(.default)
+        #expect(threePDims.count == 1)
+        #expect(threePDims[0].field == nil)
+        #expect(threePDims[0].isEditable == false)
+    }
+
     @Test("CircleTool emits nothing before the center and after commit")
     func circleLiveDimensionsEmptyOutsideDrag() {
         #expect(CircleTool().liveDimensions(.default).isEmpty)
@@ -285,18 +364,35 @@ struct LiveDimensionTests {
         #expect(after.liveDimensions(.default).isEmpty)
     }
 
-    // MARK: RectangleTool — size (W × H)
+    // MARK: RectangleTool — TWO editable edge dims (width + height)
+    //
+    // A rectangle has two independent dimensions, so the tool now emits TWO `.linear`
+    // dim lines (the bottom-edge WIDTH and the right-edge HEIGHT) the user can Tab
+    // between and type into — replacing the old single diagonal `.size` readout.
 
-    @Test("RectangleTool emits W × H while dragging the opposite corner")
+    @Test("RectangleTool emits width + height edge dims while dragging the opposite corner")
     func rectangleLiveDimensions() {
         let tool = drive(RectangleTool(), [.click(Vector(0, 0)), .move(Vector(10, 4))])
         let dims = tool.liveDimensions(.default)
-        #expect(dims.count == 1)
-        #expect(dims[0].kind == .size(w: 10, h: 4))
+        #expect(dims.count == 2)
+
+        // WIDTH: the bottom edge, first → (cursor.x, first.y), editable, field `.width`.
+        #expect(dims[0].kind == .linear(10))
         #expect(dims[0].from == Vector(0, 0))                // first corner
-        #expect(dims[0].to == Vector(10, 4))                 // cursor corner
-        #expect(dims[0].label == "10 × 4")
-        #expect(dims[0].labelAnchor == Vector(10, 4))        // near the cursor corner
+        #expect(dims[0].to == Vector(10, 0))                 // along the bottom edge
+        #expect(dims[0].label == "10")                       // decimal default
+        #expect(dims[0].labelAnchor == Vector(5, 0))         // bottom-edge midpoint
+        #expect(dims[0].field == .width)
+        #expect(dims[0].isEditable)
+
+        // HEIGHT: the right edge, (cursor.x, first.y) → cursor, editable, field `.height`.
+        #expect(dims[1].kind == .linear(4))
+        #expect(dims[1].from == Vector(10, 0))               // bottom-right corner
+        #expect(dims[1].to == Vector(10, 4))                 // cursor corner
+        #expect(dims[1].label == "4")
+        #expect(dims[1].labelAnchor == Vector(10, 2))        // right-edge midpoint
+        #expect(dims[1].field == .height)
+        #expect(dims[1].isEditable)
     }
 
     @Test("RectangleTool reports unsigned extents regardless of drag direction")
@@ -304,18 +400,31 @@ struct LiveDimensionTests {
         // Drag down-left: cursor below/left of the first corner.
         let tool = drive(RectangleTool(), [.click(Vector(10, 4)), .move(Vector(0, 0))])
         let dims = tool.liveDimensions(.default)
-        #expect(dims.first?.kind == .size(w: 10, h: 4))      // |Δx|, |Δy|
+        #expect(dims.count == 2)
+        // Extents are unsigned (|Δx|, |Δy|), regardless of drag direction.
+        #expect(dims[0].kind == .linear(10))                 // width = |Δx|
+        #expect(dims[0].field == .width)
+        #expect(dims[1].kind == .linear(4))                  // height = |Δy|
+        #expect(dims[1].field == .height)
+        // The edge geometry follows the (down-left) cursor corner.
+        #expect(dims[0].from == Vector(10, 4))               // first corner
+        #expect(dims[0].to == Vector(0, 4))                  // bottom edge toward cursor.x
+        #expect(dims[1].from == Vector(0, 4))
+        #expect(dims[1].to == Vector(0, 0))                  // cursor corner
     }
 
-    @Test("RectangleTool size label honors an architectural context")
+    @Test("RectangleTool edge dim labels honor an architectural context")
     func rectangleLiveDimensionArchitecturalLabel() {
         let ctx = LiveDimensionContext(linearFormat: .architectural, linearPrecision: 4,
                                        unit: .inch)
-        // 30" × 12" → 2'-6" × 1'-0"
+        // 30" × 12" → width 2'-6", height 1'-0"
         let tool = drive(RectangleTool(), [.click(Vector(0, 0)), .move(Vector(30, 12))])
         let dims = tool.liveDimensions(ctx)
-        #expect(dims.first?.kind == .size(w: 30, h: 12))
-        #expect(dims.first?.label == "2'-6\" × 1'-0\"")
+        #expect(dims.count == 2)
+        #expect(dims[0].kind == .linear(30))
+        #expect(dims[0].label == "2'-6\"")                   // width
+        #expect(dims[1].kind == .linear(12))
+        #expect(dims[1].label == "1'-0\"")                   // height
     }
 
     @Test("RectangleTool emits nothing before the first corner and after commit")

@@ -298,6 +298,30 @@ public protocol Tool: Sendable {
     /// read a tool's overlay).
     func liveDimensions(_ ctx: LiveDimensionContext) -> [LiveDimension]
 
+    /// Resolves a set of TYPED dimension values (dynamic input — the user typed into a
+    /// live dimension field, e.g. a Line's length / angle, a Rectangle's width / height,
+    /// a Circle's radius) into the WORLD point the tool should commit to. The app feeds
+    /// the returned point through the EXISTING coordinate-commit seam (`.value(point)`),
+    /// reusing the proven typed-coordinate path — so a typed dimension lands EXACTLY
+    /// where the same value clicked would (no new `ToolInput` case).
+    ///
+    /// - `values`: the parsed numeric value for each field the user typed (lengths in
+    ///   world units, angles in RADIANS). A field absent from the map falls back to the
+    ///   live value the cursor currently implies, so a single typed field (e.g. only the
+    ///   length) constrains just that dimension while the cursor drives the rest.
+    /// - `cursor`: the current (snapped) world cursor — the live source for any field the
+    ///   user did NOT type.
+    /// - `reference`: the operation's fixed anchor the dimensions are measured FROM (the
+    ///   Line's running endpoint, the Rectangle's first corner, the Circle's center).
+    ///
+    /// Returns `nil` when the tool is not in a state where typed dimensions are
+    /// meaningful (no anchor fixed yet, or a construction sub-mode without editable
+    /// dimensions). The default implementation returns `nil`, so EVERY existing tool
+    /// inherits "no dynamic input" with no per-tool change — exactly like
+    /// `liveDimensions` / `referenceSegments`. GUI-free: a pure value-in / value-out map.
+    func applyDynamicInput(_ values: [LiveDimensionField: Double],
+                           cursor: Vector, reference: Vector) -> Vector?
+
     /// Optional per-tool COMMAND KEYWORDS to surface as tappable chips on the smart
     /// command line — the AutoCAD-style bracketed options a tool offers at its current
     /// step (e.g. a Line tool's "Close"/"Undo", an Arc tool's "Center"/"3 Points", a
@@ -349,6 +373,14 @@ public extension Tool {
     /// a conforming (empty) `liveDimensions`, exactly like `referenceSegments`.
     func liveDimensions(_ ctx: LiveDimensionContext) -> [LiveDimension] { [] }
 
+    /// Default: tools resolve no typed dimension input. Only the draw tools that expose
+    /// editable live dimensions (Line / Rectangle / Circle / Polygon) override this to
+    /// turn typed values into the world point to commit. Keeps the contract append-only —
+    /// no existing tool file needs to change to gain a conforming (`nil`)
+    /// `applyDynamicInput`, exactly like `liveDimensions` / `referenceSegments`.
+    func applyDynamicInput(_ values: [LiveDimensionField: Double],
+                           cursor: Vector, reference: Vector) -> Vector? { nil }
+
     /// Default: tools surface no command-line keyword chips. Only tools that opt in
     /// (in a later wire-wave) override this to expose their bracketed options. Keeps
     /// the contract append-only — no existing tool file needs to change to gain a
@@ -386,6 +418,43 @@ public struct ToolKeyword: Sendable, Equatable {
 }
 
 // MARK: - Live dimensional feedback (additive value types)
+
+/// Which DIMENSION a live-dimension field stands for — the stable identity the app's
+/// dynamic-input handler keys on to (a) order Tab traversal across a tool's editable
+/// fields, (b) map a typed value back to the right `applyDynamicInput` slot, and (c)
+/// label the active field in the overlay. A pure value enum (no UI dependency); mirrors
+/// the append-only, value-only design of `LiveDimension`. Additive — every existing
+/// `LiveDimension` defaults its `field` to `nil` (not editable), so no emit site changes.
+public enum LiveDimensionField: String, Sendable, Equatable, Hashable {
+    /// A linear length (a Line's running length).
+    case length
+    /// An angle (a Line's segment angle).
+    case angle
+    /// A rectangle's width (its bottom-edge extent).
+    case width
+    /// A rectangle's height (its right-edge extent).
+    case height
+    /// A circle / polygon radius.
+    case radius
+    /// A circle diameter.
+    case diameter
+}
+
+/// The DISPLAY/EDIT state of one editable live-dimension field, set by the MODEL (not
+/// the tool) while the user types into the dynamic-input overlay. The tool only stamps
+/// `field` + `isEditable`; the model re-stamps this (via `LiveDimension.withEditing`) to
+/// drive the overlay's chip styling. `.idle` is the default for a freshly tool-emitted
+/// dim (nothing typed yet). A pure value enum, no UI dependency.
+public enum LiveDimensionEditState: Sendable, Equatable {
+    /// Not being edited — the overlay draws the tool's formatted `label` as usual.
+    case idle
+    /// The currently-focused field the user is typing into — the overlay draws the raw
+    /// `typedString` plus a caret in an accent chip.
+    case active
+    /// A field whose typed value is locked in (Tab moved past it) — the overlay draws the
+    /// raw `typedString` in a pinned tint; the synthetic cursor honors it live.
+    case locked
+}
 
 /// A single piece of AutoCAD-style LIVE dimensional feedback a tool exposes while it
 /// runs: a dotted dimension line (`from` → `to`, WORLD coords) plus a PRE-FORMATTED
@@ -427,12 +496,52 @@ public struct LiveDimension: Sendable, Equatable {
     /// small offset from `to`. The overlay may nudge it for legibility.
     public let labelAnchor: Vector
 
-    public init(kind: Kind, from: Vector, to: Vector, label: String, labelAnchor: Vector) {
+    /// Which DIMENSION this readout represents, or `nil` when it is not an editable
+    /// field (the default — every pre-existing emit site keeps `nil`). The dynamic-input
+    /// handler keys on this to route a typed value into `applyDynamicInput` and to order
+    /// Tab traversal.
+    public let field: LiveDimensionField?
+
+    /// Whether the user may TYPE a value into this dimension (dynamic input). Default
+    /// `false` so existing dims stay read-only; only the tools that opt in (Line /
+    /// Rectangle / Circle / Polygon, in their editable states) set it `true`.
+    public let isEditable: Bool
+
+    /// The DISPLAY/EDIT state, set by the MODEL while editing (the tool always emits
+    /// `.idle`). Default `.idle`. Re-stamped via `withEditing(editState:typedString:)`.
+    public let editState: LiveDimensionEditState
+
+    /// The raw character buffer the user has typed for this field, echoed by the overlay
+    /// when `editState` is `.active` / `.locked`. `nil` (the default) when nothing has
+    /// been typed — the overlay then draws the formatted `label`. Set by the MODEL.
+    public let typedString: String?
+
+    public init(kind: Kind, from: Vector, to: Vector, label: String, labelAnchor: Vector,
+                field: LiveDimensionField? = nil,
+                isEditable: Bool = false,
+                editState: LiveDimensionEditState = .idle,
+                typedString: String? = nil) {
         self.kind = kind
         self.from = from
         self.to = to
         self.label = label
         self.labelAnchor = labelAnchor
+        self.field = field
+        self.isEditable = isEditable
+        self.editState = editState
+        self.typedString = typedString
+    }
+
+    /// Returns a copy with `editState` + `typedString` replaced and every other field
+    /// preserved — the seam the MODEL uses to re-stamp a tool-emitted dim with the live
+    /// editing display state (active field + caret buffer, or a locked typed value)
+    /// without the tool knowing anything about the UI. The tool's `kind` / geometry /
+    /// `field` / `isEditable` carry through unchanged.
+    public func withEditing(editState: LiveDimensionEditState,
+                            typedString: String?) -> LiveDimension {
+        LiveDimension(kind: kind, from: from, to: to, label: label, labelAnchor: labelAnchor,
+                      field: field, isEditable: isEditable,
+                      editState: editState, typedString: typedString)
     }
 }
 
