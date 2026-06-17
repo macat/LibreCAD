@@ -610,19 +610,32 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     /// MODEL-space entities are resolved, their polylines mapped into paper space by
     /// the viewport's model→paper affine, clipped to the viewport frame, and appended
     /// as line instances. The pure transform + clip live on `LayoutViewport` (engine,
-    /// GPU-free), so this is just resolve → map → clip → pack. Frozen/hidden layers
-    /// are skipped, matching `packEntity`. Fills are NOT mapped (v1 draws viewport
-    /// contents as STROKES only — a hatch shows as its boundary; fill-through-the-
-    /// viewport is a follow-up).
+    /// GPU-free), so this is just resolve → map → clip → pack. Globally frozen/hidden
+    /// layers are skipped, matching `packEntity`. Fills are NOT mapped (v1 draws
+    /// viewport contents as STROKES only — a hatch shows as its boundary; fill-through-
+    /// the-viewport is a follow-up).
+    ///
+    /// W2-2D per-viewport honoring (all defaults are no-ops, so a DEFAULT viewport
+    /// packs BYTE-IDENTICAL instances to before):
+    ///   • `displayOn == false` (via `drawsContents`) skips the whole viewport;
+    ///   • a layer in `frozenLayers` (via `freezesLayer`) is excluded from THIS
+    ///     viewport only;
+    ///   • `twistRadians` is applied inside `modelToPaper`, so the map below rotates
+    ///     the model view about its center.
     private func packViewportContents(_ viewports: [LayoutViewport], ctx: ResolveContext,
                                       origin: Vector, layers: LayerTable) {
         let halfWidthPx = renderPrefs.lineHalfWidthPx(backingScale: backingScale)
         // Resolve the model-space set ONCE per rebuild; every viewport reuses it.
         let modelEntities = model.drawing.entities.filter { $0.space == .model }
         for vp in viewports {
-            guard vp.scale > 0 else { continue }   // degenerate frame: nothing visible
+            // W2-2D: skip a display-OFF viewport entirely; `drawsContents` also folds
+            // in the prior `scale > 0` degenerate-frame gate (default viewport ⇒ same).
+            guard vp.drawsContents else { continue }
             for e in modelEntities {
                 guard RendererVisibility.isRendered(e.layer, in: layers) else { continue }
+                // W2-2D: a layer frozen IN THIS viewport is excluded here only (model
+                // space + other viewports still show it). No-op for a default viewport.
+                if vp.freezesLayer(e.layer.name) { continue }
                 let geo = e.resolve(ctx)
                 for poly in geo.polylines {
                     // Map each model point into paper space, then clip the resulting
