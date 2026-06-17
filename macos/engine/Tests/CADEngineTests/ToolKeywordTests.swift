@@ -63,8 +63,11 @@ struct ToolKeywordTests {
 
     @Test("the empty default holds across several non-overriding tools")
     func severalToolsInheritEmptyDefault() {
-        // A spread of unrelated draw tools, all relying on the default.
-        let tools: [any Tool] = [LineTool(), CircleTool(), RectangleTool(), ArcTool()]
+        // A spread of unrelated draw tools, all relying on the default. NOTE: Circle
+        // and Arc were here in W1C but now OPT IN to construction-mode keywords (W2B),
+        // so this spread uses tools that still genuinely inherit the empty default —
+        // preserving the test's intent (non-overriding tools surface no chips).
+        let tools: [any Tool] = [LineTool(), RectangleTool(), PolygonTool(), PointTool()]
         for tool in tools {
             #expect(tool.keywordOptions.isEmpty)
         }
