@@ -309,10 +309,15 @@ final class CanvasModel {
     /// those points (horizontal/vertical/polar) — or onto the intersection of two guides.
     /// `@ObservationIgnored`: like the polar-tracking display state, the overlay reads it
     /// via `trackingDisplay()` on the same redraw the snap marker drives. A live drafting
-    /// policy (not persisted to the document). The dwell-to-acquire trigger, the guide
-    /// rendering, and the toggle key are LATER waves (W6/W7) — this wave is the model only.
+    /// policy. UNLIKE the original `false` default, it is now an APP PREFERENCE that
+    /// persists across launches (like `dynamicInputEnabled`): seeded at init from
+    /// `AppSettings.Key.objectTracking` (default OFF, matching the historical model
+    /// default) and `toggleObjectTracking()` writes it back to `UserDefaults`, so the
+    /// Preferences toggle + persistence actually take effect. The dwell-to-acquire
+    /// trigger, the guide rendering, and the toggle key are LATER waves (W6/W7).
     @ObservationIgnored
-    var objectTrackingEnabled: Bool = false
+    var objectTrackingEnabled: Bool = AppSettings.boolPreference(
+        AppSettings.Key.objectTracking, default: AppSettings.Default.objectTracking)
 
     /// The snap points the user has ACQUIRED for object-snap tracking — the small "+"
     /// glyphs OTRACK radiates alignment guides from. Mutated only through
@@ -355,6 +360,19 @@ final class CanvasModel {
     /// segment re-renders on a cycle. A live VIEW policy (not document content, not
     /// undoable). UNWIRED — the status-bar button is a later wire-wave.
     var coordinateDisplayMode: CoordinateDisplayMode = .absolute
+
+    /// The active USER COORDINATE SYSTEM — a rotated/translated input/display frame
+    /// (LibreCAD / AutoCAD UCS). The document always stores geometry in WORLD
+    /// coordinates; this frame is applied ONLY at the input/display boundary: the
+    /// status-bar coordinate readouts convert the cursor's world point INTO this frame
+    /// before formatting, typed command-line coordinates are interpreted RELATIVE to it,
+    /// and the on-canvas UCS axis gizmo anchors at its origin/angle. It defaults to
+    /// `.world` (the identity frame), in which case every conversion is a no-op and the
+    /// output is byte-identical to having no UCS. Mutated only through `setUCS` /
+    /// `resetUCS` (which bump `modelVersion` so the chrome refreshes). A live DRAFTING
+    /// policy — NOT document content, NOT undoable, NOT persisted (DXF round-trip is a
+    /// later wave). Ortho/grid-relative and the set-UCS UI are also later waves.
+    var currentUCS: UCS = .world
 
     /// The grid step (world units) last seen via `updateSnap`/`snappedWorldPoint`.
     /// The renderer owns the live grid spacing and the canvas view passes it down
@@ -2580,26 +2598,38 @@ final class CanvasModel {
             return absoluteCursorReadout(w, gv)
         case .relative:
             guard let zero = relativeZero else { return absoluteCursorReadout(w, gv) }
+            // The relative delta is rotated INTO the UCS frame (translation cancels in a
+            // difference, so a direction rotation is exact). With `UCS.world` this is the
+            // identity, so the raw `w - zero` deltas are formatted unchanged.
+            let d = currentUCS.directionToUCS(w - zero)
             let dx = CoordinateFormatter.length(
-                w.x - zero.x, format: gv.linearFormat, precision: gv.linearPrecision)
+                d.x, format: gv.linearFormat, precision: gv.linearPrecision)
             let dy = CoordinateFormatter.length(
-                w.y - zero.y, format: gv.linearFormat, precision: gv.linearPrecision)
+                d.y, format: gv.linearFormat, precision: gv.linearPrecision)
             return "@\(dx), \(dy)"
         case .polar:
             guard let zero = relativeZero else { return absoluteCursorReadout(w, gv) }
+            // Distance is rotation-invariant; the angle is shifted by the UCS angle via
+            // `angleBase` so it reads relative to the UCS +X axis. `UCS.world` ⇒
+            // `angleBase: 0` ⇒ byte-identical to before.
             return CoordinateFormatter.polarPair(
                 dx: w.x - zero.x, dy: w.y - zero.y,
                 format: gv.linearFormat, precision: gv.linearPrecision, unit: gv.unit,
-                angleFormat: gv.angleFormat, anglePrecision: gv.anglePrecision)
+                angleFormat: gv.angleFormat, anglePrecision: gv.anglePrecision,
+                angleBase: currentUCS.angle)
         }
     }
 
-    /// The absolute world-point readout — the original `cursorReadout` body, factored
+    /// The absolute coordinate readout — the original `cursorReadout` body, factored
     /// out so the `.absolute` mode and the relative/polar no-reference fallback share
-    /// exactly one formatting path.
+    /// exactly one formatting path. The world point is first converted INTO the active
+    /// UCS (`currentUCS.toUCS`), so the displayed X/Y is the cursor's position in the
+    /// current frame. With `UCS.world` `toUCS` is the identity, so the output is
+    /// byte-identical to formatting the raw world point.
     private func absoluteCursorReadout(_ w: Vector, _ gv: GraphicVariables) -> String {
-        CoordinateFormatter.coordinatePair(
-            x: w.x, y: w.y,
+        let p = currentUCS.toUCS(w)
+        return CoordinateFormatter.coordinatePair(
+            x: p.x, y: p.y,
             format: gv.linearFormat, precision: gv.linearPrecision, unit: gv.unit)
     }
 
@@ -2618,8 +2648,10 @@ final class CanvasModel {
     var relativeReadout: String? {
         guard let zero = relativeZero, let w = cursorWorld else { return nil }
         let gv = drawing.graphicVariables
-        let dx = CoordinateFormatter.length(w.x - zero.x, format: gv.linearFormat, precision: gv.linearPrecision)
-        let dy = CoordinateFormatter.length(w.y - zero.y, format: gv.linearFormat, precision: gv.linearPrecision)
+        // Rotate the delta into the UCS frame (identity for `UCS.world`).
+        let d = currentUCS.directionToUCS(w - zero)
+        let dx = CoordinateFormatter.length(d.x, format: gv.linearFormat, precision: gv.linearPrecision)
+        let dy = CoordinateFormatter.length(d.y, format: gv.linearFormat, precision: gv.linearPrecision)
         return "@\(dx), \(dy)"
     }
 
@@ -2635,7 +2667,12 @@ final class CanvasModel {
         let gv = drawing.graphicVariables
         let distStr = CoordinateFormatter.length(
             d, format: gv.linearFormat, precision: gv.linearPrecision, unit: gv.unit)
-        let deg = (w - zero).angle * 180 / .pi
+        // Bearing relative to the UCS +X axis: subtract the UCS angle (`displayAngle`)
+        // and re-normalize into [0, 2π). `(w - zero).angle` is already normalized, so
+        // with `UCS.world` (`displayAngle` is a no-op) `correctAngle` is idempotent and
+        // the degrees value is byte-identical to before.
+        let bearing = Vector.correctAngle(currentUCS.displayAngle((w - zero).angle))
+        let deg = bearing * 180 / .pi
         let degStr = String(format: "%.0f", deg)
         return "\u{27C2} \(distStr)   \u{2220} \(degStr)\u{00B0}"
     }
@@ -2653,8 +2690,10 @@ final class CanvasModel {
             return relativeZeroLocked ? "RelZero: locked" : nil
         }
         let gv = drawing.graphicVariables
+        // The datum's position is shown in the active UCS (identity for `UCS.world`).
+        let p = currentUCS.toUCS(zero)
         let pos = CoordinateFormatter.coordinatePair(
-            x: zero.x, y: zero.y,
+            x: p.x, y: p.y,
             format: gv.linearFormat, precision: gv.linearPrecision, unit: gv.unit)
         let lock = relativeZeroLocked ? " \u{1F512}" : ""
         return "RelZero: \(pos)\(lock)"
@@ -2846,10 +2885,21 @@ final class CanvasModel {
                 lastCommandError = "Start a tool first"
                 return .error("Start a tool first")
             }
-            switch CommandParser.parse(trimmed, reference: relativeZero, cursor: cursorWorld) {
+            // Typed coordinates are interpreted in the ACTIVE UCS: parse the whole token
+            // in UCS space (the reference/cursor are first converted INTO the UCS), then
+            // convert the parsed point back to WORLD before feeding the tool. Doing the
+            // entire parse in UCS coordinates and converting the RESULT handles absolute
+            // `x,y`, relative `@dx,dy`, and polar `dist<angle` uniformly. With `UCS.world`
+            // `toUCS`/`toWorld`/`isWorld` collapse to the identity, so this is byte-for-
+            // byte the previous behavior (same reference/cursor, same parsed point).
+            let world = currentUCS.isWorld
+            let reference = world ? relativeZero : relativeZero.map(currentUCS.toUCS)
+            let cursor = world ? cursorWorld : cursorWorld.map(currentUCS.toUCS)
+            switch CommandParser.parse(trimmed, reference: reference, cursor: cursor) {
             case .point(let p):
                 lastCommandError = nil
-                handleToolInput(.value(p))
+                let worldPoint = world ? p : currentUCS.toWorld(p)
+                handleToolInput(.value(worldPoint))
                 return .handled
             case .error(let message):
                 lastCommandError = message
@@ -5589,17 +5639,43 @@ final class CanvasModel {
     /// is on, "—" when off (mirrors `orthoReadout`).
     var polarReadout: String { polarEnabled ? "Polar" : "\u{2014}" }
 
+    // MARK: - User coordinate system (UCS — LibreCAD / AutoCAD UCS) — model foundation
+
+    /// Sets the active UCS (the input/display frame). The document is unchanged — this
+    /// only affects how coordinates are READ (the status-bar readouts), TYPED (the
+    /// command line), and the UCS axis gizmo's anchor/orientation. Bumps `modelVersion`
+    /// so the status bar + the axis overlay refresh (the same redraw mechanism
+    /// `togglePolar` uses). A live drafting policy — not undoable, not persisted.
+    func setUCS(_ ucs: UCS) {
+        currentUCS = ucs
+        modelVersion &+= 1
+    }
+
+    /// Restores the WORLD frame (`UCS.world`) — the identity, in which every coordinate
+    /// conversion is a no-op and readouts/typed input behave exactly as if there were no
+    /// UCS. Bumps `modelVersion` so the chrome refreshes.
+    func resetUCS() {
+        currentUCS = .world
+        modelVersion &+= 1
+    }
+
     // MARK: - Object-snap tracking (OTRACK — LibreCAD object snap tracking / AutoCAD F11)
 
     /// Toggles the persistent OTRACK flag (View ▸ Object Tracking / status bar). UNLIKE
     /// `toggleOrtho`/`togglePolar` — which are mutually exclusive with each other — OTRACK
     /// is INDEPENDENT: it never clears `orthoEnabled`/`polarEnabled`, so the user can run
     /// object tracking together with ortho or polar. Turning it OFF discards any acquired
-    /// points (`clearTrackingPoints`, which also nils `trackingResult`). Bumps
-    /// `modelVersion` so the menu checkmark + status chip refresh (the same redraw
-    /// mechanism `togglePolar` uses). The toggle KEY binding is a later wire-wave (W7).
+    /// points (`clearTrackingPoints`, which also nils `trackingResult`). PERSISTS the new
+    /// value to `UserDefaults` (it is an app preference, like dynamic input — seeded at
+    /// init from `AppSettings.Key.objectTracking`), then bumps `modelVersion` so the menu
+    /// checkmark + status chip refresh (the same redraw mechanism `togglePolar` uses).
+    /// The toggle KEY binding is a later wire-wave (W7).
     func toggleObjectTracking() {
         objectTrackingEnabled.toggle()
+        // Persist the new value (it is an app preference, like dynamic input) so the
+        // Preferences toggle + cross-launch persistence take effect (mirrors
+        // `toggleDynamicInput`).
+        AppSettings.setBoolPreference(AppSettings.Key.objectTracking, objectTrackingEnabled)
         if !objectTrackingEnabled { clearTrackingPoints() }  // clearTrackingPoints bumps modelVersion
         modelVersion &+= 1
     }

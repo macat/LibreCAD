@@ -3,11 +3,14 @@
 //  LibreCADmacOS
 //
 //  The fixed-screen-size UCS AXIS INDICATOR (backlog #4b) — a small L-shaped X/Y
-//  gizmo, anchored at the WORLD ORIGIN (0, 0), floated as an AppKit overlay OVER the
-//  Metal canvas. It shows where the world origin is and which way the +X / +Y axes
-//  point on screen, so the coordinate frame is always legible (HIG: orient the user
-//  in the drawing). The arms are a CONSTANT on-screen length (they do not scale with
-//  zoom); only the anchor point moves with pan/zoom (it is `worldToScreen(0,0)`).
+//  gizmo, anchored at the CURRENT UCS ORIGIN, floated as an AppKit overlay OVER the
+//  Metal canvas. It shows where the active coordinate frame's origin is and which way
+//  its +X / +Y axes point on screen, so the coordinate frame is always legible (HIG:
+//  orient the user in the drawing). The arms are a CONSTANT on-screen length (they do
+//  not scale with zoom); only the anchor point and the arm DIRECTIONS follow the UCS:
+//  the anchor is `worldToScreen(currentUCS.origin)`, and the arms are rotated by the
+//  UCS angle. With the WORLD frame (`UCS.world`) the gizmo is identical to before —
+//  anchored at `worldToScreen(0,0)` with axis-aligned arms.
 //
 //  ## Why a screen-space AppKit overlay (mirrors CrosshairOverlayView's rationale)
 //  The gizmo must stay a constant on-screen size, track the viewport on every
@@ -20,13 +23,15 @@
 //  alongside the other overlays, keeps it sized to the canvas, and calls `refresh()`
 //  on every `redraw` so it tracks pan/zoom.
 //
-//  ## Anchor source of truth
-//  The gizmo origin is `model.viewport.worldToScreen(Vector(0, 0))`, recomputed on
-//  every `refresh()` — no extra state. `worldToScreen` returns a Y-DOWN (flipped)
-//  screen point, the SAME space this `isFlipped` view draws in, so the point lands
-//  directly. World +Y points UP, which in flipped (Y-down) screen space is toward
-//  SMALLER y — so the +Y arm is drawn with a NEGATIVE screen-y delta (see
-//  `axisGeometry`). The +X arm is drawn with a POSITIVE screen-x delta.
+//  ## Anchor + orientation source of truth
+//  The gizmo origin is `model.viewport.worldToScreen(model.currentUCS.origin)`, and
+//  the arm directions come from `model.currentUCS.angle`, both recomputed on every
+//  `refresh()` — no extra state. `worldToScreen` returns a Y-DOWN (flipped) screen
+//  point, the SAME space this `isFlipped` view draws in, so the point lands directly.
+//  World +Y points UP, which in flipped (Y-down) screen space is toward SMALLER y —
+//  so a world direction `(dx, dy)` maps to the screen DELTA `(dx, -dy)`. With the
+//  world frame the +X arm is a POSITIVE screen-x delta and the +Y arm a NEGATIVE
+//  screen-y delta (see `axisGeometry`); a rotated UCS rotates both arms accordingly.
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //
@@ -43,9 +48,9 @@ import CADEngine
 // MARK: - Pure UCS-axis geometry (GPU-free; unit-tested)
 
 /// The screen-space line segments to stroke for the UCS axis gizmo, derived purely
-/// from the on-screen anchor (the world origin) and a fixed arm length. Value type,
-/// no AppKit drawing — so the anchor→segments mapping is fully unit-testable
-/// (`UCSAxisGeometryTests`), exactly like `CrosshairGeometry`.
+/// from the on-screen anchor (the UCS origin), a fixed arm length, and the UCS angle.
+/// Value type, no AppKit drawing — so the anchor+angle→segments mapping is fully
+/// unit-testable (`UCSAxisGeometryTests`), exactly like `CrosshairGeometry`.
 ///
 /// Each segment is the inclusive `(from, to)` endpoint pair to stroke, both in the
 /// host view's flipped (top-left, Y-down) screen space.
@@ -90,7 +95,8 @@ final class UCSAxisOverlayView: NSView {
     // MARK: Geometry constants (screen points)
 
     /// Length of one arm of the L-gizmo (points). Fixed on-screen size — it does NOT
-    /// scale with zoom; only the anchor (the origin) moves with pan/zoom.
+    /// scale with zoom; only the anchor (the UCS origin) moves with pan/zoom and the
+    /// arms rotate with the UCS angle.
     static let armLength: CGFloat = 24
     /// The axis line width (points). A touch heavier than the crosshair so the gizmo
     /// reads as a distinct UCS affordance.
@@ -98,17 +104,28 @@ final class UCSAxisOverlayView: NSView {
 
     // MARK: Pure geometry helper (unit-tested)
 
-    /// Compute the two axis-arm segments for an `origin` anchor (the world origin in
-    /// flipped screen space) and arm `length`. Pure + GPU-free so it's exercised
-    /// directly by `UCSAxisGeometryTests`.
+    /// Compute the two axis-arm segments for an `origin` anchor (the UCS origin in
+    /// flipped screen space), an arm `length`, and the UCS rotation `angle` (radians,
+    /// world-space CCW — the same convention as `UCS.angle`). Pure + GPU-free so it's
+    /// exercised directly by `UCSAxisGeometryTests`.
     ///
-    /// - The +X arm runs from `origin` to `origin + (length, 0)` (rightward).
-    /// - The +Y arm runs from `origin` to `origin + (0, -length)` (upward on screen,
-    ///   because the host view is flipped/Y-down and world +Y is up).
-    static func axisGeometry(origin: CGPoint, length: CGFloat) -> UCSAxisGeometry {
-        UCSAxisGeometry(
-            xArm: (origin, CGPoint(x: origin.x + length, y: origin.y)),
-            yArm: (origin, CGPoint(x: origin.x, y: origin.y - length)))
+    /// The UCS +X axis world direction is `(cos θ, sin θ)` and the +Y axis is that
+    /// rotated 90° CCW, `(-sin θ, cos θ)`. A world direction `(dx, dy)` maps to a
+    /// FLIPPED (Y-down) screen delta `(dx, -dy)` — world +Y is up, i.e. toward smaller
+    /// screen-y. So:
+    /// - The +X arm runs from `origin` to `origin + (cos θ, -sin θ) · length`.
+    /// - The +Y arm runs from `origin` to `origin + (-sin θ, -cos θ) · length`.
+    ///
+    /// With `angle == 0` (the world frame, the default) this reduces EXACTLY to the
+    /// prior behavior: +X → `(length, 0)` (rightward), +Y → `(0, -length)` (up).
+    static func axisGeometry(origin: CGPoint, length: CGFloat,
+                             angle: CGFloat = 0) -> UCSAxisGeometry {
+        let c = cos(angle)
+        let s = sin(angle)
+        // World dir (dx, dy) → flipped screen delta (dx, -dy).
+        let xEnd = CGPoint(x: origin.x + c * length, y: origin.y - s * length)
+        let yEnd = CGPoint(x: origin.x - s * length, y: origin.y - c * length)
+        return UCSAxisGeometry(xArm: (origin, xEnd), yArm: (origin, yEnd))
     }
 
     // MARK: Click-through
@@ -131,10 +148,14 @@ final class UCSAxisOverlayView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
-        // The anchor is the world origin mapped to (flipped) screen space; it moves
-        // with pan/zoom, while the arm length stays a constant on-screen size.
-        let origin = model.viewport.worldToScreen(Vector(0, 0))
-        let geometry = Self.axisGeometry(origin: origin, length: Self.armLength)
+        // The anchor is the CURRENT UCS origin mapped to (flipped) screen space; it
+        // moves with pan/zoom, while the arm length stays a constant on-screen size and
+        // the arm directions follow the UCS angle. With `UCS.world` this is identical to
+        // anchoring at the world origin with axis-aligned arms.
+        let ucs = model.currentUCS
+        let origin = model.viewport.worldToScreen(ucs.origin)
+        let geometry = Self.axisGeometry(
+            origin: origin, length: Self.armLength, angle: CGFloat(ucs.angle))
 
         // +X red-ish, +Y green-ish — the conventional CAD axis coloring, tinted down a
         // little so the gizmo reads without fighting the geometry.
