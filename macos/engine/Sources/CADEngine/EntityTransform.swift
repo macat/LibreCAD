@@ -504,7 +504,26 @@ public enum EntityTransform {
                 PolylineVertex(point: t.apply(v.point), bulge: flip ? -v.bulge : v.bulge)
             }
         }
-        return HatchData(loops: loops, solidFill: h.solidFill, patternName: h.patternName)
+        // Rotate a pattern/gradient angle the same way text/arc angles are mapped:
+        // reflect across the mirror axis under a mirror, else add the rotation
+        // delta. A pure move/scale (rotationDelta == 0, no mirror) leaves it intact.
+        func mappedAngle(_ a: Double) -> Double {
+            t.isMirror
+                ? Vector.correctAngle(t.mirrorAxisAngle * 2 - a)
+                : Vector.correctAngle(a + t.rotationDelta)
+        }
+        // Gradient colors/kind are transform-invariant; only the angle rotates
+        // (mirroring how patternAngle rotates). Scale is dimensionless — unchanged.
+        let gradient: HatchGradient? = h.gradient.map { g in
+            HatchGradient(kind: g.kind, colors: g.colors, angle: mappedAngle(g.angle))
+        }
+        return HatchData(
+            loops: loops,
+            solidFill: h.solidFill,
+            patternName: h.patternName,
+            patternScale: h.patternScale,
+            patternAngle: mappedAngle(h.patternAngle),
+            gradient: gradient)
     }
 
     // MARK: solid — transform every corner (RS_Solid::move/rotate/scale/mirror).

@@ -104,6 +104,12 @@ public struct HatchTool: Tool {
         /// A named pattern fill (`solidFill == false`) with the per-hatch
         /// `patternScale` (DXF code 41) and `patternAngle` (DXF code 52, radians).
         case pattern(name: String, scale: Double, angle: Double)
+        /// A GRADIENT fill — the committed hatch carries this `HatchGradient` (render
+        /// support lands in a later wave). Built as a solid hatch (`solidFill ==
+        /// true`, `patternName == "SOLID"`) whose `gradient` field is set, so a
+        /// gradient-unaware path still draws a plausible solid (the resolve arm
+        /// supersedes the solid with the gradient when it gains gradient support).
+        case gradient(HatchGradient)
     }
 
     /// The fill the next committed hatch is given. Settable so the picker (wired
@@ -133,6 +139,13 @@ public struct HatchTool: Tool {
             let s = (scale.isFinite && scale > 0) ? scale : 1
             self.fill = .pattern(name: patternName, scale: s, angle: angle)
         }
+    }
+
+    /// A Hatch tool pre-configured to fill the selected boundary with a GRADIENT.
+    /// The committed hatch is a solid hatch carrying the supplied `HatchGradient`
+    /// (render support lands later; the resolve arm carries it onto `ResolvedFill`).
+    public init(gradient: HatchGradient) {
+        self.fill = .gradient(gradient)
     }
 
     // MARK: - Tool
@@ -215,6 +228,10 @@ public struct HatchTool: Tool {
         case .pattern(let name, let scale, let angle):
             hatch = HatchData(loops: loops, solidFill: false, patternName: name,
                               patternScale: scale, patternAngle: angle)
+        case .gradient(let g):
+            // A gradient fill: a solid hatch carrying the gradient descriptor.
+            hatch = HatchData(loops: loops, solidFill: true, patternName: "SOLID",
+                              gradient: g)
         }
         let record = EntityRecord(
             id: .placeholder,
