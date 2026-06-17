@@ -49,23 +49,62 @@
 import Foundation
 
 /// The interactive Divide tool. With a single supported entity selected, place
-/// `divisions − 1` (open) or `divisions` (closed) point nodes at equal arc-length
-/// intervals along it; the source entity stays.
+/// point nodes along it; the source entity stays. Two modes:
+///   • `.count(n)`  — DIVIDE: `n − 1` (open) / `n` (closed) nodes at equal
+///                    arc-length intervals (the historical default behavior).
+///   • `.length(s)` — MEASURE: a node every `s` world units marched from the
+///                    start endpoint (LibreCAD's MEASURE command).
 public struct DivideTool: Tool {
 
     // MARK: - Configuration
 
-    /// The number of equal pieces to divide into (LibreCAD's division count).
-    /// Clamped to ≥ 2 when the division fires. Public so the app sets it from the
-    /// command line / dialog.
-    public var divisions: Int
+    /// How the Divide tool places nodes along the entity.
+    ///
+    /// - `count(n)`:  DIVIDE — split into `n` equal arc-length pieces (the
+    ///                division points are the interior boundaries for an open
+    ///                entity, the loop boundaries for a closed one). `n` is
+    ///                clamped to ≥ 2 when the division fires.
+    /// - `length(s)`: MEASURE — drop a node every `s` world units of arc length
+    ///                marched from the START endpoint. The start endpoint itself
+    ///                (distance 0) is NOT emitted (it is already an endpoint
+    ///                snap), and a trailing partial segment shorter than `s`
+    ///                yields no node (the remainder is dropped) — matching
+    ///                LibreCAD's MEASURE / equidistant "Snap distance" semantics.
+    ///                `s` must be > 0; a non-positive spacing yields no nodes.
+    public enum DivideMode: Equatable, Sendable {
+        case count(Int)
+        case length(Double)
+    }
+
+    /// The active mode/config. Defaults to `.count(2)` so the historical DIVIDE
+    /// behavior is unchanged. Surfaced later via applyToolConfig + ToolOptionsBar.
+    public var mode: DivideMode
+
+    /// The number of equal pieces to divide into (LibreCAD's division count) — a
+    /// convenience facade over `.count(…)` so existing call sites / command-line
+    /// wiring that set `tool.divisions = n` keep working. Reading it returns the
+    /// count for `.count`, and `0` when the tool is in `.length` mode. Writing it
+    /// switches the tool into `.count(n)` mode.
+    public var divisions: Int {
+        get {
+            if case .count(let n) = mode { return n }
+            return 0
+        }
+        set { mode = .count(newValue) }
+    }
 
     // MARK: - State
 
     private var captured: [EntityRecord] = []
 
+    /// Construct in DIVIDE (count) mode — the historical initializer.
     public init(divisions: Int = 2) {
-        self.divisions = divisions
+        self.mode = .count(divisions)
+    }
+
+    /// Construct with an explicit mode (DIVIDE-by-count or MEASURE-by-length).
+    public init(mode: DivideMode) {
+        self.mode = mode
     }
 
     // MARK: - Tool
@@ -73,9 +112,13 @@ public struct DivideTool: Tool {
     public var title: String { "Divide" }
 
     public var status: String {
-        captured.isEmpty
-            ? "Select an object to divide first"
-            : "Press Return to divide into \(Swift.max(2, divisions)) parts"
+        guard !captured.isEmpty else { return "Select an object to divide first" }
+        switch mode {
+        case .count(let n):
+            return "Press Return to divide into \(Swift.max(2, n)) parts"
+        case .length(let s):
+            return "Press Return to measure nodes every \(s) units"
+        }
     }
 
     /// The live preview: the division points rendered as degenerate single-point
@@ -154,19 +197,74 @@ public struct DivideTool: Tool {
     }
 
     /// The division points along the first supported selected entity. Empty when
-    /// nothing dividable is selected or the count is degenerate.
+    /// nothing dividable is selected or the mode/config is degenerate. Routes by
+    /// `mode`: `.count` → equal-segment DIVIDE; `.length` → MEASURE-by-spacing.
     private func divisionPoints() -> [Vector] {
         guard let record = firstDividable() else { return [] }
-        let n = Swift.max(2, divisions)
-        switch record.kind {
+        switch mode {
+        case .count(let raw):
+            let n = Swift.max(2, raw)
+            switch record.kind {
+            case .line(let d):
+                return Self.divideLine(d, into: n)
+            case .arc(let d):
+                return Self.divideArc(d, into: n)
+            case .circle(let d):
+                return Self.divideCircle(d, into: n)
+            case .polyline(let d):
+                return Self.dividePolyline(d, into: n)
+            default:
+                return []
+            }
+        case .length(let spacing):
+            return Self.measureNodes(record.kind, spacing: spacing)
+        }
+    }
+
+    // MARK: - MEASURE (by fixed length, pure)
+
+    /// Nodes placed every `spacing` world units of arc length along the entity,
+    /// marched from the START endpoint. Reuses the equidistant `SnapGeometry`
+    /// "Snap distance" helpers, so the convention is exactly LibreCAD's MEASURE:
+    ///
+    ///   • the START endpoint (distance 0) is NOT emitted (it is already an
+    ///     endpoint snap);
+    ///   • nodes are at `1·spacing, 2·spacing, …` strictly inside the entity;
+    ///   • a trailing partial segment shorter than `spacing` produces no node —
+    ///     the remainder is dropped (so a 10-unit line at spacing 3 → nodes at
+    ///     3, 6, 9 and the final 1-unit stub is left empty);
+    ///   • a non-positive `spacing` (or a degenerate entity) → no nodes.
+    ///
+    /// A CIRCLE has no canonical start endpoint; MEASURE marches from angle 0
+    /// (the +X point, matching `divideCircle`'s reference) all the way around,
+    /// emitting nodes at `1·spacing, 2·spacing, …` of arc length and dropping the
+    /// trailing remainder before the full circumference.
+    static func measureNodes(_ kind: EntityKind, spacing: Double) -> [Vector] {
+        guard spacing > Tolerance.distance else { return [] }
+        switch kind {
         case .line(let d):
-            return Self.divideLine(d, into: n)
+            return SnapGeometry.pointsAlongLine(start: d.start, end: d.end,
+                                                spacing: spacing, fromStart: true)
         case .arc(let d):
-            return Self.divideArc(d, into: n)
+            return SnapGeometry.pointsAlongArc(center: d.center, radius: d.radius,
+                                               startAngle: d.startAngle, endAngle: d.endAngle,
+                                               reversed: d.reversed,
+                                               spacing: spacing, fromStart: true)
         case .circle(let d):
-            return Self.divideCircle(d, into: n)
+            // A circle has no canonical endpoint: march the FULL circumference
+            // (a 0 → 2π CCW arc) from the +X point — the same reference angle as
+            // `divideCircle`. `pointsAlongArc` computes EXACT arc length (no
+            // tessellation), so nodes land at 1·spacing, 2·spacing, … and the
+            // trailing partial arc before 2π is dropped.
+            return SnapGeometry.pointsAlongArc(center: d.center, radius: d.radius,
+                                               startAngle: 0, endAngle: 2 * Double.pi,
+                                               reversed: false,
+                                               spacing: spacing, fromStart: true)
         case .polyline(let d):
-            return Self.dividePolyline(d, into: n)
+            let pts = EntityKind.expandPolyline(d, ctx: .default)
+            guard pts.count >= 2 else { return [] }
+            return SnapGeometry.pointsAlongPolyline(points: pts, closed: d.closed,
+                                                    spacing: spacing, fromStart: true)
         default:
             return []
         }
