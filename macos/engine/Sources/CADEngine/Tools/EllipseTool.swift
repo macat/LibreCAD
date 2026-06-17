@@ -234,6 +234,42 @@ public struct EllipseTool: Tool {
         }
     }
 
+    // MARK: - Construction-mode command keywords (W2B)
+
+    /// Whether the tool is still in its INITIAL waiting state (no point placed yet)
+    /// for the active `mode`. The construction-mode chips are offered ONLY here:
+    /// switching mode mid-draw re-mints the tool (Wave 3 reapply), which would
+    /// discard in-progress picks — so it is only safe with nothing to lose. The
+    /// 4-point / inscribe modes start in `.collecting(points: [])`, so an EMPTY
+    /// `collecting` is still "initial"; a non-empty one means a corner is placed.
+    private var isInitialState: Bool {
+        switch state {
+        case .settingCenter, .settingFocus1:
+            return true
+        case .collecting(let pts):
+            return pts.isEmpty
+        default:
+            return false
+        }
+    }
+
+    /// AutoCAD-style construction-mode options for the smart command line, shown
+    /// ONLY in the initial state (before the first pick — see `isInitialState`).
+    /// Returns one chip per `EllipseTool.Mode` EXCEPT the active one. After the first
+    /// pick → `[]` (mid-draw mode switching is unsafe). Dispatching a chip reuses the
+    /// existing `ToolInput` events via the app's reapply path (Wave 3); see the W2B
+    /// mapping table for the `CanvasModel.ellipseModeIndex` each keyword sets.
+    public var keywordOptions: [ToolKeyword] {
+        guard isInitialState else { return [] }
+        var out: [ToolKeyword] = []
+        if mode != .axis         { out.append(ToolKeyword(keyword: "Axis",    label: "Axis Endpoints")) }
+        if mode != .fociPoint    { out.append(ToolKeyword(keyword: "Foci",    label: "Foci + Point")) }
+        if mode != .fourPoint    { out.append(ToolKeyword(keyword: "4P",      label: "4 Points")) }
+        if mode != .inscribeQuad { out.append(ToolKeyword(keyword: "Inscribe", label: "Inscribed")) }
+        if mode != .arc          { out.append(ToolKeyword(keyword: "Arc",     label: "Elliptical Arc")) }
+        return out
+    }
+
     /// A draw tool: it IGNORES `context` (it needs only the snapped world points)
     /// and emits new geometry as `.add` edits.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
