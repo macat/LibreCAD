@@ -1860,6 +1860,11 @@ enum ToolCatalog {
         case .lineConstruction: return .init(symbol: "line.diagonal",
                                              help: "Line construction (perpendicular / parallel / bisector / tangent)",
                                              shortcut: nil)
+        // Parity-program W3: Wipeout masking polygon (coupled no-default arm only;
+        // no toolbar group / pinned / activate wiring beyond what compiles).
+        case .wipeout:     return .init(symbol: "rectangle.slash",
+                                        help: "Wipeout (mask region in the background color)",
+                                        shortcut: nil)
         }
     }
 }
