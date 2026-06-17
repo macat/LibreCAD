@@ -614,6 +614,29 @@ final class CADCanvasController {
     /// `refreshGizmo` (a dynamic insert suppresses the gizmo and shows ONLY this overlay).
     private(set) var dynamicGrip: DynamicGripOverlayView?
 
+    /// The PER-ENTITY GRIP-EDITING overlay (Wave 3B', a subview of the MTKView). When a
+    /// grip-editable entity (line/circle/arc/polyline/…) is selected in Select mode it
+    /// draws the blue square grip handles at the entity's characteristic points and lets
+    /// the user reshape ONE entity by dragging a grip → a single undoable commit. It is
+    /// SELF-CONTAINED + INJECTED (owns no model, carries no geometry math — that is the
+    /// pure engine `EntityGrips`); the mount supplies its five closures from the merged
+    /// 3B `CanvasModel` grip API. Transparent to clicks that are NOT on a grip (its
+    /// `hitTest` returns nil there). Mounted ABOVE the gizmo so when a grip and a gizmo
+    /// handle overlap the grip wins the click; otherwise each overlay claims only its own
+    /// handles. Suppressed (via `isEnabled`) while the gizmo owns a drag — see
+    /// `gripsEnabledCache` / `refreshGizmo` (the same dual-overlay arbitration the dynamic
+    /// grip uses, so exactly one of {gizmo, dynamic-grip, entity-grip} owns the cursor).
+    private(set) var entityGrip: EntityGripOverlayView?
+
+    /// Cached value of `model.gripsEnabled` — whether the per-entity grip overlay should
+    /// currently participate. `model.gripsEnabled` REBUILDS a `ResolveContext` and queries
+    /// `EntityGrips.grips` for every selected entity, so it must NOT be polled per frame /
+    /// in the hot redraw path. It is recomputed ONLY on a selection / tool / model change
+    /// (in `refreshGizmo()`, the same selection-change hook the gizmo uses) and the cached
+    /// value is what drives `entityGrip.isEnabled`; the per-frame `redraw()` path reads the
+    /// cache, never `model.gripsEnabled`.
+    private var gripsEnabledCache = false
+
     /// The UCS AXIS INDICATOR overlay (backlog #4b, a subview of the MTKView). Draws a
     /// small fixed-screen-size L-shaped X/Y gizmo anchored at the world origin
     /// (`worldToScreen(Vector(0,0))`). Always click-through (`hitTest` returns nil) so it
@@ -672,6 +695,27 @@ final class CADCanvasController {
         view.addSubview(dynamicGripView)
         dynamicGrip = dynamicGripView
 
+        // Float the per-entity GRIP overlay (Wave 3B') ABOVE the gizmo + dynamic grip
+        // (added last → topmost), so when a blue grip and a gizmo handle overlap the grip
+        // wins the click; otherwise it is transparent to clicks that are NOT on a grip
+        // (its `hitTest` returns nil there) and the gizmo keeps the gesture. Its five
+        // closures come from the merged 3B `CanvasModel` grip API; `requestRedraw` is the
+        // controller's redraw so a live grip-drag preview repaints the canvas. `isEnabled`
+        // is driven (in `refreshGizmo`) from the cached `model.gripsEnabled` so grips are
+        // suppressed while the gizmo owns a drag.
+        let entityGripView = EntityGripOverlayView(
+            selectionProvider: { [weak self] in self?.model.gripSelectionRecords ?? [] },
+            contextProvider: { [weak self] in
+                self?.model.gripResolveContext() ?? CADDrawing().makeResolveContext()
+            },
+            viewportProvider: { [weak self] in self?.model.gripViewport() ?? Viewport(size: .zero) },
+            onGripCommit: { [weak self] record in self?.model.commitMovedGrip(record) },
+            requestRedraw: { [weak self] in self?.redraw() })
+        entityGripView.frame = view.bounds
+        entityGripView.autoresizingMask = [.width, .height]
+        view.addSubview(entityGripView)
+        entityGrip = entityGripView
+
         refreshGizmo()
         refreshCrosshair()
     }
@@ -708,7 +752,17 @@ final class CADCanvasController {
     /// For ANY other selection the gizmo behaves exactly as before and the dynamic grip is
     /// hidden. (The dynamic grip is itself only shown in Select mode with no text editor,
     /// the same gate the gizmo uses.)
-    func refreshGizmo() {
+    ///
+    /// PER-ENTITY GRIPS (Wave 3B'): the entity-grip overlay's enablement (`model.gripsEnabled`,
+    /// which REBUILDS a resolve context — see `gripsEnabledCache`) is recomputed here, the
+    /// selection / tool / model-change hook, NOT in the per-frame `redraw()` path. Pass
+    /// `recomputeGrips: false` (the per-frame caller does) to reuse the cache; every
+    /// selection-changing caller uses the default (recompute). The entity-grip overlay is
+    /// driven by `isEnabled` (it hides itself when disabled or grip-less), coexists with the
+    /// gizmo (it is mounted ABOVE so a grip wins an overlapping click), and is suppressed
+    /// while the gizmo owns a drag (`gripsEnabled` is false then) — so exactly one overlay
+    /// owns the cursor.
+    func refreshGizmo(recomputeGrips: Bool = true) {
         guard let gizmo else { return }
         let interactive = !model.isToolActive && textEditor == nil
         let suppressForDynamic = interactive && model.shouldSuppressGizmoForSelection
@@ -727,6 +781,16 @@ final class CADCanvasController {
             if interactive { dynamicGrip.refresh() }
             else { dynamicGrip.isHidden = true }
         }
+
+        // Per-entity grip overlay (Wave 3B'). Recompute the cached enablement only on a
+        // selection / tool / model change (the expensive `model.gripsEnabled` read), then
+        // drive the overlay's `isEnabled` from the cache; its own `refresh()` re-anchors +
+        // hides itself when disabled or grip-less. While the overlay owns a live grip drag,
+        // leave it untouched (it owns its captured handles until mouse-up).
+        if let entityGrip, !entityGrip.isDragging {
+            if recomputeGrips { gripsEnabledCache = model.gripsEnabled }
+            entityGrip.isEnabled = gripsEnabledCache
+        }
     }
 
     // MARK: Redraw helpers
@@ -741,8 +805,27 @@ final class CADCanvasController {
         // Skip the refresh while EITHER the gizmo OR the dynamic-grip overlay owns a live
         // drag (each repaints itself; its drag math is relative to the value captured at
         // mouse-down, so re-anchoring mid-drag would only churn).
+        let gizmoDragging = gizmo?.isDragging ?? false
         let dynamicDragging = dynamicGrip?.isDragging ?? false
-        if let gizmo, !gizmo.isDragging, !dynamicDragging { refreshGizmo() }
+        // Per frame, re-anchor the gizmo/grip overlays but DO NOT re-read the expensive
+        // `model.gripsEnabled` (recomputeGrips: false → reuse `gripsEnabledCache`, which the
+        // selection/tool-change hook keeps current). Skipped while any overlay owns a drag.
+        if gizmo != nil, !gizmoDragging, !dynamicDragging {
+            refreshGizmo(recomputeGrips: false)
+        }
+        // Per-entity grips and the gizmo COEXIST (grips mounted above), but a gizmo drag
+        // OWNS the gesture: suppress the grip overlay for the duration of the drag so its
+        // stale blue squares don't float at the pre-transform points while the gizmo
+        // previews. Suppression toggles `isEnabled` (cheap; no `model.gripsEnabled` read);
+        // on gizmo mouse-up the model change re-runs `refreshGizmo` and the cache/enabled
+        // state is restored. Otherwise keep the grip squares glued to the (panned/zoomed)
+        // entity points each repaint (they are `worldToScreen`-mapped). The overlay's own
+        // `refresh()` early-returns mid grip-drag (it owns its captured handles until
+        // mouse-up), so this is a no-op churn during a grip drag.
+        if let entityGrip, !entityGrip.isDragging {
+            if gizmoDragging { entityGrip.isEnabled = false }
+            else { entityGrip.refresh() }
+        }
         // Keep the crosshair glued to the (snapped) cursor across pan/zoom repaints
         // (its center is `worldToScreen(cursor)`, which moves when the viewport does).
         if let crosshair, !crosshair.isHidden { crosshair.refresh() }
@@ -1546,6 +1629,16 @@ final class CADCanvasController {
         }
 
         if isEscape {
+            // Esc on an in-progress PER-ENTITY GRIP drag drops the preview WITHOUT
+            // committing (re-anchors the grips) — the earliest unwind step, alongside the
+            // dynamic-grip cancel, before any tool/marquee/selection handling. Routed here
+            // (not via the overlay's own first-responder keyDown) so the canvas's key
+            // handler — which always has focus — reliably cancels the drag.
+            if entityGrip?.isDragging == true {
+                entityGrip?.cancelActiveDrag()
+                redraw()
+                return true
+            }
             // Esc on an in-progress DYNAMIC-GRIP stretch drag reverts to the committed
             // value (drop the preview, re-anchor the grips) WITHOUT committing — the
             // earliest unwind step, before any tool/marquee/selection handling. Routed
