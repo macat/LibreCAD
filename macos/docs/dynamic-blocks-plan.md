@@ -512,7 +512,9 @@ and its appData (code-102) *reader* is broken. So XDATA/appData does **not** rou
 INSERT/BLOCK through the unmodified library (and we do not modify libdxfrw). What DOES round-trip
 verbatim is the block ATTRIBUTE path (ATTRIB tag/text on an INSERT; ATTDEF tag/text inside a BLOCK).
 The dynamic JSON therefore rides a single **reserved-tag** attribute, tag `LIBRECAD$DYN` (the `$` is
-illegal in a user attribute tag, so it can never collide):
+disallowed by AutoCAD in a user attribute tag, so a collision is vanishingly unlikely — the engine
+does not sanitize tags, so a hand-authored literal `LIBRECAD$DYN` user tag would be swallowed, an
+accepted negligible risk):
 
 | Half | Carrier | Content |
 |---|---|---|

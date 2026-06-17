@@ -113,11 +113,14 @@ namespace {
 // dynamic INSERT, and an ATTDEF(tag=LIBRECAD$DYN, text=<def-json>) inside each
 // dynamic BLOCK. The bridge appends it on write and FILTERS it back out on read
 // (surfacing the text as `dynamicJSON`, never as a user-visible attribute), so the
-// Swift model is unchanged. The tag uses '$' (illegal in a user attribute tag, which
-// AutoCAD restricts to letters/digits/'_') so it can never collide with a real one.
-// (Compact JSON keeps the text well within a DXF group-1 line; a very large dynamic
-// block could in theory exceed it — a documented limitation. DWG: dwgWriter15 makes
-// empty blocks + emits no attributes, so dynamic-on-DWG does not round-trip.)
+// Swift model is unchanged. The tag uses '$' (which AutoCAD disallows in a user
+// attribute tag — restricted to letters/digits/'_'), so a collision with a real
+// attribute is vanishingly unlikely; the engine does not itself sanitize tags, so a
+// hand-authored literal "LIBRECAD$DYN" user tag would be swallowed — an accepted,
+// negligible risk. (Compact JSON keeps the text well within a DXF group-1 line; a
+// very large dynamic block could in theory exceed it — a documented limitation. DWG:
+// dwgWriter15 makes empty blocks + emits no attributes, so dynamic-on-DWG does not
+// round-trip.)
 constexpr const char *kDynAttrTag = "LIBRECAD$DYN";
 
 // Whether an attribute tag is the reserved dynamic-block carrier tag.

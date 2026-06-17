@@ -348,10 +348,16 @@ extension InsertDynamicState {
 // The native document is DXF-only (there is no separate JSON document format), so
 // the in-memory `Codable` above does NOT, by itself, survive a save→reopen — the
 // drawing is written to DXF and read back. To make dynamic-block behavior LOSSLESS
-// across a DXF round-trip we embed a COMPACT JSON blob as DXF extended data
-// (XDATA / appData under the "LIBRECAD" appid) on each non-static INSERT (the
-// per-instance state) and BLOCK (the per-definition state) — see DXFWriter /
-// DXFReader + the C bridge.
+// across a DXF round-trip we embed a COMPACT JSON blob in the DXF carried on a
+// RESERVED-TAG block ATTRIBUTE (tag `LIBRECAD$DYN`): a reserved ATTDEF inside the
+// BLOCK holds the per-DEFINITION JSON, and a reserved ATTRIB on the INSERT holds
+// the per-INSTANCE JSON. (We do NOT use DXF XDATA/appData: the vendored libdxfrw's
+// DXF writer omits entity `extData` for INSERT + the BLOCK record, and its appData
+// reader is broken — so XDATA cannot round-trip for INSERT/BLOCK there, whereas the
+// block-attribute path round-trips verbatim. We do not modify libdxfrw.) The C
+// bridge appends the carrier on write and FILTERS the reserved tag back out on read
+// so it never appears as a user attribute — see DXFWriter / DXFReader + the bridge
+// (lcdxf.cpp `kDynAttrTag`), and dynamic-blocks-plan §6a.
 //
 // ## The #1 correctness subtlety — EntityID is NOT stable across a reopen
 // `DynamicBlockDef` references block members by `EntityID` (in
