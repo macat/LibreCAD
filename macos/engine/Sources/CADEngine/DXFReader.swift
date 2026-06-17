@@ -330,6 +330,15 @@ extension CADEngine {
                 gv.dimLinearFormat = GraphicVariables.linearFormat(fromDXF: Int(h.dimLUnit))
             }
             if h.hasDimDec != 0 { gv.dimLinearPrecision = Int(h.dimDec) }
+            // Extension-line offset / extend-beyond / text gap — symmetric with the
+            // writer's `makeHeader` ($DIMEXO/$DIMEXE/$DIMGAP). Setting each via its
+            // typed accessor both stores the value and registers its `$`-key, so a
+            // later re-save's `gv.has("$DIM…")` guard re-emits it (lossless round-trip).
+            // Only read a var the file actually carried (its `has*` flag set); an
+            // absent var keeps the document/resolve default rather than forcing 0.
+            if h.hasDimExo != 0 { gv.dimExtensionOffset = h.dimExo }
+            if h.hasDimExe != 0 { gv.dimExtensionBeyond = h.dimExe }
+            if h.hasDimGap != 0 { gv.dimTextGap = h.dimGap }
         }
 
         // 3) R4b: the GENERIC extra HEADER vars (the document-settings vars the fixed
@@ -996,12 +1005,17 @@ extension CADEngine {
         // Only carry weights when they cover every control point (a rational
         // spline); a partial array would mis-weight the curve.
         if weights.count != cps.count { weights = [] }
+        // Carry the RAW code-70 flags (1 closed, 2 periodic, 4 rational, 8 planar,
+        // 16 linear) so the periodic / linear bits survive on write instead of
+        // being re-synthesized from `closed`/`weights` alone (the writer prefers
+        // these when non-zero). `0` ⇒ the file carried no flags (unknown).
         return .spline(SplineData(
             degree: degree,
             controlPoints: cps,
             knots: knots,
             weights: weights,
-            closed: e.closed != 0
+            closed: e.closed != 0,
+            splineFlags: Int(e.splineFlags)
         ))
     }
 

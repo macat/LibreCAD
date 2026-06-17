@@ -2977,6 +2977,29 @@ private:
         base.setTextLineFactor(e.dimLineFactor);
         if (e.dimHasTextRotation) base.setDir(e.dimTextRotation);
 
+        // Per-dimension DSTYLE override (xdata) — the inverse of applyDimOverrides.
+        // When the dimension carries a per-entity text-height / arrow-size override
+        // we emit the AutoCAD `ACAD:DSTYLE` group as entity extData: 1001 "ACAD"
+        // (appid), 1000 "DSTYLE" (control string), then a (1070 dim-var-code,
+        // 1040 value) pair per override — text height is dim-var 140, arrow size 41.
+        // The variants are self-contained (each STRING DRW_Variant owns its `sdata`,
+        // re-pointed by its copy ctor), so they ride the base into each DRW_Dim*
+        // subclass via DRW_Entity's copy ctor and survive the emit. NOTE: stock
+        // dxfRW::writeDimension does NOT call writeExtData; a 1-line vendored patch
+        // (libdxfrw.cpp) emits ent->extData so this round-trips on DXF write.
+        if (e.dimHasTextHeightOverride || e.dimHasArrowSizeOverride) {
+            base.extData.push_back(std::make_shared<DRW_Variant>(1001, std::string("ACAD")));
+            base.extData.push_back(std::make_shared<DRW_Variant>(1000, std::string("DSTYLE")));
+            if (e.dimHasTextHeightOverride) {
+                base.extData.push_back(std::make_shared<DRW_Variant>(1070, static_cast<dint32>(140)));
+                base.extData.push_back(std::make_shared<DRW_Variant>(1040, e.dimTextHeightOverride));
+            }
+            if (e.dimHasArrowSizeOverride) {
+                base.extData.push_back(std::make_shared<DRW_Variant>(1070, static_cast<dint32>(41)));
+                base.extData.push_back(std::make_shared<DRW_Variant>(1040, e.dimArrowSizeOverride));
+            }
+        }
+
         switch (e.dimType) {
         case LC_DIM_LINEAR: {
             base.type = 0;                       // type-70 low nibble: linear
