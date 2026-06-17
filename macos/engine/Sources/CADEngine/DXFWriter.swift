@@ -1224,7 +1224,29 @@ private final class PODBuilder {
         if layer.isLocked { flags |= 0x4 }
         l.flags = flags
         l.plot = layer.isPrintable ? 1 : 0
+        l.transparency = layerTransparency1071(for: layer.opacity)
         return l
+    }
+
+    /// Maps a `Layer.opacity` to the raw `AcCmTransparency` value the bridge writes
+    /// to the LAYER table's XDATA (code 1001 "AcCmTransparency" + code 1071 <value>).
+    /// The encoding is the SAME `(alpha_type<<24)|alpha` form as per-entity code 440
+    /// (`transparency440(for:)`), so the inverse decode is shared in spirit with
+    /// `DXFReader.layerOpacity(fromTransparency1071:)`:
+    ///   - a FULLY-OPAQUE layer (opacity 1, the historical default) ⇒ `0`, which the
+    ///     bridge treats as "emit NO 1001/1071 group" — byte-identical to the
+    ///     pre-transparency output.
+    ///   - any non-opaque opacity ⇒ `0x02000000 | round(opacity*255)` (type 0x02,
+    ///     "by value"; low byte == alpha, 255 == opaque).
+    /// DXF only: the DWG layer writer has no per-layer XDATA hook, so per-layer
+    /// transparency does not round-trip on DWG (a documented no-op; use DXF).
+    private func layerTransparency1071(for opacity: Double) -> Int32 {
+        let clamped = max(0, min(1, opacity))
+        let alpha = Int32((clamped * 255.0).rounded()) & 0xFF
+        // Fully opaque ⇒ 0 (no XDATA group). 255-alpha is exactly "opaque", so the
+        // common all-opaque layer emits nothing and stays byte-clean.
+        if alpha == 0xFF { return 0 }
+        return 0x02000000 | alpha
     }
 
     // MARK: Pen / color / linetype / lineweight (inverse of DXFReader.mapPen)

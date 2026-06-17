@@ -546,7 +546,41 @@ public:
         l.lineWeightMM100 = DRW_LW_Conv::lineWidth2dxfInt(data.lWeight);
         l.flags = data.flags;          // bit0 frozen, bit2 locked
         l.plot = data.plotF ? 1 : 0;
+        l.transparency = layerTransparencyFromXData(data);  // 1001/1071 XDATA; 0 == opaque
         m_out->layers.push_back(l);
+    }
+
+    // ----- per-LAYER transparency (xdata) --------------------------------
+    // DRW_Layer has no native transparency field, so a layer's transparency rides
+    // the LAYER table's XDATA as the AutoCAD `AcCmTransparency` pair: code 1001
+    // "AcCmTransparency" (the appid) immediately followed by code 1071 <value>, where
+    // the value uses the SAME `(alpha_type<<24)|alpha` AcCmTransparency encoding as
+    // per-entity code 440 (the low byte is the alpha, 255 == opaque). We scan the
+    // FIFO extData (stock libdxfrw's DRW_TableEntry::parseCode already parses 1001 as
+    // a STRING and 1071 as an INTEGER into extData) for that 1001→1071 sequence and
+    // return the raw 1071 value verbatim (the Swift reader decodes alpha→opacity).
+    // Absent => 0 (no XDATA ⇒ fully opaque, back-compatible default).
+    static int32_t layerTransparencyFromXData(const DRW_Layer &data) {
+        bool inAcCmTransparency = false;
+        for (const auto *vp : data.extData) {
+            if (vp == nullptr) continue;
+            const DRW_Variant &v = *vp;
+            switch (v.code()) {
+            case 1001:               // appid: a new xdata group begins
+                inAcCmTransparency =
+                    (v.type() == DRW_Variant::STRING && v.c_str() != nullptr &&
+                     std::string(v.c_str()) == "AcCmTransparency");
+                break;
+            case 1071:               // the AcCmTransparency value for the open group
+                if (inAcCmTransparency && v.type() == DRW_Variant::INTEGER) {
+                    return static_cast<int32_t>(v.i_val());
+                }
+                break;
+            default:
+                break;
+            }
+        }
+        return 0;                     // no AcCmTransparency XDATA ⇒ opaque
     }
 
     // Capture one DIMSTYLE table entry. DRW_Dimstyle exposes the values as typed
@@ -1866,6 +1900,19 @@ public:
             lay.lWeight  = DRW_LW_Conv::dxfInt2lineWidth(l.lineWeightMM100);
             lay.flags    = l.flags;     // bit0 frozen, bit2 locked
             lay.plotF    = (l.plot != 0);
+            // Per-LAYER TRANSPARENCY (lcdxf.h LCLayer::transparency): DRW_Layer has
+            // no native transparency field, so a non-opaque layer carries it as the
+            // LAYER table's XDATA — the AutoCAD `AcCmTransparency` pair: code 1001
+            // "AcCmTransparency" (the appid) + code 1071 <(alpha_type<<24)|alpha>
+            // (the SAME encoding as per-entity code 440; the Swift writer builds the
+            // value from Layer.opacity). 0 == fully opaque ⇒ emit NOTHING, so an
+            // all-opaque drawing is byte-identical to the pre-transparency output.
+            // dxfRW::writeLayer emits ent->extData via writeExtData (1001 string +
+            // 1071 int32 are both handled by stock libdxfrw — no vendored change).
+            if (l.transparency != 0) {
+                lay.extData.push_back(new DRW_Variant(1001, std::string("AcCmTransparency")));
+                lay.extData.push_back(new DRW_Variant(1071, static_cast<dint32>(l.transparency)));
+            }
             m_dxf->writeLayer(&lay);
         }
         // DXF requires layer "0"; synthesize it if the caller didn't supply one.
