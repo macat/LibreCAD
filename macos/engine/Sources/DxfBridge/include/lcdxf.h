@@ -232,7 +232,8 @@ typedef struct LCAttrib {
  *  - TEXT:        p1 (insertion point), height, startAngle (rotation, radians),
  *                 hAlign/vAlign, textValue (string), styleName
  *  - HATCH:       loops[loopCount] (each a window into vertices[]), solidFill,
- *                 textValue (pattern name)
+ *                 textValue (pattern name), hatchScale/hatchAngle, and (when
+ *                 hatchGradient != 0) the gradient block (kind/angle/stop colors)
  *  - SOLID:       vertices[vertexCount] (3-4 ring-ordered corners)
  *  - DIMENSION:   dimType, definitionPoint (p1), the dim* defining points,
  *                 dimAngle/dimOblique/dimTextRotation, dimAlign/dimLineStyle/
@@ -331,6 +332,18 @@ typedef struct LCEntity {
     int32_t solidFill;     /**< HATCH solid-fill flag (0 pattern, 1 solid). */
     double  hatchScale;    /**< HATCH pattern scale, code 41 (1 == native). */
     double  hatchAngle;    /**< HATCH pattern angle, code 52 (radians). */
+    /* HATCH gradient fill (DRW_Hatch gradient block; DXF codes 450..470 + 463/421
+     * per stop). A GRADIENT hatch sets `hatchGradient` != 0; a plain solid/pattern
+     * hatch leaves it 0 and the rest of these are ignored. Mirrors the
+     * solidFill-color convention: stop colors cross as packed 0x00RRGGBB ints (the
+     * same form as `color24`), -1 == unset. Up to two stops are carried (1 ==
+     * single-color gradient, 2 == two-color); extra stops are not represented. */
+    int32_t hatchGradient;     /**< 1 == gradient fill present (DRW code 450), else 0. */
+    int32_t hatchGradKind;     /**< 0 == linear, 1 == radial (mapped from DRW gradName). */
+    double  hatchGradAngle;    /**< gradient angle, code 460, RADIANS (libdxfrw stores radians). */
+    int32_t hatchGradStopCount;/**< number of valid stop colors below (0..2). */
+    int32_t hatchGradColor0;   /**< stop 0 color, packed 0x00RRGGBB, or -1 if unset. */
+    int32_t hatchGradColor1;   /**< stop 1 color, packed 0x00RRGGBB, or -1 if unset. */
 
     /* MTEXT-only layout (meaningful when kind == LC_ENT_MTEXT). */
     double mtextRectWidth;        /**< MTEXT reference / wrap width (code 41); 0 == no wrap. */

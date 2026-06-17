@@ -715,6 +715,19 @@ private final class PODBuilder {
             // carry for a solid one (libdxfrw emits 41/52 only when !solid).
             e.hatchScale = d.patternScale > 0 ? d.patternScale : 1
             e.hatchAngle = d.patternAngle
+            // Gradient fill (DRW_Hatch gradient block; codes 450..470 + 463/421 per
+            // stop). The C side emits the gradient when `hatchGradient != 0`. Stop
+            // colors cross as packed 0x00RRGGBB (the same form as `color24`); up to
+            // two stops are carried (1 == single-color, 2 == two-color). The angle
+            // (code 460) is RADIANS — passed verbatim (the C side does NOT convert).
+            if let g = d.gradient, !g.colors.isEmpty {
+                e.hatchGradient = 1
+                e.hatchGradKind = (g.kind == .radial) ? 1 : 0
+                e.hatchGradAngle = g.angle
+                e.hatchGradStopCount = Int32(min(2, g.colors.count))
+                e.hatchGradColor0 = packedRGB(g.colors[0])
+                e.hatchGradColor1 = g.colors.count > 1 ? packedRGB(g.colors[1]) : -1
+            }
             let (vptr, vcount, lptr, lcount) = internHatchLoops(d.loops)
             e.vertices = vptr
             e.vertexCount = vcount
