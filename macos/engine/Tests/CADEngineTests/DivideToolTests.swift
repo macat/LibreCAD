@@ -224,4 +224,208 @@ struct DivideToolTests {
         #expect(pts?.count == 1)
         #expect(approxEqual(pts![0], Vector(4, 0)))
     }
+
+    // MARK: - Mode facade / config
+
+    @Test("default mode is count(2); the divisions facade mirrors it")
+    func defaultModeIsCount() {
+        let tool = DivideTool()
+        #expect(tool.mode == .count(2))
+        #expect(tool.divisions == 2)
+    }
+
+    @Test("setting divisions switches the mode to count(n); reading mirrors it back")
+    func divisionsFacadeRoundTrips() {
+        var tool = DivideTool(divisions: 7)
+        #expect(tool.mode == .count(7))
+        #expect(tool.divisions == 7)
+        tool.divisions = 3
+        #expect(tool.mode == .count(3))
+        #expect(tool.divisions == 3)
+    }
+
+    @Test("the divisions facade reads 0 while in length mode")
+    func divisionsFacadeInLengthMode() {
+        let tool = DivideTool(mode: .length(2.5))
+        #expect(tool.mode == .length(2.5))
+        #expect(tool.divisions == 0)
+    }
+
+    @Test("count mode is unchanged when constructed via the explicit mode initializer")
+    func countModeViaModeInitMatchesLegacy() {
+        // The .count(n) mode initializer must produce identical output to the
+        // historical DivideTool(divisions:) path — the by-length feature does not
+        // perturb the existing DIVIDE behavior.
+        let line = EntityRecord(
+            id: EntityID(20), layer: .zero, pen: .byLayer, flags: [.visible, .selected],
+            kind: .line(LineData(start: Vector(0, 0), end: Vector(10, 0)))
+        )
+        var legacy = DivideTool(divisions: 5)
+        var viaMode = DivideTool(mode: .count(5))
+        let a = addedPoints(legacy.handle(.commit, context: context([line])))
+        let b = addedPoints(viaMode.handle(.commit, context: context([line])))
+        #expect(a?.count == 4)
+        #expect(b?.count == 4)
+        for (x, y) in zip(a ?? [], b ?? []) { #expect(approxEqual(x, y)) }
+    }
+
+    // MARK: - MEASURE (by length): line
+
+    @Test("MEASURE a 10-unit line at spacing 2 → 4 interior nodes at 2,4,6,8 (start & end excluded)")
+    func measureLineEvenFit() {
+        let line = EntityRecord(
+            id: EntityID(21), layer: LayerID("L"), pen: .byLayer, flags: [.visible, .selected],
+            kind: .line(LineData(start: Vector(0, 0), end: Vector(10, 0)))
+        )
+        var tool = DivideTool(mode: .length(2))
+        let pts = addedPoints(tool.handle(.commit, context: context([line])))
+        #expect(pts != nil)
+        // Marched from the start every 2 units; the start (0) is not emitted and
+        // the far end (10) is excluded too → 2,4,6,8.
+        let expected = [Vector(2, 0), Vector(4, 0), Vector(6, 0), Vector(8, 0)]
+        #expect(pts?.count == expected.count)
+        for (got, want) in zip(pts ?? [], expected) { #expect(approxEqual(got, want)) }
+    }
+
+    @Test("MEASURE drops the trailing partial segment: 10-unit line at spacing 3 → 3,6,9 (1-unit stub dropped)")
+    func measureLineRemainderDropped() {
+        let line = EntityRecord(
+            id: EntityID(22), layer: .zero, pen: .byLayer, flags: [.visible, .selected],
+            kind: .line(LineData(start: Vector(0, 0), end: Vector(10, 0)))
+        )
+        var tool = DivideTool(mode: .length(3))
+        let pts = addedPoints(tool.handle(.commit, context: context([line])))
+        // 3,6,9 — the final 1-unit remainder (9→10) is shorter than the spacing
+        // so no node lands there (documented MEASURE remainder semantics).
+        let expected = [Vector(3, 0), Vector(6, 0), Vector(9, 0)]
+        #expect(pts?.count == 3)
+        for (got, want) in zip(pts ?? [], expected) { #expect(approxEqual(got, want)) }
+    }
+
+    @Test("MEASURE marches from the start endpoint (vertical line: nodes climb in +Y)")
+    func measureLineFromStart() {
+        let line = EntityRecord(
+            id: EntityID(23), layer: .zero, pen: .byLayer, flags: [.visible, .selected],
+            kind: .line(LineData(start: Vector(0, 0), end: Vector(0, 9)))
+        )
+        var tool = DivideTool(mode: .length(4))
+        let pts = addedPoints(tool.handle(.commit, context: context([line])))
+        // 4, 8 from the start; the 8→9 stub is dropped.
+        let expected = [Vector(0, 4), Vector(0, 8)]
+        #expect(pts?.count == 2)
+        for (got, want) in zip(pts ?? [], expected) { #expect(approxEqual(got, want)) }
+    }
+
+    @Test("MEASURE with spacing longer than the line → no nodes (no-op, no commit)")
+    func measureLineSpacingTooLong() {
+        let line = EntityRecord(
+            id: EntityID(24), layer: .zero, pen: .byLayer, flags: [.visible, .selected],
+            kind: .line(LineData(start: Vector(0, 0), end: Vector(5, 0)))
+        )
+        var tool = DivideTool(mode: .length(8))
+        // No node fits → fire() emits no edits → the tool stays a no-op (.none),
+        // matching the empty-result guard (it never commits an empty edit list).
+        #expect(tool.handle(.commit, context: context([line])) == .none)
+    }
+
+    @Test("MEASURE with a non-positive spacing yields no nodes (no commit)")
+    func measureNonPositiveSpacing() {
+        let line = EntityRecord(
+            id: EntityID(25), layer: .zero, pen: .byLayer, flags: [.visible, .selected],
+            kind: .line(LineData(start: Vector(0, 0), end: Vector(10, 0)))
+        )
+        var zeroTool = DivideTool(mode: .length(0))
+        #expect(zeroTool.handle(.commit, context: context([line])) == .none)
+        var negTool = DivideTool(mode: .length(-3))
+        #expect(negTool.handle(.commit, context: context([line])) == .none)
+    }
+
+    // MARK: - MEASURE: arc
+
+    @Test("MEASURE a quarter arc (radius 4) by arc-length spacing → nodes at the right sweep angles")
+    func measureArc() {
+        // Quarter arc radius 4 from 0→90°; arc length = (π/2)·4 ≈ 6.2832.
+        let r = 4.0
+        let arc = EntityRecord(
+            id: EntityID(26), layer: .zero, pen: .byLayer, flags: [.visible, .selected],
+            kind: .arc(ArcData(center: Vector(0, 0), radius: r,
+                               startAngle: 0, endAngle: Double.pi / 2, reversed: false))
+        )
+        let spacing = 2.0   // arc-length units → 2/4 = 0.5 rad per step
+        var tool = DivideTool(mode: .length(spacing))
+        let pts = addedPoints(tool.handle(.commit, context: context([arc])))
+        // total ≈ 6.2832 → nodes at 2,4,6 (the 6→6.2832 stub dropped) = 3 nodes.
+        #expect(pts?.count == 3)
+        for (k, p) in (pts ?? []).enumerated() {
+            let s = spacing * Double(k + 1)
+            let ang = s / r                              // CCW from start angle 0
+            let want = Vector(0, 0) + Vector.polar(radius: r, angle: ang)
+            #expect(approxEqual(p, want, eps: 1e-9))
+        }
+    }
+
+    // MARK: - MEASURE: circle (full circumference from +X)
+
+    @Test("MEASURE a circle marches the whole circumference from the +X point, remainder dropped")
+    func measureCircle() {
+        let r = 5.0
+        let circle = EntityRecord(
+            id: EntityID(27), layer: .zero, pen: .byLayer, flags: [.visible, .selected],
+            kind: .circle(CircleData(center: Vector(0, 0), radius: r))
+        )
+        let spacing = 4.0
+        var tool = DivideTool(mode: .length(spacing))
+        let pts = addedPoints(tool.handle(.commit, context: context([circle])))
+        // circumference = 2π·5 ≈ 31.4159 → nodes at 4,8,…,28 = 7 (the 28→31.42 stub dropped).
+        #expect(pts?.count == 7)
+        for (k, p) in (pts ?? []).enumerated() {
+            let s = spacing * Double(k + 1)
+            let ang = s / r                              // CCW from angle 0 (+X)
+            let want = Vector(0, 0) + Vector.polar(radius: r, angle: ang)
+            #expect(approxEqual(p, want, eps: 1e-9))
+        }
+    }
+
+    // MARK: - MEASURE: polyline (open & closed)
+
+    @Test("MEASURE an open 2-leg polyline (total length 4) at spacing 1 → 3 nodes at 1,2,3")
+    func measureOpenPolyline() {
+        // L of two legs: (0,0)→(2,0)→(2,2), total length 4.
+        let pl = EntityRecord(
+            id: EntityID(28), layer: .zero, pen: .byLayer, flags: [.visible, .selected],
+            kind: .polyline(PolylineData(vertices: [
+                PolylineVertex(point: Vector(0, 0)),
+                PolylineVertex(point: Vector(2, 0)),
+                PolylineVertex(point: Vector(2, 2)),
+            ], closed: false))
+        )
+        var tool = DivideTool(mode: .length(1))
+        let pts = addedPoints(tool.handle(.commit, context: context([pl])))
+        // Cumulative length 1,2,3 (the end at 4 is excluded): (1,0),(2,0),(2,1).
+        let expected = [Vector(1, 0), Vector(2, 0), Vector(2, 1)]
+        #expect(pts?.count == 3)
+        for (got, want) in zip(pts ?? [], expected) { #expect(approxEqual(got, want)) }
+    }
+
+    @Test("MEASURE a closed square (perimeter 8) at spacing 2 → 3 corner nodes (start & wrap excluded)")
+    func measureClosedPolyline() {
+        // Unit-ish square (0,0)(2,0)(2,2)(0,2) closed; perimeter 8.
+        let pl = EntityRecord(
+            id: EntityID(29), layer: .zero, pen: .byLayer, flags: [.visible, .selected],
+            kind: .polyline(PolylineData(vertices: [
+                PolylineVertex(point: Vector(0, 0)),
+                PolylineVertex(point: Vector(2, 0)),
+                PolylineVertex(point: Vector(2, 2)),
+                PolylineVertex(point: Vector(0, 2)),
+            ], closed: true))
+        )
+        var tool = DivideTool(mode: .length(2))
+        let pts = addedPoints(tool.handle(.commit, context: context([pl])))
+        // Perimeter 8, marched from the start (0,0): nodes at 2,4,6 → (2,0),(2,2),(0,2).
+        // The start (0,0) and the full-loop wrap (8) are both excluded (MEASURE
+        // marches the closed path as a finite length, dropping the closing stub).
+        let expected = [Vector(2, 0), Vector(2, 2), Vector(0, 2)]
+        #expect(pts?.count == 3)
+        for (got, want) in zip(pts ?? [], expected) { #expect(approxEqual(got, want)) }
+    }
 }
