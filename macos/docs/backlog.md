@@ -3,6 +3,11 @@
 Tracked items from reviews/builders that are NOT merge-blockers but should be addressed in a polish
 pass or by the relevant downstream owner. Each cites its source.
 
+## Parity program — W1 follow-up NITs (text-style round-trip)
+- **Loaded-file re-save adds a benign `1071=1` on Standard** — `DXFReader` decodes libdxfrw's default stroke font "txt" to `.native(family:"txt")`, which `makeTextStyle` re-encodes WITH the TTF flag, so re-saving a *loaded* file gains a spurious `1071=1` on Standard. Functionally benign (code-3 name preserved; consistent with the dimStyle precedent) — but scope the "byte-identical" comment (DXFWriter.swift ~266-279) to new/in-memory drawings, OR decode a bare no-flag/no-extension name to a flag-free source. *(review-w1a NIT-1)*
+- **Partial 1071 fidelity** — reader extracts only TTF/bold/italic bits from code 1071; AutoCAD charset/pitch low-byte bits are dropped on round-trip. Acceptable (name is what renders); a raw-int `LCTextStyle.fontFamily` model field would be needed for full fidelity. *(review-w1a NIT-2)*
+- **Optional test** — add coverage for the loaded-file (non-default Standard) re-read path + the "txt"→native decode. *(review-w1a NIT-3)*
+
 ## Build / tooling
 - **Bundle `.lff` fonts in `Package.swift`** (test currently reads `standard.lff` by `#filePath`). When
   network/XcodeGen returns or via a manifest edit, add the fonts dir as a resource and switch the LFF

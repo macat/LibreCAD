@@ -6,6 +6,18 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-17 — PARITY PROGRAM W1 shipped (text-style DXF round-trip + rotate/mirror-copy + layer transparency) — (`native-macos @ 1d8869087`, **3411 tests**, `.app` rebuilt)
+
+Owner chose **"do all of it (parallel program)"** after a where-are-we/parity audit (LibreCAD ≈ done bar a few finishers + one data-loss bug; the frontier is AutoCAD-LT plotting/annotation). Planned via the `parity-program-plan` workflow (6 cluster probes → sequencing DAG → critic **APPROVE-WITH-FIXES**); full DAG + serialized critical sections + deferred list in `macos/docs/parity-program-plan.md`. W1 = 4 disjoint engine lanes, built in isolated worktrees, merged by hash, one serial gate.
+
+- **1A — text STYLE-table DXF round-trip** `ffd49796` (**DATA-LOSS FIX**; review APPROVE-WITH-NITS): cloned the DIMSTYLE round-trip end-to-end (LCTextStyle POD + `addTextStyle` read-capture [was a no-op] + `writeTextstyles` enumerate [was hardcoded "Standard"] + the 9th `withUnsafeBufferPointer` level + `CADDrawing.load(textStyles:)`). Named text styles now survive DXF save→reopen (were silently dropped). **Byte-identity trap caught:** `TextStyleTable()` pre-seeds a non-empty Standard (unlike empty `DimStyleTable()`) → gate emits `[]` on the default table so default saves stay byte-identical. **Gaps (documented + tested):** `annotative` is XDATA not a `DRW_Textstyle` field (not round-tripped); DWG STYLE write is dwgWriter15-internal. C-ABI lockstep reviewer-verified across all 5 surfaces.
+- **1B — rotate-copy** `b960a82` · **1C — mirror-copy** `9155a3f`: additive `keepOriginal` (default false = byte-identical); true → emit `.add` rotated/mirrored copies preserving the FULL record (incl. `space`/`layoutName`, so a paper-space copy stays in its sheet — chosen over literal CopyTool parity). UNWIRED (UI toggle lands in W4).
+- **1D — per-layer transparency** `53de020`: additive `Layer.opacity: Double` (default 1) threaded into `resolvedPen` → lights up the already-wired `.byLayer` resolve+render opacity path. DXF round-trip (code 1071) deferred to W3b; UI deferred to W4.
+
+**Infra learning:** the harness `isolation: worktree` was **flaky for named/background builders** — it isolated 1B/1C but dropped 1A/1D into the shared checkout; the builders correctly REFUSED to write there (builder.md safety check). Recovery: coordinator pre-creates worktrees + redirects via SendMessage. 1A's first agent then died on infra (empty worktree, nothing lost) → clean foreground redo succeeded. **Going forward: pre-create worktrees up front; don't trust auto-isolation.** **Backlog NITs (1A):** loaded-file re-save adds a benign `1071=1` on Standard (scope the "byte-identical" comment to new/in-memory drawings); partial 1071 charset/pitch fidelity; an optional loaded-file re-read test.
+
+---
+
 ## 2026-06-17 — FOUR CAD FEATURES in parallel: snap tracking + gradient hatch + UCS + MLEADER (+ command transcript) — ALL SHIPPED (`native-macos @ 1b70b4bdb`, **3393 tests**, `.app` rebuilt)
 
 Owner: "could we do all of these options?!" → built all four requested CAD features + the command transcript as concurrent worktree lanes, serializing only at the real chokepoints (`CanvasModel`, `Snapping`, the renderer, the `EntityKind`/`ToolKind` exhaustive switches). Planned via the `cad-features-plan` workflow (3 probes + global sequencing + critic — whose *stale-snapshot* sequencing was re-derived by the coordinator against real in-flight state). DAG recorded in `macos/docs/multi-feature-sequencing.md`. Test count grew 3012 → 3393. All waves reviewed (or coordinator-spot-checked) + serial-gated + merged-by-hash; merged worktrees pruned.

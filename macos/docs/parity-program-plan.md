@@ -67,5 +67,6 @@ worktree). **No libdxfrw patch is needed anywhere in this program.** The only li
 
 ## Execution status
 
-- [ ] **W1** — dispatched (4 isolated-worktree builders) · merge-by-hash · serial gate · `.app` rebuild
-- [ ] W2 · W5 · W3 · W3b · W4
+- [x] **W1 — SHIPPED** `native-macos @ 1d8869087`, **3411 tests**, `.app` rebuilt. Lanes: 1A `ffd49796` (text-style round-trip, review APPROVE-WITH-NITS), 1B `b960a82` (rotate-copy), 1C `9155a3f` (mirror-copy), 1D `53de020` (layer transparency). Infra: auto-isolation flaky → pre-create worktrees going forward.
+- [ ] **W2** (offset flags + RevisionCloud/LineConstruction tools UNWIRED + viewport fields) — NEXT. Round 1: 2A∥2B∥2D; then 2C (after 2B's ToolKind/glyph append); then W5 (after 2C's SnapGeometry).
+- [ ] W3 (Wipeout solo) · W3b (layer-transparency DXF + annotation-scale) · W4 (wire-wave + page-setup + font-dir)
