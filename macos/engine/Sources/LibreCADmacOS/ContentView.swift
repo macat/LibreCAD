@@ -185,7 +185,10 @@ struct ContentView: View {
         // appear, then re-persist whenever the model promotes a freshly-used tool. The
         // list + promote logic live on the model (pure `ToolSuggester.updatedMRU`); the
         // durable store is the `@AppStorage` string here.
-        .onAppear { model.commandBarMRU = Self.decodeMRU(commandBarMRURaw) }
+        .onAppear {
+            model.seedSnapSettingsFromAppSettings()   // new window: pick up Preferences snap/polar defaults (W2D/3B)
+            model.commandBarMRU = Self.decodeMRU(commandBarMRURaw)
+        }
         .onChange(of: model.commandBarMRU) { _, new in
             commandBarMRURaw = Self.encodeMRU(new)
         }
