@@ -457,7 +457,8 @@ extension CADEngine {
                         lineWidth: lineWidth(mm100: l.lineWeightMM100),
                         isFrozen: frozen,
                         isLocked: locked,
-                        isPrintable: l.plot != 0
+                        isPrintable: l.plot != 0,
+                        opacity: layerOpacity(transparency1071: l.transparency)
                     )
                 )
             }
@@ -1059,6 +1060,22 @@ extension CADEngine {
         if type == 0x01 { return .byBlock }
         let alpha = Double(code440 & 0xFF) / 255.0
         return .opacity(max(0, min(1, alpha)))
+    }
+
+    /// Maps the bridge's raw per-LAYER `AcCmTransparency` value (decoded from the
+    /// LAYER table's XDATA, code 1071; the inverse of
+    /// `DXFWriter.layerTransparency1071(for:)`) to a `Layer.opacity` in `[0, 1]`.
+    /// The value uses the SAME `(alpha_type<<24)|alpha` encoding as per-entity code
+    /// 440 (the low byte is the ALPHA, 255 == opaque):
+    ///   - `0` (no AcCmTransparency XDATA was present) ⇒ `1` — fully opaque. This is
+    ///     the BACK-COMPAT path: a layer written before this feature, or any plain
+    ///     opaque layer, has no 1071 group and reads as fully opaque (historical
+    ///     behavior), so an old file is unchanged.
+    ///   - any non-zero value ⇒ `(value & 0xFF) / 255` — the explicit by-value alpha.
+    private static func layerOpacity(transparency1071: Int32) -> Double {
+        if transparency1071 == 0 { return 1 }            // no XDATA ⇒ fully opaque
+        let alpha = Double(transparency1071 & 0xFF) / 255.0
+        return max(0, min(1, alpha))
     }
 
     /// Resolves a concrete `RGBAColor` from a DXF entity/layer color. Prefers

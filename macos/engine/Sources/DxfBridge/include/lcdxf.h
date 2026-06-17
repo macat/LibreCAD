@@ -523,6 +523,24 @@ typedef struct LCLayer {
     int32_t lineWeightMM100;/**< lineweight in mm*100; -1 ByLayer, -3 default, etc. */
     int32_t flags;          /**< code 70: bit0 frozen, bit2 locked. */
     int32_t plot;           /**< code 290: 1 printable, 0 not. */
+    /** Per-LAYER TRANSPARENCY, persisted via the LAYER table's XDATA (DXF code 1001
+     *  "AcCmTransparency" + code 1071 <value>) — DRW_Layer has no native
+     *  transparency field, so stock libdxfrw carries it ONLY as extended data, and
+     *  the bridge encodes/decodes that XDATA pair around this POD field. The value
+     *  uses the SAME AcCmTransparency encoding as per-ENTITY transparency (code 440,
+     *  see `LCEntity::transparency`): `(alpha_type << 24) | alpha`, where the low
+     *  byte is the ALPHA (255 == fully opaque, 0 == fully transparent) and alpha_type
+     *  `0x02` is an explicit by-value transparency.
+     *    - `0` — no XDATA pair present ⇒ the layer is FULLY OPAQUE (the historical
+     *      default; a zero-initialized POD is byte-identical to the pre-transparency
+     *      output, and the writer emits NO 1001/1071 group for it).
+     *    - alpha_type `0x02` — an explicit by-value alpha (the common case: a
+     *      non-opaque layer writes `0x02000000 | round(opacity*255)`).
+     *  Defaults to 0 (opaque/no-XDATA) so a `{}`-zeroed POD round-trips byte-clean.
+     *  DXF only: the DWG layer writer (dwgWriter15) emits the standard table with no
+     *  per-layer XDATA hook, so per-layer transparency does not round-trip on DWG —
+     *  a documented no-op, like the other DWG table/XDATA gaps. */
+    int32_t transparency;
 } LCLayer;
 
 /**
