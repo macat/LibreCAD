@@ -330,6 +330,18 @@ public struct GraphicVariables: Sendable, Hashable, Codable {
         set { setDouble("$DIMSCALE", newValue) }
     }
 
+    /// `$LTSCALE` — the drawing-wide LINETYPE SCALE: a global multiplier on every
+    /// dashed entity's dash pattern period (AutoCAD's `LTSCALE` system variable).
+    /// `resolve()` multiplies it by the per-entity `Pen.linetypeScale` (DXF code 48)
+    /// to produce `ResolvedPen.linetypeScale`, which the renderer scales the dash
+    /// period by. Defaults `1`. It is a STANDARD AutoCAD header var in libdxfrw's
+    /// curated emit list (it always writes the `$LTSCALE` group, code 40), so it
+    /// round-trips through the R4b header extra-var bag on a .dxf Save → reopen.
+    public var linetypeScale: Double {
+        get { double("$LTSCALE", default: 1.0) }
+        set { setDouble("$LTSCALE", newValue) }
+    }
+
     /// `$DIMLUNIT` — the dimension-text linear unit format. DXF codes match
     /// `$LUNITS` (1=Scientific, 2=Decimal, 3=Engineering, 4=Architectural,
     /// 5=Fractional). Defaults Decimal (mirrors the drawing's linear format).
@@ -1926,6 +1938,10 @@ public final class CADDrawing {
         // style (the Document Settings Points tab writes these header vars).
         let docPointMode = graphicVariables.pointDisplayMode
         let docPointSize = graphicVariables.pointSize
+        // Snapshot the drawing-wide LINETYPE SCALE ($LTSCALE) so the resolve hook
+        // multiplies it onto every entity's per-entity dash scale (DXF code 48) →
+        // ResolvedPen.linetypeScale (the renderer scales the dash period by it).
+        let docLinetypeScale = graphicVariables.linetypeScale
         // Snapshot the block table → member records map (value copies) so an
         // `.insert` can resolve a referenced block's geometry. Building the
         // name→[EntityRecord] map once here keeps the per-insert lookup O(1) and
@@ -1947,6 +1963,7 @@ public final class CADDrawing {
             fontProvider: CADFonts.provider,
             textStyleProvider: { name in styleTable.style(named: name) },
             annotationScale: annotationScale,
+            globalLinetypeScale: docLinetypeScale,
             dimStyleProvider: { docDimStyle },
             namedDimStyleProvider: { name in dimStyleTable.style(named: name)?.style },
             pointStyleProvider: { (mode: docPointMode, size: docPointSize) },

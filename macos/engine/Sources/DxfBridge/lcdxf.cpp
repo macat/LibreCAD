@@ -327,6 +327,11 @@ public:
         // the ENC alpha_raw the same way). Copy the RAW value across — the Swift
         // reader decodes `(alpha_type<<24)|alpha`. Absent ⇒ DRW::Opaque (0) ⇒ ByLayer.
         e.transparency = src.transparency;
+        // Per-entity LINETYPE SCALE (DXF code 48): libdxfrw parses code 48 straight
+        // into DRW_Entity::ltypeScale (drw_entities.cpp:95, default 1.0; the DWG path
+        // decodes the same BD). Copy the RAW value — the Swift reader maps it onto
+        // Pen.linetypeScale. Absent ⇒ DRW_Entity defaults it to 1.0.
+        e.linetypeScale = src.ltypeScale;
         e.spaceFlag = (src.space == DRW::PaperSpace) ? 1 : 0;
         e.layoutName = nullptr;
     }
@@ -341,6 +346,7 @@ public:
         e.color24 = -1;
         e.lineWeightMM100 = -1;
         e.transparency = DRW::Opaque;   // code 440 absent ⇒ ByLayer/opaque default
+        e.linetypeScale = 1.0;    // code 48 absent ⇒ unscaled (DRW_Entity default)
         e.spaceFlag = 0;          // model space by default (DXF code 67 == 0)
         e.layoutName = nullptr;   // bound only for paper-space block members
         e.ratio = 1.0;
@@ -436,7 +442,9 @@ public:
         // components. The DXF reader keys $-prefixed, the DWG reader un-prefixed; both
         // spellings are tried (findHdrVar). A missing var simply yields no record.
         static const char *kExtraInt[]    = { "GRIDMODE", "PDMODE", "ANGDIR" };
-        static const char *kExtraDouble[] = { "PDSIZE", "ANGBASE" };
+        // $LTSCALE (drawing-wide linetype scale, code 40) rides the generic bag so
+        // the global scale round-trips on read; libdxfrw always emits it (curated).
+        static const char *kExtraDouble[] = { "PDSIZE", "ANGBASE", "LTSCALE" };
         static const char *kExtraCoord[]  = { "GRIDUNIT", "PINSBASE" };
         for (const char *key : kExtraInt) {
             const DRW_Variant *v = findHdrVar(*data, key);
@@ -1628,6 +1636,15 @@ public:
         // > AC1015 (R2000), so a 0 (ByLayer/opaque) entity writes NO 440 group —
         // byte-identical to the pre-transparency output. (libdxfrw.cpp:225.)
         ent.transparency = src.transparency;
+        // Per-entity LINETYPE SCALE (DXF code 48): set DRW_Entity::ltypeScale from the
+        // Swift value (a 0 from a zeroed POD is treated as the 1.0 default). NOTE:
+        // stock libdxfrw's `dxfRW::writeEntity` does NOT emit code 48 (it writes
+        // color/lineweight/transparency but not ltypeScale), so this assignment has no
+        // effect on the produced DXF under the unmodified vendored library — the
+        // per-entity scale is dropped on .dxf write (documented in lcdxf.h). The
+        // drawing-wide $LTSCALE DOES round-trip via the HEADER. Setting it anyway keeps
+        // the value correct should a future libdxfrw patch emit code 48.
+        ent.ltypeScale = (src.linetypeScale > 0.0) ? src.linetypeScale : 1.0;
         // Paper-space P1: a paper-space entity (spaceFlag == 1) gets DRW::PaperSpace,
         // which libdxfrw emits as DXF code 67 == 1 in the ENTITIES section
         // (libdxfrw.cpp:197). libdxfrw also writes a single built-in `*Paper_Space`
