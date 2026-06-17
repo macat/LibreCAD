@@ -61,21 +61,34 @@ public struct ResolvedFill: Sendable, Equatable {
     /// default) is a flat solid fill — the prior behavior. Additive, so all
     /// existing fill producers/consumers stay byte-for-byte unchanged.
     public var gradient: ResolvedGradient?
+    /// When `true`, this fill is a **WIPEOUT mask**: the renderer SUBSTITUTES the
+    /// live canvas background color for `color` and draws it in a dedicated pass
+    /// AFTER the model lines (so it masks both lower fills AND lower strokes — the
+    /// `CADEngine` module is view-free, so the actual background color is supplied
+    /// by the renderer, not stored here). Additive: `false` (the default, and what
+    /// every existing fill producer emits) keeps the prior fills-under-lines
+    /// behavior byte-for-byte. `color` still holds a sensible fallback (the engine
+    /// black/white default) for headless / export paths with no live background.
+    public var isMask: Bool
 
     /// The outer boundary loop, if any (`loops[0]`).
     public var outerLoop: [Vector]? { loops.first }
 
-    public init(loops: [[Vector]], color: RGBAColor, gradient: ResolvedGradient? = nil) {
+    public init(loops: [[Vector]], color: RGBAColor, gradient: ResolvedGradient? = nil,
+                isMask: Bool = false) {
         self.loops = loops
         self.color = color
         self.gradient = gradient
+        self.isMask = isMask
     }
 
     /// Convenience for the common single-boundary (no holes) case.
-    public init(outline: [Vector], color: RGBAColor, gradient: ResolvedGradient? = nil) {
+    public init(outline: [Vector], color: RGBAColor, gradient: ResolvedGradient? = nil,
+                isMask: Bool = false) {
         self.loops = [outline]
         self.color = color
         self.gradient = gradient
+        self.isMask = isMask
     }
 }
 
@@ -1079,7 +1092,46 @@ extension EntityKind {
             // so the image border is always visible/snappable and a hidden/missing
             // image still shows its placement. Derived geometry, never stored.
             return Self.resolveImage(d, pen: pen, ctx: ctx)
+
+        case .wipeout(let d):
+            // Wipeout mask → ONE `ResolvedFill` over the world boundary polygon,
+            // flagged `isMask` so the renderer substitutes the live canvas
+            // background color and draws it AFTER the model lines (masking lower
+            // fills AND lower strokes). PLUS an optional frame `ResolvedPolyline`
+            // over the same boundary in the resolved pen when `frameVisible`, so the
+            // wipeout is visible/selectable. Derived geometry, never stored.
+            return Self.resolveWipeout(d, pen: pen, ctx: ctx)
         }
+    }
+
+    // MARK: - Wipeout resolve (background-color mask fill + frame outline)
+
+    /// The fallback color a wipeout mask carries in its `ResolvedFill.color` for
+    /// headless / export paths that have no live canvas background. The renderer
+    /// REPLACES this with the actual `view.clearColor` when it sees `isMask`; this
+    /// value is only used where no background is available (e.g. a unit test reading
+    /// the resolved fill, or a CG/SVG export that has its own page background). The
+    /// engine default canvas is dark, so black is the most plausible stand-in.
+    static let wipeoutFallbackColor: RGBAColor = .black
+
+    /// Resolves a wipeout to its masking fill + frame outline (ADR-001: PURE — no
+    /// background lookup here; the renderer supplies the live color via `isMask`).
+    /// A degenerate boundary (< 3 valid world vertices) resolves to nothing (it can
+    /// neither mask nor frame). The mask fill is a single outer loop (no holes); the
+    /// frame is a closed `ResolvedPolyline` over the same world polygon, emitted only
+    /// when `frameVisible`.
+    static func resolveWipeout(_ d: WipeoutData, pen: ResolvedPen, ctx: ResolveContext)
+        -> ResolvedGeometry
+    {
+        let world = d.worldBoundary.filter(\.valid)
+        guard world.count >= 3 else { return ResolvedGeometry() }
+
+        let mask = ResolvedFill(outline: world, color: wipeoutFallbackColor, isMask: true)
+        var polylines: [ResolvedPolyline] = []
+        if d.frameVisible {
+            polylines.append(ResolvedPolyline(points: world, closed: true, pen: pen))
+        }
+        return ResolvedGeometry(polylines: polylines, fills: [mask])
     }
 
     // MARK: - Image resolve (textured quad + frame outline)
@@ -2534,6 +2586,13 @@ extension EntityKind {
             let corners = d.corners.filter(\.valid)
             return corners.isEmpty ? AABB(point: d.insertion.valid ? d.insertion : Vector(0, 0))
                                    : AABB(points: corners)
+
+        case .wipeout(let d):
+            // The wipeout's world boundary polygon (which already encodes its frame
+            // placement). A degenerate boundary collapses to the insertion point.
+            let world = d.worldBoundary.filter(\.valid)
+            return world.isEmpty ? AABB(point: d.insertion.valid ? d.insertion : Vector(0, 0))
+                                 : AABB(points: world)
         }
     }
 

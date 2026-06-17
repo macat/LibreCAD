@@ -897,6 +897,26 @@ private final class PODBuilder {
             e.imgClip = d.display.clipping ? 1 : 0
             e.imgShow = d.display.showImage ? 1 : 0
             e.textValue = intern(d.imageDef.path)
+
+        case .wipeout(let d):
+            // Emitted as a DXF WIPEOUT (DRW_Image + the AcDbWipeout subclass marker;
+            // the C side calls `dxfRW::writeWipeout`). The placement frame reuses the
+            // IMAGE fields: insertion → p1 (code 10); per-pixel u/v → p2 (code 11) +
+            // imgVVec* (code 12); pixel size → imgSizeU/V (codes 13/23). The masking
+            // polygon (pixel space) → the flat vertex array (codes 91/14/24); the clip
+            // mode → wipeoutClipMode (code 290). NO IMAGEDEF (a wipeout has no raster).
+            // WIPEOUT needs R2000+; at R12 / on DWG the C side drops it (counted
+            // skipped), like IMAGE/MTEXT/DIMENSION.
+            e.kind = Int32(LC_ENT_WIPEOUT.rawValue)
+            e.p1x = d.insertion.x; e.p1y = d.insertion.y; e.p1z = d.insertion.z
+            e.p2x = d.uVector.x;   e.p2y = d.uVector.y;   e.p2z = d.uVector.z
+            e.imgVVecX = d.vVector.x; e.imgVVecY = d.vVector.y; e.imgVVecZ = d.vVector.z
+            e.imgSizeU = d.pixelWidth
+            e.imgSizeV = d.pixelHeight
+            e.wipeoutClipMode = d.clipMode ? 1 : 0
+            let (wptr, wcount) = internPoints(d.boundary)
+            e.vertices = wptr
+            e.vertexCount = wcount
         }
         return e
     }

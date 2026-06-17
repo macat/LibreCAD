@@ -91,6 +91,7 @@ struct ToolKindWiringTests {
             .viewport,                                             // wire-wave-1 (paper-space, out-of-band)
             .revcloud,                                             // parity-program W2 (annotate — UNWIRED)
             .lineConstruction,                                     // parity-program W2 (modify — UNWIRED)
+            .wipeout,                                              // parity-program W3 (draw — WIPEOUT EntityKind)
         ]
         #expect(Set(ToolKind.allCases) == expected,
                 "ToolKind.allCases (\(ToolKind.allCases)) != expected roster")
@@ -517,6 +518,7 @@ struct ToolKindWiringTests {
         .line, .circle, .arc, .rectangle, .polyline, .point,
         .ellipse, .polygon, .spline, .hatch, .image,
         .xline, .ray, .insert, .viewport,
+        .wipeout,   // parity-program W3 (masking polygon — grouped so it's not orphaned)
     ]
 
     /// The Modify group roster — transforms + edit-under-cursor + blocks

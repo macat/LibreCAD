@@ -163,6 +163,9 @@ enum CommandRegistry {
         // Parity-program W2: Line Construction (UNWIRED — no canvas chord yet; the
         // construction-mode picker is a later wave, so no shortcut hint).
         case .lineConstruction: return ("line.diagonal", nil)
+        // Parity-program W3: Wipeout masking polygon (no canvas chord yet, so the
+        // palette surfaces it without a shortcut hint).
+        case .wipeout:         return ("rectangle.slash", nil)
         }
     }
 

@@ -647,9 +647,39 @@ extension CADEngine {
             // display ints ← imgBrightness/imgContrast/imgFade/imgClip/imgShow.
             return mapImage(e)
 
+        case Int32(LC_ENT_WIPEOUT.rawValue):
+            // DXF WIPEOUT (AcDbWipeout) → `.wipeout`. The placement frame reuses the
+            // IMAGE fields: insertion ← p1 (code 10); per-pixel u/v ← p2 (code 11) +
+            // imgVVec* (code 12); pixel size ← imgSizeU/imgSizeV (codes 13/23). The
+            // masking polygon (codes 91/14/24, in pixel space) ← the flat vertex
+            // array; the clip mode ← wipeoutClipMode (code 290). No path/raster.
+            return mapWipeout(e)
+
         default: // LC_ENT_UNSUPPORTED (incl. ordinate/3p DIMENSION) and anything else
             return nil
         }
+    }
+
+    /// Maps a flattened WIPEOUT POD to `WipeoutData`: the placement frame (insertion
+    /// p1, per-pixel u/v from p2 + imgVVec*, pixel size imgSize*) plus the masking
+    /// polygon (the flat vertex array, in IMAGE-PIXEL space, bulge ignored) and the
+    /// clip-mode flag. The frame is shown by default (DXF's WIPEOUTFRAME is global; we
+    /// default a freshly-read wipeout to framed so it stays visible/selectable).
+    private static func mapWipeout(_ e: LCEntity) -> EntityKind? {
+        var boundary: [Vector] = []
+        if let base = e.vertices, e.vertexCount > 0 {
+            let buf = UnsafeBufferPointer(start: base, count: Int(e.vertexCount))
+            boundary = buf.map { Vector($0.x, $0.y) }
+        }
+        return .wipeout(WipeoutData(
+            insertion: Vector(e.p1x, e.p1y, e.p1z),
+            uVector: Vector(e.p2x, e.p2y, e.p2z),
+            vVector: Vector(e.imgVVecX, e.imgVVecY, e.imgVVecZ),
+            pixelWidth: e.imgSizeU,
+            pixelHeight: e.imgSizeV,
+            boundary: boundary,
+            clipMode: e.wipeoutClipMode != 0
+        ))
     }
 
     /// Maps a flattened IMAGE POD to `ImageData`: the insertion (p1), the per-pixel

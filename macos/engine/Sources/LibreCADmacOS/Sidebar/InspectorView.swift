@@ -660,6 +660,7 @@ struct InspectorView: View {
         case .leader:       return "Leader"
         case .multileader:  return "Multileader"
         case .image:        return "Image"
+        case .wipeout:      return "Wipeout"
         }
     }
 }

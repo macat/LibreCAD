@@ -202,6 +202,13 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     /// angle bisector, point→circle tangent, orth-tangent). No new `EntityKind`; it
     /// reuses `.line`. Built UNWIRED — the construction-MODE picker is a later wave.
     case lineConstruction
+    // --- Parity-program W3 tool (the ONE new-EntityKind tool; built minimally
+    //     wired since EntityKind.wipeout's exhaustive switches are inseparable) ---
+    /// The Wipeout tool (`WipeoutTool`) — click a polygon boundary, commit ONE
+    /// closed `.wipeout` masking region that paints the canvas background color over
+    /// lower-draw-order entities (the AutoCAD WIPEOUT). This is the ONE tool whose
+    /// committed entity is the new `EntityKind.wipeout`.
+    case wipeout
     // Append new draw tools here (one `case` per tool) — see the collision note.
 
     /// A short title for the UI (toolbar button / menu).
@@ -265,6 +272,7 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .viewport:        return "Viewport"
         case .revcloud:        return "Revision Cloud"
         case .lineConstruction: return "Line Construction"
+        case .wipeout:         return "Wipeout"
         // Append a title arm per new case.
         }
     }
@@ -361,6 +369,9 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         // construction-mode picker (which variant) is a later wave; minted with the
         // default `.perpendicularFoot` mode.
         case .lineConstruction: return LineConstructionTool()
+        // Parity-program W3: Wipeout masking-polygon tool. Commits the ONE new
+        // `EntityKind.wipeout`; mints a fresh `WipeoutTool`.
+        case .wipeout:         return WipeoutTool()
         // Append a `case <kind>: return <Name>Tool()` arm per new tool.
         }
     }

@@ -226,6 +226,7 @@ struct GeometryEditor: View {
             case .text(let d):         textGeometryEditor(d)
             case .mtext(let d):        mtextGeometryEditor(d)
             case .image(let d):        imageGeometryEditor(d)
+            case .wipeout(let d):      wipeoutEditor(d)
             }
         }
     }
@@ -618,6 +619,29 @@ struct GeometryEditor: View {
         } label: {
             Text("File").lineLimit(1)
         }
+    }
+
+    // MARK: Wipeout (read-only summary + frame toggle)
+    //
+    // A wipeout is a masking polygon; its boundary is edited by grips/transform, not
+    // by per-vertex fields here. The inspector shows a read-only summary (vertex
+    // count) plus an editable Frame toggle (whether the boundary outline draws).
+
+    @ViewBuilder
+    private func wipeoutEditor(_ d: WipeoutData) -> some View {
+        LabeledContent("Vertices") {
+            Text("\(d.boundary.count)").foregroundStyle(.secondary)
+        }
+        .lineLimit(1)
+        Toggle("Frame", isOn: Binding(
+            get: { d.frameVisible },
+            set: { newValue in
+                var w = d
+                w.frameVisible = newValue
+                onCommit([replacing(.wipeout(w))])
+            }
+        ))
+        .lineLimit(1)
     }
 
     /// A copy of the selected record with its geometry swapped to `kind`.

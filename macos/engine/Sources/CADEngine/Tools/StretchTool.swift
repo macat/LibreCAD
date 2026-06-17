@@ -372,12 +372,13 @@ public struct StretchTool: Tool {
             guard inside(d.base) else { return nil }
             return EntityKind.ray(d).transformed(by: t)
 
-        case .hatch, .dimension, .insert, .leader, .multileader, .image:
+        case .hatch, .dimension, .insert, .leader, .multileader, .image, .wipeout:
             // Best-effort whole-translate if ANY defining point is in-window; the
             // per-point stretch of these composite kinds is backlog. We translate
             // the whole entity (its boundary moves with the geometry it bounds). For
             // an `.insert` the defining point is its insertion point; for a `.leader`/
-            // `.multileader` any leg vertex; for an `.image` any quad corner.
+            // `.multileader` any leg vertex; for an `.image`/`.wipeout` any boundary
+            // corner.
             guard anyDefiningPointInside(kind, window: window) else { return nil }
             return kind.transformed(by: t)
         }
@@ -440,6 +441,9 @@ public struct StretchTool: Tool {
         case .image(let im):
             // An image's quad corners (+ insertion) are its stretch reference points.
             return im.insertion.valid && (inside(im.insertion) || im.corners.contains(where: inside))
+        case .wipeout(let w):
+            // A wipeout's world boundary vertices are its stretch reference points.
+            return w.worldBoundary.contains { inside($0) }
         default:
             return false
         }

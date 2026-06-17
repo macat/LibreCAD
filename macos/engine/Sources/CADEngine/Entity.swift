@@ -1318,6 +1318,148 @@ public struct ImageData: Sendable, Hashable, Codable {
     }
 }
 
+// MARK: - Wipeout defining data (DXF WIPEOUT, libdxfrw DRW_Image + AcDbWipeout)
+
+/// `WipeoutData` — a **wipeout** (DXF `WIPEOUT`, AutoCAD's `AcDbWipeout`): a
+/// masking polygon that paints the CANVAS BACKGROUND color over every
+/// LOWER-draw-order entity beneath it, hiding (not erasing) the geometry behind
+/// its boundary. Per ADR-001 a value type holding only the defining data; the
+/// drawn graphic — one background-colored fill loop (the mask) plus an optional
+/// frame outline — is produced on demand by `resolve()`, never stored.
+///
+/// ## Why a WIPEOUT reuses the IMAGE encoding (and is cloned from `ImageData`)
+/// In DXF a `WIPEOUT` is literally an `AcDbRasterImage` subclass (`AcDbWipeout`)
+/// with NO raster: libdxfrw delivers it as a `DRW_Image` (there is no
+/// `DRW_Wipeout` class). So a wipeout carries the SAME placement frame an image
+/// does — an `insertion` point (code 10), a per-pixel `uVector` (code 11) and
+/// `vVector` (code 12), and a `pixelWidth`/`pixelHeight` (codes 13/23) — PLUS a
+/// **clip-boundary polygon** (codes 91 + repeated 14/24) that is the masking
+/// region, and a `clipMode` (code 290). The boundary lives in IMAGE-PIXEL space
+/// (the 14/24 coordinates are fractions of the pixel grid the u/v frame spans),
+/// so the WORLD polygon is `insertion + uVector·pxW·bx + vVector·pxH·by` for each
+/// boundary vertex `(bx, by)` — this is the standard AcDbRasterImage clip-boundary
+/// transform, identical to how `ImageData.corners` maps the unit quad to world.
+///
+/// ## Field grounding (DXF `WIPEOUT` / `AcDbWipeout`, cloned from `ImageData`)
+/// - `insertion`    — code 10: the placement frame origin (lower-left), the pixel
+///                    polygon's `(0,0)`.
+/// - `uVector`      — code 11: the per-pixel U (row) vector spanning the frame's
+///                    bottom edge over `pixelWidth` pixels.
+/// - `vVector`      — code 12: the per-pixel V (column) vector spanning the left
+///                    edge over `pixelHeight` pixels.
+/// - `pixelWidth`/`pixelHeight` — codes 13/23: the frame's pixel size; `u`/`v` are
+///                    scaled by these to span the full frame edges. `0` ⇒ treated
+///                    as `1` so the u/v are the full edge vectors (a tool-built
+///                    wipeout uses a 1×1 frame and stores the polygon in [0,1]²).
+/// - `boundary`     — codes 91/14/24: the masking polygon, in IMAGE-PIXEL space (a
+///                    flat vertex list, no bulges). Transformed to world by the
+///                    frame above. ≥ 3 vertices is a real mask; fewer resolves to
+///                    nothing.
+/// - `clipMode`     — code 290: `false` (the AutoCAD default) masks OUTSIDE is not
+///                    used — a wipeout always masks INSIDE its polygon; the flag is
+///                    carried for round-trip. (We treat the polygon interior as the
+///                    masked region regardless, matching the common WIPEOUT.)
+/// - `frameVisible` — whether the boundary outline (the frame) is DRAWN. AutoCAD's
+///                    WIPEOUTFRAME variable is document-global; we model it
+///                    per-entity (additive) so a wipeout can show or hide its frame
+///                    independently. Default `true` so a placed wipeout is visible
+///                    + selectable.
+public struct WipeoutData: Sendable, Hashable, Codable {
+    /// DXF code 10 — the placement frame origin (the pixel polygon's `(0,0)`).
+    public var insertion: Vector
+    /// DXF code 11 — the per-pixel U (row-direction) vector. Scaled by
+    /// `pixelWidth` to span the frame's bottom edge.
+    public var uVector: Vector
+    /// DXF code 12 — the per-pixel V (column-direction) vector. Scaled by
+    /// `pixelHeight` to span the frame's left edge.
+    public var vVector: Vector
+    /// DXF code 13 — the frame's pixel width (U size). `0` ⇒ treated as `1`.
+    public var pixelWidth: Double
+    /// DXF code 23 — the frame's pixel height (V size). `0` ⇒ treated as `1`.
+    public var pixelHeight: Double
+    /// DXF codes 91/14/24 — the masking polygon in IMAGE-PIXEL space (no bulges).
+    public var boundary: [Vector]
+    /// DXF code 290 — the clip mode flag (round-trip only).
+    public var clipMode: Bool
+    /// Whether the boundary outline (frame) is drawn. Additive; default `true`.
+    public var frameVisible: Bool
+
+    public init(
+        insertion: Vector,
+        uVector: Vector,
+        vVector: Vector,
+        pixelWidth: Double = 1,
+        pixelHeight: Double = 1,
+        boundary: [Vector],
+        clipMode: Bool = false,
+        frameVisible: Bool = true
+    ) {
+        self.insertion = insertion
+        self.uVector = uVector
+        self.vVector = vVector
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+        self.boundary = boundary
+        self.clipMode = clipMode
+        self.frameVisible = frameVisible
+    }
+
+    /// Convenience for building a wipeout from WORLD-space boundary points (the form
+    /// the placement TOOL produces from clicks). Uses a 1×1 pixel frame whose
+    /// `insertion` is the FIRST boundary point and whose `uVector`/`vVector` are the
+    /// world axes — so the stored `boundary` is the world points expressed RELATIVE
+    /// to `insertion` (i.e. pixel space == world-offset space when u/v are the unit
+    /// axes). `worldBoundary()` recovers the world polygon exactly.
+    public init(worldBoundary points: [Vector], frameVisible: Bool = true) {
+        let origin = points.first ?? Vector(0, 0)
+        self.insertion = origin
+        self.uVector = Vector(1, 0)
+        self.vVector = Vector(0, 1)
+        self.pixelWidth = 1
+        self.pixelHeight = 1
+        self.boundary = points.map { $0 - origin }
+        self.clipMode = false
+        self.frameVisible = frameVisible
+    }
+
+    /// The effective pixel width (`1` when unknown/non-positive).
+    public var effectivePixelWidth: Double { pixelWidth > 0 ? pixelWidth : 1 }
+    /// The effective pixel height (`1` when unknown/non-positive).
+    public var effectivePixelHeight: Double { pixelHeight > 0 ? pixelHeight : 1 }
+
+    /// The full bottom-edge vector (`uVector · pixelWidth`).
+    public var widthVector: Vector { uVector * effectivePixelWidth }
+    /// The full left-edge vector (`vVector · pixelHeight`).
+    public var heightVector: Vector { vVector * effectivePixelHeight }
+
+    /// The masking polygon mapped to WORLD space: each pixel-space vertex `(bx, by)`
+    /// becomes `insertion + uVector·bx + vVector·by` (the AcDbRasterImage clip-
+    /// boundary transform — note the per-pixel u/v already encode the scale, so the
+    /// pixel coordinates multiply u/v directly, NOT the full edge vectors).
+    public var worldBoundary: [Vector] {
+        boundary.map { insertion + uVector * $0.x + vVector * $0.y }
+    }
+
+    // MARK: - Decodable (back-compat: tolerate missing pixel size / clipMode / frame)
+
+    private enum CodingKeys: String, CodingKey {
+        case insertion, uVector, vVector, pixelWidth, pixelHeight, boundary, clipMode, frameVisible
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        insertion = try c.decode(Vector.self, forKey: .insertion)
+        uVector = try c.decodeIfPresent(Vector.self, forKey: .uVector) ?? Vector(1, 0)
+        vVector = try c.decodeIfPresent(Vector.self, forKey: .vVector) ?? Vector(0, 1)
+        pixelWidth = try c.decodeIfPresent(Double.self, forKey: .pixelWidth) ?? 1
+        pixelHeight = try c.decodeIfPresent(Double.self, forKey: .pixelHeight) ?? 1
+        boundary = try c.decodeIfPresent([Vector].self, forKey: .boundary) ?? []
+        clipMode = try c.decodeIfPresent(Bool.self, forKey: .clipMode) ?? false
+        // ADDITIVE: a wipeout born without an explicit frame flag is framed.
+        frameVisible = try c.decodeIfPresent(Bool.self, forKey: .frameVisible) ?? true
+    }
+}
+
 // MARK: - The entity-kind sum type
 
 /// The discriminated union of entity geometry. This is the **seed set** for the
@@ -1399,6 +1541,16 @@ public enum EntityKind: Sendable, Hashable, Codable {
     /// part of the value model: only the file PATH + pixel size travel in
     /// `ImageData.imageDef`; the renderer loads + caches the texture by that path.
     case image(ImageData)
+    /// A **wipeout** — a masking polygon (`DXF WIPEOUT` / `AcDbWipeout`) that
+    /// paints the CANVAS BACKGROUND color over every LOWER-draw-order entity
+    /// beneath its boundary, hiding (not erasing) the geometry behind it. Its
+    /// graphic — one MASK `ResolvedFill` (flagged `isMask` so the renderer
+    /// substitutes the live background color and draws it in a dedicated AFTER-the-
+    /// lines pass) plus an optional frame `ResolvedPolyline` — is produced on demand
+    /// by `resolve()`, never stored (ADR-001). Cloned from `.image` (a WIPEOUT is a
+    /// raster-image subclass in DXF, with no raster); behaves like `.solid`/`.image`
+    /// for the areal/non-editable switches.
+    case wipeout(WipeoutData)
 }
 
 // MARK: - Per-entity flags
