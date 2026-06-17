@@ -501,3 +501,320 @@ struct LineAngleModeTests {
         #expect(approx(second!.end, Vector(7, 0)))
     }
 }
+
+// MARK: - Circle: entity-pick construction modes (TTR / TTT / from-arc — W5-5A)
+
+/// Builds a `ToolContext` whose `nearbyEntities` hook scans `records` with the SAME
+/// exact-distance semantics the app's `makeToolContext` (and FilletTool's fixture)
+/// wires up: visible records within tolerance by `HitTesting.worldDistance`.
+private func pickContext(_ records: [EntityRecord], gridSpacing: Double? = nil) -> ToolContext {
+    let byID = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0) })
+    return ToolContext(
+        selected: [],
+        entity: { byID[$0] },
+        gridSpacing: gridSpacing,
+        nearbyEntities: { point, tolerance in
+            guard point.valid else { return [] }
+            let tol = Swift.max(tolerance, 0)
+            return records.filter { r in
+                guard r.flags.contains(.visible) else { return false }
+                return HitTesting.worldDistance(from: point, to: r) <= tol
+            }
+        },
+        allEntities: { records }
+    )
+}
+
+private func lineRecord(_ id: UInt64, _ a: Vector, _ b: Vector) -> EntityRecord {
+    EntityRecord(id: EntityID(id), kind: .line(LineData(start: a, end: b)))
+}
+private func circleRecord(_ id: UInt64, _ c: Vector, _ r: Double) -> EntityRecord {
+    EntityRecord(id: EntityID(id), kind: .circle(CircleData(center: c, radius: r)))
+}
+private func arcRecord(_ id: UInt64, _ c: Vector, _ r: Double,
+                       _ a1: Double = 0, _ a2: Double = .pi) -> EntityRecord {
+    EntityRecord(id: EntityID(id), kind: .arc(ArcData(center: c, radius: r, startAngle: a1, endAngle: a2)))
+}
+
+// MARK: from-arc (single pick, no solver)
+
+@Suite("CircleConstructionMode from-arc")
+struct CircleFromArcModeTests {
+
+    @Test("title and initial status reflect the from-arc pick flow")
+    func statusFlow() {
+        let tool = CircleTool(mode: .fromArc)
+        #expect(tool.title == "Circle")
+        #expect(tool.status == "Select an arc to complete")
+    }
+
+    @Test("picking an arc completes it to a full circle (same center + radius)")
+    func completesArc() {
+        var tool = CircleTool(mode: .fromArc)
+        let ctx = pickContext([arcRecord(1, Vector(5, 5), 3)])
+        // Click ON the arc (a point at radius 3 from (5,5), within the +X..+ sweep).
+        let onArc = Vector(8, 5)
+        let c = committedCircle(tool.handle(.click(onArc), context: ctx))
+        #expect(c != nil)
+        #expect(approx(c!.center, Vector(5, 5)))
+        #expect(approx(c!.radius, 3))
+    }
+
+    @Test("picking a full circle returns the same circle")
+    func completesCircle() {
+        var tool = CircleTool(mode: .fromArc)
+        let ctx = pickContext([circleRecord(1, Vector(0, 0), 4)])
+        let c = committedCircle(tool.handle(.click(Vector(4, 0)), context: ctx))
+        #expect(c != nil)
+        #expect(approx(c!.center, Vector(0, 0)))
+        #expect(approx(c!.radius, 4))
+    }
+
+    @Test("picking empty space is a graceful no-op (keeps waiting)")
+    func emptyPickNoOp() {
+        var tool = CircleTool(mode: .fromArc)
+        let ctx = pickContext([arcRecord(1, Vector(5, 5), 3)])
+        let outcome = tool.handle(.click(Vector(100, 100)), context: ctx)
+        #expect(committedCircle(outcome) == nil)
+        if case .none = outcome {} else { Issue.record("expected .none for empty pick") }
+        #expect(tool.status == "Select an arc to complete")
+    }
+
+    @Test("picking a LINE (no completable arc) is a no-op")
+    func linePickNoOp() {
+        var tool = CircleTool(mode: .fromArc)
+        let ctx = pickContext([lineRecord(1, Vector(0, 0), Vector(10, 0))])
+        let outcome = tool.handle(.click(Vector(5, 0)), context: ctx)
+        // Line still gets picked by nearestTangentEntity, but circleCompleting → nil.
+        #expect(committedCircle(outcome) == nil)
+    }
+
+    @Test("preview shows the completing circle once hovering an arc")
+    func preview() {
+        var tool = CircleTool(mode: .fromArc)
+        let ctx = pickContext([arcRecord(1, Vector(0, 0), 5)])
+        #expect(tool.preview.isEmpty)
+        _ = tool.handle(.move(Vector(5, 0)), context: ctx)
+        #expect(tool.preview.count == 1)
+        #expect(tool.preview[0].closed)
+    }
+}
+
+// MARK: TTR (tangent-tangent-radius)
+
+@Suite("CircleConstructionMode tangent-tangent-radius (TTR)")
+struct CircleTTRModeTests {
+
+    /// A TTR tool with a fixed radius set (the radius the picks are solved against).
+    private func ttrTool(radius: Double) -> CircleTool {
+        var tool = CircleTool(mode: .tanTanRadius)
+        tool.fixedSize = radius   // .radius sizeMode by default → fixedRadius == radius
+        return tool
+    }
+
+    @Test("status walks first → second tangent entity")
+    func statusFlow() {
+        var tool = ttrTool(radius: 2)
+        let ctx = pickContext([lineRecord(1, Vector(-10, 0), Vector(10, 0)),
+                               lineRecord(2, Vector(0, -10), Vector(0, 10))])
+        #expect(tool.status == "Select first tangent entity")
+        _ = tool.handle(.click(Vector(5, 0)), context: ctx)   // pick line 1
+        #expect(tool.status == "Select second tangent entity")
+    }
+
+    @Test("two lines + radius 2: committed circle is r=2 tangent to both axes")
+    func lineLineTTR() {
+        var tool = ttrTool(radius: 2)
+        let ctx = pickContext([lineRecord(1, Vector(-10, 0), Vector(10, 0)),    // X axis
+                               lineRecord(2, Vector(0, -10), Vector(0, 10))])   // Y axis
+        _ = tool.handle(.click(Vector(5, 0)), context: ctx)      // first = X axis
+        // The second click MUST land on the second line (the Y axis), so it sits at
+        // x≈0; the +y side selects the upper solution. (The x-sign tie is exercised by
+        // `quadrantSelection`, which uses a non-axis line.)
+        let c = committedCircle(tool.handle(.click(Vector(0, 3)), context: ctx))
+        #expect(c != nil)
+        #expect(approx(c!.radius, 2))
+        // Tangent to both axes ⇒ |x| = |y| = 2; the +y click selects y = +2.
+        #expect(approx(abs(c!.center.x), 2, 1e-7))
+        #expect(approx(c!.center.y, 2, 1e-7))
+    }
+
+    @Test("the cursor side selects which solution is committed (non-axis 2nd line)")
+    func quadrantSelection() {
+        var tool = ttrTool(radius: 2)
+        // First line: X axis. Second line: the vertical line x = 6 (so its pick point
+        // is at x≈6, unambiguously to the +X side of every solution's tie).
+        let ctx = pickContext([lineRecord(1, Vector(-10, 0), Vector(10, 0)),
+                               lineRecord(2, Vector(6, -10), Vector(6, 10))])
+        _ = tool.handle(.click(Vector(0, 0)), context: ctx)      // first = X axis
+        // Click on the x=6 line (within tolerance), below the axis and biased to the
+        // +x side of the x-tie → the (8, −2) solution (2 right of x=6, 2 below y=0).
+        let c = committedCircle(tool.handle(.click(Vector(6.4, -3)), context: ctx))
+        #expect(c != nil)
+        #expect(approx(c!.center, Vector(8, -2), 1e-7))
+    }
+
+    @Test("line + circle TTR: committed circle is r from the line and tangent to the circle")
+    func lineCircleTTR() {
+        var tool = ttrTool(radius: 2)
+        let line = lineRecord(1, Vector(-10, 0), Vector(10, 0))   // X axis
+        // Circle close enough to the line that a radius-2 tangent circle bridges it:
+        // center (0,4) r=1 → the externally-tangent locus (radius 3 about (0,4))
+        // meets the y=2 offset line at x = ±√5.
+        let circ = circleRecord(2, Vector(0, 4), 1)
+        let ctx = pickContext([line, circ])
+        _ = tool.handle(.click(Vector(5, 0)), context: ctx)      // first = line
+        // Click near the circle (on it, in the +X half) so a solution is found.
+        let c = committedCircle(tool.handle(.click(Vector(1, 4)), context: ctx))
+        #expect(c != nil)
+        #expect(approx(c!.radius, 2))
+        // Center is 2 above the X axis (tangent to the line from above).
+        #expect(approx(abs(c!.center.y), 2, 1e-6))
+        // And tangent to the circle: distance from (0,4) is R+r=3 or |R−r|=1.
+        let d = c!.center.distance(to: Vector(0, 4))
+        #expect(abs(d - 3) < 1e-6 || abs(d - 1) < 1e-6)
+    }
+
+    @Test("no fixed radius set → picks are graceful no-ops")
+    func noRadiusNoOp() {
+        var tool = CircleTool(mode: .tanTanRadius)   // fixedSize nil
+        let ctx = pickContext([lineRecord(1, Vector(-10, 0), Vector(10, 0)),
+                               lineRecord(2, Vector(0, -10), Vector(0, 10))])
+        _ = tool.handle(.click(Vector(5, 0)), context: ctx)
+        let outcome = tool.handle(.click(Vector(0, 3)), context: ctx)
+        #expect(committedCircle(outcome) == nil)
+        if case .none = outcome {} else { Issue.record("expected .none without a TTR radius") }
+    }
+
+    @Test("parallel lines → no tangent circle (no-op)")
+    func parallelNoOp() {
+        var tool = ttrTool(radius: 1)
+        let ctx = pickContext([lineRecord(1, Vector(0, 0), Vector(10, 0)),
+                               lineRecord(2, Vector(0, 5), Vector(10, 5))])
+        _ = tool.handle(.click(Vector(5, 0)), context: ctx)
+        let outcome = tool.handle(.click(Vector(5, 5)), context: ctx)
+        #expect(committedCircle(outcome) == nil)
+    }
+
+    @Test("backspace from second pick rewinds to the first")
+    func backspace() {
+        var tool = ttrTool(radius: 2)
+        let ctx = pickContext([lineRecord(1, Vector(-10, 0), Vector(10, 0)),
+                               lineRecord(2, Vector(0, -10), Vector(0, 10))])
+        _ = tool.handle(.click(Vector(5, 0)), context: ctx)
+        #expect(tool.status == "Select second tangent entity")
+        _ = tool.handle(.backspace, context: ctx)
+        #expect(tool.status == "Select first tangent entity")
+    }
+
+    @Test("re-arms after a commit (next two picks draw another TTR circle)")
+    func reArm() {
+        var tool = ttrTool(radius: 2)
+        let ctx = pickContext([lineRecord(1, Vector(-10, 0), Vector(10, 0)),
+                               lineRecord(2, Vector(0, -10), Vector(0, 10))])
+        _ = tool.handle(.click(Vector(5, 0)), context: ctx)
+        _ = tool.handle(.click(Vector(0, 3)), context: ctx)
+        #expect(tool.status == "Select first tangent entity")   // reset
+    }
+}
+
+// MARK: TTT (inscribe — three lines)
+
+@Suite("CircleConstructionMode tangent-tangent-tangent (TTT inscribe)")
+struct CircleTTTModeTests {
+
+    // The 6-8-10 right triangle: legs on the axes, vertices (0,0),(6,0),(0,8).
+    private let bottom = (Vector(0, 0), Vector(6, 0))
+    private let left = (Vector(0, 0), Vector(0, 8))
+    private let hyp = (Vector(6, 0), Vector(0, 8))
+
+    private func triangleContext() -> ToolContext {
+        pickContext([lineRecord(1, bottom.0, bottom.1),
+                     lineRecord(2, left.0, left.1),
+                     lineRecord(3, hyp.0, hyp.1)])
+    }
+
+    @Test("status walks first → second → third tangent entity")
+    func statusFlow() {
+        var tool = CircleTool(mode: .tanTanTan)
+        let ctx = triangleContext()
+        #expect(tool.status == "Select first tangent entity")
+        _ = tool.handle(.click(Vector(3, 0)), context: ctx)
+        #expect(tool.status == "Select second tangent entity")
+        _ = tool.handle(.click(Vector(0, 4)), context: ctx)
+        #expect(tool.status == "Select third tangent entity")
+    }
+
+    @Test("three triangle sides → the INCIRCLE when the cursor is inside the triangle")
+    func incircle() {
+        var tool = CircleTool(mode: .tanTanTan)
+        let ctx = triangleContext()
+        _ = tool.handle(.click(Vector(3, 0)), context: ctx)   // bottom
+        _ = tool.handle(.click(Vector(0, 4)), context: ctx)   // left
+        // Third click ON the hypotenuse, cursor near the triangle interior → incircle.
+        let c = committedCircle(tool.handle(.click(Vector(3, 4)), context: ctx))
+        #expect(c != nil)
+        // Incircle of the 6-8-10 triangle: r = (6+8−10)/2 = 2, center (2,2).
+        #expect(approx(c!.center, Vector(2, 2), 1e-6))
+        #expect(approx(c!.radius, 2, 1e-6))
+    }
+
+    @Test("a non-line third reference → no solution (mixed Apollonius deferred)")
+    func nonLineDeferred() {
+        var tool = CircleTool(mode: .tanTanTan)
+        let ctx = pickContext([lineRecord(1, bottom.0, bottom.1),
+                               lineRecord(2, left.0, left.1),
+                               circleRecord(3, Vector(20, 20), 2)])
+        _ = tool.handle(.click(Vector(3, 0)), context: ctx)
+        _ = tool.handle(.click(Vector(0, 4)), context: ctx)
+        let outcome = tool.handle(.click(Vector(20, 18)), context: ctx)
+        #expect(committedCircle(outcome) == nil)
+    }
+
+    @Test("backspace from third rewinds to second, keeping the first two")
+    func backspace() {
+        var tool = CircleTool(mode: .tanTanTan)
+        let ctx = triangleContext()
+        _ = tool.handle(.click(Vector(3, 0)), context: ctx)
+        _ = tool.handle(.click(Vector(0, 4)), context: ctx)
+        #expect(tool.status == "Select third tangent entity")
+        _ = tool.handle(.backspace, context: ctx)
+        #expect(tool.status == "Select second tangent entity")
+    }
+}
+
+// MARK: solver-glue direct tests
+
+@Suite("CircleTool tangent-circle glue (static helpers)")
+struct CircleToolTangentGlueTests {
+
+    @Test("circleCompleting: arc/circle → full circle; line → nil")
+    func circleCompleting() {
+        let arc = arcRecord(1, Vector(2, 3), 5)
+        let c1 = CircleTool.circleCompleting(arc)
+        #expect(c1 != nil)
+        #expect(approx(c1!.center, Vector(2, 3)))
+        #expect(approx(c1!.radius, 5))
+        let circ = circleRecord(2, Vector(0, 0), 7)
+        #expect(CircleTool.circleCompleting(circ)?.radius == 7)
+        #expect(CircleTool.circleCompleting(lineRecord(3, Vector(0, 0), Vector(1, 0))) == nil)
+    }
+
+    @Test("tangentCenters dispatches line/line through the SnapGeometry solver")
+    func tangentCentersLineLine() {
+        let a = lineRecord(1, Vector(-10, 0), Vector(10, 0))
+        let b = lineRecord(2, Vector(0, -10), Vector(0, 10))
+        let centers = CircleTool.tangentCenters(first: a, second: b, radius: 2)
+        #expect(centers.count == 4)
+    }
+
+    @Test("inscribedCircles requires three lines (else empty)")
+    func inscribedRequiresLines() {
+        let a = lineRecord(1, Vector(0, 0), Vector(6, 0))
+        let b = lineRecord(2, Vector(0, 0), Vector(0, 8))
+        let c = lineRecord(3, Vector(6, 0), Vector(0, 8))
+        #expect(CircleTool.inscribedCircles(first: a, second: b, third: c).count == 4)
+        let circ = circleRecord(4, Vector(1, 1), 1)
+        #expect(CircleTool.inscribedCircles(first: a, second: b, third: circ).isEmpty)
+    }
+}
