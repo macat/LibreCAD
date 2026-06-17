@@ -153,11 +153,20 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     /// Shared canvas state (model, viewport, index, selection, snap).
     private let model: CanvasModel
 
-    /// The resolved Rendering preferences (antialias / LOD / default line width),
-    /// read once from `UserDefaults` at init (each key falls back to its default
-    /// when unset → today's behavior for a user who never opened Preferences). The
-    /// half-width feeds every packed stroke; the LOD scales the resolve tolerance.
-    private let renderPrefs: RenderPrefs = .fromDefaults()
+    /// The resolved Rendering preferences (antialias / LOD / default line width).
+    /// RE-READ from `UserDefaults` at the top of every `draw(in:)` (each key falls
+    /// back to its default when unset → today's behavior for a user who never opened
+    /// Preferences) so a change in Preferences ▸ Rendering takes effect on the next
+    /// redraw of an ALREADY-OPEN window — not only on windows opened afterwards
+    /// (finding #30). It was previously a `let` frozen at init, which made the
+    /// Rendering controls dead for open windows. The half-width feeds every packed
+    /// stroke; the LOD scales the resolve tolerance. `refreshRenderPrefs()` detects a
+    /// change and forces the line/fill buffer + resolve-context rebuild that bakes the
+    /// new width/LOD in (the prefs are NOT consumed per-frame otherwise — they're read
+    /// into the cull/resolve path, so a stale value would otherwise persist until the
+    /// next model edit). NOTE: an IDLE window still needs an external `setNeedsDisplay`
+    /// to repaint at all; this only guarantees the next paint is correct (see report).
+    private var renderPrefs: RenderPrefs = .fromDefaults()
 
     /// Grid spacing chosen on the last frame (fed to snapping). Read by the
     /// interaction layer so grid-snap matches the drawn grid.
@@ -421,6 +430,12 @@ final class LineRenderer: NSObject, MTKViewDelegate {
         // converted to the right device-pixel half-width on this display.
         backingScale = view.window?.backingScaleFactor ?? view.layer?.contentsScale ?? backingScale
 
+        // Re-read the Rendering prefs (antialias / LOD / default width) so a change
+        // in Preferences ▸ Rendering applies to THIS already-open window's next paint
+        // (finding #30). When they actually changed, this forces the line/fill +
+        // resolve-context rebuild that bakes the new half-width / tessellation LOD in.
+        refreshRenderPrefs()
+
         // Refresh model/overlay geometry if needed (NOT on matrix-only pan/zoom).
         let visibleRect = model.viewport.visibleWorldRect
         rebuildLineInstancesIfNeeded(visibleRect: visibleRect)
@@ -557,6 +572,31 @@ final class LineRenderer: NSObject, MTKViewDelegate {
         }
         commandBuffer.present(drawable)
         commandBuffer.commit()
+    }
+
+    // MARK: - Render-preference refresh (finding #30 — live-apply to open windows)
+
+    /// Re-reads the Rendering prefs from `UserDefaults` and, when they CHANGED, forces
+    /// the rebuilds that bake the new values into the next frame:
+    ///   • a new default line WIDTH or antialias toggle changes every stroke's packed
+    ///     half-width → invalidate `builtModelVersion` so the line/fill buffer re-packs;
+    ///   • a new LOD/quality tier changes the resolve tessellation tolerance →
+    ///     invalidate `resolveContextVersion` so the cached `ResolveContext` is remade.
+    /// Both are cheap no-ops when nothing changed (the common steady-state path: the
+    /// `==` compare short-circuits and no buffer is touched), so this adds no per-frame
+    /// rebuild for a user who never opens Preferences. Reading `UserDefaults` once per
+    /// on-demand paint (the canvas uses `enableSetNeedsDisplay`, not a 120 Hz free-run)
+    /// is negligible.
+    private func refreshRenderPrefs() {
+        let fresh = RenderPrefs.fromDefaults()
+        guard fresh != renderPrefs else { return }
+        // The half-width (width + AA) feeds the packed line/fill instances; the LOD
+        // feeds the resolve tolerance. A change in EITHER must re-pack / re-resolve, so
+        // invalidate both caches — the next `rebuildLineInstancesIfNeeded` sees a
+        // version mismatch and rebuilds with the new prefs.
+        renderPrefs = fresh
+        builtModelVersion = -1
+        resolveContextVersion = -1
     }
 
     // MARK: - Buffer (re)builds

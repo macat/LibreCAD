@@ -137,7 +137,7 @@ private struct UnitsSettingsTab: View {
                         get: { model.drawing.graphicVariables.anglesBase * 180 / .pi },
                         set: { model.setAngleBaseDegrees($0) }
                     ), format: .number)
-                    .frame(width: 90)
+                    .frame(width: DS.Field.std)
                     .multilineTextAlignment(.trailing)
                 }
                 Picker("Direction", selection: Binding(
@@ -175,7 +175,7 @@ private struct GridSnapSettingsTab: View {
                         get: { model.preferredGridSpacing },
                         set: { model.setGridSpacing($0); controllerBox.controller?.requestRedraw() }
                     ), format: .number)
-                    .frame(width: 90)
+                    .frame(width: DS.Field.std)
                     .multilineTextAlignment(.trailing)
                 }
             }
@@ -247,7 +247,7 @@ private struct DimensionsSettingsTab: View {
                 get: { value },
                 set: { set($0); controllerBox.controller?.requestRedraw() }
             ), format: .number)
-            .frame(width: 90)
+            .frame(width: DS.Field.std)
             .multilineTextAlignment(.trailing)
         }
     }
@@ -296,7 +296,7 @@ private struct PointsSettingsTab: View {
                         get: { model.drawing.graphicVariables.pointSize },
                         set: { setSize($0) }
                     ), format: .number)
-                    .frame(width: 110)
+                    .frame(width: DS.Field.std)
                     .multilineTextAlignment(.trailing)
                 }
                 Text("A size of 0 uses the built-in default marker size.")
@@ -452,7 +452,7 @@ private struct PaperSettingsTab: View {
                         get: { marginMM },
                         set: { marginMM = Swift.max(0, $0); syncStore() }
                     ), format: .number)
-                    .frame(width: 90).multilineTextAlignment(.trailing)
+                    .frame(width: DS.Field.std).multilineTextAlignment(.trailing)
                 }
             }
 
@@ -472,13 +472,13 @@ private struct PaperSettingsTab: View {
                                 get: { customDrawingUnits },
                                 set: { customDrawingUnits = Swift.max(0, $0); syncStore() }
                             ), format: .number)
-                            .frame(width: 56).multilineTextAlignment(.trailing)
+                            .frame(width: DS.Field.xy).multilineTextAlignment(.trailing)
                             Text(":")
                             TextField("paper", value: Binding(
                                 get: { customPaperUnits },
                                 set: { customPaperUnits = Swift.max(0, $0); syncStore() }
                             ), format: .number)
-                            .frame(width: 56).multilineTextAlignment(.trailing)
+                            .frame(width: DS.Field.xy).multilineTextAlignment(.trailing)
                         }
                     }
                 }
@@ -494,7 +494,7 @@ private struct PaperSettingsTab: View {
                         set: { model.setPaperInsertionBase(
                             Vector($0, model.drawing.graphicVariables.paperInsertionBase.y)) }
                     ), format: .number)
-                    .frame(width: 90).multilineTextAlignment(.trailing)
+                    .frame(width: DS.Field.std).multilineTextAlignment(.trailing)
                 }
                 LabeledContent("Y") {
                     TextField("y", value: Binding(
@@ -502,7 +502,7 @@ private struct PaperSettingsTab: View {
                         set: { model.setPaperInsertionBase(
                             Vector(model.drawing.graphicVariables.paperInsertionBase.x, $0)) }
                     ), format: .number)
-                    .frame(width: 90).multilineTextAlignment(.trailing)
+                    .frame(width: DS.Field.std).multilineTextAlignment(.trailing)
                 }
             }
         }
@@ -556,9 +556,24 @@ private struct PaperSettingsTab: View {
     }
 
     /// Seed the UI from the shared store so the sheet shows the persisted page setup.
+    /// The store keeps the paper rect in POINTS with the chosen orientation already
+    /// applied, so map it BACK into the picker's `PaperSize` + portrait/landscape:
+    /// convert points→mm, match the nearest standard sheet by the existing
+    /// `PrintLayout.nearestStandardPage` math, then resolve its canonical name through
+    /// `PaperSize.named`. Orientation is recovered from which paper dimension is larger.
+    /// Without this the size/orientation pickers always re-showed A4/portrait even after
+    /// a different sheet had been persisted (finding #31).
     private func loadFromStore() {
         let setup = PrintLayoutStore.shared.pageSetup
         marginMM = setup.margin * 25.4 / 72.0
+        // Points → millimeters (1 pt = 1/72 in, 1 in = 25.4 mm).
+        let widthMM = setup.paperSize.width * 25.4 / 72.0
+        let heightMM = setup.paperSize.height * 25.4 / 72.0
+        // The matcher is orientation-normalized, so derive the picker orientation from
+        // the stored rect's own aspect (landscape ⇔ width > height) BEFORE matching.
+        model.paperLandscape = setup.paperSize.width > setup.paperSize.height
+        let std = PrintLayout.nearestStandardPage(widthMM: widthMM, heightMM: heightMM)
+        model.paperSize = PaperSize.named(std.name)
         switch setup.scale {
         case .fit:
             scaleChoice = .fit
