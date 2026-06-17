@@ -48,6 +48,22 @@ public struct Layer: Sendable, Hashable, Codable, Identifiable {
     /// helper geometry and is never printed.
     public var isConstruction: Bool
 
+    /// The layer's TRANSPARENCY as a normalized OPACITY in `[0, 1]` (AutoCAD layer
+    /// transparency; in DXF the LAYER-table transparency, code 1071 — written in a
+    /// later wave). `1` is fully OPAQUE, `0` fully see-through — the same sense as
+    /// `RGBAColor.a` and `ResolvedPen.opacity` (and the inverse of AutoCAD's
+    /// "transparency %" UI knob, which is `1 - opacity`).
+    ///
+    /// This is what an entity whose pen is `.byLayer` inherits: `resolvedPen` passes
+    /// it through to `ResolvedPen.opacity`, which folds it into the resolved color's
+    /// alpha, so the already-wired resolve + render opacity path picks it up with no
+    /// new render field. Default `1` (fully opaque) keeps the historical behavior, so
+    /// a document authored before layer transparency existed renders byte-identically.
+    ///
+    /// Stored raw; `ResolvedPen.init` clamps to `[0, 1]` at resolve-time (mirroring
+    /// how `Pen`'s `.opacity(a)` is stored raw and clamped at resolve).
+    public var opacity: Double
+
     public init(
         name: String,
         color: RGBAColor = .librecadGreen,
@@ -56,7 +72,8 @@ public struct Layer: Sendable, Hashable, Codable, Identifiable {
         isFrozen: Bool = false,
         isLocked: Bool = false,
         isPrintable: Bool = true,
-        isConstruction: Bool = false
+        isConstruction: Bool = false,
+        opacity: Double = 1
     ) {
         self.name = name
         self.color = color
@@ -66,6 +83,7 @@ public struct Layer: Sendable, Hashable, Codable, Identifiable {
         self.isLocked = isLocked
         self.isPrintable = isPrintable
         self.isConstruction = isConstruction
+        self.opacity = opacity
     }
 
     /// Visibility — the inverse of `isFrozen` (LibreCAD freezes layers to hide
@@ -76,8 +94,13 @@ public struct Layer: Sendable, Hashable, Codable, Identifiable {
     }
 
     /// The pen attributes an entity inherits when its pen is `.byLayer`.
+    ///
+    /// Threads the layer's `opacity` into `ResolvedPen.opacity` (folded into the
+    /// resolved color's alpha by `ResolvedPen.init`), so a `.byLayer` entity inherits
+    /// the layer's transparency through the existing resolve + render path.
     public var resolvedPen: ResolvedPen {
-        ResolvedPen(color: color, lineType: lineType, lineWidth: lineWidth)
+        ResolvedPen(color: color, lineType: lineType, lineWidth: lineWidth,
+                    opacity: opacity)
     }
 }
 
@@ -87,6 +110,7 @@ extension Layer {
     private enum CodingKeys: String, CodingKey {
         case name, color, lineType, lineWidth
         case isFrozen, isLocked, isPrintable, isConstruction
+        case opacity
         // Legacy key (older skeleton stored visibility directly).
         case isVisible
     }
@@ -108,6 +132,9 @@ extension Layer {
         isLocked = try c.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
         isPrintable = try c.decodeIfPresent(Bool.self, forKey: .isPrintable) ?? true
         isConstruction = try c.decodeIfPresent(Bool.self, forKey: .isConstruction) ?? false
+        // Additive back-compat: a document saved before layer transparency existed
+        // carries no `opacity` key → default `1` (fully opaque, historical behavior).
+        opacity = try c.decodeIfPresent(Double.self, forKey: .opacity) ?? 1
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -120,6 +147,7 @@ extension Layer {
         try c.encode(isLocked, forKey: .isLocked)
         try c.encode(isPrintable, forKey: .isPrintable)
         try c.encode(isConstruction, forKey: .isConstruction)
+        try c.encode(opacity, forKey: .opacity)
     }
 }
 
@@ -315,6 +343,12 @@ public struct LayerTable: Sendable, Hashable, Codable {
     /// Sets a layer's default line width. No-op if unknown.
     public mutating func setLineWidth(_ name: String, _ width: PenLineWidth) {
         mutate(name) { $0.lineWidth = width }
+    }
+
+    /// Sets a layer's transparency as a normalized OPACITY in `[0, 1]` (1 == opaque).
+    /// No-op if unknown. Stored raw; clamped to `[0, 1]` at resolve-time.
+    public mutating func setOpacity(_ name: String, _ opacity: Double) {
+        mutate(name) { $0.opacity = opacity }
     }
 
     /// Sets a layer's whole default pen at once.
