@@ -49,6 +49,7 @@ struct AppSettingsKeyTests {
         AppSettings.Key.crosshairStyle,
         AppSettings.Key.defaultSnapMask,
         AppSettings.Key.snapAperturePx,
+        AppSettings.Key.polarIncrementDegrees,
         AppSettings.Key.antialias,
         AppSettings.Key.renderQuality,
         AppSettings.Key.defaultLineWidthMM,
@@ -79,6 +80,8 @@ struct AppSettingsKeyTests {
         #expect(AppSettings.Key.defaultUnit == "app.general.defaultUnit")
         #expect(AppSettings.Key.theme == "app.appearance.theme")
         #expect(AppSettings.Key.defaultSnapMask == "app.snapping.defaultSnapMask")
+        #expect(AppSettings.Key.snapAperturePx == "app.snapping.snapAperturePx")
+        #expect(AppSettings.Key.polarIncrementDegrees == "app.snapping.polarIncrementDegrees")
         #expect(AppSettings.Key.renderQuality == "app.rendering.renderQuality")
         #expect(AppSettings.Key.defaultTextFont == "app.text.defaultTextFont")
     }
@@ -99,6 +102,7 @@ struct AppSettingsDefaultTests {
         #expect(AppSettings.Default.gridColorHex.isEmpty)
         #expect(AppSettings.Default.crosshairStyle == .full)
         #expect(AppSettings.Default.snapAperturePx == 12)
+        #expect(AppSettings.Default.polarIncrementDegrees == 15)   // LibreCAD's classic 15° polar step
         #expect(AppSettings.Default.antialias == true)
         #expect(AppSettings.Default.renderQuality == .high)
         #expect(AppSettings.Default.defaultLineWidthMM == 0)        // 0 = by default
@@ -156,6 +160,29 @@ struct AppSettingsValidatorTests {
         #expect(AppSettings.unit(fromRaw: -1) == AppSettings.Default.unit)
     }
 
+    @Test("polar increment clamps to (0, 360], falling back to 15° default for bad input")
+    func polarIncrementClamp() {
+        #expect(AppSettings.clampPolarIncrementDegrees(15) == 15)    // common case passes through
+        #expect(AppSettings.clampPolarIncrementDegrees(45) == 45)
+        #expect(AppSettings.clampPolarIncrementDegrees(360) == 360)  // a full turn is still valid
+        #expect(AppSettings.clampPolarIncrementDegrees(0) == AppSettings.Default.polarIncrementDegrees)
+        #expect(AppSettings.clampPolarIncrementDegrees(-10) == AppSettings.Default.polarIncrementDegrees)
+        #expect(AppSettings.clampPolarIncrementDegrees(361) == AppSettings.Default.polarIncrementDegrees)
+        #expect(AppSettings.clampPolarIncrementDegrees(.nan) == AppSettings.Default.polarIncrementDegrees)
+        #expect(AppSettings.clampPolarIncrementDegrees(.infinity) == AppSettings.Default.polarIncrementDegrees)
+    }
+
+    @Test("polar increment converts degrees→radians, and the default matches the model's .pi/12")
+    func polarIncrementRadians() {
+        // 90° → π/2.
+        #expect(abs(AppSettings.polarIncrementRadians(fromDegrees: 90) - .pi / 2) < 1e-12)
+        // The stored default (15°) must equal CanvasModel.polarAngleIncrement's own default (.pi/12).
+        #expect(abs(AppSettings.polarIncrementRadians(fromDegrees: AppSettings.Default.polarIncrementDegrees) - .pi / 12) < 1e-12)
+        // A bad stored value is clamped FIRST, so the conversion is never a no-op (always > 0).
+        #expect(AppSettings.polarIncrementRadians(fromDegrees: 0) > 0)
+        #expect(abs(AppSettings.polarIncrementRadians(fromDegrees: -5) - .pi / 12) < 1e-12)
+    }
+
     @Test("snap-mask round-trips and always forces .free on")
     func snapMaskRoundTrip() {
         let mode: SnapMode = [.endpoint, .center, .grid]
@@ -167,6 +194,56 @@ struct AppSettingsValidatorTests {
         #expect(back.contains(.free))          // free is the always-on fallback
         // A 0/blank mask still yields .free so the cursor is never un-snappable.
         #expect(AppSettings.snapMode(fromMask: 0) == .free)
+    }
+}
+
+// MARK: - DXFExportVersion: UI tiers ⇆ engine writer version
+
+@Suite("App Settings — DXF export version tiers")
+struct AppSettingsDXFVersionTests {
+
+    @Test("every UI tier maps to the matching engine DXFVersion")
+    func tierToEngineVersion() {
+        #expect(DXFExportVersion.r12.engineVersion == .r12)
+        #expect(DXFExportVersion.r14.engineVersion == .r14)
+        #expect(DXFExportVersion.r2000.engineVersion == .r2000)
+        #expect(DXFExportVersion.r2004.engineVersion == .r2004)
+        #expect(DXFExportVersion.r2007.engineVersion == .r2007)
+        #expect(DXFExportVersion.r2018.engineVersion == .r2018)
+    }
+
+    @Test("the intermediate tiers R14 / R2004 / R2007 are exposed")
+    func intermediateTiersPresent() {
+        let all = Set(DXFExportVersion.allCases)
+        #expect(all.contains(.r14))
+        #expect(all.contains(.r2004))
+        #expect(all.contains(.r2007))
+        // Six tiers total, in chronological order, each with a distinct rawValue + label.
+        #expect(DXFExportVersion.allCases.count == 6)
+        let raws = DXFExportVersion.allCases.map(\.rawValue)
+        #expect(Set(raws).count == raws.count)
+        let labels = DXFExportVersion.allCases.map(\.label)
+        #expect(Set(labels).count == labels.count)
+        #expect(labels.allSatisfy { !$0.isEmpty })
+    }
+
+    @Test("stable rawValues (changing these silently resets the saved DXF-version pref)")
+    func stableRawValues() {
+        #expect(DXFExportVersion.r12.rawValue == "r12")
+        #expect(DXFExportVersion.r14.rawValue == "r14")
+        #expect(DXFExportVersion.r2000.rawValue == "r2000")
+        #expect(DXFExportVersion.r2004.rawValue == "r2004")
+        #expect(DXFExportVersion.r2007.rawValue == "r2007")
+        #expect(DXFExportVersion.r2018.rawValue == "r2018")
+    }
+
+    @Test("forgiving decode: a known tier round-trips, an unknown/blank value falls back to R2000")
+    func decodeFallback() {
+        #expect(AppSettings.dxfExportVersion(fromRaw: "r2004") == .r2004)
+        #expect(AppSettings.dxfExportVersion(fromRaw: "r14") == .r14)
+        #expect(AppSettings.dxfExportVersion(fromRaw: "r2007") == .r2007)
+        #expect(AppSettings.dxfExportVersion(fromRaw: "bogus") == AppSettings.Default.dxfExportVersion)
+        #expect(AppSettings.dxfExportVersion(fromRaw: "") == .r2000)
     }
 }
 
@@ -184,6 +261,8 @@ struct AppSettingsModelTests {
         #expect(m.theme == AppSettings.Default.theme)
         #expect(m.crosshairStyle == AppSettings.Default.crosshairStyle)
         #expect(m.snapAperturePx == AppSettings.Default.snapAperturePx)
+        // Default polar increment resolves (in radians) to the model's own .pi/12 default.
+        #expect(abs(m.polarIncrementRadians - .pi / 12) < 1e-12)
         #expect(m.antialias == AppSettings.Default.antialias)
         #expect(m.renderQuality == AppSettings.Default.renderQuality)
         #expect(m.defaultLineWidthMM == AppSettings.Default.defaultLineWidthMM)
@@ -207,7 +286,9 @@ struct AppSettingsModelTests {
             renderQualityRaw: RenderQuality.low.rawValue,
             defaultLineWidthMM: 0.5,
             textFont: "Helvetica",
-            textHeight: 4)
+            textHeight: 4,
+            dxfExportVersionRaw: DXFExportVersion.r2004.rawValue,
+            polarIncrementDegrees: 30)
         #expect(m.defaultUnit == .inch)
         #expect(m.defaultTemplate == "iso_a3")
         #expect(m.autosaveEnabled == false)
@@ -219,6 +300,8 @@ struct AppSettingsModelTests {
         #expect(m.defaultSnap.contains(.center))
         #expect(m.defaultSnap.contains(.free))   // always forced on
         #expect(m.snapAperturePx == 20)
+        #expect(abs(m.polarIncrementRadians - 30 * .pi / 180) < 1e-12)   // 30° preserved
+        #expect(m.dxfExportVersion == .r2004)
         #expect(m.antialias == false)
         #expect(m.renderQuality == .low)
         #expect(m.defaultLineWidthMM == 0.5)
@@ -242,13 +325,17 @@ struct AppSettingsModelTests {
             renderQualityRaw: "ultra",     // unknown → default quality
             defaultLineWidthMM: -2,        // negative → 0
             textFont: "",                  // empty → default font
-            textHeight: 0)                 // ≤ 0 → default height
+            textHeight: 0,                 // ≤ 0 → default height
+            dxfExportVersionRaw: "bogus",  // unknown → default DXF version (R2000)
+            polarIncrementDegrees: 0)      // ≤ 0 → default 15° (never a no-op step)
         #expect(m.defaultUnit == AppSettings.Default.unit)
         #expect(m.defaultTemplate == AppSettings.Default.template)
         #expect(m.theme == AppSettings.Default.theme)
         #expect(m.crosshairStyle == AppSettings.Default.crosshairStyle)
         #expect(m.defaultSnap == .free)
         #expect(m.snapAperturePx == 64)
+        #expect(abs(m.polarIncrementRadians - .pi / 12) < 1e-12)   // bad 0° → default 15°
+        #expect(m.dxfExportVersion == AppSettings.Default.dxfExportVersion)
         #expect(m.renderQuality == AppSettings.Default.renderQuality)
         #expect(m.defaultLineWidthMM == 0)
         #expect(m.defaultTextFont == AppSettings.Default.textFont)

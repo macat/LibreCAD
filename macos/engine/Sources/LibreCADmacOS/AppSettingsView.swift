@@ -22,12 +22,22 @@
 //  WHO READS the key determines whether the pref drives behavior *today*:
 //    • `AppTheme` (Appearance ▸ theme) drives `NSApp.appearance` live via
 //      `.onChange` in this file — that is fully wired here (no non-owned edit needed).
+//    • The DXF-save-version key is also WIRED: `DXFDocumentCodec` reads it off-main and
+//      threads it into the engine writer (R2000 default = unchanged behavior). The new
+//      intermediate tiers (R14 / R2004 / R2007) are just additional `DXFExportVersion`
+//      cases that map to the corresponding engine `DXFVersion` — no read-site change.
 //    • Every OTHER key is STORED-PENDING-A-READ-SITE: a follow-up (in a file this
 //      task does not own — `ContentView`/`CanvasModel`/`LibreCADDocument`/
 //      `CanvasTheme`) should consult `AppSettings.<key>` when it seeds a new
 //      drawing / builds the canvas chrome / picks default snap modes. The exact
 //      read-site for each key is named in a `// READ-SITE:` comment below and in the
-//      task report, so wiring them is a mechanical, well-scoped change.
+//      task report, so wiring them is a mechanical, well-scoped change. In particular,
+//      the SNAP seeding read-site (a new window's `CanvasModel`, where `snapModes` /
+//      the aperture / `polarAngleIncrement` are initialized) is a Wave-3 follow-up: it
+//      should seed those three from `AppSettings.snapMode(fromMask:)` /
+//      `AppSettings.clampAperture(_:)` / `AppSettings.polarIncrementRadians(fromDegrees:)`
+//      (or read the whole `AppSettingsModel` snapshot, whose `defaultSnap` /
+//      `snapAperturePx` / `polarIncrementRadians` fields are already normalized).
 //
 //  ## Testability (CONVENTIONS.md — pure model, GUI-free tests)
 //  All the non-GUI logic — the key strings, the typed defaults, and the
@@ -94,6 +104,11 @@ enum AppSettings {
         static let defaultSnapMask = "app.snapping.defaultSnapMask"
         /// Default snap aperture in screen pixels for new windows.
         static let snapAperturePx = "app.snapping.snapAperturePx"
+        /// Default POLAR-tracking angle increment, stored in DEGREES (Double). The model
+        /// (`CanvasModel.polarAngleIncrement`) works in radians, so the read-site converts
+        /// via `AppSettings.polarIncrementRadians(fromDegrees:)`. Degrees is the human-
+        /// readable unit users expect in the Preferences UI (AutoCAD POLARANG is in degrees).
+        static let polarIncrementDegrees = "app.snapping.polarIncrementDegrees"
 
         /// Rendering tab.
         /// Whether antialiasing is on.
@@ -131,6 +146,9 @@ enum AppSettings {
         /// onEntity+grid+free) — mirrors `SnapMode.standard`.
         static let snapMask: Int = Int(SnapMode.standard.rawValue)
         static let snapAperturePx: Double = 12
+        /// 15° — LibreCAD's / AutoCAD's classic polar increment (== `CanvasModel`'s own
+        /// `.pi / 12` default, expressed in degrees). 360 / 15 = 24 even divisions of a turn.
+        static let polarIncrementDegrees: Double = 15
 
         static let antialias = true
         static let renderQuality: RenderQuality = .high
@@ -160,6 +178,24 @@ enum AppSettings {
     static func clampTextHeight(_ h: Double) -> Double {
         guard h.isFinite, h > 0 else { return Default.textHeight }
         return h
+    }
+
+    /// Clamp a polar-tracking angle increment (DEGREES) to the usable range `(0, 360]`.
+    /// A zero/negative/non-finite step would make `PolarConstraint.constrain` a no-op
+    /// (it guards `incrementRadians > 0`), and a step over a full turn is meaningless, so
+    /// out-of-range input falls back to the 15° default. The common case (a clean divisor
+    /// of 360 such as 5/10/15/30/45/90) passes through unchanged.
+    static func clampPolarIncrementDegrees(_ deg: Double) -> Double {
+        guard deg.isFinite, deg > 0, deg <= 360 else { return Default.polarIncrementDegrees }
+        return deg
+    }
+
+    /// Convert a stored polar increment (DEGREES) to the RADIANS the model
+    /// (`CanvasModel.polarAngleIncrement`) and `PolarConstraint.constrain` consume. The
+    /// input is clamped first, so a corrupt/out-of-range key never yields a no-op polar
+    /// step — the read-site always gets a valid, positive radian increment.
+    static func polarIncrementRadians(fromDegrees deg: Double) -> Double {
+        clampPolarIncrementDegrees(deg) * .pi / 180
     }
 
     /// Resolve a stored unit rawValue back to a `DrawingUnit`, falling back to the
@@ -203,6 +239,10 @@ struct AppSettingsModel: Sendable, Equatable {
 
     var defaultSnap: SnapMode
     var snapAperturePx: Double
+    /// The POLAR-tracking angle increment in RADIANS — ready for the model
+    /// (`CanvasModel.polarAngleIncrement`) to consume directly. Built by running the
+    /// stored degrees value through `AppSettings.polarIncrementRadians(fromDegrees:)`.
+    var polarIncrementRadians: Double
 
     var antialias: Bool
     var renderQuality: RenderQuality
@@ -225,6 +265,7 @@ struct AppSettingsModel: Sendable, Equatable {
         crosshairStyle: AppSettings.Default.crosshairStyle,
         defaultSnap: SnapMode(rawValue: UInt16(truncatingIfNeeded: AppSettings.Default.snapMask)),
         snapAperturePx: AppSettings.Default.snapAperturePx,
+        polarIncrementRadians: AppSettings.Default.polarIncrementDegrees * .pi / 180,
         antialias: AppSettings.Default.antialias,
         renderQuality: AppSettings.Default.renderQuality,
         defaultLineWidthMM: AppSettings.Default.defaultLineWidthMM,
@@ -250,7 +291,8 @@ struct AppSettingsModel: Sendable, Equatable {
          defaultLineWidthMM: Double,
          textFont: String,
          textHeight: Double,
-         dxfExportVersionRaw: String = AppSettings.Default.dxfExportVersion.rawValue) {
+         dxfExportVersionRaw: String = AppSettings.Default.dxfExportVersion.rawValue,
+         polarIncrementDegrees: Double = AppSettings.Default.polarIncrementDegrees) {
         self.defaultUnit = AppSettings.unit(fromRaw: unitRaw)
         self.defaultTemplate = template.isEmpty ? AppSettings.Default.template : template
         self.autosaveEnabled = autosave
@@ -260,6 +302,7 @@ struct AppSettingsModel: Sendable, Equatable {
         self.crosshairStyle = CrosshairStyle(rawValue: crosshairStyleRaw) ?? AppSettings.Default.crosshairStyle
         self.defaultSnap = AppSettings.snapMode(fromMask: snapMask)
         self.snapAperturePx = AppSettings.clampAperture(snapAperturePx)
+        self.polarIncrementRadians = AppSettings.polarIncrementRadians(fromDegrees: polarIncrementDegrees)
         self.antialias = antialias
         self.renderQuality = RenderQuality(rawValue: renderQualityRaw) ?? AppSettings.Default.renderQuality
         self.defaultLineWidthMM = AppSettings.clampLineWidthMM(defaultLineWidthMM)
@@ -273,6 +316,7 @@ struct AppSettingsModel: Sendable, Equatable {
     private init(defaultUnit: DrawingUnit, defaultTemplate: String, autosaveEnabled: Bool,
                  theme: AppTheme, canvasBackgroundHex: String, gridColorHex: String,
                  crosshairStyle: CrosshairStyle, defaultSnap: SnapMode, snapAperturePx: Double,
+                 polarIncrementRadians: Double,
                  antialias: Bool, renderQuality: RenderQuality, defaultLineWidthMM: Double,
                  defaultTextFont: String, defaultTextHeight: Double,
                  dxfExportVersion: DXFExportVersion) {
@@ -285,6 +329,7 @@ struct AppSettingsModel: Sendable, Equatable {
         self.crosshairStyle = crosshairStyle
         self.defaultSnap = defaultSnap
         self.snapAperturePx = snapAperturePx
+        self.polarIncrementRadians = polarIncrementRadians
         self.antialias = antialias
         self.renderQuality = renderQuality
         self.defaultLineWidthMM = defaultLineWidthMM
@@ -345,16 +390,24 @@ enum RenderQuality: String, CaseIterable, Sendable, Hashable {
 }
 
 /// The DXF format version a Save/Export writes. A thin app-level mirror of the engine's
-/// `CADEngine.DXFVersion`: it exposes the broadly-useful tiers in the Preferences UI
-/// (R12 / R2000 / R2018) and converts to the engine type for the write call. Backed by a
-/// stable `rawValue` String so it persists to `UserDefaults` via `@AppStorage` and is read
-/// off-main by `DXFDocumentCodec`. R2000 is the default — identical to the writer's own
-/// default — so an unset key leaves existing save behavior byte-for-byte unchanged.
+/// `CADEngine.DXFVersion`: it exposes every tier the engine writer (and the underlying
+/// `LCDxfVersion`/libdxfrw) supports in the Preferences UI — R12 / R14 / R2000 / R2004 /
+/// R2007 / R2018 — and converts to the engine type for the write call. Backed by a stable
+/// `rawValue` String so it persists to `UserDefaults` via `@AppStorage` and is read off-main
+/// by `DXFDocumentCodec`. R2000 is the default — identical to the writer's own default — so an
+/// unset key leaves existing save behavior byte-for-byte unchanged. The `CaseIterable` order
+/// is the chronological version order the Picker presents.
 enum DXFExportVersion: String, CaseIterable, Sendable, Hashable {
     /// AutoCAD R12 (AC1009) — the oldest, most widely-importable DXF (no ACAD object DB).
     case r12
+    /// AutoCAD R14 (AC1014).
+    case r14
     /// AutoCAD 2000 (AC1015) — the modern, broadly-compatible default.
     case r2000
+    /// AutoCAD 2004 (AC1018).
+    case r2004
+    /// AutoCAD 2007 (AC1021).
+    case r2007
     /// AutoCAD 2018 (AC1032) — the newest tier the engine writer supports.
     case r2018
 
@@ -362,7 +415,10 @@ enum DXFExportVersion: String, CaseIterable, Sendable, Hashable {
     var label: String {
         switch self {
         case .r12:   return "R12 (AC1009)"
+        case .r14:   return "R14 (AC1014)"
         case .r2000: return "R2000 (AC1015)"
+        case .r2004: return "R2004 (AC1018)"
+        case .r2007: return "R2007 (AC1021)"
         case .r2018: return "R2018 (AC1032)"
         }
     }
@@ -371,7 +427,10 @@ enum DXFExportVersion: String, CaseIterable, Sendable, Hashable {
     var engineVersion: DXFVersion {
         switch self {
         case .r12:   return .r12
+        case .r14:   return .r14
         case .r2000: return .r2000
+        case .r2004: return .r2004
+        case .r2007: return .r2007
         case .r2018: return .r2018
         }
     }
@@ -532,14 +591,19 @@ private struct AppearanceSettingsTab: View {
 
 // MARK: Snapping tab
 
-/// Snapping: default snap modes + aperture for NEW windows. Both are
-/// STORED-PENDING-A-READ-SITE (the new-window canvas-model build should seed its snap
-/// state from these).
+/// Snapping: default snap modes + aperture + polar increment for NEW windows. All three
+/// are STORED-PENDING-A-READ-SITE (the new-window canvas-model build should seed its snap
+/// state — `snapModes`, the screen-pixel aperture, and `polarAngleIncrement` — from these).
 private struct SnappingSettingsTab: View {
-    // READ-SITE: new-window CanvasModel build — seed `enabledSnapModes` from this mask.
+    // READ-SITE: new-window CanvasModel build — seed `snapModes` from this mask
+    // (via `AppSettings.snapMode(fromMask:)`).
     @AppStorage(AppSettings.Key.defaultSnapMask) private var snapMask = AppSettings.Default.snapMask
-    // READ-SITE: new-window snapper — seed the screen-pixel aperture from this.
+    // READ-SITE: new-window snapper — seed the screen-pixel aperture from this
+    // (via `AppSettings.clampAperture(_:)`).
     @AppStorage(AppSettings.Key.snapAperturePx) private var aperture = AppSettings.Default.snapAperturePx
+    // READ-SITE: new-window CanvasModel build — seed `polarAngleIncrement` (RADIANS) from
+    // this DEGREES value via `AppSettings.polarIncrementRadians(fromDegrees:)`.
+    @AppStorage(AppSettings.Key.polarIncrementDegrees) private var polarDegrees = AppSettings.Default.polarIncrementDegrees
 
     var body: some View {
         Form {
@@ -556,6 +620,17 @@ private struct SnappingSettingsTab: View {
                     ), format: .number)
                     .frame(width: 80).multilineTextAlignment(.trailing)
                 }
+            }
+            Section("Polar tracking") {
+                LabeledContent("Angle increment (°)") {
+                    TextField("degrees", value: Binding(
+                        get: { polarDegrees },
+                        set: { polarDegrees = AppSettings.clampPolarIncrementDegrees($0) }
+                    ), format: .number)
+                    .frame(width: 80).multilineTextAlignment(.trailing)
+                }
+                Text("The angular step polar tracking (F10) snaps to in new windows. 15° gives 24 even divisions of a full turn.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
