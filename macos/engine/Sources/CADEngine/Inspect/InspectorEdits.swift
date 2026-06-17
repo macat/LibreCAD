@@ -264,6 +264,32 @@ public enum InspectorEdits {
         return .dimension(d)
     }
 
+    /// Moves a `.dimension`'s text middle point (DXF code 11) — the explicit
+    /// override for where the measurement text is centered. Passing `nil` clears
+    /// the override so the resolve recenters the text on the dimension line.
+    public static func setDimTextMiddle(_ kind: EntityKind, _ point: Vector?) -> EntityKind {
+        guard case .dimension(var d) = kind else { return kind }
+        d.textMiddle = point
+        return .dimension(d)
+    }
+
+    /// Sets a `.dimension`'s explicit measurement-text rotation (DXF code 53,
+    /// radians), independent of the dimension-line angle. Passing `nil` clears the
+    /// override so the resolve derives the upright baseline angle from the geometry.
+    public static func setDimTextRotation(_ kind: EntityKind, _ rotation: Double?) -> EntityKind {
+        guard case .dimension(var d) = kind else { return kind }
+        d.textRotation = rotation
+        return .dimension(d)
+    }
+
+    /// Sets a `.dimension`'s extension-line oblique (slant) angle (DXF code 52,
+    /// radians) for linear/aligned dimensions. `0` ⇒ perpendicular extension lines.
+    public static func setDimOblique(_ kind: EntityKind, _ angle: Double) -> EntityKind {
+        guard case .dimension(var d) = kind else { return kind }
+        d.obliqueAngle = angle
+        return .dimension(d)
+    }
+
     // MARK: - Insert / block-reference field edits (RS_Insert, DXF INSERT)
 
     /// Replaces an `.insert`'s insertion (placement) point (DXF code 10).

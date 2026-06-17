@@ -193,6 +193,116 @@ struct InspectorMTextEditTests {
     }
 }
 
+// MARK: - Dimension text-edit field edits → DimData
+
+@Suite("Inspector dimension text edits")
+struct InspectorDimTextEditTests {
+
+    /// A linear dimension with no text overrides set (the resolve-derived defaults).
+    private func sampleDim() -> EntityKind {
+        .dimension(DimData(
+            kind: .linear(extension1: Vector(0, 0), extension2: Vector(10, 0), angle: 0),
+            definitionPoint: Vector(5, 3)))
+    }
+
+    @Test("setDimTextMiddle moves the text middle point; nil clears it; other fields kept")
+    func textMiddle() {
+        let kind = sampleDim()
+        guard case .dimension(let base) = kind else { Issue.record("not a dimension"); return }
+        #expect(base.textMiddle == nil)               // baseline: no override
+
+        let moved = InspectorEdits.setDimTextMiddle(kind, Vector(7, 4))
+        guard case .dimension(let d) = moved else { Issue.record("not a dimension"); return }
+        #expect(d.textMiddle == Vector(7, 4))
+        #expect(d.definitionPoint == base.definitionPoint)  // other fields kept
+        #expect(d.textRotation == base.textRotation)
+        #expect(d.obliqueAngle == base.obliqueAngle)
+
+        // Clearing the override.
+        let cleared = InspectorEdits.setDimTextMiddle(moved, nil)
+        guard case .dimension(let d2) = cleared else { Issue.record("not a dimension"); return }
+        #expect(d2.textMiddle == nil)
+    }
+
+    @Test("setDimTextRotation sets the explicit text rotation; nil clears it")
+    func textRotation() {
+        let kind = sampleDim()
+        guard case .dimension(let base) = kind else { Issue.record("not a dimension"); return }
+        #expect(base.textRotation == nil)             // baseline: derived angle
+
+        let rotated = InspectorEdits.setDimTextRotation(kind, .pi / 4)
+        guard case .dimension(let d) = rotated else { Issue.record("not a dimension"); return }
+        #expect(d.textRotation != nil)
+        #expect(abs((d.textRotation ?? 0) - .pi / 4) < 1e-12)
+        #expect(d.textMiddle == base.textMiddle)      // other fields kept
+
+        let cleared = InspectorEdits.setDimTextRotation(rotated, nil)
+        guard case .dimension(let d2) = cleared else { Issue.record("not a dimension"); return }
+        #expect(d2.textRotation == nil)
+    }
+
+    @Test("setDimOblique sets the extension-line oblique angle; other fields kept")
+    func oblique() {
+        let kind = sampleDim()
+        guard case .dimension(let base) = kind else { Issue.record("not a dimension"); return }
+        #expect(base.obliqueAngle == 0)               // baseline: perpendicular
+
+        let slanted = InspectorEdits.setDimOblique(kind, .pi / 6)
+        guard case .dimension(let d) = slanted else { Issue.record("not a dimension"); return }
+        #expect(abs(d.obliqueAngle - .pi / 6) < 1e-12)
+        #expect(d.textMiddle == base.textMiddle)      // other fields kept
+        #expect(d.textRotation == base.textRotation)
+    }
+
+    @Test("no-op when the value is unchanged — re-setting the same value yields an equal kind")
+    func noOpWhenUnchanged() {
+        // textMiddle: setting the same point back produces an equal kind.
+        let withMid = InspectorEdits.setDimTextMiddle(sampleDim(), Vector(7, 4))
+        #expect(InspectorEdits.setDimTextMiddle(withMid, Vector(7, 4)) == withMid)
+
+        // textRotation: re-setting the same rotation is a no-op.
+        let withRot = InspectorEdits.setDimTextRotation(sampleDim(), .pi / 4)
+        #expect(InspectorEdits.setDimTextRotation(withRot, .pi / 4) == withRot)
+
+        // oblique: re-setting the same angle is a no-op.
+        let withObl = InspectorEdits.setDimOblique(sampleDim(), .pi / 6)
+        #expect(InspectorEdits.setDimOblique(withObl, .pi / 6) == withObl)
+    }
+
+    @Test("dimension text edits applied to a non-dimension kind are no-ops")
+    func nonDimensionUnaffected() {
+        let line = EntityKind.line(LineData(start: Vector(0, 0), end: Vector(10, 0)))
+        #expect(InspectorEdits.setDimTextMiddle(line, Vector(7, 4)) == line)
+        #expect(InspectorEdits.setDimTextRotation(line, .pi / 4) == line)
+        #expect(InspectorEdits.setDimOblique(line, .pi / 6) == line)
+    }
+
+    @Test("each edit is undoable/redoable: the source kind is unmutated, and re-applying reproduces the edit")
+    func undoRedoSnapshots() {
+        // The app's undo funnel snapshots the prior EntityKind and applies the new
+        // one via `.replace`; these pure builders never mutate their input, so the
+        // original value IS the undo snapshot, and re-applying the builder IS redo.
+        let original = sampleDim()
+
+        let edited = InspectorEdits.setDimOblique(original, .pi / 3)
+        #expect(edited != original)                   // a real change
+
+        // Undo: the original snapshot is intact (the builder did not mutate it).
+        guard case .dimension(let o) = original else { Issue.record("not a dimension"); return }
+        #expect(o.obliqueAngle == 0)
+
+        // Redo: re-applying the same edit to the original reproduces the edited value.
+        let redone = InspectorEdits.setDimOblique(original, .pi / 3)
+        #expect(redone == edited)
+
+        // And the same holds for the two override fields.
+        let mid = InspectorEdits.setDimTextMiddle(original, Vector(2, 9))
+        #expect(InspectorEdits.setDimTextMiddle(original, Vector(2, 9)) == mid)
+        let rot = InspectorEdits.setDimTextRotation(original, .pi / 5)
+        #expect(InspectorEdits.setDimTextRotation(original, .pi / 5) == rot)
+    }
+}
+
 // MARK: - Font / style derivation (the font-system payoff)
 
 @Suite("Inspector font/style derivation")
