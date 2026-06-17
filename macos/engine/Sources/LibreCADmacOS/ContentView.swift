@@ -1699,6 +1699,12 @@ enum ToolCatalog {
         case .centerRadius: return "Center, Radius"
         case .twoPoint:     return "2 Points"
         case .threePoint:   return "3 Points"
+        // W5-5A construction modes — titles only (UNWIRED: not yet offered in the
+        // options-bar picker / draw flyout; the W4 wire-wave surfaces them). Listed
+        // here so this exhaustive no-default switch keeps compiling.
+        case .tanTanRadius: return "Tan, Tan, Radius"
+        case .tanTanTan:    return "Tan, Tan, Tan"
+        case .fromArc:      return "From Arc"
         }
     }
 

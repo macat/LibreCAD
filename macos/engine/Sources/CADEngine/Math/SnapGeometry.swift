@@ -391,4 +391,179 @@ public enum SnapGeometry {
         guard a.valid, b.valid else { return .invalid }
         return (a + b) * 0.5
     }
+
+    // MARK: - Tangent-circle construction (TTR / TTT)
+    //
+    // Solvers for the constructive Circle tool modes (W5-5A), mirroring LibreCAD's
+    // `RS_ActionDrawCircleTan2_1P` / `RS_ActionDrawCircleTan3` /
+    // `RS_Creation::createCircle*` tangent constructions. Each returns the CENTERS of
+    // every circle of the given (TTR) or solved (TTT) radius that is tangent to the
+    // two/three references; the caller picks the one nearest the cursor and builds the
+    // `CircleData`. All are pure primitive-parameter functions (no entity enum), same
+    // shape as the snap kernels above, so they unit-test in isolation.
+    //
+    // CONVENTION: "tangent to a line" means tangent to the INFINITE carrier line of
+    // the segment `(a, b)` — the constructed circle touches the line, which is what
+    // AutoCAD/LibreCAD's TTR does (the segment endpoints don't bound the contact).
+
+    /// All centers of a circle of radius `r` tangent to BOTH infinite lines
+    /// `(a0,a1)` and `(b0,b1)` (TTR, line–line). A tangent circle's center lies on a
+    /// line PARALLEL to each carrier at perpendicular offset `±r`; intersecting the
+    /// two offset families gives up to FOUR centers (one per quadrant of the crossing),
+    /// each exactly `r` from both lines. Empty for parallel/degenerate carriers.
+    ///
+    /// The caller keeps whichever center is nearest the cursor (`closestCenter`).
+    public static func tangentCircleCentersLineLine(r: Double,
+                                                    a0: Vector, a1: Vector,
+                                                    b0: Vector, b1: Vector) -> [Vector] {
+        guard r > Tolerance.distance else { return [] }
+        let na = lineNormal(a0, a1), nb = lineNormal(b0, b1)
+        guard na.valid, nb.valid else { return [] }
+        var out: [Vector] = []
+        for sa in [1.0, -1.0] {
+            for sb in [1.0, -1.0] {
+                // Offset each carrier by `r` along its unit normal (two parallels each).
+                let oa0 = a0 + na * (sa * r), oa1 = a1 + na * (sa * r)
+                let ob0 = b0 + nb * (sb * r), ob1 = b1 + nb * (sb * r)
+                let sol = Intersections.lineLine(oa0, oa1, ob0, ob1, segment: false)
+                if let c = sol.first, c.valid { out.append(c) }
+            }
+        }
+        return out
+    }
+
+    /// All centers of a circle of radius `r` tangent to the infinite line `(a0,a1)`
+    /// AND the circle `(center, radius R)` (TTR, line–circle). The center lies on a
+    /// line parallel to the carrier at offset `±r` AND on a circle concentric with
+    /// the given one at radius `R + r` (externally tangent) or `|R − r|` (internally
+    /// tangent). Intersecting both parallels with both concentric circles gives up to
+    /// FOUR centers. Empty for a degenerate carrier or non-positive radii.
+    public static func tangentCircleCentersLineCircle(r: Double,
+                                                     a0: Vector, a1: Vector,
+                                                     center: Vector, radius R: Double) -> [Vector] {
+        guard r > Tolerance.distance, abs(R) > Tolerance.distance else { return [] }
+        let n = lineNormal(a0, a1)
+        guard n.valid else { return [] }
+        var out: [Vector] = []
+        let bigR = abs(R) + r            // externally tangent locus
+        let smallR = abs(abs(R) - r)     // internally tangent locus
+        for s in [1.0, -1.0] {
+            let o0 = a0 + n * (s * r), o1 = a1 + n * (s * r)
+            for cr in [bigR, smallR] where cr > Tolerance.distance {
+                let sol = Intersections.lineCircle(line: (o0, o1), center: center, radius: cr)
+                for p in sol.points where p.valid { out.append(p) }
+            }
+        }
+        return out
+    }
+
+    /// All centers of a circle of radius `r` tangent to BOTH circles
+    /// `(c1,R1)` and `(c2,R2)` (TTR, circle–circle). The center lies on a circle
+    /// concentric with each given one at radius `Ri + r` (external) or `|Ri − r|`
+    /// (internal); intersecting the four `(locus1, locus2)` pairs gives up to EIGHT
+    /// centers (the distinct ones). Empty for non-positive radii.
+    public static func tangentCircleCentersCircleCircle(r: Double,
+                                                       c1: Vector, radius1 R1: Double,
+                                                       c2: Vector, radius2 R2: Double) -> [Vector] {
+        guard r > Tolerance.distance, abs(R1) > Tolerance.distance, abs(R2) > Tolerance.distance else {
+            return []
+        }
+        let loci1 = [abs(R1) + r, abs(abs(R1) - r)].filter { $0 > Tolerance.distance }
+        let loci2 = [abs(R2) + r, abs(abs(R2) - r)].filter { $0 > Tolerance.distance }
+        var out: [Vector] = []
+        for l1 in loci1 {
+            for l2 in loci2 {
+                let sol = Intersections.circleCircle(center1: c1, radius1: l1,
+                                                     center2: c2, radius2: l2)
+                for p in sol.points where p.valid { out.append(p) }
+            }
+        }
+        return out
+    }
+
+    /// The incircle and three excircles of the triangle formed by THREE infinite
+    /// lines (TTT, three lines): every circle tangent to all three carriers. Returns
+    /// `(center, radius)` for each — the inscribed circle first, then the three
+    /// escribed circles. Empty when any two carriers are parallel (no triangle) or a
+    /// carrier is degenerate. The caller keeps whichever is nearest the cursor.
+    ///
+    /// Geometry: the four tangent circles' centers are the intersections of the
+    /// internal/external angle bisectors. We instead solve directly: a circle tangent
+    /// to all three lines has its center equidistant (signed) from each. Using the
+    /// three pairwise corners + the side lengths, the incenter is the side-length-
+    /// weighted average of the opposite vertices; each excenter negates one weight.
+    public static func tangentCirclesThreeLines(a0: Vector, a1: Vector,
+                                                b0: Vector, b1: Vector,
+                                                d0: Vector, d1: Vector) -> [(center: Vector, radius: Double)] {
+        // Triangle vertices = pairwise infinite-line intersections.
+        guard let vA = cornerOf(b0, b1, d0, d1),   // opposite line A (= intersection of B,D)
+              let vB = cornerOf(a0, a1, d0, d1),   // opposite line B
+              let vC = cornerOf(a0, a1, b0, b1)    // opposite line C
+        else { return [] }
+        // Side lengths opposite each vertex (a = |BC|, b = |CA|, c = |AB|).
+        let la = (vB - vC).magnitude
+        let lb = (vC - vA).magnitude
+        let lc = (vA - vB).magnitude
+        guard la > Tolerance.distance, lb > Tolerance.distance, lc > Tolerance.distance else { return [] }
+        // Incenter + the three excenters via barycentric weights (±a, ±b, ±c).
+        let weightSets: [(Double, Double, Double)] = [
+            ( la,  lb,  lc),   // incircle
+            (-la,  lb,  lc),   // excircle opposite A
+            ( la, -lb,  lc),   // excircle opposite B
+            ( la,  lb, -lc),   // excircle opposite C
+        ]
+        var out: [(center: Vector, radius: Double)] = []
+        for (wa, wb, wc) in weightSets {
+            let sum = wa + wb + wc
+            guard abs(sum) > Tolerance.distance else { continue }
+            let center = (vA * wa + vB * wb + vC * wc) * (1.0 / sum)
+            // Radius = perpendicular distance from the center to any one carrier line.
+            let radius = perpendicularDistanceToLine(center, a0, a1)
+            guard radius > Tolerance.distance else { continue }
+            out.append((center, radius))
+        }
+        return out
+    }
+
+    /// Picks the center NEAREST `cursor` from a candidate list, or `.invalid` for an
+    /// empty list / invalid cursor. The selection rule TTR/TTT use to disambiguate
+    /// among their multiple solutions (the user steers by where the cursor sits).
+    public static func closestCenter(_ centers: [Vector], to cursor: Vector) -> Vector {
+        guard cursor.valid else { return .invalid }
+        var best = Vector.invalid
+        var bestDist = Double.greatestFiniteMagnitude
+        for c in centers where c.valid {
+            let d = c.distance(to: cursor)
+            if d < bestDist { bestDist = d; best = c }
+        }
+        return best
+    }
+
+    // MARK: - Tangent-circle helpers (private)
+
+    /// The UNIT normal of the line `(a, b)` (perpendicular to its direction), or
+    /// `.invalid` for a degenerate (zero-length) line.
+    private static func lineNormal(_ a: Vector, _ b: Vector) -> Vector {
+        let d = b - a
+        let len = d.magnitude
+        guard len > Tolerance.distance else { return .invalid }
+        // Rotate the unit direction +90° → (−dy, dx)/len.
+        return Vector(-d.y, d.x) * (1.0 / len)
+    }
+
+    /// The infinite-line intersection (corner) of `(a0,a1)` and `(b0,b1)`, or `nil`
+    /// when parallel/coincident.
+    private static func cornerOf(_ a0: Vector, _ a1: Vector, _ b0: Vector, _ b1: Vector) -> Vector? {
+        let sol = Intersections.lineLine(a0, a1, b0, b1, segment: false)
+        guard let c = sol.first, c.valid else { return nil }
+        return c
+    }
+
+    /// The perpendicular distance from `p` to the infinite line `(a, b)` (>= 0), or
+    /// `0` for a degenerate line.
+    private static func perpendicularDistanceToLine(_ p: Vector, _ a: Vector, _ b: Vector) -> Double {
+        let foot = perpendicularFootOnLine(from: p, a: a, b: b)
+        guard foot.valid else { return 0 }
+        return (p - foot).magnitude
+    }
 }

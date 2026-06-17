@@ -62,6 +62,20 @@ public enum CircleConstructionMode: Sendable, Hashable, CaseIterable {
     /// three picks (its circumcircle) (`RS_ActionDrawCircle3P`). Collinear /
     /// coincident picks have no finite circle and are ignored.
     case threePoint
+    /// Tangent–Tangent–Radius: pick TWO entities (lines / circles / arcs) the circle
+    /// must be tangent to, with a fixed `fixedSize` radius; among the up-to-eight
+    /// solution circles of that radius the one whose center is NEAREST the cursor (at
+    /// the radius pick) is committed (`RS_ActionDrawCircleTan2`). Requires a positive
+    /// `fixedSize` (the TTR radius); with none set the picks are no-ops.
+    case tanTanRadius
+    /// Tangent–Tangent–Tangent (inscribe): pick THREE entities the circle must be
+    /// tangent to; the inscribed/escribed circle nearest the cursor is committed
+    /// (`RS_ActionDrawCircleTan3`). This build solves the THREE-LINE case (triangle
+    /// incircle + excircles) in closed form; a non-line third reference is a no-op.
+    case tanTanTan
+    /// From-arc: pick a single ARC (or circle); the circle COMPLETING it — same center
+    /// and radius — is committed (a one-pick convenience, no solver).
+    case fromArc
 }
 
 /// The interactive center+radius Circle tool. Click the center, then click (or
@@ -92,6 +106,23 @@ public struct CircleTool: Tool {
         /// Three-point mode: two points fixed; waiting for the third. The committed
         /// circle is the unique one through the three picks.
         case threeThird(first: Vector, second: Vector)
+
+        /// TTR mode: waiting for the FIRST tangent entity pick.
+        case ttrFirst
+        /// TTR mode: first tangent entity fixed; waiting for the SECOND. The committed
+        /// circle (radius = `fixedSize`) is tangent to both, picked by cursor proximity.
+        case ttrSecond(first: EntityRecord)
+
+        /// TTT (inscribe) mode: waiting for the FIRST tangent entity.
+        case tttFirst
+        /// TTT mode: one entity fixed; waiting for the second.
+        case tttSecond(first: EntityRecord)
+        /// TTT mode: two entities fixed; waiting for the third. The committed circle is
+        /// tangent to all three (incircle/excircle nearest the cursor).
+        case tttThird(first: EntityRecord, second: EntityRecord)
+
+        /// From-arc mode: waiting for the single arc/circle pick to complete.
+        case fromArcPick
     }
 
     /// The current state. Set in `init` from the `mode`.
@@ -100,6 +131,13 @@ public struct CircleTool: Tool {
     /// The last cursor point seen via `.move`, used to draw the rubber-band even
     /// between clicks. Invalid until the first move.
     private var cursor: Vector = .invalid
+
+    /// The candidate circle computed on the last `.move` for the ENTITY-PICK modes
+    /// (TTR / TTT / from-arc), cached because `preview` has no `ToolContext` (the app
+    /// builds one only for `handle`). The interactive point modes don't use it (their
+    /// preview is a pure function of `cursor` + fixed points). `nil` when no valid
+    /// candidate circle would result. Mirrors `FilletTool.previewResult`.
+    private var previewCircleData: CircleData?
 
     /// Whether a numeric size entry means a radius (default) or a diameter. Surfaced
     /// by the tool-options bar (UX-plan U2). Used to interpret `fixedSize`.
@@ -138,6 +176,9 @@ public struct CircleTool: Tool {
         case .centerRadius: return .settingCenter
         case .twoPoint:     return .twoFirst
         case .threePoint:   return .threeFirst
+        case .tanTanRadius: return .ttrFirst
+        case .tanTanTan:    return .tttFirst
+        case .fromArc:      return .fromArcPick
         }
     }
 
@@ -154,6 +195,12 @@ public struct CircleTool: Tool {
         case .threeFirst:    return "Specify first point"
         case .threeSecond:   return "Specify second point"
         case .threeThird:    return "Specify third point"
+        case .ttrFirst:      return "Select first tangent entity"
+        case .ttrSecond:     return "Select second tangent entity"
+        case .tttFirst:      return "Select first tangent entity"
+        case .tttSecond:     return "Select second tangent entity"
+        case .tttThird:      return "Select third tangent entity"
+        case .fromArcPick:   return "Select an arc to complete"
         }
     }
 
@@ -176,6 +223,12 @@ public struct CircleTool: Tool {
         case .threeThird(let first, let second):
             // Rubber-band the circle through first → second → cursor.
             guard let c = Self.circleThrough(first, second, cursor) else { return [] }
+            return previewCircle(center: c.center, radius: c.radius)
+
+        case .ttrSecond, .tttThird, .fromArcPick:
+            // Entity-pick modes: show the candidate circle cached on the last `.move`
+            // (the preview path has no `ToolContext`, so it can't recompute the pick).
+            guard let c = previewCircleData else { return [] }
             return previewCircle(center: c.center, radius: c.radius)
 
         default:
@@ -292,8 +345,9 @@ public struct CircleTool: Tool {
     /// discard in-progress picks — so it is only safe with nothing to lose.
     private var isInitialState: Bool {
         switch state {
-        case .settingCenter, .twoFirst, .threeFirst: return true
-        default:                                      return false
+        case .settingCenter, .twoFirst, .threeFirst,
+             .ttrFirst, .tttFirst, .fromArcPick: return true
+        default:                                 return false
         }
     }
 
@@ -329,12 +383,19 @@ public struct CircleTool: Tool {
         switch input {
         case .move(let p):
             cursor = p
-            // A move only matters for the preview once the center is fixed.
+            // The ENTITY-PICK modes (TTR / TTT / from-arc) recompute their candidate
+            // circle from the live context on each move (cached for the context-free
+            // `preview` path). The interactive point modes derive the preview purely
+            // from `cursor` + fixed points, so they only matter once a point is fixed.
+            if isEntityPickMode {
+                previewCircleData = computeEntityPickCircle(at: p, context: context)
+                return previewCircleData == nil ? .none : .preview
+            }
             return preview.isEmpty ? .none : .preview
 
         case .click(let p), .value(let p):
             // A typed coordinate (U1) places the next point exactly like a click.
-            return handleClick(p)
+            return handleClick(p, context: context)
 
         case .backspace:
             return handleBackspace()
@@ -355,7 +416,7 @@ public struct CircleTool: Tool {
 
     // MARK: - Click / backspace handling
 
-    private mutating func handleClick(_ p: Vector) -> ToolOutcome {
+    private mutating func handleClick(_ p: Vector, context: ToolContext) -> ToolOutcome {
         switch state {
         case .settingCenter:
             // Exact-size mode (UX-plan U2): a single click fixes the center and
@@ -407,6 +468,54 @@ public struct CircleTool: Tool {
             // coincident picks have no finite circle — ignore and keep waiting.
             guard let c = Self.circleThrough(first, second, p) else { return .none }
             return commitCircle(center: c.center, radius: c.radius)
+
+        // MARK: Tangent–Tangent–Radius (TTR)
+
+        case .ttrFirst:
+            // Pick the first tangent entity (line / circle / arc) under the click.
+            guard let first = Self.nearestTangentEntity(at: p, exclude: nil, context: context) else {
+                return .none
+            }
+            state = .ttrSecond(first: first)
+            cursor = p
+            previewCircleData = nil
+            return .none
+
+        case .ttrSecond:
+            // Pick the second tangent entity, solve, and commit the candidate circle
+            // whose center is nearest the click.
+            guard let c = computeEntityPickCircle(at: p, context: context) else { return .none }
+            return commitCircle(center: c.center, radius: c.radius)
+
+        // MARK: Tangent–Tangent–Tangent (inscribe, TTT)
+
+        case .tttFirst:
+            guard let first = Self.nearestTangentEntity(at: p, exclude: nil, context: context) else {
+                return .none
+            }
+            state = .tttSecond(first: first)
+            cursor = p
+            previewCircleData = nil
+            return .none
+
+        case .tttSecond(let first):
+            guard let second = Self.nearestTangentEntity(at: p, exclude: first.id, context: context) else {
+                return .none
+            }
+            state = .tttThird(first: first, second: second)
+            cursor = p
+            previewCircleData = nil
+            return .none
+
+        case .tttThird:
+            guard let c = computeEntityPickCircle(at: p, context: context) else { return .none }
+            return commitCircle(center: c.center, radius: c.radius)
+
+        // MARK: From-arc (complete a picked arc/circle to a full circle)
+
+        case .fromArcPick:
+            guard let c = computeEntityPickCircle(at: p, context: context) else { return .none }
+            return commitCircle(center: c.center, radius: c.radius)
         }
     }
 
@@ -426,7 +535,8 @@ public struct CircleTool: Tool {
 
     private mutating func handleBackspace() -> ToolOutcome {
         switch state {
-        case .settingCenter, .twoFirst, .threeFirst:
+        case .settingCenter, .twoFirst, .threeFirst,
+             .ttrFirst, .tttFirst, .fromArcPick:
             // Nothing to step back (waiting for the first pick of the mode).
             return .none
         case .settingRadius:
@@ -446,6 +556,17 @@ public struct CircleTool: Tool {
             state = .threeSecond(first: first)
             cursor = first
             return .preview
+
+        case .ttrSecond, .tttSecond:
+            // Undo the first tangent pick → back to the initial state.
+            reset()
+            return .preview
+
+        case .tttThird(let first, _):
+            // Undo the second tangent pick → back to waiting for it, keep the first.
+            state = .tttSecond(first: first)
+            previewCircleData = nil
+            return .preview
         }
     }
 
@@ -453,6 +574,155 @@ public struct CircleTool: Tool {
     private mutating func reset() {
         state = Self.initialState(for: mode)
         cursor = .invalid
+        previewCircleData = nil
+    }
+
+    // MARK: - Entity-pick modes (TTR / TTT / from-arc)
+
+    /// Whether the active `mode` picks ENTITIES (not points) — TTR, TTT, from-arc.
+    /// These read `context.nearbyEntities` and cache their candidate circle for the
+    /// context-free `preview`; the point modes don't.
+    private var isEntityPickMode: Bool {
+        switch mode {
+        case .tanTanRadius, .tanTanTan, .fromArc: return true
+        case .centerRadius, .twoPoint, .threePoint: return false
+        }
+    }
+
+    /// The candidate circle for the current entity-pick state, given a click/cursor
+    /// `p` and the live context. Drives BOTH the `.move` preview and the committing
+    /// click. `nil` when the pick is invalid or no tangent/from-arc circle results.
+    ///
+    /// - TTR (`.ttrSecond`): picks the second tangent entity under `p`, solves every
+    ///   circle of radius `fixedRadius` tangent to both, and keeps the one whose
+    ///   center is NEAREST `p` (the user steers the solution by where they click).
+    ///   Requires a positive `fixedRadius`.
+    /// - TTT (`.tttThird`): picks the third tangent entity and solves the
+    ///   incircle/excircle (three-line case) nearest `p`.
+    /// - from-arc (`.fromArcPick`): picks an arc/circle under `p` and completes it to
+    ///   a full circle (same center + radius).
+    private func computeEntityPickCircle(at p: Vector, context: ToolContext) -> CircleData? {
+        switch state {
+        case .ttrSecond(let first):
+            guard let r = fixedRadius else { return nil }
+            guard let second = Self.nearestTangentEntity(at: p, exclude: first.id, context: context) else {
+                return nil
+            }
+            let centers = Self.tangentCenters(first: first, second: second, radius: r)
+            let center = SnapGeometry.closestCenter(centers, to: p)
+            guard center.valid else { return nil }
+            return CircleData(center: center, radius: r)
+
+        case .tttThird(let first, let second):
+            guard let third = Self.nearestTangentEntity(at: p, exclude: nil, context: context),
+                  third.id != first.id, third.id != second.id else { return nil }
+            let solutions = Self.inscribedCircles(first: first, second: second, third: third)
+            // Keep the (center, radius) whose center is nearest the pick.
+            let center = SnapGeometry.closestCenter(solutions.map(\.center), to: p)
+            guard center.valid, let hit = solutions.first(where: { $0.center == center }) else {
+                return nil
+            }
+            return CircleData(center: hit.center, radius: hit.radius)
+
+        case .fromArcPick:
+            guard let e = Self.nearestTangentEntity(at: p, exclude: nil, context: context) else {
+                return nil
+            }
+            return Self.circleCompleting(e)
+
+        default:
+            return nil
+        }
+    }
+
+    /// The nearest LINE / CIRCLE / ARC within the pick aperture of `p`, optionally
+    /// excluding one id (so the second/third pick can't re-pick an earlier one). Other
+    /// kinds are skipped. Mirrors `FilletTool.nearestLine`'s exact-distance pick but
+    /// accepts the tangent-able primitive kinds.
+    static func nearestTangentEntity(at p: Vector, exclude: EntityID?, context: ToolContext) -> EntityRecord? {
+        guard p.valid else { return nil }
+        let tol = pickTolerance(context)
+        var best: EntityRecord?
+        var bestDist = Double.greatestFiniteMagnitude
+        for e in context.nearbyEntities(p, tol) where e.id != exclude {
+            switch e.kind {
+            case .line, .circle, .arc:
+                let d = HitTesting.worldDistance(from: p, to: e)
+                if d < bestDist { bestDist = d; best = e }
+            default:
+                continue
+            }
+        }
+        return best
+    }
+
+    /// The pick tolerance aperture in world units (mirrors `FilletTool.pickTolerance`):
+    /// half the grid spacing when present, else a small fixed default.
+    static func pickTolerance(_ context: ToolContext) -> Double {
+        if let g = context.gridSpacing, g > Tolerance.distance { return g * 0.5 }
+        return 0.5
+    }
+
+    /// All centers of a circle of `radius` tangent to BOTH picked entities (TTR),
+    /// dispatched on the pair's kinds through the `SnapGeometry` solvers. Returns `[]`
+    /// for a kind pair this build doesn't solve (e.g. an ellipse) — a graceful no-op.
+    static func tangentCenters(first: EntityRecord, second: EntityRecord, radius r: Double) -> [Vector] {
+        switch (first.kind, second.kind) {
+        case (.line(let a), .line(let b)):
+            return SnapGeometry.tangentCircleCentersLineLine(
+                r: r, a0: a.start, a1: a.end, b0: b.start, b1: b.end)
+        case (.line(let a), .circle(let c)):
+            return SnapGeometry.tangentCircleCentersLineCircle(
+                r: r, a0: a.start, a1: a.end, center: c.center, radius: c.radius)
+        case (.circle(let c), .line(let a)):
+            return SnapGeometry.tangentCircleCentersLineCircle(
+                r: r, a0: a.start, a1: a.end, center: c.center, radius: c.radius)
+        case (.line(let a), .arc(let arc)):
+            return SnapGeometry.tangentCircleCentersLineCircle(
+                r: r, a0: a.start, a1: a.end, center: arc.center, radius: arc.radius)
+        case (.arc(let arc), .line(let a)):
+            return SnapGeometry.tangentCircleCentersLineCircle(
+                r: r, a0: a.start, a1: a.end, center: arc.center, radius: arc.radius)
+        case (.circle(let c1), .circle(let c2)):
+            return SnapGeometry.tangentCircleCentersCircleCircle(
+                r: r, c1: c1.center, radius1: c1.radius, c2: c2.center, radius2: c2.radius)
+        case (.circle(let c), .arc(let arc)), (.arc(let arc), .circle(let c)):
+            return SnapGeometry.tangentCircleCentersCircleCircle(
+                r: r, c1: c.center, radius1: c.radius, c2: arc.center, radius2: arc.radius)
+        case (.arc(let a1), .arc(let a2)):
+            return SnapGeometry.tangentCircleCentersCircleCircle(
+                r: r, c1: a1.center, radius1: a1.radius, c2: a2.center, radius2: a2.radius)
+        default:
+            return []
+        }
+    }
+
+    /// Every circle tangent to all THREE picked entities (TTT). This build solves the
+    /// THREE-LINE case (triangle incircle + excircles); any non-line reference yields
+    /// `[]` (a graceful no-op — mixed line/circle Apollonius is deferred, see the file
+    /// header / brief). Returns `(center, radius)` per solution.
+    static func inscribedCircles(first: EntityRecord, second: EntityRecord,
+                                 third: EntityRecord) -> [(center: Vector, radius: Double)] {
+        guard case .line(let a) = first.kind,
+              case .line(let b) = second.kind,
+              case .line(let c) = third.kind else { return [] }
+        return SnapGeometry.tangentCirclesThreeLines(
+            a0: a.start, a1: a.end, b0: b.start, b1: b.end, d0: c.start, d1: c.end)
+    }
+
+    /// The full circle COMPLETING a picked arc/circle (from-arc): same center + radius.
+    /// A circle pick already IS a full circle (returns it); a line/other → `nil`.
+    static func circleCompleting(_ e: EntityRecord) -> CircleData? {
+        switch e.kind {
+        case .arc(let arc):
+            guard arc.radius > Tolerance.distance else { return nil }
+            return CircleData(center: arc.center, radius: arc.radius)
+        case .circle(let c):
+            guard c.radius > Tolerance.distance else { return nil }
+            return CircleData(center: c.center, radius: c.radius)
+        default:
+            return nil
+        }
     }
 
     // MARK: - Construction geometry (pure, side-effect-free; unit-tested directly)
