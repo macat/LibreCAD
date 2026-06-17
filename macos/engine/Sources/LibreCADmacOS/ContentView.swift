@@ -90,23 +90,20 @@ struct ContentView: View {
     /// The unique suggested name handed to the `BlockNamePrompt` sheet when it opens.
     @State private var suggestedBlockName = "Block-1"
 
-    /// The live text of the bottom command / coordinate input line (UX-plan U1).
-    /// Cleared after each successful submit; the field echoes parse errors via the
-    /// model's `lastCommandError`.
-    @State private var commandText: String = ""
+    /// The single backing string for the MERGED smart command line (Wave-4 bottom-chrome
+    /// redesign). It carries BOTH commands (`line`, `rect`) AND coordinates (`0,0`,
+    /// `@10,0`, `5<90`) — the model's `interpretCommandLine` routes by shape. Cleared
+    /// after each handled submit / tool activation; an error echoes via the model's
+    /// `lastCommandError` and keeps the text so the user can fix it. (Replaces the two
+    /// former backing strings `commandText` + `commandBarQuery`.)
+    @State private var commandLineText: String = ""
 
-    /// Whether the bottom command field has keyboard focus. Bound to a `@FocusState`
-    /// so the canvas can hand focus to it on Space (D1) and Esc/submit can return
-    /// focus to the canvas (so tool letters work again).
-    @FocusState private var commandFieldFocused: Bool
-
-    /// Whether the bottom COMMAND BAR's tool-filter field has keyboard focus. The bar
-    /// is the AutoCAD-style tool launcher ADDED alongside the grouped button toolbar
-    /// (the toolbar stays the primary visual surface; the bar is the keyboard surface).
-    /// Focused on click, or on the `/` launcher keystroke over the canvas; Esc /
-    /// activation returns focus to the canvas (so tool letters work again). Kept
-    /// separate from `commandFieldFocused` so the two bottom fields never fight.
-    @FocusState private var commandBarFocused: Bool
+    /// The single focus flag for the merged command line (Wave-4). ALL focus entry
+    /// points drive THIS one flag: the canvas Space hook (`requestCommandFocus`), the
+    /// `/` launcher keypress over the canvas, and the ⇧⌘L menu (`focusCommandLine`).
+    /// Esc / a tool activation returns focus to the canvas so tool letters work again.
+    /// (Replaces the two former flags `commandFieldFocused` + `commandBarFocused`.)
+    @FocusState private var commandLineFocused: Bool
 
     /// The command bar's most-recently-used tools, persisted across launches as a
     /// comma-separated list of `ToolKind` raw values (most-recent first). Seeded into
@@ -324,26 +321,31 @@ struct ContentView: View {
                             showSettings = true
                         }
                     )
-                    StatusBar(
+                    // Wave-4 bottom-chrome redesign: the MERGED smart command line — ONE
+                    // full-width row that replaces BOTH the former U1 coordinate line and
+                    // the `CommandBar` tool launcher. It handles commands AND coordinates
+                    // (the model's `interpretCommandLine` routes by shape), shows the
+                    // active-tool prompt + clickable bracket keyword chips, an autocomplete
+                    // dropdown (opens UPWARD over the canvas) while typing a command, and
+                    // recent-command chips that LOAD (not execute) into the field. Image
+                    // placement routes through the View-layer file-picker (`.image`'s modal
+                    // never reaches the model/tool).
+                    CommandLineBar(
                         model: model,
-                        requestRedraw: { controllerBox.controller?.requestRedraw() }
-                    )
-                    commandBar
-                    // The AutoCAD-style tool LAUNCHER bar — ADDED below the U1
-                    // coordinate line, alongside the grouped button toolbar at the
-                    // top (the toolbar stays the primary visual surface). Mouse users
-                    // use the toolbar; keyboard users type a command here to narrow
-                    // the chips. All ranking is the pure `ToolSuggester`; image
-                    // placement routes through the same View-layer file-picker the
-                    // toolbar uses (`chooseAndPlaceImage`) so no modal is reachable
-                    // from the model/suggester/tool.
-                    CommandBar(
-                        model: model,
-                        focused: $commandBarFocused,
+                        text: $commandLineText,
+                        focused: $commandLineFocused,
                         pinned: pinnedToolsSet,
                         activateTool: { kind in controllerBox.controller?.activateTool(kind) },
                         placeImage: { chooseAndPlaceImage() },
-                        returnFocusToCanvas: { controllerBox.controller?.returnFocusToCanvas() }
+                        returnFocusToCanvas: { controllerBox.controller?.returnFocusToCanvas() },
+                        requestRedraw: { controllerBox.controller?.requestRedraw() }
+                    )
+                    // The status bar is the LITERAL bottom row (AutoCAD layout): read-only
+                    // telemetry (coords / zoom / OSNAP / POLAR / DYN chips) under the
+                    // command line. Moved here in Wave-4; the StatusBar HStack is intact.
+                    StatusBar(
+                        model: model,
+                        requestRedraw: { controllerBox.controller?.requestRedraw() }
                     )
                 }
             }
@@ -457,7 +459,9 @@ struct ContentView: View {
             // controller calls this closure from `handleKey` when Space is pressed
             // and a tool is active, so a typed length goes to the field, not a tool.
             .onAppear {
-                controllerBox.controller?.requestCommandFocus = { commandFieldFocused = true }
+                // Canvas Space hook (D1): the canvas controller hands focus to the merged
+                // command line so a typed length/coordinate goes to the field, not a tool.
+                controllerBox.controller?.requestCommandFocus = { commandLineFocused = true }
                 // U5 context-menu hooks: "Properties" reveals + focuses the Inspector;
                 // "Document Settings…" raises the per-document settings sheet.
                 controllerBox.controller?.requestShowInspector = { showInspector = true }
@@ -467,16 +471,15 @@ struct ContentView: View {
                 // selection inside `raiseBlockNamePrompt`).
                 controllerBox.controller?.requestCreateBlockFromSelection = { raiseBlockNamePrompt() }
             }
-            // View ▸ Show Command Line (⇧⌘L) focuses the field from the menu.
-            .focusedSceneValue(\.focusCommandLine) { commandFieldFocused = true }
-            // The `/` launcher keystroke focuses the bottom COMMAND BAR's tool filter
-            // (AutoCAD's command-line convention). `/` is not a tool letter (the canvas
-            // never consumes it), so this is non-disruptive: the canvas's bare-letter
-            // shortcuts keep working unchanged, and clicking the bar focuses it too.
-            // SwiftUI delivers the press here only when the canvas is NOT capturing the
-            // key; the always-available focus path remains a click on the field.
+            // View ▸ Show Command Line (⇧⌘L) focuses the merged command line from the menu.
+            .focusedSceneValue(\.focusCommandLine) { commandLineFocused = true }
+            // The `/` launcher keystroke focuses the merged command line (AutoCAD's
+            // command-line convention). `/` is not a tool letter (the canvas never
+            // consumes it), so this is non-disruptive: the canvas's bare-letter shortcuts
+            // keep working unchanged, and clicking the field focuses it too. SwiftUI
+            // delivers the press here only when the canvas is NOT capturing the key.
             .onKeyPress("/") {
-                commandBarFocused = true
+                commandLineFocused = true
                 return .handled
             }
     }
@@ -1066,74 +1069,15 @@ struct ContentView: View {
         .padding(.trailing, 8)
     }
 
-    // MARK: - Command / coordinate input line (U1)
-
-    /// The persistent command/coordinate field pinned to the bottom of the window.
-    /// Typing here (focused via Space, click, or ⇧⌘L) and pressing Return parses the
-    /// text and feeds the active tool a `.value(point)` — the precision-input path
-    /// (e.g. `0,0`, `@10,0`, `5<90`). Esc returns focus to the canvas so tool
-    /// shortcut letters work again. The prompt label echoes the active tool's step.
-    private var commandBar: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "chevron.right")
-                .font(.caption.bold())
-                .foregroundStyle(.secondary)
-
-            TextField(commandPlaceholder, text: $commandText)
-                .textFieldStyle(.plain)
-                .font(.body.monospaced())
-                .focused($commandFieldFocused)
-                .onSubmit { submitCommand() }
-                // Esc clears + returns focus to the canvas (so tool letters work).
-                .onExitCommand { returnFocusToCanvas() }
-
-            // De-dup (plan §3d): the syntax hint lives ONLY in the placeholder now;
-            // the trailing duplicate else-branch hint is removed. Keep the trailing
-            // slot for ERROR display (so a typo like `1,,2` is shown in red). The verb
-            // hints (⏎ / ⌫ / esc) live in the StatusBar only.
-            if let error = model.lastCommandError, !error.isEmpty {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(1)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .background(.bar)
-        .overlay(alignment: .top) { Divider() }
-    }
-
-    /// The active tool's step prompt + the accepted coordinate syntax, shown as the
-    /// field's placeholder/hint (the SINGLE place the syntax hint appears). A short
-    /// neutral hint in select mode.
-    private var commandPlaceholder: String {
-        let hint = model.commandHint
-        return hint.isEmpty
-            ? "Command — type a coordinate (x,y · @dx,dy · dist<angle)"
-            : hint
-    }
-
-    /// Parses + submits the current command text via the model, clears the field on
-    /// success, and keeps focus for the next coordinate (a chained run types many).
-    private func submitCommand() {
-        let didChange = model.submitCommandText(commandText)
-        if model.lastCommandError == nil {
-            commandText = ""
-            // A successful submit may have committed geometry / moved the preview.
-            if didChange { controllerBox.controller?.requestRedraw() }
-        }
-        // Keep focus in the field so the user can type the next point immediately.
-    }
-
-    /// Returns keyboard focus to the canvas (Esc): clears the field text and the
-    /// error, drops the field focus so the MTKView reclaims first-responder and tool
-    /// shortcut letters route to it again.
-    private func returnFocusToCanvas() {
-        commandText = ""
-        commandFieldFocused = false
-        controllerBox.controller?.returnFocusToCanvas()
-    }
+    // MARK: - Command / coordinate input line (Wave-4 merged)
+    //
+    // The bottom command/coordinate line is now the merged `CommandLineBar` (see
+    // `CommandLineBar.swift`), mounted in the bottom VStack above the status bar. It
+    // owns its own routing/prompt/dropdown; ContentView provides the single backing
+    // string (`commandLineText`), the single focus flag (`commandLineFocused`), and the
+    // controller closures (activate / placeImage / returnFocusToCanvas / requestRedraw).
+    // The former U1 `commandBar` property + its `commandPlaceholder`/`submitCommand`/
+    // `returnFocusToCanvas` helpers were retired into that view.
 
     // MARK: - Export (PDF / PNG / SVG) and Print (⌘P)
     //
