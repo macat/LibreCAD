@@ -36,6 +36,15 @@ struct SplineToolTests {
         return d
     }
 
+    /// Pulls the single `SplineData` (NURBS) out of a `.commit` outcome (fails the
+    /// test if the outcome isn't a one-edit `.add` `.spline` commit).
+    private func committedNURBS(_ outcome: ToolOutcome) -> SplineData? {
+        guard case .commit(let edits) = outcome, edits.count == 1,
+              case .add(let record) = edits[0],
+              case .spline(let d) = record.kind else { return nil }
+        return d
+    }
+
     // MARK: - Title / status transitions
 
     @Test("title is Spline")
@@ -352,5 +361,130 @@ struct SplineToolTests {
         #expect(spline?.controlPoints.count == 2)
         #expect(spline?.controlPoints[0] == Vector(1, 2))
         #expect(spline?.controlPoints[1] == Vector(7, 9))
+    }
+
+    // MARK: - Control-point (NURBS) mode
+
+    @Test("default tool is fit mode (back-compatible)")
+    func defaultModeIsFit() {
+        #expect(SplineTool().mode == .fit)
+    }
+
+    @Test("fit mode still emits a .splinePoints entity (unchanged)")
+    func fitModeStillEmitsSplinePoints() {
+        var tool = SplineTool(mode: .fit)
+        let pts = [Vector(0, 0), Vector(10, 5), Vector(20, -5), Vector(30, 0)]
+        for p in pts { _ = tool.handle(.click(p), context: .empty) }
+        let outcome = tool.handle(.commit, context: .empty)
+        // It is a .splinePoints, NOT a .spline.
+        #expect(committedSpline(outcome) != nil)
+        #expect(committedNURBS(outcome) == nil)
+        #expect(committedSpline(outcome)?.controlPoints == pts)
+        #expect(committedSpline(outcome)?.closed == false)
+    }
+
+    @Test("control-point mode emits a .spline (NURBS) carrying the picks as control points")
+    func controlPointModeEmitsNURBS() {
+        var tool = SplineTool(mode: .controlPoints)
+        let pts = [Vector(0, 0), Vector(10, 10), Vector(20, 0), Vector(30, 10)]
+        for p in pts { _ = tool.handle(.click(p), context: .empty) }
+        let outcome = tool.handle(.commit, context: .empty)
+        // It is a .spline, NOT a .splinePoints.
+        let nurbs = committedNURBS(outcome)
+        #expect(nurbs != nil)
+        #expect(committedSpline(outcome) == nil)
+        #expect(nurbs?.controlPoints == pts)
+        #expect(nurbs?.closed == false)
+        // Four control points → the default cubic degree.
+        #expect(nurbs?.degree == 3)
+        // Empty knot/weight vectors: the resolver generates a clamped knot vector
+        // and treats the spline as non-rational.
+        #expect(nurbs?.knots.isEmpty == true)
+        #expect(nurbs?.weights.isEmpty == true)
+    }
+
+    @Test("control-point mode commit resolves to a non-empty smooth curve")
+    func controlPointModeResolvesToCurve() {
+        var tool = SplineTool(mode: .controlPoints)
+        let pts = [Vector(0, 0), Vector(10, 10), Vector(20, 0), Vector(30, 10)]
+        for p in pts { _ = tool.handle(.click(p), context: .empty) }
+        let outcome = tool.handle(.commit, context: .empty)
+        guard case .commit(let edits) = outcome, case .add(let record) = edits[0] else {
+            Issue.record("expected a single-add commit outcome")
+            return
+        }
+        // The NURBS resolve path tessellates the control polygon into a smooth
+        // polyline with MANY more points than the four control points — proving the
+        // emitted degree/knot contract yields a valid, renderable curve.
+        let geometry = record.resolve()
+        #expect(geometry.polylines.count == 1)
+        #expect((geometry.polylines.first?.points.count ?? 0) > 4)
+        // A clamped knot vector interpolates the endpoints: the tessellation starts
+        // at the first control point and ends at the last.
+        #expect(geometry.polylines.first?.points.first == pts.first)
+        #expect(geometry.polylines.first?.points.last == pts.last)
+    }
+
+    @Test("control-point degree is clamped down so few picks still resolve")
+    func controlPointDegreeClamping() {
+        // The pure degree helper: cubic by default, clamped to count − 1 (≥ 1).
+        #expect(SplineTool.degree(forControlPointCount: 2) == 1)   // line-like
+        #expect(SplineTool.degree(forControlPointCount: 3) == 2)   // quadratic
+        #expect(SplineTool.degree(forControlPointCount: 4) == 3)   // cubic (default)
+        #expect(SplineTool.degree(forControlPointCount: 10) == 3)  // capped at cubic
+
+        // A 3-pick control-point spline is a valid quadratic NURBS that resolves.
+        var tool = SplineTool(mode: .controlPoints)
+        let pts = [Vector(0, 0), Vector(5, 10), Vector(10, 0)]
+        for p in pts { _ = tool.handle(.click(p), context: .empty) }
+        let nurbs = committedNURBS(tool.handle(.commit, context: .empty))
+        #expect(nurbs?.degree == 2)
+        #expect(nurbs?.controlPoints.count == 3)
+        let record = EntityRecord(id: .placeholder, kind: .spline(nurbs!))
+        #expect((record.resolve().polylines.first?.points.count ?? 0) >= 2)
+    }
+
+    @Test("control-point mode closes on the first point with a closed .spline")
+    func controlPointModeCloses() {
+        var tool = SplineTool(mode: .controlPoints)
+        let p0 = Vector(0, 0)
+        _ = tool.handle(.click(p0), context: .empty)
+        _ = tool.handle(.click(Vector(10, 0)), context: .empty)
+        _ = tool.handle(.click(Vector(10, 10)), context: .empty)
+        // Click back on the first point → closed NURBS committed immediately.
+        let nurbs = committedNURBS(tool.handle(.click(p0), context: .empty))
+        #expect(nurbs != nil)
+        #expect(nurbs?.closed == true)
+        #expect(nurbs?.controlPoints.count == 3)   // first point not duplicated
+    }
+
+    @Test("control-point mode status reflects 'control point'")
+    func controlPointModeStatus() {
+        var tool = SplineTool(mode: .controlPoints)
+        #expect(tool.status == "Specify first control point")
+        _ = tool.handle(.click(Vector(0, 0)), context: .empty)
+        #expect(tool.status == "Specify next control point (Return to finish)")
+    }
+
+    @Test("control-point mode preview tessellates the picks plus cursor as a NURBS curve")
+    func controlPointModePreview() {
+        var tool = SplineTool(mode: .controlPoints)
+        let p0 = Vector(0, 0)
+        let p1 = Vector(10, 0)
+        let p2 = Vector(20, 0)
+        _ = tool.handle(.click(p0), context: .empty)
+        _ = tool.handle(.click(p1), context: .empty)
+        _ = tool.handle(.click(p2), context: .empty)
+        let cursor = Vector(30, 10)
+        let outcome = tool.handle(.move(cursor), context: .empty)
+        #expect(outcome == .preview)
+        #expect(tool.preview.count == 1)
+        let curve = tool.preview[0]
+        #expect(curve.closed == false)
+        // Four control points (3 fixed + cursor) → cubic NURBS, tessellated to many
+        // points, interpolating the first/last control point.
+        #expect(curve.points.count > 4)
+        #expect(curve.points.first == p0)
+        #expect(curve.points.last == cursor)
     }
 }
