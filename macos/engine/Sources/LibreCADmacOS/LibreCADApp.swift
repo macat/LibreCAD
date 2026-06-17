@@ -44,6 +44,35 @@ struct LibreCADApp: App {
     /// the View menu fires the grid toggle. (W4's canvas `keyDown` also handles F7 via
     /// keyCode 98, so it works whether the menu or the canvas has key focus.)
     private static let f7Key = KeyEquivalent(Character(UnicodeScalar(NSF7FunctionKey)!))
+
+    /// Options for the custom standard About panel (Wave 3D). Surfaces the app name +
+    /// the GPLv2-or-later / LibreCAD / libdxfrw attribution this fork must carry. The
+    /// `.credits` key takes an `NSAttributedString` shown in the panel's scroll area;
+    /// `.applicationName` overrides the default (the executable is `LibreCADmacOS`, so
+    /// we present a human title). Version/build come from the bundle automatically.
+    private static var aboutPanelOptions: [NSApplication.AboutPanelOptionKey: Any] {
+        let credits = """
+        A from-scratch native macOS reimplementation of LibreCAD, in Swift.
+
+        Licensed under the GNU General Public License, version 2 or (at your option) \
+        any later version (GPLv2-or-later).
+
+        Derivative of LibreCAD (https://librecad.org) and the libdxfrw DXF/DWG library. \
+        LibreCAD © 2010-2026 the LibreCAD developers; libdxfrw © 2011-2015 \
+        José F. Soriano (RallazZ). This program comes with ABSOLUTELY NO WARRANTY.
+        """
+        let attributed = NSAttributedString(
+            string: credits,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                .foregroundColor: NSColor.labelColor,
+            ]
+        )
+        return [
+            .applicationName: "LibreCAD for macOS",
+            .credits: attributed,
+        ]
+    }
     /// The "open command palette" (⌘K) action published by the focused window.
     @FocusedValue(\.commandPalette) private var commandPalette
     @FocusedValue(\.focusCommandLine) private var focusCommandLine
@@ -111,6 +140,18 @@ struct LibreCADApp: App {
             ContentView(document: configuration.document)
         }
         .commands {
+            // <App> ▸ About LibreCAD for macOS (Wave 3D) — a CUSTOM About panel that
+            // surfaces the required GPLv2-or-later attribution (this app is a LibreCAD /
+            // libdxfrw derivative). We REPLACE the standard `.appInfo` group so the
+            // application menu's About item raises our panel with custom credits instead
+            // of the bare default. `orderFrontStandardAboutPanel(options:)` is a
+            // View-layer AppKit call (never reached by the headless suite); the credits
+            // are built as an `NSAttributedString` (see `Self.aboutPanelOptions`).
+            CommandGroup(replacing: .appInfo) {
+                Button("About LibreCAD for macOS") {
+                    NSApp.orderFrontStandardAboutPanel(options: Self.aboutPanelOptions)
+                }
+            }
             // File ▸ New from Template… — added right after the native New item
             // (DocumentGroup owns plain New / Open / Open Recent). It raises the
             // template chooser on the focused window (F24); picking a template seeds
@@ -161,6 +202,20 @@ struct LibreCADApp: App {
                 Button("Document Settings…") { openDocumentSettings?() }
                     .keyboardShortcut(",", modifiers: [.command, .option])
                     .disabled(openDocumentSettings == nil)
+
+                Divider()
+                // File ▸ Import / Merge DXF… (Wave 3D) — read another `.dxf`/`.dwg`
+                // through the engine reader and MERGE its geometry into the CURRENT
+                // drawing (the classic AutoCAD-style "merge", distinct from native Open
+                // which replaces the document). Dispatches through the responder chain to
+                // the focused canvas (`FlippedMTKView`), whose `@objc` handler (in the
+                // extension in THIS file) presents the `NSOpenPanel` in the View layer
+                // (headless-modal trap), reads via `CADEngine.shared.readEntities`, and
+                // adds the records to the window's `CanvasModel` as one undoable group.
+                // No standard chord (matches most CAD apps' Import).
+                Button("Import / Merge DXF…") {
+                    NSApp.sendAction(Selector(("importMergeDXFAction:")), to: nil, from: nil)
+                }
             }
             // Undo / redo. DocumentGroup provides system Undo/Redo bound to the
             // document's environment UndoManager — which our model now ADOPTS, so
@@ -176,6 +231,45 @@ struct LibreCADApp: App {
                 Button("Redo") { redoAction?() }
                     .keyboardShortcut("z", modifiers: [.command, .shift])
                     .disabled(redoAction == nil)
+            }
+            // Edit ▸ Cut / Copy / Paste / Paste as Block (Wave 3D — the in-app entity
+            // clipboard). We REPLACE the standard `.pasteboard` group (which would carry
+            // the AppKit default Cut/Copy/Paste/Delete/Select-All) so the canonical
+            // ⌘X/⌘C/⌘V act on the focused canvas's GEOMETRY, not text. (Delete and
+            // Select All are re-added by the `after: .pasteboard` group just below, so
+            // nothing is lost.) Each item dispatches through the responder chain
+            // (`NSApp.sendAction(_:to:nil:from:)`) to the focused window's canvas
+            // (`FlippedMTKView`, the first responder) — the same wiring the Ortho /
+            // Arrange / Named-views items use — whose `@objc` handlers (in the extension
+            // in THIS file) forward to the window's `CanvasModel` clipboard verbs
+            // (`cutSelection` / `copySelection` / `paste` / `pasteAsBlock`, verified in
+            // CanvasModel). `validateUserInterfaceItem` on the canvas (its `default`
+            // arm returns `true`) keeps them enabled while a canvas is focused; the
+            // model verbs are safe no-ops when there is no selection / empty clipboard,
+            // so an empty cut/copy/paste never mutates the drawing. With no canvas
+            // focused the responder chain finds no target and AppKit greys them out.
+            //
+            // CHORDS: Cut/Copy/Paste keep the system ⌘X/⌘C/⌘V. Paste as Block uses ⌥⌘V
+            // (⌘⇧V is already taken by Edit ▸ Apply Properties, the Match-Properties
+            // pair) — ⌥⌘V is FREE in the menus and, being a ⌘ chord, never collides with
+            // the canvas keymap (bare / ⇧ / ⌥ tool letters).
+            CommandGroup(replacing: .pasteboard) {
+                Button("Cut") {
+                    NSApp.sendAction(Selector(("cutSelectionAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("x", modifiers: .command)
+                Button("Copy") {
+                    NSApp.sendAction(Selector(("copySelectionAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("c", modifiers: .command)
+                Button("Paste") {
+                    NSApp.sendAction(Selector(("pasteEntitiesAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("v", modifiers: .command)
+                Button("Paste as Block") {
+                    NSApp.sendAction(Selector(("pasteAsBlockAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("v", modifiers: [.command, .option])
             }
             // Edit ▸ Delete — removes the current selection (undoable). The ⌫ key on
             // the canvas is also handled directly by the controller (select mode);
@@ -419,6 +513,41 @@ struct LibreCADApp: App {
                     NSApp.sendAction(Selector(("revertDirectionAction:")), to: nil, from: nil)
                 }
             }
+            // The Layers menu (Wave 3D) — the AutoCAD LAYISO / LAYUNISO / CLAYER /
+            // "freeze others" layer-state verbs on the CURRENT SELECTION's layers.
+            // Routed through the responder chain to the focused canvas
+            // (`FlippedMTKView`, the first responder) — the same `NSApp.sendAction`
+            // wiring the Arrange / Named-views items use — whose `@objc` handlers (in
+            // the extension in THIS file) forward to the window's `CanvasModel`
+            // (`isolateSelectionLayers` / `unisolateLayers` / `makeLayerCurrent` /
+            // `turnOffOtherLayers`, verified in CanvasModel). The model verbs are
+            // undoable and are safe no-ops with no selection / nothing isolated, so the
+            // items never corrupt state; `validateUserInterfaceItem`'s `default` arm
+            // keeps them enabled while a canvas is focused (greyed out with none).
+            // ⌥⌘ chords avoid the canvas keymap + the existing command-modifier menu
+            // chords (⌥⌘I / ⌥⌘U confirmed free in the menus).
+            CommandMenu("Layers") {
+                Button("Isolate Selection’s Layers") {
+                    NSApp.sendAction(Selector(("isolateSelectionLayersAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+                Button("Unisolate Layers") {
+                    NSApp.sendAction(Selector(("unisolateLayersAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("u", modifiers: [.command, .option])
+
+                Divider()
+                // Make the selection's layer the CURRENT (active) layer where new
+                // geometry lands (AutoCAD CLAYER from a selection).
+                Button("Make Selected Layer Current") {
+                    NSApp.sendAction(Selector(("makeSelectedLayerCurrentAction:")), to: nil, from: nil)
+                }
+                // Freeze every layer EXCEPT the selection's (LibreCAD "freeze others";
+                // no restore stash — distinct from Isolate above).
+                Button("Turn Off Other Layers") {
+                    NSApp.sendAction(Selector(("turnOffOtherLayersAction:")), to: nil, from: nil)
+                }
+            }
         }
 
         // The APPLICATION-LEVEL Preferences window (audit G7). On macOS a `Settings`
@@ -547,6 +676,18 @@ struct LibreCADApp: App {
             toolItem(.ordinateDim, "o", .option)
             toolItem(.arcLengthDim, "g", .option)
             toolItem(.angular3pDim, "n", .option)
+
+            Divider()
+            // Dimension Style Manager… (Wave 3D, consumes 2B's `DimStyleManagerView`).
+            // Manages the drawing's NAMED dimension styles (the DXF DIMSTYLE table).
+            // Dispatched through the responder chain to the focused canvas, whose
+            // `@objc` handler (in the extension in THIS file) presents the
+            // `DimStyleManagerView(model:)` over the window's `CanvasModel` as an AppKit
+            // sheet via `NSHostingController` (View-layer only — never reachable from a
+            // test). No standard chord.
+            Button("Dimension Style Manager…") {
+                NSApp.sendAction(Selector(("dimStyleManagerAction:")), to: nil, from: nil)
+            }
         }
     }
 
@@ -777,5 +918,201 @@ extension FlippedMTKView {
             NSApp.stopModal(withCode: response)
         }
         return NSApp.runModal(for: alert.window)
+    }
+}
+
+// MARK: - Edit-menu clipboard responder-chain actions (Wave 3D — Cut/Copy/Paste)
+//
+// The Edit ▸ Cut / Copy / Paste / Paste as Block menu items dispatch via
+// `NSApp.sendAction(_:to:nil:from:)` (the same responder-chain wiring the Ortho /
+// Arrange / Named-views items use). The focused window's canvas (`FlippedMTKView`) is
+// the first responder, so the action lands here; each forwards to the owning
+// controller's `CanvasModel` clipboard verb and requests a redraw so the pasted
+// geometry / cleared cut paints. The model verbs are undoable and SAFE no-ops when
+// there is nothing to do (empty selection / empty clipboard), so an empty cut/copy/
+// paste never mutates the drawing. (The `@objc` selector names match the
+// `NSApp.sendAction` selectors above EXACTLY.)
+extension FlippedMTKView {
+
+    /// Edit ▸ Cut (⌘X) — copy the selection onto the in-app clipboard then delete it
+    /// (one undoable group). No-op with an empty selection.
+    @objc func cutSelectionAction(_ sender: Any?) {
+        guard let controller else { return }
+        if controller.model.cutSelection() { controller.requestRedraw() }
+    }
+
+    /// Edit ▸ Copy (⌘C) — copy the selection's records onto the in-app clipboard
+    /// (no drawing mutation). No-op with an empty selection.
+    @objc func copySelectionAction(_ sender: Any?) {
+        controller?.model.copySelection()
+    }
+
+    /// Edit ▸ Paste (⌘V) — paste the clipboard at the default offset as one undoable
+    /// group; the pasted records become the new selection. No-op with an empty clipboard.
+    @objc func pasteEntitiesAction(_ sender: Any?) {
+        guard let controller else { return }
+        if controller.model.paste() { controller.requestRedraw() }
+    }
+
+    /// Edit ▸ Paste as Block (⌥⌘V) — wrap the clipboard into a NEW block + an insert at
+    /// the view center as one undoable group (Wave 3B's `pasteAsBlock`). No-op with an
+    /// empty clipboard.
+    @objc func pasteAsBlockAction(_ sender: Any?) {
+        guard let controller else { return }
+        if controller.model.pasteAsBlock() { controller.requestRedraw() }
+    }
+}
+
+// MARK: - Layers-menu responder-chain actions (Wave 3D — LAYISO / CLAYER / freeze)
+//
+// The Layers ▸ Isolate Selection’s Layers / Unisolate / Make Selected Layer Current /
+// Turn Off Other Layers menu items dispatch via `NSApp.sendAction(_:to:nil:from:)` to
+// the focused canvas (`FlippedMTKView`, the first responder). Each forwards to the
+// owning controller's `CanvasModel` layer verb (all undoable + safe no-ops with no
+// selection / nothing isolated) and requests a redraw so the layer-visibility change
+// repaints. The selectors match the `NSApp.sendAction` selectors above EXACTLY.
+extension FlippedMTKView {
+
+    /// Layers ▸ Isolate Selection’s Layers (⌥⌘I) — freeze every layer except those the
+    /// current selection lives on (LAYISO), stashing a restore for Unisolate.
+    @objc func isolateSelectionLayersAction(_ sender: Any?) {
+        guard let controller else { return }
+        if controller.model.isolateSelectionLayers() { controller.requestRedraw() }
+    }
+
+    /// Layers ▸ Unisolate Layers (⌥⌘U) — reverse the last isolate (LAYUNISO). No-op
+    /// when nothing is isolated.
+    @objc func unisolateLayersAction(_ sender: Any?) {
+        guard let controller else { return }
+        if controller.model.unisolateLayers() { controller.requestRedraw() }
+    }
+
+    /// Layers ▸ Make Selected Layer Current — set the current (active) layer to the
+    /// layer of the (single) selected entity (CLAYER from a selection). No-op when the
+    /// selection has no resolvable layer or it is already current.
+    @objc func makeSelectedLayerCurrentAction(_ sender: Any?) {
+        guard let controller else { return }
+        let model = controller.model
+        // The "selected layer" is the layer shared by the selection; pick the first
+        // resolvable one (a single-entity selection is the common case). No-op if none.
+        guard let layer = model.selection.ids
+            .compactMap({ model.drawing.entity($0)?.layer.name })
+            .first else { return }
+        if model.makeLayerCurrent(layer) { controller.requestRedraw() }
+    }
+
+    /// Layers ▸ Turn Off Other Layers — freeze every layer EXCEPT the ones the current
+    /// selection lives on (LibreCAD "freeze others"; no restore stash). No-op when the
+    /// selection has no resolvable layers.
+    @objc func turnOffOtherLayersAction(_ sender: Any?) {
+        guard let controller else { return }
+        let model = controller.model
+        let keep = Set(model.selection.ids.compactMap { model.drawing.entity($0)?.layer.name })
+        guard !keep.isEmpty else { return }
+        if model.turnOffOtherLayers(keep: keep) { controller.requestRedraw() }
+    }
+}
+
+// MARK: - Dimension Style Manager responder-chain action (Wave 3D — consumes 2B)
+//
+// The Tools ▸ Annotate ▸ Dimensions ▸ Dimension Style Manager… menu item dispatches via
+// `NSApp.sendAction(_:to:nil:from:)` to the focused canvas (`FlippedMTKView`). The
+// handler presents Wave 2B's `DimStyleManagerView(model:)` over the window's
+// `CanvasModel` as an AppKit SHEET, hosted in an `NSHostingController` and presented
+// from the View layer ONLY (the headless-modal trap — nothing a test reaches builds or
+// presents it). The manager edits the drawing's named DIMSTYLE table live + undoably;
+// it dismisses itself via its `@Environment(\.dismiss)` Done button, which tears down
+// the hosting controller's sheet. The hosting controller is retained for the sheet's
+// lifetime by `presentAsSheet`.
+extension FlippedMTKView {
+
+    /// Tools ▸ … ▸ Dimension Style Manager… — present the 2B manager as a sheet.
+    @objc func dimStyleManagerAction(_ sender: Any?) {
+        guard let controller, let window else { return }
+        let host = NSHostingController(rootView: DimStyleManagerView(model: controller.model))
+        // Present as a document-modal sheet on the focused window. `presentAsSheet`
+        // retains `host` until it is dismissed (the manager's Done → `dismiss()`).
+        window.contentViewController?.presentAsSheet(host)
+    }
+}
+
+// MARK: - Import / Merge DXF responder-chain action (Wave 3D)
+//
+// The File ▸ Import / Merge DXF… menu item dispatches via `NSApp.sendAction(_:to:nil:
+// from:)` to the focused canvas (`FlippedMTKView`). The handler presents an
+// `NSOpenPanel` (View-layer ONLY — the headless-modal trap), reads the chosen file
+// through the shared `CADEngine` reader actor (`readEntities(dxfPath:)` /
+// `readEntities(dwgPath:)`), and MERGES the read records into the focused window's
+// drawing as ONE undoable group, selecting the merged geometry.
+//
+// WHY this re-implements the merge inline rather than calling a CanvasModel method:
+// the brief asked to merge via `CanvasModel.paste(records:)`, but that method (and the
+// model's `clipboard`) are PRIVATE — unreachable from this file, and CanvasModel is not
+// owned by this change. So the merge mirrors `paste(records:)`'s body EXACTLY using the
+// model's accessible surface: it re-mints ids, adds each record through the undoable
+// `CADDrawing.add` (the model's undoManager IS the drawing's), keeps the quadtree in
+// sync, then selects the additions + bumps dirty/version. One undo step reverts the
+// whole merge. (Flagged in the completion report as a non-owned-file dependency.)
+extension FlippedMTKView {
+
+    /// File ▸ Import / Merge DXF… — pick a `.dxf`/`.dwg` and merge its geometry into
+    /// the current drawing (undoable).
+    @objc func importMergeDXFAction(_ sender: Any?) {
+        guard let controller else { return }
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = LibreCADDocument.dxfTypes
+        panel.title = "Import / Merge DXF"
+        panel.prompt = "Merge"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let path = url.path
+        let isDWG = url.pathExtension.lowercased() == "dwg"
+        let model = controller.model
+
+        Task { @MainActor in
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let result = isDWG
+                    ? try await CADEngine.shared.readEntities(dwgPath: path)
+                    : try await CADEngine.shared.readEntities(dxfPath: path)
+                guard !result.records.isEmpty else {
+                    NSLog("CADCanvas: import/merge — “\(url.lastPathComponent)” has no geometry")
+                    return
+                }
+                Self.merge(records: result.records, into: model)
+                controller.requestRedraw()
+            } catch {
+                NSLog("CADCanvas: import/merge DXF failed: \(error)")
+            }
+        }
+    }
+
+    /// Merges `records` into `model`'s drawing as ONE undoable group, mirroring the
+    /// private `CanvasModel.paste(records:)` body via the model's accessible surface:
+    /// fresh-mint each id, add through the undoable `CADDrawing.add`, keep the quadtree
+    /// in sync, then make the additions the new selection + bump dirty/version.
+    @MainActor
+    private static func merge(records: [EntityRecord], into model: CanvasModel) {
+        let explicitGroup = !model.undoManager.groupsByEvent
+        if explicitGroup { model.undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { model.undoManager.endUndoGrouping() } }
+
+        var newIDs: Set<EntityID> = []
+        for record in records {
+            var added = record
+            added.id = EntityID(0)            // ensure a fresh mint
+            added.flags.remove(.selected)
+            let id = model.drawing.add(added) // undoable; mints a real id
+            let box = model.drawing.entity(id)?.boundingBox() ?? added.boundingBox()
+            if !box.isEmpty { model.quadtree.insert(id, bounds: box) }
+            newIDs.insert(id)
+        }
+        model.selection = Selection(ids: newIDs)
+        model.modelDirty = true
+        model.modelVersion &+= 1
     }
 }
