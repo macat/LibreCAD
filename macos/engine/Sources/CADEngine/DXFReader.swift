@@ -183,12 +183,21 @@ extension CADEngine {
                         memberIDs.append(mapped.id)
                     }
                 }
+                // DYNAMIC BLOCK: recover the block's DEFINITION the C bridge surfaced
+                // from this block's reserved-tag dynamic ATTDEF. Decode it INDEX-KEYED
+                // against the JUST-MINTED fresh member ids (declaration order) — so
+                // member references resolve to the correct fresh ids, never the stale
+                // authored ones. Absent / malformed ⇒ nil (a plain block).
+                let dynamic = Self.string(b.dynamicJSON).flatMap {
+                    DynamicBlockDef.decodeIndexKeyedJSON($0, memberOrder: memberIDs)
+                }
                 blocks.add(Block(
                     name: blockName,
                     basePoint: Vector(b.bx, b.by, b.bz),
                     entityIDs: memberIDs,
                     isFrozen: (b.flags & 0x1) != 0,
-                    attributeDefs: Self.mapAttribDefs(b.attribDefs, count: b.attribDefCount)))
+                    attributeDefs: Self.mapAttribDefs(b.attribDefs, count: b.attribDefCount),
+                    dynamic: dynamic))
             }
         }
 
@@ -574,6 +583,11 @@ extension CADEngine {
     /// `nil` -> warning) — the resolve would have nothing to place.
     private static func mapInsert(_ e: LCEntity) -> EntityKind? {
         guard let name = string(e.textValue), !name.isEmpty else { return nil }
+        // DYNAMIC BLOCK: recover the per-instance state the C bridge surfaced from
+        // this INSERT's reserved-tag dynamic ATTRIB. A plain insert carries none ⇒
+        // `dynamic` stays nil (byte-identical to before). The block DEFINITION is
+        // recovered separately during block reconstruction (its own reserved ATTDEF).
+        let dynamic = string(e.dynamicJSON).flatMap { InsertDynamicState.decodeJSON($0) }
         return .insert(InsertData(
             blockName: name,
             insertionPoint: Vector(e.p1x, e.p1y, e.p1z),
@@ -583,7 +597,8 @@ extension CADEngine {
             cols: Int(e.insCols),
             rowSpacing: e.insRowSpacing,
             colSpacing: e.insColSpacing,
-            attributes: mapAttribs(e.attribs, count: e.attribCount)
+            attributes: mapAttribs(e.attribs, count: e.attribCount),
+            dynamic: dynamic
         ))
     }
 

@@ -22,12 +22,21 @@
 //  exhaustive enum switches are never touched (dynamic-blocks-plan §8).
 //
 //  ## Forward-compat (later waves are ADDITIVE on these structs)
-//  `DynamicBlockDef` currently carries ONLY `visibilityStates`. Parameters,
-//  actions, value sets and lookup tables (dynamic-blocks-plan §2a, waves DB-2..DB-5)
-//  are added later as ADDITIVE optional/defaulted fields here — never a new file
-//  on the hot enum, never a new `EntityKind`. `InsertDynamicState.parameterValues`
-//  is defined now (defaulted empty) for that forward-compat but is UNUSED by
-//  visibility — only `activeVisibilityState` matters this wave.
+//  Parameters, actions, value sets and lookup tables (dynamic-blocks-plan §2a, waves
+//  DB-2..DB-5) are added as ADDITIVE optional/defaulted fields here — never a new
+//  file on the hot enum, never a new `EntityKind`. The per-field `init(from:)`
+//  back-compat (decodeIfPresent) below keeps the in-MEMORY `Codable` tolerant of
+//  files written by an earlier wave.
+//
+//  ## DXF persistence (R4b, dynamic-blocks-plan §6a) — LOSSLESS round-trip
+//  The engine has NO native non-DXF document format: the document IS DXF, so the
+//  in-memory `Codable` above does NOT, by itself, survive a save→reopen. The
+//  index-keyed JSON wire form at the BOTTOM of this file
+//  (`encodeIndexKeyedJSON`/`decodeIndexKeyedJSON` for the DEFINITION;
+//  `encodeJSON`/`decodeJSON` for the per-instance state) is what `DXFWriter`/
+//  `DXFReader` + the C bridge embed in / recover from the DXF (carried on a
+//  reserved-tag ATTDEF/ATTRIB). The DEFINITION's member references are remapped
+//  EntityID↔INDEX so they survive the reader minting fresh ids on every read.
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //
@@ -331,5 +340,144 @@ extension InsertDynamicState {
         parameterValues = try c.decodeIfPresent([String: Double].self, forKey: .parameterValues) ?? [:]
         // ADDITIVE: pre-DB-2 files (no `flipStates` key) decode to empty.
         flipStates = try c.decodeIfPresent([String: Bool].self, forKey: .flipStates) ?? [:]
+    }
+}
+
+// MARK: - DXF persistence: index-keyed JSON wire form (R4b dynamic-block save→reopen)
+//
+// The native document is DXF-only (there is no separate JSON document format), so
+// the in-memory `Codable` above does NOT, by itself, survive a save→reopen — the
+// drawing is written to DXF and read back. To make dynamic-block behavior LOSSLESS
+// across a DXF round-trip we embed a COMPACT JSON blob in the DXF carried on a
+// RESERVED-TAG block ATTRIBUTE (tag `LIBRECAD$DYN`): a reserved ATTDEF inside the
+// BLOCK holds the per-DEFINITION JSON, and a reserved ATTRIB on the INSERT holds
+// the per-INSTANCE JSON. (We do NOT use DXF XDATA/appData: the vendored libdxfrw's
+// DXF writer omits entity `extData` for INSERT + the BLOCK record, and its appData
+// reader is broken — so XDATA cannot round-trip for INSERT/BLOCK there, whereas the
+// block-attribute path round-trips verbatim. We do not modify libdxfrw.) The C
+// bridge appends the carrier on write and FILTERS the reserved tag back out on read
+// so it never appears as a user attribute — see DXFWriter / DXFReader + the bridge
+// (lcdxf.cpp `kDynAttrTag`), and dynamic-blocks-plan §6a.
+//
+// ## The #1 correctness subtlety — EntityID is NOT stable across a reopen
+// `DynamicBlockDef` references block members by `EntityID` (in
+// `BlockVisibilityState.visibleMemberIDs`, `BlockAction.memberIDs`). But the
+// DXF reader MINTS FRESH sequential `EntityID`s on every read — the ids in a saved
+// file are stale the moment it is reopened. What IS stable is the member's POSITION
+// in the block's ordered member list (`Block.entityIDs` / the DXF block-member
+// declaration order): a block's members are written, and re-read, in that order.
+//
+// Therefore the wire form is keyed by member INDEX, not EntityID:
+//  - on WRITE, each referenced `EntityID` is remapped to its INDEX in the block's
+//    ordered member list (a reference to an id NOT in that list is dropped — it
+//    cannot be persisted meaningfully);
+//  - on READ, after the block's members are mapped and assigned their FRESH ids in
+//    declaration order, each INDEX is remapped back to the fresh `EntityID` at that
+//    position (an out-of-range index is dropped).
+//
+// We reuse the existing `Codable` rather than maintaining a parallel struct tree:
+// `remappingMemberIDs(_:)` rewrites every member `EntityID` through a function, so
+// "encode index-keyed" == "remap each id → EntityID(index), then JSONEncode", and
+// "decode index-keyed" == "JSONDecode, then remap each EntityID(index) →
+// memberOrder[index]". `InsertDynamicState` carries NO `EntityID` references (its
+// keys are visibility-state names + parameter-id strings), so it needs no remap —
+// it round-trips through plain compact JSON.
+
+extension DynamicBlockDef {
+    /// Returns a copy with EVERY member-`EntityID` reference rewritten through
+    /// `remap` (visibility-state member sets + action member sets). A reference for
+    /// which `remap` returns `nil` is DROPPED. Pure; the visibility-state ids /
+    /// names / parameters / action defining data are otherwise unchanged.
+    public func remappingMemberIDs(_ remap: (EntityID) -> EntityID?) -> DynamicBlockDef {
+        let states = visibilityStates.map { state -> BlockVisibilityState in
+            var s = state
+            s.visibleMemberIDs = Set(state.visibleMemberIDs.compactMap(remap))
+            return s
+        }
+        let mappedActions = actions.map { action -> BlockAction in
+            switch action {
+            case .stretch(let id, let pid, let frame, let members, let mult, let ang):
+                return .stretch(id: id, parameterID: pid, stretchFrame: frame,
+                                memberIDs: Set(members.compactMap(remap)),
+                                distanceMultiplier: mult, angleOffset: ang)
+            case .flip(let id, let pid, let members):
+                return .flip(id: id, parameterID: pid,
+                             memberIDs: Set(members.compactMap(remap)))
+            }
+        }
+        return DynamicBlockDef(visibilityStates: states,
+                               parameters: parameters,
+                               actions: mappedActions)
+    }
+
+    /// Encodes this definition to a COMPACT JSON string for DXF XDATA, with every
+    /// member-`EntityID` reference remapped to its INDEX in `memberOrder` (the
+    /// block's ordered member list). References to an id NOT in `memberOrder` are
+    /// dropped. Returns `nil` when the bundle is empty (a non-dynamic block needs
+    /// no blob) or on an (unexpected) encode failure.
+    ///
+    /// The index is the STABLE key: it survives the reader's fresh-id minting,
+    /// where the raw `EntityID` would not.
+    public func encodeIndexKeyedJSON(memberOrder: [EntityID]) -> String? {
+        guard !isEmpty else { return nil }
+        var indexByID: [EntityID: Int] = [:]
+        indexByID.reserveCapacity(memberOrder.count)
+        // FIRST occurrence wins (member ids are unique in a well-formed block).
+        for (i, id) in memberOrder.enumerated() where indexByID[id] == nil {
+            indexByID[id] = i
+        }
+        // Index → a sentinel EntityID carrying the index as its raw value.
+        let indexed = remappingMemberIDs { id in
+            indexByID[id].map { EntityID(UInt64($0)) }
+        }
+        let encoder = JSONEncoder()
+        // Sort keys so the blob is deterministic (stable bytes for a given model).
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(indexed),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return json
+    }
+
+    /// Decodes an index-keyed JSON blob (produced by `encodeIndexKeyedJSON`) back
+    /// into a `DynamicBlockDef`, remapping each member INDEX to the FRESH `EntityID`
+    /// at that position in `memberOrder` (the block's just-read member ids, in
+    /// declaration order). An index out of `memberOrder`'s range is dropped.
+    /// Returns `nil` on malformed JSON (degrade gracefully — the block reads back
+    /// as a plain static block).
+    public static func decodeIndexKeyedJSON(_ json: String,
+                                            memberOrder: [EntityID]) -> DynamicBlockDef? {
+        guard let data = json.data(using: .utf8) else { return nil }
+        guard let indexed = try? JSONDecoder().decode(DynamicBlockDef.self, from: data)
+        else { return nil }
+        return indexed.remappingMemberIDs { sentinel in
+            let idx = Int(sentinel.rawValue)
+            guard idx >= 0, idx < memberOrder.count else { return nil }
+            return memberOrder[idx]
+        }
+    }
+}
+
+extension InsertDynamicState {
+    /// Encodes this per-instance state to a COMPACT JSON string for DXF XDATA.
+    /// No member-`EntityID` remap is needed — the state is keyed only by
+    /// visibility-state NAMES + parameter-id STRINGS, all stable across a reopen.
+    /// Returns `nil` when the state is observably empty (a non-dynamic insert
+    /// needs no blob) or on an (unexpected) encode failure.
+    public func encodeJSON() -> String? {
+        if activeVisibilityState == nil && parameterValues.isEmpty && flipStates.isEmpty {
+            return nil
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(self),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return json
+    }
+
+    /// Decodes a per-instance state JSON blob (from `encodeJSON`). Returns `nil` on
+    /// malformed JSON (the insert reads back as a plain static insert).
+    public static func decodeJSON(_ json: String) -> InsertDynamicState? {
+        guard let data = json.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(InsertDynamicState.self, from: data)
     }
 }
