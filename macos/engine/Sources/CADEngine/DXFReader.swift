@@ -879,7 +879,25 @@ extension CADEngine {
         }
 
         let lw: PenLineWidth = penLineWidth(mm100: e.lineWeightMM100)
-        return Pen(lineColor: color, lineType: lt, lineWidth: lw)
+        let transparency = penTransparency(code440: e.transparency)
+        return Pen(lineColor: color, lineType: lt, lineWidth: lw, transparency: transparency)
+    }
+
+    /// Maps the bridge's raw DXF code-440 transparency value to a `PenTransparency`
+    /// (the inverse of `DXFWriter.transparency440(for:)`). The value is encoded
+    /// `(alpha_type << 24) | alpha` where the low byte is the ALPHA (255 == opaque):
+    ///   - `0` (DRW::Opaque — the var was ABSENT) ⇒ `.byLayer` (inherit).
+    ///   - alpha_type `0x01` ⇒ `.byBlock`.
+    ///   - any other type (`0x02` "by value", or a stray type) ⇒ `.opacity(alpha/255)`.
+    /// A by-value alpha of exactly 255 (fully opaque-by-value) is preserved as an
+    /// explicit `.opacity(1)` (it is a deliberate per-entity override, distinct from
+    /// the absent/ByLayer case), so a save→reopen is stable.
+    private static func penTransparency(code440: Int32) -> PenTransparency {
+        if code440 == 0 { return .byLayer }                 // DRW::Opaque == absent
+        let type = (code440 >> 24) & 0xFF
+        if type == 0x01 { return .byBlock }
+        let alpha = Double(code440 & 0xFF) / 255.0
+        return .opacity(max(0, min(1, alpha)))
     }
 
     /// Resolves a concrete `RGBAColor` from a DXF entity/layer color. Prefers

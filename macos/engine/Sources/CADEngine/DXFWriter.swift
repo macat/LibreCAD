@@ -1048,6 +1048,30 @@ private final class PODBuilder {
         e.color24 = color24
         e.lineType = intern(lineTypeName(pen.lineType))
         e.lineWeightMM100 = lineWeightDXF(pen.lineWidth)
+        e.transparency = transparency440(for: pen.transparency)
+    }
+
+    /// Maps a `PenTransparency` to the raw DXF code-440 integer (the inverse of
+    /// `DXFReader.penTransparency(code440:)`). The encoding is `(alpha_type<<24)|alpha`
+    /// (low byte == alpha, 255 == opaque):
+    ///   - `.byLayer` ⇒ `0` (DRW::Opaque) — the bridge then writes NO 440 group, so
+    ///     a ByLayer entity is byte-identical to the pre-transparency output.
+    ///   - `.byBlock` ⇒ `0x01000000` (type 0x01).
+    ///   - `.opacity(a)` ⇒ `0x02000000 | round(a*255)` (type 0x02, "by value").
+    /// NOTE: libdxfrw only emits code 440 for versions > AC1015 (R2000); at R12/R2000
+    /// the transparency is dropped on write (a documented version limit, like MTEXT
+    /// at R12). DWG: the dwgWriter15 path has no 440 encode, so transparency does not
+    /// round-trip on DWG (use DXF R2004+).
+    private func transparency440(for t: PenTransparency) -> Int32 {
+        switch t {
+        case .byLayer:
+            return 0                              // DRW::Opaque ⇒ no 440 group written
+        case .byBlock:
+            return 0x01000000
+        case .opacity(let a):
+            let alpha = Int32((max(0, min(1, a)) * 255.0).rounded()) & 0xFF
+            return 0x02000000 | alpha
+        }
     }
 
     // MARK: Dimension mapping (inverse of DXFReader.mapDimension)
