@@ -330,6 +330,36 @@ final class CanvasModel {
     /// Observed so the menu state + a status chip can track it live.
     private(set) var relativeZeroLocked: Bool = false
 
+    // MARK: Dynamic-input editing state (editable live dimensions — Wave M)
+
+    /// Whether the user is TYPING into a live-dimension field (AutoCAD-style dynamic
+    /// input). Set by `beginDynInput(firstChar:)` the first time a digit / `.` / `-`
+    /// is pressed while a draw tool exposes an editable live dimension; cleared by
+    /// `dynCommit` / `cancelDynInput` / `resetDynInput` (and the run-end / tool-change
+    /// hooks). While `true` the model drives the active tool with the SYNTHETIC cursor
+    /// (`effectiveCursor()`) so the rubber-band preview + live dims reflect the typed
+    /// values, and `currentLiveDimensions()` re-stamps the editable dims as
+    /// `.active`/`.locked`. `@ObservationIgnored` like `tool` — interaction state the
+    /// explicit methods publish (via `modelVersion`), not a directly-rendered property.
+    @ObservationIgnored
+    var dynEditing = false
+
+    /// The live-dimension field the user is currently typing into (the `.active` field),
+    /// or `nil` when not editing. Advanced by `dynCycleField(reverse:)` (Tab / Shift-Tab)
+    /// over `editableFields()` in array order. Re-clamped to a still-valid field (or
+    /// cleared) whenever the tool's editable-field set changes mid-run.
+    @ObservationIgnored
+    var dynActiveField: LiveDimensionField? = nil
+
+    /// The raw text the user has typed for each field, keyed by `LiveDimensionField`. A
+    /// field is **LOCKED** ⟺ it is NOT `dynActiveField` AND its buffer parses to a
+    /// `Double`; a locked or active buffer that parses feeds `effectiveCursor()` so the
+    /// preview honors it live. Partial / unparseable buffers (e.g. `"-"`, `"1."`) are
+    /// simply omitted from `parsedDynValues()`, so that field naturally tracks the live
+    /// cursor until the text becomes a number. Cleared by `resetDynInput`.
+    @ObservationIgnored
+    var dynBuffers: [LiveDimensionField: String] = [:]
+
     /// Whether the canvas is armed for a one-shot "Set Relative Origin" pick: the NEXT
     /// snapped canvas click (in select mode) sets `relativeZero` to that point instead
     /// of toggling selection, then auto-disarms (mirrors the Zoom-Window one-shot arm).
@@ -2016,6 +2046,9 @@ final class CanvasModel {
         // command line's `@`/polar/distance input has no leftover reference. A LOCKED
         // datum survives the tool change (the user pinned it deliberately).
         if !relativeZeroLocked { relativeZero = nil }
+        // A tool change abandons any in-flight typed dimension entry (the new tool has
+        // its own — possibly no — editable fields).
+        resetDynInput()
         lastCommandError = nil
     }
 
@@ -2326,6 +2359,10 @@ final class CanvasModel {
             // (Copy/Array/Offset/…) preserve their source layer/pen. Keyed off the
             // active tool kind — see `toolAdoptsCurrentProperties`.
             applyCommit(edits, adoptsCurrentProperties: toolAdoptsCurrentProperties(activeToolKind))
+            // A point was placed (a typed dyn commit, or a plain click while mid-type):
+            // the in-flight typed entry is consumed/abandoned, so clear dyn state. Idempotent
+            // when `dynCommit` already cleared it (it resets via `defer`).
+            resetDynInput()
             return true
         case .finished:
             // CreateBlockTool does NOT emit `.commit` edits — block creation touches
@@ -2347,8 +2384,29 @@ final class CanvasModel {
             // The run is over — drop the relative-zero so the next run starts fresh,
             // UNLESS it is locked (a user-pinned datum persists across runs).
             if !relativeZeroLocked { relativeZero = nil }
+            // The operation ended (commit/cancel → fresh tool): abandon any typed entry.
+            resetDynInput()
             return true
         }
+    }
+
+    /// The mouse-MOVE entry point the canvas cursor funnel calls (the constrained,
+    /// snapped world point from `mouseMoved`). When NOT typing, it is just
+    /// `handleToolInput(.move(point))`. When DYNAMIC INPUT is active, it substitutes the
+    /// SYNTHETIC cursor (`effectiveCursor()`) so the locked / typed fields stay FIXED at
+    /// their typed values while the unlocked fields (and the rest of the preview) follow
+    /// the real mouse — e.g. with a typed length, the line keeps that length while the
+    /// angle tracks the cursor. The substitution lives here (not in the view) so it is
+    /// headless-testable; Wave V's `mouseMoved` funnel calls THIS instead of
+    /// `handleToolInput(.move(...))`.
+    @discardableResult
+    func handleToolMove(_ point: Vector) -> Bool {
+        guard dynEditing else { return handleToolInput(.move(point)) }
+        // Remember the live mouse so `effectiveCursor()` uses the new position for any
+        // field the user did NOT type (the cursor-tracking fields). `cursorWorld` is set
+        // by `updateSnap` upstream of this call, so it already reflects this move; we
+        // resolve the synthetic point from it.
+        return handleToolInput(.move(effectiveCursor()))
     }
 
     /// If the just-finished tool is a `CreateBlockTool` carrying a `pendingCreation`
@@ -5165,7 +5223,184 @@ final class CanvasModel {
             unit: gv.unit,
             angleFormat: gv.angleFormat,
             anglePrecision: gv.anglePrecision)
-        return tool.liveDimensions(ctx)
+        let dims = tool.liveDimensions(ctx)
+        // When NOT typing, hand the tool's dims through unchanged (every editable dim
+        // stays `.idle` with no `typedString`, so the overlay draws the live `label`).
+        guard dynEditing else { return dims }
+        // While editing, re-stamp each EDITABLE dim with the live display/edit state so
+        // the overlay (Wave V) can draw the active field's raw buffer + caret in an
+        // accent chip, a locked field's typed value in a pinned tint, and leave any
+        // not-yet-typed editable field showing its live `label` (`.idle`). The tool
+        // only stamps `field` + `isEditable`; the MODEL owns `editState` / `typedString`.
+        return dims.map { dim in
+            guard dim.isEditable, let field = dim.field else { return dim }
+            if field == dynActiveField {
+                // The focused field — echo the raw (possibly partial) buffer + caret.
+                return dim.withEditing(editState: .active, typedString: dynBuffers[field])
+            }
+            // A non-active field whose buffer parses to a number is LOCKED (Tab moved
+            // past it); the synthetic cursor honors it live. A non-parsing / empty
+            // buffer leaves the field idle (it still tracks the cursor).
+            if let buf = dynBuffers[field], Double(buf) != nil {
+                return dim.withEditing(editState: .locked, typedString: buf)
+            }
+            return dim
+        }
+    }
+
+    // MARK: - Dynamic input (editable live dimensions — Wave M)
+
+    /// Whether ANY currently-shown live dimension is editable — the gate Wave V's
+    /// keyDown handler uses to decide a first digit / `.` / `-` should BEGIN dynamic
+    /// input (it replaces the non-existent `hasStartedOperation`). True exactly when a
+    /// draw tool is mid-operation AND exposes at least one `isEditable` dim (so it is
+    /// `false` in select mode, before the first point, and for non-editable tools).
+    var hasEditableLiveField: Bool {
+        currentLiveDimensions().contains { $0.isEditable }
+    }
+
+    /// The editable live-dimension FIELDS in Tab order (the tool's emit order). E.g.
+    /// Line → `[.length, .angle]`, Rectangle → `[.width, .height]`, Circle →
+    /// `[.radius]` (or `[.diameter]`). Empty when nothing editable is shown. The Tab /
+    /// Shift-Tab cycle and the active-field clamp are defined against this list.
+    func editableFields() -> [LiveDimensionField] {
+        currentLiveDimensions().compactMap { $0.isEditable ? $0.field : nil }
+    }
+
+    /// Each typed buffer that currently parses to a `Double`, keyed by field — the
+    /// values fed to `Tool.applyDynamicInput`. A field whose buffer is empty / partial
+    /// (`"-"`, `"1."`, `""`) is OMITTED, so `applyDynamicInput` falls back to the live
+    /// cursor for it (the field keeps tracking the mouse until the text is a number).
+    func parsedDynValues() -> [LiveDimensionField: Double] {
+        var out: [LiveDimensionField: Double] = [:]
+        for (field, buf) in dynBuffers {
+            if let v = Double(buf) { out[field] = v }
+        }
+        return out
+    }
+
+    /// The SYNTHETIC cursor: the world point the active tool resolves from the typed
+    /// (locked + active) field values, with any untyped field falling back to the live
+    /// `cursorWorld`. This is what the model feeds the tool as `.move(...)` while editing
+    /// so the preview + live dims reflect the typed values (type `10` → the line shows
+    /// length 10 while the angle still follows the mouse). Falls back to the raw cursor
+    /// when the tool does not support dynamic input in its current state (or there is no
+    /// cursor yet), so the preview never breaks.
+    func effectiveCursor() -> Vector {
+        let cursor = cursorWorld ?? .invalid
+        let reference = relativeZero ?? cursor
+        return tool?.applyDynamicInput(parsedDynValues(), cursor: cursor, reference: reference)
+            ?? cursor
+    }
+
+    /// Begins dynamic input on the FIRST editable field, seeding its buffer with the
+    /// just-pressed character (the digit / `.` / `-` that triggered editing). No-op if
+    /// there is no editable field right now (the keyDown gate should prevent that, but
+    /// this stays robust). Refreshes the synthetic-cursor preview so the typed digit is
+    /// reflected immediately.
+    func beginDynInput(firstChar: Character) {
+        guard let first = editableFields().first else { return }
+        dynEditing = true
+        dynActiveField = first
+        dynBuffers = [first: String(firstChar)]
+        refreshDynPreview()
+    }
+
+    /// Appends a typed character to the ACTIVE field's buffer (digit / `.` / `-`, per
+    /// Wave V's gate). No-op unless editing with an active field set. Refreshes the
+    /// preview so the unlocked/active field updates as the user types.
+    func dynAppend(_ ch: Character) {
+        guard dynEditing, let field = dynActiveField else { return }
+        dynBuffers[field, default: ""].append(ch)
+        refreshDynPreview()
+    }
+
+    /// Deletes the last character of the ACTIVE field's buffer (Backspace). Stays in
+    /// editing mode even when the buffer becomes empty (the user is mid-correction); an
+    /// empty buffer just omits the field from `parsedDynValues()` so it tracks the
+    /// cursor again. No-op unless editing with an active field set.
+    func dynBackspace() {
+        guard dynEditing, let field = dynActiveField else { return }
+        guard var buf = dynBuffers[field], !buf.isEmpty else { return }
+        buf.removeLast()
+        dynBuffers[field] = buf
+        refreshDynPreview()
+    }
+
+    /// Advances (Tab) / retreats (Shift-Tab) the active field across `editableFields()`,
+    /// modulo the field count — the field the user just typed into LOCKS (its buffer is
+    /// honored live) and focus moves to the next. No-op when fewer than two editable
+    /// fields exist (e.g. Circle / Polygon, which have one editable field → no Tab) or
+    /// when not editing. Refreshes the preview (the newly-active field now tracks the
+    /// cursor; the just-left field stays locked at its typed value).
+    func dynCycleField(reverse: Bool) {
+        guard dynEditing else { return }
+        let fields = editableFields()
+        guard fields.count >= 2 else { return }
+        let current = dynActiveField.flatMap { fields.firstIndex(of: $0) } ?? 0
+        let step = reverse ? -1 : 1
+        let next = ((current + step) % fields.count + fields.count) % fields.count
+        dynActiveField = fields[next]
+        refreshDynPreview()
+    }
+
+    /// Commits the typed dimensions: resolves the synthetic cursor and feeds it through
+    /// the EXACT `.value(point)` coordinate-commit seam (no snap drift), exactly as if
+    /// the user had typed the equivalent coordinate on the command line — so a typed
+    /// length / width / radius lands precisely. Then clears all dynamic-input state. A
+    /// no-op (still resets) when the tool does not resolve a point in its current state.
+    @discardableResult
+    func dynCommit() -> Bool {
+        defer { resetDynInput() }
+        guard dynEditing,
+              let p = tool?.applyDynamicInput(parsedDynValues(),
+                                              cursor: cursorWorld ?? .invalid,
+                                              reference: relativeZero ?? cursorWorld ?? .invalid)
+        else { return false }
+        return handleToolInput(.value(p))
+    }
+
+    /// Cancels dynamic input (Esc while editing): clears the typed buffers + active
+    /// field and exits editing, then feeds the tool the REAL cursor again so the
+    /// preview reverts to tracking the mouse. Does NOT cancel the tool / the in-progress
+    /// operation (decision D1) — only the typed entry is abandoned.
+    func cancelDynInput() {
+        resetDynInput()
+        // Revert the preview to the live cursor (the synthetic cursor is gone now).
+        if let c = cursorWorld { _ = handleToolInput(.move(c)) }
+        modelVersion &+= 1
+    }
+
+    /// Clears ALL dynamic-input state (editing flag, active field, buffers). Used by
+    /// `dynCommit` / `cancelDynInput` and the reset hooks (tool change / run end). Does
+    /// not itself touch the tool or the preview.
+    func resetDynInput() {
+        dynEditing = false
+        dynActiveField = nil
+        dynBuffers = [:]
+    }
+
+    /// Drives the active tool with the SYNTHETIC cursor (`effectiveCursor()`) so the
+    /// rubber-band preview AND the live dims reflect the typed values, then bumps
+    /// `modelVersion` so the observing overlay/canvas repaints. Called from every
+    /// dynamic-input mutation (begin / append / backspace / cycle). The `.move` may run
+    /// snapping (preview only); the COMMIT path uses `.value(effectiveCursor())` so the
+    /// committed point has no snap drift. Also re-clamps the active field if the tool's
+    /// editable-field set changed under us (e.g. the tool advanced state).
+    private func refreshDynPreview() {
+        guard dynEditing else { return }
+        clampDynActiveField()
+        _ = handleToolInput(.move(effectiveCursor()))
+        modelVersion &+= 1
+    }
+
+    /// Re-clamps `dynActiveField` to a field still present in `editableFields()`: if the
+    /// editable-field set changed (the tool advanced and the active field is gone), it
+    /// snaps to the first editable field, or clears to `nil` when nothing is editable.
+    private func clampDynActiveField() {
+        let fields = editableFields()
+        if let active = dynActiveField, fields.contains(active) { return }
+        dynActiveField = fields.first
     }
 
     // MARK: - Status-bar CAD toggles (Wave 4 — surfaces EXISTING state, no new snap logic)
