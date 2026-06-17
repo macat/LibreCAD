@@ -174,9 +174,10 @@ public enum Purge {
         for e in entities {
             let name: String?
             switch e.kind {
-            case .dimension(let d): name = d.styleName
-            case .leader(let d):    name = d.styleName
-            default:                name = nil
+            case .dimension(let d):  name = d.styleName
+            case .leader(let d):     name = d.styleName
+            case .multileader(let d): name = d.styleName
+            default:                 name = nil
             }
             if let n = name?.trimmingCharacters(in: .whitespacesAndNewlines), !n.isEmpty {
                 used.insert(n)

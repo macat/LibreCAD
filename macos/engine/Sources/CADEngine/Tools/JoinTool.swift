@@ -215,7 +215,7 @@ public struct JoinTool: Tool {
         // circles/ellipses (only meaningful when split into arcs first).
         case .polyline, .circle, .ellipse, .spline, .splinePoints, .point,
              .text, .mtext, .hatch, .solid, .dimension, .insert, .xline, .ray, .leader,
-             .image:
+             .multileader, .image:
             return false
         }
     }

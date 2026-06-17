@@ -835,6 +835,101 @@ public struct LeaderData: Sendable, Hashable, Codable {
     }
 }
 
+// MARK: - MultiLeader defining data (DRW_MText/MLEADER, DXF MULTILEADER)
+
+/// `MultiLeaderData` — a **multileader** (DXF `MULTILEADER`/`MLEADER`, AutoCAD's
+/// modern annotation callout that superseded the legacy `LEADER`). Like a
+/// `LeaderData` it is one leg `vertices` path with an optional arrowhead at the
+/// FIRST vertex and an optional attached `.text`/`.mtext` annotation at the LAST
+/// vertex — but a multileader adds a **landing** (a short horizontal "dogleg" tail
+/// run between the last leg vertex and the annotation) which `resolve()` draws when
+/// `doglegEnabled`. Per ADR-001 a value type holding only the defining data; the
+/// drawn graphic (leg polyline, arrowhead via the shared `dimArrowhead`, the
+/// landing segment, and the annotation via the shared `.text`/`.mtext` resolve arm
+/// — no second text path) is produced on demand by `resolve()`, never stored.
+///
+/// ## v1 scope
+/// A **single-root** multileader: ONE leg (one `vertices` path) + landing/dogleg +
+/// arrowhead + an MTEXT/TEXT annotation. DXF MLEADER block content (a block as the
+/// annotation instead of text) and **multi-root** multileaders (several legs
+/// fanning into one shared landing) are DEFERRED to a later wave; this struct
+/// mirrors `LeaderData` so those extensions stay additive.
+///
+/// ## Field grounding (DXF `MULTILEADER` / cloned from `LeaderData`)
+/// - `vertices`   — the ordered leg path points (arrow at `vertices.first`, the
+///                  landing/annotation anchor at `vertices.last`). May be empty (a
+///                  degenerate callout that round-trips but draws nothing).
+/// - `hasArrow`   — whether an arrowhead is drawn at the first vertex.
+/// - `arrowSize`  — the arrowhead length in world units; `<= 0` ⇒ resolve uses the
+///                  document / engine default arrow size.
+/// - `annotation` — the OPTIONAL attached annotation (`.text`/`.mtext`) anchored at
+///                  the landing end; `nil` for a bare multileader. Resolves through
+///                  the SAME shared text path (no second text code path).
+/// - `styleName`  — the referenced MLEADER/dimension-style name (round-trip only).
+/// - `landingDistance` — the length (world units) of the straight horizontal landing
+///                  ("dogleg" tail) drawn from the last leg vertex toward the
+///                  annotation when `doglegEnabled`. (DXF `MULTILEADER` "dogleg
+///                  length".)
+/// - `doglegEnabled` — whether the landing segment is drawn at all. When `false` the
+///                  multileader's leg runs straight to the annotation with no tail.
+public struct MultiLeaderData: Sendable, Hashable, Codable {
+    /// The ordered leg path vertices (arrow at the first, landing/annotation at the
+    /// last). May be empty (a degenerate, drawn-nothing multileader).
+    public var vertices: [Vector]
+    /// Whether an arrowhead is drawn at the first vertex.
+    public var hasArrow: Bool
+    /// The arrowhead length in world units. `<= 0` ⇒ resolve uses the document /
+    /// engine default arrow size.
+    public var arrowSize: Double
+    /// The OPTIONAL attached annotation (`.text` or `.mtext`) anchored at the landing
+    /// end; `nil` for a bare multileader. Resolves through the shared text path.
+    public var annotation: EntityKind?
+    /// The referenced MLEADER / dimension-style name (round-trip only).
+    public var styleName: String?
+    /// The straight landing ("dogleg") tail length in world units, drawn from the
+    /// last leg vertex toward the annotation when `doglegEnabled`.
+    public var landingDistance: Double
+    /// Whether the landing/dogleg tail segment is drawn.
+    public var doglegEnabled: Bool
+
+    public init(
+        vertices: [Vector],
+        hasArrow: Bool = true,
+        arrowSize: Double = 2.5,
+        annotation: EntityKind? = nil,
+        styleName: String? = nil,
+        landingDistance: Double = 2.0,
+        doglegEnabled: Bool = true
+    ) {
+        self.vertices = vertices
+        self.hasArrow = hasArrow
+        self.arrowSize = arrowSize
+        self.annotation = annotation
+        self.styleName = styleName
+        self.landingDistance = landingDistance
+        self.doglegEnabled = doglegEnabled
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case vertices, hasArrow, arrowSize, annotation, styleName
+        case landingDistance, doglegEnabled
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        vertices = try c.decodeIfPresent([Vector].self, forKey: .vertices) ?? []
+        hasArrow = try c.decodeIfPresent(Bool.self, forKey: .hasArrow) ?? true
+        arrowSize = try c.decodeIfPresent(Double.self, forKey: .arrowSize) ?? 2.5
+        annotation = try c.decodeIfPresent(EntityKind.self, forKey: .annotation)
+        styleName = try c.decodeIfPresent(String.self, forKey: .styleName)
+        // ADDITIVE back-compat: a value born without the landing fields (or partial
+        // JSON, e.g. a multileader serialized before these two were added) decodes
+        // to the defaults so old documents keep round-tripping.
+        landingDistance = try c.decodeIfPresent(Double.self, forKey: .landingDistance) ?? 2.0
+        doglegEnabled = try c.decodeIfPresent(Bool.self, forKey: .doglegEnabled) ?? true
+    }
+}
+
 // MARK: - Block attribute value (ATTRIB) — per-insert text field
 
 /// One **block attribute value** attached to a block reference (DXF `ATTRIB`,
@@ -1285,6 +1380,18 @@ public enum EntityKind: Sendable, Hashable, Codable {
     /// text/mtext kind — the recursion is bounded: an annotation is never itself a
     /// leader).
     indirect case leader(LeaderData)
+    /// A **multileader** — AutoCAD's modern annotation callout (`DXF MULTILEADER`/
+    /// `MLEADER`) that superseded the legacy `LEADER`. Like a `.leader` it is a leg
+    /// polyline + an optional arrowhead at the first vertex + an optional attached
+    /// `.text`/`.mtext` annotation, but it adds a **landing** ("dogleg") tail run
+    /// between the last leg vertex and the annotation. Its graphic (leg segments,
+    /// arrowhead fill via the shared dimension-arrowhead helper, the landing
+    /// segment, and the annotation via the shared `.text`/`.mtext` resolve arm — no
+    /// second text path) is computed in `resolve()`, never stored (ADR-001).
+    /// `indirect` because `MultiLeaderData.annotation` stores an `EntityKind` (the
+    /// recursion is bounded: an annotation is never itself a (multi)leader). v1 is a
+    /// single-root callout; block content + multi-root are a later wave.
+    indirect case multileader(MultiLeaderData)
     /// A placed **raster image** (`RS_Image`, DXF `IMAGE` + `IMAGEDEF`). Its
     /// graphic — a textured quad at the four world corners (or a placeholder
     /// outline when the source file is missing) — is produced on demand by

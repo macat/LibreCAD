@@ -136,10 +136,11 @@ public enum EntityDirection {
             return .splinePoints(s)
 
         case .point, .circle, .text, .mtext, .hatch, .solid, .dimension,
-             .insert, .xline, .ray, .leader, .image:
+             .insert, .xline, .ray, .leader, .multileader, .image:
             // No meaningful direction to revert (a raster image's u/v placement has
             // no "traversal direction" — flipping it would mirror the picture, which
-            // is a TRANSFORM, not a reverse).
+            // is a TRANSFORM, not a reverse). A (multi)leader is an annotation
+            // callout: its leg order is not user-reversible here.
             return nil
         }
     }

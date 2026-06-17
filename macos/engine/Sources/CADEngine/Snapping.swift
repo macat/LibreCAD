@@ -477,6 +477,18 @@ public enum Snapping {
             // annotation anchor) are the snappable points.
             return d.vertices.filter(\.valid)
 
+        case .multileader(let d):
+            // The multileader's leg vertices (arrow tip + knees + landing root) PLUS
+            // the landing tail end (the dogleg's free end, where the annotation sits)
+            // are the snappable points — mirroring the leader, plus the landing end.
+            var pts = d.vertices.filter(\.valid)
+            let verts = d.vertices.filter(\.valid)
+            if d.doglegEnabled, d.landingDistance > Tolerance.distance,
+               let landing = EntityKind.multiLeaderLandingSegment(d, verts: verts) {
+                pts.append(landing.1)
+            }
+            return pts.filter(\.valid)
+
         case .image(let d):
             // The four quad corners are the snappable defining points of a placed
             // image — `corners[0]` IS the lower-left insertion point, so it is not
@@ -596,6 +608,21 @@ public enum Snapping {
             var mids: [Vector] = []
             for i in 0..<(d.vertices.count - 1) {
                 mids.append((d.vertices[i] + d.vertices[i + 1]) * 0.5)
+            }
+            return mids.filter(\.valid)
+
+        case .multileader(let d):
+            // The midpoint of each straight leg segment PLUS the landing tail's
+            // midpoint (so a multileader's legs + dogleg snap like a polyline's).
+            guard d.vertices.count >= 2 else { return [] }
+            var mids: [Vector] = []
+            for i in 0..<(d.vertices.count - 1) {
+                mids.append((d.vertices[i] + d.vertices[i + 1]) * 0.5)
+            }
+            let verts = d.vertices.filter(\.valid)
+            if d.doglegEnabled, d.landingDistance > Tolerance.distance,
+               let landing = EntityKind.multiLeaderLandingSegment(d, verts: verts) {
+                mids.append((landing.0 + landing.1) * 0.5)
             }
             return mids.filter(\.valid)
 

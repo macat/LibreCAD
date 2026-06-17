@@ -154,7 +154,7 @@ public struct ExtendTool: Tool {
         // and open splines to a boundary. Out of scope for this pass.
         case .circle, .polyline, .ellipse, .spline, .splinePoints, .point,
              .text, .mtext, .hatch, .solid, .dimension, .insert, .xline, .ray, .leader,
-             .image:
+             .multileader, .image:
             return false
         }
     }
@@ -173,7 +173,7 @@ public struct ExtendTool: Tool {
             return extendArc(d, near: near, boundaries: boundaries).map(EntityKind.arc)
         case .circle, .polyline, .ellipse, .spline, .splinePoints, .point,
              .text, .mtext, .hatch, .solid, .dimension, .insert, .xline, .ray, .leader,
-             .image:
+             .multileader, .image:
             return nil
         }
     }
@@ -241,7 +241,7 @@ public struct ExtendTool: Tool {
             // TODO(backlog): ellipse / spline boundaries.
             case .ellipse, .spline, .splinePoints, .polyline, .point,
                  .text, .mtext, .hatch, .solid, .dimension, .insert, .xline, .ray, .leader,
-                 .image:
+                 .multileader, .image:
                 continue
             }
         }
@@ -317,7 +317,7 @@ public struct ExtendTool: Tool {
             // TODO(backlog): ellipse / spline boundaries.
             case .ellipse, .spline, .splinePoints, .polyline, .point,
                  .text, .mtext, .hatch, .solid, .dimension, .insert, .xline, .ray, .leader,
-                 .image:
+                 .multileader, .image:
                 continue
             }
         }

@@ -222,6 +222,7 @@ struct GeometryEditor: View {
             case .xline(let d):        xlineEditor(d)
             case .ray(let d):          rayEditor(d)
             case .leader(let d):       leaderEditor(d)
+            case .multileader(let d):  multiLeaderEditor(d)
             case .text(let d):         textGeometryEditor(d)
             case .mtext(let d):        mtextGeometryEditor(d)
             case .image(let d):        imageGeometryEditor(d)
@@ -494,6 +495,34 @@ struct GeometryEditor: View {
         } label: {
             Text("Text").lineLimit(1)
         }
+    }
+
+    // MARK: Multileader (ML-W1 read-only summary; full inline editor is ML-W4)
+    //
+    // The multileader entity exists end-to-end in the engine (resolve / transform /
+    // snap / Codable) but its INLINE inspector editing is a later wire-wave (ML-W4).
+    // For now the GeometryEditor shows a read-only summary so a selected multileader
+    // reports its defining data without an unwired edit affordance.
+
+    @ViewBuilder
+    private func multiLeaderEditor(_ d: MultiLeaderData) -> some View {
+        LabeledContent("Vertices") {
+            Text("\(d.vertices.count)").foregroundStyle(.secondary)
+        }
+        .lineLimit(1)
+        LabeledContent("Arrowhead") {
+            Text(d.hasArrow ? "On" : "Off").foregroundStyle(.secondary)
+        }
+        .lineLimit(1)
+        LabeledContent("Arrow size") {
+            Text(d.arrowSize, format: .number).foregroundStyle(.secondary)
+        }
+        .lineLimit(1)
+        LabeledContent("Landing") {
+            Text(d.doglegEnabled ? "On (\(d.landingDistance.formatted()))" : "Off")
+                .foregroundStyle(.secondary)
+        }
+        .lineLimit(1)
     }
 
     // MARK: Text geometry (position / height / rotation)
