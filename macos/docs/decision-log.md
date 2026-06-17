@@ -6,6 +6,22 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-17 — PARITY PROGRAM COMPLETE: W3 (Wipeout) + W3b (layer-transparency DXF + annotation-scale) + W4 (wire-wave + page-setup + font-dir + layer-opacity) — (`native-macos @ 99e4dd1fa`, **3564 tests**, `.app` rebuilt)
+
+The back half + completion of the owner's "do all of it (parallel program)". Program total: **3393 → 3564 (+171 tests)**, zero regressions, every wave reviewed-or-spot-checked + serial-gated + merged-by-hash.
+
+- **W3 — WIPEOUT** `4c1147333` (the ONE new EntityKind; review APPROVE-WITH-NITS): masking polygon cloning `.image`/`.solid`; `ResolvedFill.isMask` keeps the engine view-free (renderer substitutes the live `clearColor`) + a dedicated post-line render pass for draw-order masking; DXF round-trip via libdxfrw `writeWipeout` (WIPEOUT is delivered as `DRW_Image`); NO libdxfrw patch. Masking residual (a stroke raised ABOVE a wipeout is still masked) + non-background-aware CG/SVG/PDF export → backlog.
+- **W3b-3bA — layer-transparency DXF** `e295215`: `Layer.opacity` (W1-1D) now persists via the LAYER table's XDATA 1071 (AcCmTransparency `(0x02<<24)|alpha`, mirroring entity code 440); opaque layers byte-clean; no libdxfrw patch.
+- **W3b-3bB — annotation-scale UI** `5ba46aa`: `$CANNOSCALE` persistence + undoable `CanvasModel.annotationScale` + StatusBar scale picker + render threading (default 1.0 byte-identical). Pick-side divergence at non-unit scales documented (text/mtext only; dims/leaders/hatch not annotative this round).
+- **W4 — wire-wave** `046a7af`: surfaced every unwired tool/mode — offset modes + bothSides/eraseSource, rotate/mirror copy toggles, revcloud, line-construction mode picker, circle tangent modes (TTR/TTT/from-arc), wipeout — via ToolOptionsBar + ContentView roster/flyouts + menus + `applyToolConfig`. No canvas chords for revcloud/lineConstruction/wipeout (the keymap is a non-owned file; reachable via menu/palette/toolbar).
+- **W4-tail** `0c6e5fb`: per-layout **Page Setup sheet** (pure `LayoutPageMapper` → `setLayoutPage`), user **font-dir picker** (`CADFonts.addUserFontDirectory` + Settings row + launch register; raw path/unsandboxed, security-scoped-bookmark noted), **layer-opacity slider** in the sidebar (completes the transparency feature end-to-end).
+
+**Infra learning:** background named subagents were flaky (1A + 2C died/stalled with empty worktrees + no idle ping; a reviewer idled without delivering its verdict) → switched to **in-process (blocking) agents** mid-program, which ran reliably through W3's 31-file EntityKind lane and all later lanes. Coordinator **pre-creates worktrees** because the harness `isolation: worktree` dropped some agents into the shared checkout (they correctly refused to write). Recorded in `[[subagent-dispatch-gotchas]]`.
+
+**Deferred (documented, not built):** CXF parser (speculative, no bundled `.cxf`); MLINE + ACAD_TABLE (new EntityKinds, twice-deferred); isometric grid (single-owner blast radius across the hottest files); multi-layout DXF round-trip (off-limits vendored libdxfrw); plot styles CTB/STB · fields · XREF · parametric constraints (XL new subsystems). Per-wave NITs live in `backlog.md`. `.app` rebuilt for GUI verification.
+
+---
+
 ## 2026-06-17 — PARITY PROGRAM W2 + W5 shipped (offset flags · revision-cloud · viewport freeze/display/twist · line-construction · circle tangents) — (`native-macos @ 50d02792c`, **3490 tests**)
 
 W2/W5 of the parity program — all UNWIRED engine work (UI wiring batches into W4). **In-process agents adopted mid-wave** after background dispatch proved flaky (1A died, 2C stalled — both empty worktrees, no idle ping); in-process runs returned results directly and reliably.

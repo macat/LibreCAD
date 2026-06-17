@@ -69,5 +69,8 @@ worktree). **No libdxfrw patch is needed anywhere in this program.** The only li
 
 - [x] **W1 — SHIPPED** `native-macos @ 1d8869087`, **3411 tests**, `.app` rebuilt. Lanes: 1A `ffd49796` (text-style round-trip, review APPROVE-WITH-NITS), 1B `b960a82` (rotate-copy), 1C `9155a3f` (mirror-copy), 1D `53de020` (layer transparency). Infra: auto-isolation flaky → pre-create worktrees going forward.
 - [x] **W2 + W5 — SHIPPED** `native-macos @ 50d02792c`, **3490 tests**. 2A `ba8418a` (offset flags), 2B `897a5277` (revcloud), 2C `21ea4e6` (line construction), 2D `6988a4c` (viewport freeze/display/twist), 5A `9f44111` (circle tangents). All UNWIRED. Learnings: each new ToolKind needs 2 coupled arms (`CommandPalette.glyph` + `ContentView.metadata`); switched to in-process agents (background dispatch flaky).
-- [ ] **W3** (Wipeout — solo new EntityKind, 4-sub-phase MLEADER cadence) — NEXT
-- [ ] W3b (layer-transparency DXF + annotation-scale UI) · W4 (wire-wave + page-setup + font-dir)
+- [x] **W3 — SHIPPED** `4c1147333` Wipeout new EntityKind (review APPROVE-WITH-NITS).
+- [x] **W3b — SHIPPED** `e295215` layer-transparency DXF (XDATA 1071) + `5ba46aa` annotation-scale UI. (CXF deferred.)
+- [x] **W4 — SHIPPED** `046a7af` wire-wave (all tools surfaced) + `0c6e5fb` page-setup sheet + font-dir picker + layer-opacity slider.
+
+**PROGRAM COMPLETE** — `native-macos @ 99e4dd1fa`, **3564 tests** (3393 → +171), `.app` rebuilt.
