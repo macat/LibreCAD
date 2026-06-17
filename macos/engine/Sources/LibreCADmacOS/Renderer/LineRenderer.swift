@@ -789,7 +789,26 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             // default look is unchanged.
             let tolerance = RenderPrefs.defaultTessellationTolerance
                 * renderPrefs.tessellationToleranceScale
-            let ctx = model.drawing.makeResolveContext(tessellationTolerance: tolerance)
+            // Thread the active ANNOTATION SCALE ($CANNOSCALE) into the resolve
+            // context so an annotative text/mtext STYLE RENDERS at the chosen scale
+            // (TextShaper/MTextShaper multiply the entity height by
+            // `ctx.annotationScale`). Default `1.0` (1:1) leaves the produced
+            // LineInstances byte-identical to the pre-annotation-scale renderer.
+            //
+            // PICK-SIDE LIMITATION (v1, documented — NOT fixed here): the
+            // snap/selection/hit-test call sites (Snapping.swift, Selection.swift,
+            // OverlayGeometry.swift, MarqueeHoverOverlay.swift, CADCanvasView.swift,
+            // and CanvasModel.rebuildIndex) still call `makeResolveContext()` with
+            // the 1.0 default, so they size annotative glyphs at their AUTHORED
+            // height. At a non-unit annotation scale, PICKING/snapping an annotative
+            // glyph can therefore diverge from its DRAWN size (the rendered text is
+            // scaled, the hit-test box is not). A follow-up wave would thread
+            // `model.annotationScale` through those (non-owned) call sites too; until
+            // then this is a known, scoped limitation (text/mtext only; dims/leaders/
+            // hatch are unaffected — they are not annotative this round).
+            let ctx = model.drawing.makeResolveContext(
+                tessellationTolerance: tolerance,
+                annotationScale: model.annotationScale)
             cachedResolveContext = ctx
             resolveContextVersion = model.modelVersion
             return ctx

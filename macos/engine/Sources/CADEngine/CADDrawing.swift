@@ -330,6 +330,21 @@ public struct GraphicVariables: Sendable, Hashable, Codable {
         set { setDouble("$DIMSCALE", newValue) }
     }
 
+    /// `$CANNOSCALE` — the document's ACTIVE ANNOTATION SCALE (the AutoCAD
+    /// `CANNOSCALE` system variable, normally a "1:N" name; here stored as the
+    /// numeric scale factor it represents, e.g. 1:50 ⇒ `0.02`). When a text/mtext
+    /// entity's STYLE is annotative, the resolve step multiplies its height by this
+    /// (wired into `ResolveContext.annotationScale` by `makeResolveContext`). The
+    /// app's StatusBar scale picker reads/writes it via `CanvasModel.annotationScale`;
+    /// it persists in memory + through the Codable `DXFPayload` / `CADDrawing.load`
+    /// path and the R4b generic `$VAR` header pass-through (standard `$`-vars survive
+    /// a .dxf Save → reopen). Defaults `1.0` (1:1 — annotative text drawn at its
+    /// authored height, so the default leaves every LineInstance byte-identical).
+    public var annotationScale: Double {
+        get { double("$CANNOSCALE", default: 1.0) }
+        set { setDouble("$CANNOSCALE", newValue) }
+    }
+
     /// `$LTSCALE` — the drawing-wide LINETYPE SCALE: a global multiplier on every
     /// dashed entity's dash pattern period (AutoCAD's `LTSCALE` system variable).
     /// `resolve()` multiplies it by the per-entity `Pen.linetypeScale` (DXF code 48)

@@ -98,8 +98,10 @@ struct StatusBar: View {
 
             Divider().frame(height: DS.Size.barDivider)
 
-            // Right: snap mode · zoom · the clickable mode toggles.
+            // Right: snap mode · annotation scale · zoom · the clickable mode toggles.
             snapSegment
+            Divider().frame(height: DS.Size.barDivider)
+            annotationScaleSegment
             Divider().frame(height: DS.Size.barDivider)
             zoomSegment
             Divider().frame(height: DS.Size.barDivider)
@@ -245,6 +247,80 @@ struct StatusBar: View {
         }
         .labelStyle(.titleAndIcon)
         .accessibilityLabel("Zoom \(model.zoomPercent) percent")
+    }
+
+    // MARK: - Annotation scale (CANNOSCALE)
+
+    /// The common AutoCAD-style annotation scales (the `CANNOSCALE` list), as
+    /// `(label, factor)`. The factor is the numeric multiplier an annotative
+    /// text/mtext STYLE's height is scaled by at render time (1:50 ⇒ 0.02). View-
+    /// layer-only constant; the engine stores only the factor (`$CANNOSCALE`).
+    private static let annotationScales: [(label: String, factor: Double)] = [
+        ("1:1",   1.0),
+        ("1:2",   1.0 / 2),
+        ("1:5",   1.0 / 5),
+        ("1:10",  1.0 / 10),
+        ("1:20",  1.0 / 20),
+        ("1:50",  1.0 / 50),
+        ("1:100", 1.0 / 100),
+        ("2:1",   2.0),
+        ("5:1",   5.0),
+        ("10:1", 10.0),
+    ]
+
+    /// The label for the model's current annotation-scale factor: the matching
+    /// preset name if one matches (within a tiny tolerance), else a generic
+    /// "1:N" / "N:1" derived from the factor so a value loaded from a file (or set
+    /// elsewhere) always reads sensibly.
+    private var annotationScaleLabel: String {
+        let f = model.annotationScale
+        if let preset = Self.annotationScales.first(where: { abs($0.factor - f) < 1e-9 }) {
+            return preset.label
+        }
+        guard f > 0 else { return "1:1" }
+        if f >= 1 { return "\(Self.trimmed(f)):1" }
+        return "1:\(Self.trimmed(1.0 / f))"
+    }
+
+    /// Formats a scale factor compactly (drops a trailing ".0" for whole numbers).
+    private static func trimmed(_ v: Double) -> String {
+        v.rounded() == v ? String(Int(v.rounded())) : String(format: "%g", v)
+    }
+
+    /// The annotation-scale picker: a borderless `Menu` of the common `CANNOSCALE`
+    /// presets, bound to `CanvasModel.annotationScale`. Choosing one calls the model's
+    /// `setAnnotationScale` (persists `$CANNOSCALE` + bumps the render version so the
+    /// canvas repaints annotative text at the new scale) and asks the canvas to redraw.
+    /// View-layer only — no modal, no engine logic here.
+    private var annotationScaleSegment: some View {
+        Menu {
+            ForEach(Self.annotationScales, id: \.label) { item in
+                Button {
+                    model.setAnnotationScale(item.factor)
+                    requestRedraw()
+                } label: {
+                    if abs(item.factor - model.annotationScale) < 1e-9 {
+                        Label(item.label, systemImage: "checkmark")
+                    } else {
+                        Text(item.label)
+                    }
+                }
+            }
+        } label: {
+            Label {
+                Text(annotationScaleLabel)
+                    .font(DS.Font.rowValue)
+                    .foregroundStyle(.secondary)
+            } icon: {
+                Image(systemName: "textformat.size")
+                    .foregroundStyle(.secondary)
+            }
+            .labelStyle(.titleAndIcon)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Annotation scale (CANNOSCALE) — scales annotative text")
+        .accessibilityLabel("Annotation scale \(annotationScaleLabel)")
     }
 
     // MARK: - Clickable mode toggles (GRID / SNAP / ORTHO)
