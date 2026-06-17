@@ -101,6 +101,41 @@ public enum CommandParser {
         return parseBareDistance(trimmed, reference: reference, cursor: cursor)
     }
 
+    // MARK: - Classifier (coordinate vs command word)
+
+    /// A cheap, allocation-light heuristic the MERGED command line uses to decide
+    /// whether the text the user typed is a COORDINATE / DISTANCE token (which it
+    /// should feed to `parse(_:reference:cursor:)` and the active tool as
+    /// `.value(point)`) versus a COMMAND WORD like `LINE` / `L` / `rect` (which it
+    /// should route to the command matcher instead).
+    ///
+    /// It is intentionally a *quick classifier*, not a full validator: it only
+    /// inspects the leading character and the presence of the coordinate
+    /// separators. The View / CanvasModel that owns the merged line uses this to
+    /// pick a route, then the chosen route does the real parsing/matching.
+    ///
+    /// Returns `true` iff the trimmed text looks like a coordinate/distance:
+    /// - empty (after trimming) → `false`.
+    /// - first non-space char is a digit, `+`, `-`, `.`, or `@` → `true`
+    ///   (the start of a number, a signed/decimal number, or the relative `@`).
+    /// - otherwise, contains `,` or `<` (the absolute / relative / polar
+    ///   separators) → `true`.
+    /// - otherwise (an alphabetic command word like `LINE` / `L` / `line` /
+    ///   `rect`) → `false`.
+    ///
+    /// Note: a malformed pair such as `"x,y"` returns `true` because it contains a
+    /// comma; that is acceptable — this classifier only chooses the ROUTE, and the
+    /// coordinate route's `parse` then rejects it as an error. The merged line is
+    /// expected to surface that error rather than silently fall back to a command.
+    public static func looksLikeCoordinate(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard let first = trimmed.first else { return false }
+        if (first.isASCII && first.isNumber) || first == "+" || first == "-" || first == "." || first == "@" {
+            return true
+        }
+        return trimmed.contains(",") || trimmed.contains("<")
+    }
+
     // MARK: - Pair (absolute / relative)
 
     /// Parses `"x,y"` into a point. When `relative` the components are added to
