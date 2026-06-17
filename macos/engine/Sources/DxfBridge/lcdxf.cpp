@@ -322,6 +322,11 @@ public:
         e.color = src.color;
         e.color24 = src.color24;
         e.lineWeightMM100 = DRW_LW_Conv::lineWidth2dxfInt(src.lWeight);
+        // Per-entity TRANSPARENCY (DXF code 440): libdxfrw parses code 440 straight
+        // into DRW_Entity::transparency (drw_entities.cpp:122; the DWG path decodes
+        // the ENC alpha_raw the same way). Copy the RAW value across — the Swift
+        // reader decodes `(alpha_type<<24)|alpha`. Absent ⇒ DRW::Opaque (0) ⇒ ByLayer.
+        e.transparency = src.transparency;
         e.spaceFlag = (src.space == DRW::PaperSpace) ? 1 : 0;
         e.layoutName = nullptr;
     }
@@ -335,6 +340,7 @@ public:
         e.color = DRW::ColorByLayer;
         e.color24 = -1;
         e.lineWeightMM100 = -1;
+        e.transparency = DRW::Opaque;   // code 440 absent ⇒ ByLayer/opaque default
         e.spaceFlag = 0;          // model space by default (DXF code 67 == 0)
         e.layoutName = nullptr;   // bound only for paper-space block members
         e.ratio = 1.0;
@@ -1616,6 +1622,12 @@ public:
         // src.lineWeightMM100 holds the DXF lineweight integer (mm*100 / sentinel
         // -1/-2/-3), exactly what dxfInt2lineWidth expects.
         ent.lWeight  = DRW_LW_Conv::dxfInt2lineWidth(src.lineWeightMM100);
+        // Per-entity TRANSPARENCY (DXF code 440): the raw `(alpha_type<<24)|alpha`
+        // value built by the Swift writer rides straight onto DRW_Entity::transparency.
+        // libdxfrw emits code 440 only when this != DRW::Opaque AND the version is
+        // > AC1015 (R2000), so a 0 (ByLayer/opaque) entity writes NO 440 group —
+        // byte-identical to the pre-transparency output. (libdxfrw.cpp:225.)
+        ent.transparency = src.transparency;
         // Paper-space P1: a paper-space entity (spaceFlag == 1) gets DRW::PaperSpace,
         // which libdxfrw emits as DXF code 67 == 1 in the ENTITIES section
         // (libdxfrw.cpp:197). libdxfrw also writes a single built-in `*Paper_Space`

@@ -248,6 +248,19 @@ typedef struct LCEntity {
     int32_t color;         /**< ACI color index, code 62 (0=ByBlock, 256=ByLayer). */
     int32_t color24;       /**< true-color 0x00RRGGBB, code 420, or -1 if unset. */
     int32_t lineWeightMM100;/**< lineweight in mm*100; -1 ByLayer, -2 ByBlock, -3 default. */
+    /** Per-entity TRANSPARENCY (AutoCAD entity transparency, DXF code 440). This is
+     *  the RAW DXF/libdxfrw `DRW_Entity::transparency` value (an `int`), copied
+     *  verbatim across the bridge — the Swift reader/writer own the decode/encode.
+     *  The encoding is `(alpha_type << 24) | alpha`:
+     *    - `0` (DRW::Opaque) — the var was ABSENT ⇒ inherit (ByLayer). libdxfrw only
+     *      WRITES code 440 when this != Opaque (and only for versions > AC1015/R2000),
+     *      so a 0 here round-trips as "no 440 group", i.e. ByLayer.
+     *    - alpha_type `0x02` — an explicit by-value transparency; the low byte is the
+     *      ALPHA (255 == fully opaque, 0 == fully transparent).
+     *    - alpha_type `0x01` — ByBlock.
+     *  Defaults to 0 (Opaque/ByLayer) so a zero-initialized POD / pre-440 call site
+     *  is byte-compatible. */
+    int32_t transparency;
     /** Which "space" the entity lives in (paper-space P1): 0 == model space (DXF
      *  code 67 == 0, the default), 1 == paper space (code 67 == 1). The reader
      *  copies DRW_Entity::space (which libdxfrw parses from code 67) here, AND

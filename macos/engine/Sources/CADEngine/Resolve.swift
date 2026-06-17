@@ -401,12 +401,19 @@ extension Pen {
         let layerPen = ctx.layerAttributes(layer)
         let blockPen = ctx.blockAttributes(ctx.currentBlockPen)
 
-        let color: RGBAColor
+        // Resolve the base color, then NORMALIZE its alpha to 1: the entity's
+        // transparency is the single authority on the final alpha (folded in by
+        // `ResolvedPen.init` from `op` below). Without this reset, inheriting a
+        // layer/block color that ALREADY folded its own opacity into `color.a`
+        // would double-count the alpha when the entity's resolved opacity is then
+        // applied again. RGB is preserved; only alpha is reset.
+        var color: RGBAColor
         switch lineColor {
         case .byLayer: color = layerPen.color
         case .byBlock: color = blockPen.color
         case .explicit(let c): color = c
         }
+        color.a = 1
 
         let lt: PenLineType
         switch lineType {
@@ -422,7 +429,22 @@ extension Pen {
         default: lw = lineWidth
         }
 
-        return ResolvedPen(color: color, lineType: lt, lineWidth: lw)
+        // Effective TRANSPARENCY (DXF 440), resolved with the SAME ByLayer→layer /
+        // ByBlock→block / else→value chain as color/linetype/width. An explicit
+        // `.opacity(a)` wins; `.byLayer` falls back to the layer's resolved opacity
+        // (which is OPAQUE this wave — Layer has no transparency field yet, so
+        // `layerPen.opacity == 1`; documented follow-up to add a Layer field);
+        // `.byBlock` to the placing block's resolved opacity. The result is folded
+        // into the resolved color's alpha by `ResolvedPen.init` so the renderer's
+        // existing `pen.color` path draws it with no new field.
+        let op: Double
+        switch transparency {
+        case .byLayer: op = layerPen.opacity
+        case .byBlock: op = blockPen.opacity
+        case .opacity(let a): op = Swift.max(0, Swift.min(1, a))
+        }
+
+        return ResolvedPen(color: color, lineType: lt, lineWidth: lw, opacity: op)
     }
 }
 
