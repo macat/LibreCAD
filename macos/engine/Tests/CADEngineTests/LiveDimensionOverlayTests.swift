@@ -24,6 +24,7 @@
 
 import Testing
 import Foundation
+import AppKit
 @testable import CADEngine
 
 @MainActor
@@ -157,5 +158,67 @@ struct LiveDimensionOverlayTests {
                                 label: "10", labelAnchor: Vector(5, 0))
         let anchorScreen = vp.worldToScreen(dim.labelAnchor)
         #expect(anchorScreen == CGPoint(x: 410, y: 300))   // midpoint of from(400)/to(420)
+    }
+
+    // MARK: dynamicInputChar — the keyDown gate decode (Wave V)
+
+    @Test("dynamicInputChar accepts a single digit / `.` / `-` and rejects the rest")
+    func dynamicInputCharDecode() {
+        // Single digits decode to themselves.
+        #expect(LiveDimensionGeometry.dynamicInputChar("5") == "5")
+        #expect(LiveDimensionGeometry.dynamicInputChar("0") == "0")
+        #expect(LiveDimensionGeometry.dynamicInputChar("9") == "9")
+        // Decimal point + minus sign decode (for fractional / negative entry).
+        #expect(LiveDimensionGeometry.dynamicInputChar(".") == ".")
+        #expect(LiveDimensionGeometry.dynamicInputChar("-") == "-")
+        // Multi-character strings are NOT a single editable char → nil (fall through).
+        #expect(LiveDimensionGeometry.dynamicInputChar("12") == nil)
+        // A letter is a tool-switch / chord key, never dynamic input → nil.
+        #expect(LiveDimensionGeometry.dynamicInputChar("a") == nil)
+        #expect(LiveDimensionGeometry.dynamicInputChar("A") == nil)
+        // Punctuation that is not `.` / `-` → nil.
+        #expect(LiveDimensionGeometry.dynamicInputChar("+") == nil)
+        #expect(LiveDimensionGeometry.dynamicInputChar(",") == nil)
+        // nil / empty `charactersIgnoringModifiers` → nil (no character to begin/append).
+        #expect(LiveDimensionGeometry.dynamicInputChar(nil) == nil)
+        #expect(LiveDimensionGeometry.dynamicInputChar("") == nil)
+    }
+
+    // MARK: caretX — insertion-bar offset = measured width of the typed string (Wave V)
+
+    /// The exact attributes the overlay measures its label text with, so `caretX` lands
+    /// on the same glyph metrics the chip draws.
+    private var caretAttrs: [NSAttributedString.Key: Any] {
+        [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)]
+    }
+
+    @Test("caretX of an empty prefix is ~0")
+    func caretXEmpty() {
+        #expect(LiveDimensionGeometry.caretX(prefix: "", attributes: caretAttrs) == 0)
+    }
+
+    @Test("caretX equals the measured width of the typed string")
+    func caretXEqualsMeasuredWidth() {
+        let prefix = "123.4"
+        let measured = NSAttributedString(string: prefix, attributes: caretAttrs).size().width
+        #expect(LiveDimensionGeometry.caretX(prefix: prefix, attributes: caretAttrs) == measured)
+    }
+
+    @Test("caretX grows monotonically with prefix length")
+    func caretXMonotonic() {
+        let x0 = LiveDimensionGeometry.caretX(prefix: "", attributes: caretAttrs)
+        let x1 = LiveDimensionGeometry.caretX(prefix: "1", attributes: caretAttrs)
+        let x2 = LiveDimensionGeometry.caretX(prefix: "12", attributes: caretAttrs)
+        let x3 = LiveDimensionGeometry.caretX(prefix: "123", attributes: caretAttrs)
+        #expect(x0 < x1)
+        #expect(x1 < x2)
+        #expect(x2 < x3)
+    }
+
+    @Test("caretX is positive for any non-empty typed string")
+    func caretXPositive() {
+        #expect(LiveDimensionGeometry.caretX(prefix: "7", attributes: caretAttrs) > 0)
+        #expect(LiveDimensionGeometry.caretX(prefix: "-", attributes: caretAttrs) > 0)
+        #expect(LiveDimensionGeometry.caretX(prefix: ".", attributes: caretAttrs) > 0)
     }
 }

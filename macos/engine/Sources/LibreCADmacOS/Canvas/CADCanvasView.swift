@@ -998,7 +998,12 @@ final class CADCanvasController {
             let constrained = model.polarConstrained(
                 model.orthoConstrained(p, shiftHeld: Self.shiftHeld),
                 shiftHeld: Self.shiftHeld)
-            model.handleToolInput(.move(constrained))
+            // Route the cursor-move funnel through `handleToolMove` (NOT raw
+            // `handleToolInput(.move)`): while DYNAMIC INPUT is active it substitutes the
+            // SYNTHETIC cursor so locked / typed fields stay fixed at their typed values
+            // while the unlocked fields (and the rest of the preview) follow the real
+            // mouse. When not editing it is exactly `handleToolInput(.move(constrained))`.
+            model.handleToolMove(constrained)
         }
         // Hover highlight (U5): in SELECT mode, track the entity under the cursor so
         // the overlay can highlight it as a pre-selection affordance. Cheap — it
@@ -1696,6 +1701,7 @@ final class CADCanvasController {
         let isSpace = event.keyCode == 49
         let isF8 = event.keyCode == 100                            // F8 → toggle Ortho
         let isF7 = event.keyCode == 98                             // F7 → toggle Grid
+        let isTab = event.keyCode == 48                            // Tab → cycle dyn field
 
         // F8 toggles ortho (AutoCAD/LibreCAD convention), in any mode and regardless
         // of modifiers, so a draw run can flip ortho mid-operation without leaving the
@@ -1711,6 +1717,54 @@ final class CADCanvasController {
         if isF7 {
             contextToggleGrid()
             return true
+        }
+
+        // DYNAMIC INPUT (editable live dimensions) — claimed BEFORE the Space focus hook,
+        // the Esc unwind ladder, and the Return commit, so an editing keystroke (a digit /
+        // `.` / `-`, Tab, Return, Esc, ⌫) never falls through to tool-cancel / commit.
+        // Gated on `!command && !option` so menu chords (⌘…) and option tool chords (⌥…)
+        // are untouched. A digit / `.` / `-` is decoded by the pure `dynamicInputChar`
+        // helper; Tab is keyCode 48 (not otherwise decoded). When NOT editing, only a
+        // first editable char (with DYN on + a tool active + an editable field present)
+        // BEGINS editing — Tab/Return/Esc/⌫ and every other key fall through so normal
+        // focus traversal, the Space hook, the Esc ladder, and the bare-letter tool switch
+        // all keep working.
+        if !command, !option {
+            let dynChar = LiveDimensionGeometry.dynamicInputChar(event.charactersIgnoringModifiers)
+            if model.dynEditing {
+                if let ch = dynChar {
+                    model.dynAppend(ch)
+                    redraw()
+                    return true
+                }
+                if isTab {
+                    model.dynCycleField(reverse: shift)
+                    redraw()
+                    return true
+                }
+                if isReturn {
+                    model.dynCommit()
+                    redraw()
+                    return true
+                }
+                if isEscape {
+                    model.cancelDynInput()
+                    redraw()
+                    return true
+                }
+                if isDelete {
+                    model.dynBackspace()
+                    redraw()
+                    return true
+                }
+                // Any OTHER key while editing falls through to normal handling below.
+            } else if let ch = dynChar,
+                      model.dynamicInputEnabled, model.isToolActive, model.hasEditableLiveField {
+                // First editable char auto-begins editing the first editable field.
+                model.beginDynInput(firstChar: ch)
+                redraw()
+                return true
+            }
         }
 
         // Space (D1) hands focus to the bottom command/coordinate line (U1) while a
