@@ -73,25 +73,34 @@ public struct ToolSuggestionCatalog: Sendable {
 
     /// Sensible short aliases per tool (lowercased). Only the non-obvious ones are
     /// listed; the title is always matched in addition to these.
+    ///
+    /// Many entries carry the canonical short **AutoCAD command aliases** (e.g. `l`→Line,
+    /// `c`→Circle, `a`→Arc, `o`→Offset, `tr`→Trim) so a muscle-memory user can type the
+    /// classic single/two-letter command and `resolve(command:)` jumps straight to the
+    /// tool. These are deliberately exact-match-only winners: `resolve` checks aliases
+    /// before any fuzzy fallback, so `"a"` resolves to Arc rather than fuzz-matching some
+    /// other title. Every alias here is unique across kinds (see `noDuplicateAliases`).
     static let defaultAliases: [ToolKind: [String]] = [
         .select: ["pan", "cursor", "pick"],
-        .line: ["ln"],
-        .circle: ["circ"],
-        .rectangle: ["rect", "box"],
+        .line: ["l", "ln"],
+        .circle: ["c", "circ"],
+        .arc: ["a"],
+        .rectangle: ["r", "rec", "rect", "box"],
         .polyline: ["poly", "pline", "pl"],
         .point: ["pt", "node"],
-        .ellipse: ["oval"],
+        .ellipse: ["el", "oval"],
         .polygon: ["poly", "ngon"],
-        .move: ["mv"],
-        .copy: ["cp", "duplicate"],
-        .rotate: ["rot", "turn"],
+        .move: ["m", "mv"],
+        .copy: ["co", "cp", "duplicate"],
+        .rotate: ["ro", "rot", "turn"],
         .scale: ["resize"],
-        .offset: ["off"],
-        .trim: ["cut"],
-        .extend: ["ext"],
+        .offset: ["o", "off"],
+        .trim: ["tr", "cut"],
+        .extend: ["ex", "ext"],
         .fillet: ["round", "corner"],
         .chamfer: ["bevel"],
-        .text: ["txt", "label", "mtext"],
+        .mirror: ["mi"],
+        .text: ["t", "dt", "mt", "txt", "label", "mtext"],
         .linearDim: ["dim", "dimension", "measure"],
         .alignedDim: ["dim", "dimension"],
         .radialDim: ["dim", "radius"],
@@ -248,6 +257,110 @@ public enum ToolSuggester {
             return a.order < b.order
         }
         return scored.prefix(Swift.max(0, cap)).map(\.kind)
+    }
+
+    // MARK: - Command-word → tool resolution (pure)
+
+    /// The minimum `CommandMatcher.score` a FUZZY (non-exact) match must clear for
+    /// `resolve` to return it. Below this, `resolve` returns `nil` rather than guessing,
+    /// so clear garbage (`"xyzzy"`) launches nothing.
+    ///
+    /// Rationale, tied to `CommandMatcher`'s tiers: an exact full-string match scores
+    /// 1000 and a *prefix* match scores 500 (`"rectang"` → "Rectangle" is a prefix, so
+    /// it clears this easily). A pure scattered subsequence has a base tier of 0 plus
+    /// only small per-character / proximity bonuses — exactly the "letters happen to
+    /// appear in order" noise we want to reject. Requiring at least a contiguous run
+    /// inside the title (tier 4 = 150) keeps `resolve` from firing a tool just because
+    /// the typed letters are sprinkled through some unrelated title. `suggestions`/`fuzzySet`
+    /// intentionally show *all* subsequence hits (it's a chooser); `resolve` commits to
+    /// ONE tool, so it holds a higher bar.
+    public static let resolveFuzzyThreshold: Double = 150
+
+    /// Resolves a typed command word to a single `ToolKind`, or `nil` when nothing is a
+    /// confident match. Pure — no SwiftUI, no globals; the command LINE calls this when
+    /// the user presses ↵ on free text.
+    ///
+    /// Resolution order (first win returns):
+    ///   1. **Exact match wins.** After trim + lowercase, if the input equals a kind's
+    ///      `title` (case-insensitive) OR any of its aliases, return that kind. Ties on a
+    ///      shared alias (e.g. several dimension tools answer to `"dim"`) break on the
+    ///      canonical `ToolKind.allCases` order — deterministic, never random.
+    ///   2. **Fuzzy fallback.** Otherwise rank every kind's {title ∪ aliases} with the
+    ///      shared `CommandMatcher` (exactly as `fuzzySet`), and return the single best
+    ///      kind — but ONLY if its score clears `resolveFuzzyThreshold`. Below the bar →
+    ///      `nil` (so `"xyzzy"` resolves to nothing rather than a random tool).
+    ///
+    /// - Parameters:
+    ///   - command: the user's typed word (any case / surrounding whitespace).
+    ///   - catalog: the roster + aliases to resolve against (defaults to `.default`).
+    /// - Returns: the matched `ToolKind`, or `nil` for empty / unrecognized input.
+    public static func resolve(command: String,
+                               catalog: ToolSuggestionCatalog = .default) -> ToolKind? {
+        let needle = command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return nil }
+
+        // 1) Exact match (title or alias). Scan in canonical order so a needle shared by
+        //    several kinds (e.g. "dim") deterministically resolves to the FIRST kind.
+        for kind in ToolKind.allCases {
+            if kind.title.lowercased() == needle { return kind }
+            if let aliases = catalog.aliases[kind], aliases.contains(needle) { return kind }
+        }
+
+        // 2) Fuzzy fallback — best CommandMatcher score across {title ∪ aliases}, gated
+        //    by the threshold. Mirrors `fuzzySet`'s scoring + tie discipline but commits
+        //    to exactly one tool (or none).
+        var best: (kind: ToolKind, order: Int, score: Double)?
+        for (order, kind) in ToolKind.allCases.enumerated() {
+            var terms = [kind.title]
+            if let aliases = catalog.aliases[kind] { terms.append(contentsOf: aliases) }
+            var kindBest: Double?
+            for term in terms {
+                if let (s, _) = CommandMatcher.score(query: needle, candidate: term) {
+                    kindBest = Swift.max(kindBest ?? -.greatestFiniteMagnitude, s)
+                }
+            }
+            guard let kindBest else { continue }
+            if let cur = best {
+                // Higher score wins; ties → canonical order (stable, deterministic).
+                if kindBest > cur.score || (kindBest == cur.score && order < cur.order) {
+                    best = (kind, order, kindBest)
+                }
+            } else {
+                best = (kind, order, kindBest)
+            }
+        }
+
+        guard let best, best.score >= resolveFuzzyThreshold else { return nil }
+        return best.kind
+    }
+
+    // MARK: - Alias hygiene (pure, for tests)
+
+    /// Aliases that are *intentionally* shared across kinds — broad fuzzy SEARCH terms
+    /// (not command aliases) that several related tools all answer to. `resolve` handles
+    /// the ambiguity deterministically (canonical-order first wins); the duplicate-alias
+    /// hygiene check ignores these on purpose.
+    static let intentionallySharedAliases: Set<String> = [
+        "poly", "dim", "dimension", "angle", "measure", "block", "construction", "array",
+    ]
+
+    /// Diagnostic: alias strings claimed by MORE THAN ONE kind in `catalog.aliases`,
+    /// EXCLUDING the deliberately-shared fuzzy terms in `intentionallySharedAliases`.
+    /// Pure helper so tests can assert the short command aliases stay collision-free
+    /// without re-implementing the scan. Returns each offending alias mapped to the kinds
+    /// that claim it.
+    static func duplicateCommandAliases(
+        catalog: ToolSuggestionCatalog = .default
+    ) -> [String: [ToolKind]] {
+        var owners: [String: [ToolKind]] = [:]
+        // Canonical order so the reported owner lists are deterministic.
+        for kind in ToolKind.allCases {
+            guard let aliases = catalog.aliases[kind] else { continue }
+            for alias in aliases where !intentionallySharedAliases.contains(alias) {
+                owners[alias, default: []].append(kind)
+            }
+        }
+        return owners.filter { $0.value.count > 1 }
     }
 
     // MARK: - MRU maintenance (pure)
