@@ -74,6 +74,10 @@ struct DXFReaderTests {
             case .ray:          t.ray += 1
             // Leaders (DXF LEADER) are now imported (was an unsupported warning).
             case .leader:       t.leader += 1
+            // Multileaders (ML-W1): the reader does not yet produce `.multileader`
+            // (DXF MLEADER import is ML-W3), so this folds into the leader-family
+            // tally and contributes 0 in these tests.
+            case .multileader:  t.leader += 1
             // Raster images (DXF IMAGE + IMAGEDEF) are now imported (was unsupported).
             case .image:        t.image += 1
             }

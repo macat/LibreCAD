@@ -242,6 +242,7 @@ public enum EntityTransform {
         case .xline(let x):           return .xline(transformXLine(x, t))
         case .ray(let r):             return .ray(transformRay(r, t))
         case .leader(let ld):         return .leader(transformLeader(ld, t))
+        case .multileader(let ml):    return .multileader(transformMultiLeader(ml, t))
         case .image(let im):          return .image(transformImage(im, t))
         }
     }
@@ -281,6 +282,26 @@ public enum EntityTransform {
             arrowSize: abs(ld.arrowSize * t.uniformScale),
             annotation: ld.annotation.map { $0.transformed(by: t) },
             styleName: ld.styleName
+        )
+    }
+
+    // MARK: multileader — clones the leader transform (every leg vertex transforms
+    //       full-affine; the arrow size + the landing distance scale by the uniform
+    //       factor; the annotation transforms through the SAME `EntityKind
+    //       .transformed(by:)` path; the style name + arrow flag + dogleg toggle are
+    //       size-independent). The landing geometry is re-derived in `resolve()` from
+    //       the transformed last vertex + annotation, so only the scalar
+    //       `landingDistance` needs scaling here.
+
+    static func transformMultiLeader(_ ml: MultiLeaderData, _ t: Affine2D) -> MultiLeaderData {
+        MultiLeaderData(
+            vertices: ml.vertices.map { t.apply($0) },
+            hasArrow: ml.hasArrow,
+            arrowSize: abs(ml.arrowSize * t.uniformScale),
+            annotation: ml.annotation.map { $0.transformed(by: t) },
+            styleName: ml.styleName,
+            landingDistance: abs(ml.landingDistance * t.uniformScale),
+            doglegEnabled: ml.doglegEnabled
         )
     }
 

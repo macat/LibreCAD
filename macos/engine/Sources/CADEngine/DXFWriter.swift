@@ -807,6 +807,17 @@ private final class PODBuilder {
             e.vertices = ptr
             e.vertexCount = count
 
+        case .multileader:
+            // ML-W1 STUB: the multileader entity exists end-to-end in the engine
+            // (resolve / transform / snap / Codable) but DXF write is DEFERRED to
+            // ML-W3 (which adds the `LC_ENT_MLEADER` bridge POD + `writeMultiLeader`
+            // — gated on a vendored-libdxfrw sign-off, since stock libdxfrw emits a
+            // geometry-light MULTILEADER). For now mark it UNSUPPORTED so the C side
+            // counts it skipped (no bytes emitted), exactly like any kind the writer
+            // cannot yet represent. The engine's own Codable document path still
+            // round-trips a multileader losslessly.
+            e.kind = Int32(LC_ENT_UNSUPPORTED.rawValue)
+
         case .image(let d):
             // Emitted as a DXF IMAGE + its IMAGEDEF (the C side calls
             // `dxfRW::writeImage`, which creates the IMAGEDEF and the reactor wiring

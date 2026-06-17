@@ -77,6 +77,10 @@ public enum QuickSelectKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .xline:        return .xline
         case .ray:          return .ray
         case .leader:       return .leader
+        // MLEADER is DEFERRED from Quick-Select v1: a multileader maps to the SAME
+        // `.leader` tag (no new `QuickSelectKind` case) so it is still selectable
+        // alongside leaders. A dedicated tag is a later wave's call.
+        case .multileader:  return .leader
         case .image:        return .image
         }
     }

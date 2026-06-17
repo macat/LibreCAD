@@ -99,6 +99,9 @@ struct DXFWriterTests {
             case .xline:        t.xline += 1     // now written (DRW_Xline)
             case .ray:          t.ray += 1       // now written (DRW_Ray)
             case .leader:       t.leader += 1    // now written (DRW_Leader)
+            // Multileaders (ML-W1): DXF write is ML-W3 (stubbed UNSUPPORTED for now),
+            // so this folds into the leader-family tally and contributes 0 here.
+            case .multileader:  t.leader += 1
             case .image:        t.image += 1     // now written (DRW_Image + IMAGEDEF)
             }
         }
@@ -861,6 +864,9 @@ struct DXFWriterTests {
         case .line, .point, .circle, .arc, .ellipse, .polyline,
              .text, .mtext, .solid, .hatch, .dimension, .insert,
              .spline, .splinePoints, .xline, .ray, .leader, .image: return true
+        // MLEADER write is ML-W3 (the writer stubs `.multileader` to UNSUPPORTED for
+        // now), so it is NOT in the supported set yet.
+        case .multileader: return false
         }
     }
 }

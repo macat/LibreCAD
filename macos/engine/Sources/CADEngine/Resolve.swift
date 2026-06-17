@@ -1063,6 +1063,14 @@ extension EntityKind {
             // `.mtext` resolve arm (no second text path; honors ctx.fontProvider).
             return Self.resolveLeader(d, pen: pen, ctx: ctx)
 
+        case .multileader(let d):
+            // Multileader callout → the leg polyline PATH + an arrowhead FILL at the
+            // first vertex (shared `dimArrowhead`) + an optional straight LANDING
+            // ("dogleg") tail from the last leg vertex toward the annotation + the
+            // attached text/mtext annotation through the SAME `.text`/`.mtext` resolve
+            // arm (no second text path; honors ctx.fontProvider).
+            return Self.resolveMultiLeader(d, pen: pen, ctx: ctx)
+
         case .image(let d):
             // Raster image → a textured-quad `ResolvedImage` at the four world
             // corners (the renderer loads+caches the bitmap by the file path and
@@ -1260,6 +1268,110 @@ extension EntityKind {
         let style = ctx.dimStyleProvider?() ?? .default
         let base = style.arrowSize > 0 ? style.arrowSize : dimDefaultArrowSize
         return base * (style.scale > 0 ? style.scale : 1.0)
+    }
+
+    // MARK: - MultiLeader resolve (leg path + arrowhead + landing/dogleg + annotation)
+
+    /// Resolves a multileader's full graphic (ADR-001: PURE — no mutation), cloning
+    /// `resolveLeader` and ADDING the landing ("dogleg") tail:
+    /// - the leg path as a single open `ResolvedPolyline` over its `vertices` (≥ 2);
+    /// - an arrowhead FILL at the FIRST vertex pointing back along the first segment,
+    ///   via the shared `dimArrowhead` helper (so multileader / leader / dimension
+    ///   arrowheads are identical), when `hasArrow` and there is a real first segment;
+    /// - a straight LANDING segment (`landingDistance` long) from the LAST leg vertex
+    ///   toward the annotation, emitted as its own open `ResolvedPolyline`, when
+    ///   `doglegEnabled` and there is a real landing direction + positive distance;
+    /// - the attached `.text`/`.mtext` annotation resolved through the SAME text
+    ///   resolve arm as a standalone text entity (no second text path), inheriting
+    ///   the multileader's resolved pen so it renders in the multileader's color.
+    ///
+    /// The landing direction is FROM the last leg vertex TOWARD the annotation's
+    /// anchor when an annotation is present (so the tail points at the text); else it
+    /// continues along the last leg segment's direction (a bare multileader's tail
+    /// extends the leg). A degenerate multileader (< 2 vertices) resolves to JUST its
+    /// annotation (if any), mirroring `resolveLeader`.
+    static func resolveMultiLeader(_ d: MultiLeaderData, pen: ResolvedPen, ctx: ResolveContext)
+        -> ResolvedGeometry
+    {
+        var polylines: [ResolvedPolyline] = []
+        var fills: [ResolvedFill] = []
+
+        let verts = d.vertices.filter(\.valid)
+        if verts.count >= 2 {
+            // The leg path.
+            polylines.append(ResolvedPolyline(points: verts, closed: false, pen: pen))
+
+            // Arrowhead at the first vertex, pointing FROM the tip back along the
+            // first segment (the same convention as a dimension / leader arrowhead).
+            if d.hasArrow {
+                let tip = verts[0]
+                let back = verts[1]
+                let dir = back - tip
+                let len = dir.magnitude
+                if len > Tolerance.distance {
+                    let unit = dir / len
+                    let arrow = d.arrowSize > 0 ? d.arrowSize : leaderDefaultArrowSize(ctx)
+                    fills.append(dimArrowhead(tip: tip, direction: unit, size: arrow, color: pen.color))
+                }
+            }
+
+            // The landing ("dogleg") tail: a short straight run from the LAST leg
+            // vertex toward the annotation (or extending the last segment for a bare
+            // multileader). Only drawn when enabled and the distance is positive.
+            if d.doglegEnabled, d.landingDistance > Tolerance.distance,
+               let landing = multiLeaderLandingSegment(d, verts: verts) {
+                polylines.append(ResolvedPolyline(
+                    points: [landing.0, landing.1], closed: false, pen: pen))
+            }
+        }
+
+        // The attached annotation — resolved through the shared `.text`/`.mtext`
+        // resolve arm (no second text path), inheriting the multileader's pen.
+        if let annotation = d.annotation {
+            let geo = annotation.resolve(pen: pen, ctx: ctx)
+            polylines.append(contentsOf: geo.polylines)
+            fills.append(contentsOf: geo.fills)
+        }
+
+        return ResolvedGeometry(polylines: polylines, fills: fills)
+    }
+
+    /// The straight landing ("dogleg") tail segment of a multileader: from the LAST
+    /// valid leg vertex, of length `landingDistance`, in the direction TOWARD the
+    /// annotation's anchor (when one is present) else continuing along the last leg
+    /// segment. Returns `nil` (no landing) for a degenerate leg (< 2 vertices) or a
+    /// direction that can't be resolved (e.g. an annotation coincident with the last
+    /// vertex AND a zero-length last segment).
+    static func multiLeaderLandingSegment(_ d: MultiLeaderData, verts: [Vector])
+        -> (Vector, Vector)?
+    {
+        guard verts.count >= 2 else { return nil }
+        let start = verts[verts.count - 1]
+
+        // Prefer pointing at the annotation anchor; fall back to extending the last
+        // leg segment.
+        var dir = Vector(0, 0)
+        if let anchor = multiLeaderAnnotationAnchor(d), anchor.valid {
+            dir = anchor - start
+        }
+        if dir.magnitude <= Tolerance.distance {
+            dir = start - verts[verts.count - 2]
+        }
+        let len = dir.magnitude
+        guard len > Tolerance.distance else { return nil }
+        let unit = dir / len
+        return (start, start + unit * d.landingDistance)
+    }
+
+    /// The anchor point of a multileader's attached annotation (its text insertion
+    /// point), used to aim the landing tail. `nil` for a bare multileader or a
+    /// non-text annotation kind.
+    static func multiLeaderAnnotationAnchor(_ d: MultiLeaderData) -> Vector? {
+        switch d.annotation {
+        case .text(let t):  return t.position
+        case .mtext(let m): return m.position
+        default:            return nil
+        }
     }
 
     // MARK: - Hatch resolve (solid fill OR generated pattern lines)
@@ -2319,6 +2431,10 @@ extension EntityKind {
             // Pass the ctx so the attached annotation uses its tight font-aware box.
             return Self.leaderBoundingBox(d, ctx: ctx)
         }
+        if case .multileader(let d) = self {
+            // Pass the ctx so the attached annotation uses its tight font-aware box.
+            return Self.multiLeaderBoundingBox(d, ctx: ctx)
+        }
         return boundingBox()
     }
 
@@ -2406,6 +2522,12 @@ extension EntityKind {
             // box. The ctx-carrying `boundingBox(ctx:)` returns the tight text box.
             return Self.leaderBoundingBox(d, ctx: nil)
 
+        case .multileader(let d):
+            // Union of the leg vertices + the landing tail end + the (font-less,
+            // estimated) annotation box. The ctx-carrying `boundingBox(ctx:)`
+            // returns the tight text box.
+            return Self.multiLeaderBoundingBox(d, ctx: nil)
+
         case .image(let d):
             // The image's four world corners (which already encode size + rotation
             // + aspect). A degenerate placement collapses to the insertion point.
@@ -2429,6 +2551,32 @@ extension EntityKind {
         }
         if box.isEmpty {
             let anchor = d.vertices.first(where: \.valid) ?? Vector(0, 0)
+            return AABB(point: anchor)
+        }
+        return box
+    }
+
+    /// World-space bounding box of a multileader: the union of its leg vertices, the
+    /// landing ("dogleg") tail end (when enabled), and its attached annotation's box.
+    /// With a `ctx` (and font provider) the annotation box is the tight font-aware
+    /// one; without it, the loose metric estimate. Collapses to the first vertex (or
+    /// origin) for a degenerate, annotation-less multileader so the box is always
+    /// valid (never empty/infinite). Mirrors `leaderBoundingBox`.
+    static func multiLeaderBoundingBox(_ d: MultiLeaderData, ctx: ResolveContext?) -> AABB {
+        var box = AABB.empty
+        let verts = d.vertices.filter(\.valid)
+        for v in verts { box.expand(toInclude: v) }
+        // Include the landing tail end so the box covers the dogleg.
+        if d.doglegEnabled, d.landingDistance > Tolerance.distance,
+           let landing = multiLeaderLandingSegment(d, verts: verts) {
+            box.expand(toInclude: landing.1)
+        }
+        if let annotation = d.annotation {
+            let aBox = ctx.map { annotation.boundingBox(ctx: $0) } ?? annotation.boundingBox()
+            if !aBox.isEmpty { box = box.union(aBox) }
+        }
+        if box.isEmpty {
+            let anchor = verts.first ?? Vector(0, 0)
             return AABB(point: anchor)
         }
         return box
