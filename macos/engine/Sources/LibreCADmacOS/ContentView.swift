@@ -492,6 +492,13 @@ struct ContentView: View {
             // type-checker's complexity budget (gotcha #2). Each is published only when a
             // layout tab is active (paper space) — `nil` in model space disables the items.
             .modifier(layoutPlotHandlers)
+            // Lane S: the Inspector toggle (#03 — View ▸ Show Inspector, ⌃⌘I) + the
+            // Layout menu's New / Delete / Duplicate active-layout actions (#00), grouped
+            // into one modifier so the `canvasDetail` chain stays under the Swift
+            // type-checker's expression-complexity limit (gotcha #2). The Delete/Duplicate
+            // closures are `nil` in model space (no active layout) — which disables the
+            // matching Layout-menu items; New Layout is always available on a focused canvas.
+            .modifier(shellMenuHandlers)
             // The tool / image / undo / redo / delete action handlers are grouped into
             // one modifier so the `canvasDetail` chain stays under the Swift
             // type-checker's expression-complexity limit (adding the Image action inline
@@ -600,6 +607,31 @@ struct ContentView: View {
             apply: {
                 if model.applyPaintBrushToSelection() { controllerBox.controller?.requestRedraw() }
             }
+        )
+    }
+
+    /// Lane S app-shell focused-scene-value handlers — the Inspector toggle (#03) + the
+    /// Layout menu's New / Delete / Duplicate active-layout verbs (#00), grouped into one
+    /// `ViewModifier` so `canvasDetail`'s modifier chain stays under the Swift
+    /// type-checker's complexity budget (gotcha #2).
+    ///
+    /// • Inspector toggle: the same `showInspector.toggle()` the toolbar button + the ⌘K
+    ///   palette fire — wired to View ▸ Show Inspector (⌃⌘I).
+    /// • New Layout: always available on a focused canvas (`CanvasModel.newLayout` adds a
+    ///   sheet + activates it; one undoable engine op).
+    /// • Delete / Duplicate ACTIVE layout: published only when a layout TAB is active
+    ///   (paper space); `nil` in model space DISABLES the matching menu items (there is no
+    ///   active layout to act on). Both operate on `model.activeLayout` via the existing
+    ///   undoable `CanvasModel` wrappers and re-home the active tab. Rename / Page Setup
+    ///   are DEFERRED to the tab-strip sheet (see the report) — those modals live in the
+    ///   non-owned `LayoutTabStrip`, so the menu surfaces the non-sheet verbs here.
+    private var shellMenuHandlers: some ViewModifier {
+        let active = model.activeLayout   // the active sheet's name in paper space, else nil
+        return ShellMenuHandlersModifier(
+            toggleInspector: { showInspector.toggle() },
+            newLayout: { _ = model.newLayout() },
+            deleteActiveLayout: active.map { name in { _ = model.deleteLayout(name) } },
+            duplicateActiveLayout: active.map { name in { _ = model.duplicateLayout(name) } }
         )
     }
 
@@ -895,7 +927,10 @@ struct ContentView: View {
     @ViewBuilder
     private func activeBadge(_ kind: ToolKind) -> some View {
         if model.activeToolKind == kind {
-            RoundedRectangle(cornerRadius: 6).fill(.tint.opacity(0.25))
+            // #42 — match the active-TAB badge: the sanctioned selection radius + the ONE
+            // selection fill (`DS.Palette.selectionFill`, accent @ 0.15), not the heavier
+            // ad-hoc `.tint.opacity(0.25)` literal. One selection look across the chrome.
+            RoundedRectangle(cornerRadius: DS.Radius.selection).fill(DS.Palette.selectionFill)
         }
     }
 
@@ -1080,7 +1115,19 @@ struct ContentView: View {
             redo: { model.redo() },
             toggleInspector: { showInspector.toggle() },
             toggleGrid: { model.gridVisible.toggle(); controllerBox.controller?.requestRedraw() },
-            documentSettings: { showSettings = true }
+            documentSettings: { showSettings = true },
+            // Curated parity additions (#01): fire the SAME closures/selectors the menus
+            // fire. The canvas-action verbs (Import/Merge, Dim Style Manager, Save/Restore
+            // View) dispatch through the responder chain to the focused canvas — exactly
+            // like their menu items in LibreCADApp. Insert/Save Block reuse the View-layer
+            // functions the Blocks menu wires; New Layout calls the model op directly.
+            importMergeDXF: { sendDocumentAction(Selector(("importMergeDXFAction:"))) },
+            dimensionStyleManager: { sendDocumentAction(Selector(("dimStyleManagerAction:"))) },
+            saveNamedView: { sendDocumentAction(Selector(("saveNamedViewAction:"))) },
+            restoreNamedView: { sendDocumentAction(Selector(("restoreNamedViewAction:"))) },
+            insertBlockFromFile: { insertBlockFromFile() },
+            saveBlockToFile: { if let name = saveBlockTargetName { saveBlockToFile(named: name) } },
+            newLayout: { _ = model.newLayout() }
         ))
     }
 
@@ -1175,10 +1222,19 @@ struct ContentView: View {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         do {
+            // EXPORT #6 (Wave 1 completion): scope the export to the ACTIVE drawing space
+            // so a default Export/Print follows the on-screen Model/Layout tab — exactly
+            // like the live canvas — instead of always dumping every space (`.all`). The
+            // `exportSpace(forActiveSpace:layout:)` helper maps `CanvasModel.activeSpace` /
+            // `.activeLayout` to the exporter's `ExportSpace` (model → `.model`; a layout
+            // tab → `.paper(layoutName:)`).
             let count = try DrawingExporter.export(model.drawing, to: finalURL,
                                                    format: chosen,
                                                    dpi: options.effectiveDPI,
-                                                   jpegQuality: options.jpegQuality)
+                                                   jpegQuality: options.jpegQuality,
+                                                   space: DrawingExporter.exportSpace(
+                                                       forActiveSpace: model.activeSpace,
+                                                       layout: model.activeLayout))
             status = "Exported \(finalURL.lastPathComponent) — \(count) elements"
             NSLog("CADCanvas: exported \(count) elements to \(finalURL.lastPathComponent)")
         } catch {
@@ -1891,11 +1947,10 @@ enum ToolCatalog {
 /// "a tool is mid-run" flag). Open/Save/Save As are NO LONGER here — they are
 /// native DocumentGroup commands. LibreCADApp reads these in its `.commands`.
 extension FocusedValues {
-    /// Raise the ⌘K command palette on the focused window (View ▸ Command Palette…).
-    var commandPalette: (() -> Void)? {
-        get { self[CommandPaletteKey.self] }
-        set { self[CommandPaletteKey.self] = newValue }
-    }
+    // `commandPalette` (the ⌘K raise action) + its `CommandPaletteKey` now live in
+    // CommandPalette.swift alongside `CommandPaletteModifier` (its sole publisher), so the
+    // palette is self-contained for its unit-test symlink. Same module — readers here
+    // (and in LibreCADApp) are unaffected.
 
     /// Open the per-document Document Settings sheet on the focused window
     /// (File ▸ Document Settings…, ⌥⌘, — D8).
@@ -2047,11 +2102,42 @@ extension FocusedValues {
         get { self[IsToolActiveKey.self] }
         set { self[IsToolActiveKey.self] = newValue }
     }
+
+    /// Toggle the trailing Inspector pane on the focused window (#03 — View ▸ Show
+    /// Inspector, ⌃⌘I + the ⌘K palette + the toolbar `sidebar.trailing` button all
+    /// fire this same `showInspector.toggle()`). `nil` when no canvas is focused.
+    var toggleInspector: (() -> Void)? {
+        get { self[ToggleInspectorKey.self] }
+        set { self[ToggleInspectorKey.self] = newValue }
+    }
+
+    /// Create a NEW paper-space layout on the focused window and switch to it (#00 —
+    /// Layout ▸ New Layout). Always available when a canvas is focused (`CanvasModel.
+    /// newLayout`). `nil` when no canvas is focused (disables the item).
+    var newLayout: (() -> Void)? {
+        get { self[NewLayoutKey.self] }
+        set { self[NewLayoutKey.self] = newValue }
+    }
+
+    /// Delete the ACTIVE layout on the focused window (#00 — Layout ▸ Delete Layout).
+    /// Published ONLY when a layout TAB is active (paper space); `nil` in model space,
+    /// which disables the item (there is no active layout to delete).
+    var deleteActiveLayout: (() -> Void)? {
+        get { self[DeleteActiveLayoutKey.self] }
+        set { self[DeleteActiveLayoutKey.self] = newValue }
+    }
+
+    /// Duplicate the ACTIVE layout on the focused window into a fresh sheet and switch
+    /// to the copy (#00 — Layout ▸ Duplicate Layout). Published ONLY when a layout TAB
+    /// is active (paper space); `nil` in model space, which disables the item.
+    var duplicateActiveLayout: (() -> Void)? {
+        get { self[DuplicateActiveLayoutKey.self] }
+        set { self[DuplicateActiveLayoutKey.self] = newValue }
+    }
 }
 
-private struct CommandPaletteKey: FocusedValueKey {
-    typealias Value = () -> Void
-}
+// `CommandPaletteKey` moved to CommandPalette.swift (see the note on the `commandPalette`
+// accessor above) so the palette's registry + key compile standalone in its test symlink.
 
 private struct OpenDocumentSettingsKey: FocusedValueKey {
     typealias Value = () -> Void
@@ -2182,6 +2268,26 @@ private struct MatchPropHandlersModifier: ViewModifier {
     }
 }
 
+/// Groups the Lane S app-shell focused-scene-value handlers — the Inspector toggle
+/// (#03) + the Layout menu's New / Delete / Duplicate active-layout verbs (#00) — into
+/// one `ViewModifier`, so `ContentView.canvasDetail`'s modifier chain stays under the
+/// Swift type-checker's expression-complexity limit (gotcha #2). The delete/duplicate
+/// closures are `nil` in model space, which disables the matching Layout-menu items.
+private struct ShellMenuHandlersModifier: ViewModifier {
+    let toggleInspector: () -> Void
+    let newLayout: () -> Void
+    let deleteActiveLayout: (() -> Void)?
+    let duplicateActiveLayout: (() -> Void)?
+
+    func body(content: Content) -> some View {
+        content
+            .focusedSceneValue(\.toggleInspector) { toggleInspector() }
+            .focusedSceneValue(\.newLayout) { newLayout() }
+            .focusedSceneValue(\.deleteActiveLayout, deleteActiveLayout)
+            .focusedSceneValue(\.duplicateActiveLayout, duplicateActiveLayout)
+    }
+}
+
 private struct UndoActionKey: FocusedValueKey {
     typealias Value = () -> Void
 }
@@ -2212,6 +2318,22 @@ private struct MatchPropApplyKey: FocusedValueKey {
 /// `false` (no tool active ⇒ Delete enablement is governed only by the selection).
 private struct IsToolActiveKey: FocusedValueKey {
     typealias Value = Bool
+}
+
+private struct ToggleInspectorKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct NewLayoutKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct DeleteActiveLayoutKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct DuplicateActiveLayoutKey: FocusedValueKey {
+    typealias Value = () -> Void
 }
 
 // MARK: - New-from-template catalog (F24)
@@ -2333,7 +2455,7 @@ struct TemplateChooserView: View {
                 HStack(spacing: 12) {
                     Image(systemName: template.symbol)
                         .font(.title2)
-                        .foregroundStyle(.tint)
+                        .foregroundStyle(DS.Palette.accent)   // #44 — ONE accent source
                         .frame(width: 28)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(template.displayName)

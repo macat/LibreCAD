@@ -293,7 +293,9 @@ struct CommandLineBar: View {
                 .font(DS.Font.secondaryLabel.monospaced())
                 .padding(.horizontal, DS.Space.sm)
                 .padding(.vertical, DS.Space.xxs)
-                .background(Capsule().fill(DS.Palette.accent.opacity(0.14)))
+                // #45 — sanctioned tint: the ONE selection fill (`selectionFill`, accent
+                // @ 0.15) instead of the ad-hoc `accent.opacity(0.14)` literal.
+                .background(Capsule().fill(DS.Palette.selectionFill))
                 .foregroundStyle(DS.Palette.accent)
         }
         .buttonStyle(.plain)
