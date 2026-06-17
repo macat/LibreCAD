@@ -105,6 +105,40 @@ enum LiveDimensionGeometry {
 
         return CGRect(x: x, y: y, width: w, height: h)
     }
+
+    /// Decode a `charactersIgnoringModifiers` string into the single DYNAMIC-INPUT
+    /// character it represents, or `nil` if it is not exactly one of the editable
+    /// characters. The dynamic-input keyDown gate (`CADCanvasController.handleKey`) only
+    /// begins / appends editing on a digit (`0`–`9`), a decimal point (`.`), or a minus
+    /// sign (`-`) — anything else (a letter, a chord, an empty / multi-character string)
+    /// returns `nil` so the keystroke falls through to normal handling (tool switch,
+    /// menu chord, focus traversal). Pure + AppKit-free so the gate is unit-tested.
+    ///
+    /// - Parameter chars: `event.charactersIgnoringModifiers` (may be `nil` / empty).
+    /// - Returns: the single editable `Character`, or `nil` when not exactly one editable char.
+    static func dynamicInputChar(_ chars: String?) -> Character? {
+        guard let chars, chars.count == 1, let ch = chars.first else { return nil }
+        if ch.isNumber && ch.isASCII { return ch }   // 0–9 (ASCII digits only)
+        if ch == "." || ch == "-" { return ch }
+        return nil
+    }
+
+    /// The x-offset (points) of the insertion caret after `prefix`, measured with the
+    /// same `attributes` the live-dimension label uses. The caret sits at the END of the
+    /// typed string (the active field always appends at the end), so the caret x is simply
+    /// the rendered width of the whole typed `prefix` — measured the SAME way the chip
+    /// sizes its text (`NSAttributedString.size()`), so the bar lands exactly after the
+    /// last glyph. An empty prefix → ~0; longer prefixes grow monotonically. Pure +
+    /// GPU-free (a Core Text measurement) so it is unit-tested via the shared symlink.
+    ///
+    /// - Parameters:
+    ///   - prefix:     the full typed string the caret follows (the active field buffer).
+    ///   - attributes: the label text attributes (must match the drawn glyphs' font).
+    /// - Returns: the caret's x-offset from the text origin (points).
+    static func caretX(prefix: String, attributes: [NSAttributedString.Key: Any]) -> CGFloat {
+        guard !prefix.isEmpty else { return 0 }
+        return NSAttributedString(string: prefix, attributes: attributes).size().width
+    }
 }
 
 // MARK: - The live-dimension overlay view
@@ -199,6 +233,32 @@ final class LiveDimensionOverlayView: NSView {
     }
     /// The label background box stroke (a faint accent edge so it reads as a chip).
     private static var labelBoxStroke: NSColor { .separatorColor.withAlphaComponent(0.9) }
+
+    // MARK: Editable-dimension chip colors (Wave V — additive tints over the base chip)
+
+    /// The ACTIVE (currently-typed-into) field's chip fill — an accent-tinted translucent
+    /// chip so the field the user is typing into stands out from the idle / locked chips.
+    /// Adapts to the system accent + theme; stays translucent so geometry shows through.
+    private static var labelBoxFillActive: NSColor {
+        NSColor.controlAccentColor.withAlphaComponent(0.20)
+    }
+    /// The ACTIVE field's chip stroke — a stronger accent edge so the active chip reads as
+    /// the focused field (matched by the caret drawn at the typed string's end).
+    private static var labelBoxStrokeActive: NSColor {
+        NSColor.controlAccentColor.withAlphaComponent(0.95)
+    }
+    /// The LOCKED (typed + Tabbed-away, value pinned) field's chip fill — a subtle pinned
+    /// tint, calmer than the active accent, so a locked value reads as FIXED vs the live
+    /// idle dims (whose values still track the cursor).
+    private static var labelBoxFillLocked: NSColor {
+        NSColor.controlAccentColor.withAlphaComponent(0.10)
+    }
+    /// The LOCKED field's chip stroke — a faint accent edge, dimmer than `…StrokeActive`.
+    private static var labelBoxStrokeLocked: NSColor {
+        NSColor.controlAccentColor.withAlphaComponent(0.55)
+    }
+    /// The caret drawn at the end of the ACTIVE field's typed string (an insertion bar).
+    private static var caretColor: NSColor { .controlAccentColor }
 
     // MARK: Label text attributes
 
@@ -307,23 +367,54 @@ final class LiveDimensionOverlayView: NSView {
     /// crosshair and stays on-screen. Text is hosted by `NSAttributedString.draw(at:)`
     /// directly in the CG context — no NSTextView / first responder.
     private func drawLabel(_ dim: LiveDimension, in ctx: CGContext) {
-        guard !dim.label.isEmpty else { return }
-        let attr = NSAttributedString(string: dim.label, attributes: Self.labelAttributes)
+        // The STRING to render depends on the edit state: an idle dim echoes its
+        // pre-formatted `label` (the cursor-tracked value); an active / locked editable
+        // dim echoes the raw `typedString` (what the user typed). The chip TINT + an
+        // active-only caret read the field's state at a glance:
+        //   • .idle   → base translucent chip + `label`              (unchanged path)
+        //   • .active → accent chip + `typedString` + insertion caret (focused field)
+        //   • .locked → pinned tint + `typedString` (fixed vs the live idle dims)
+        // The dash `[2,3]`, rounded-chip shape, monospaced-digit 11pt font, and the
+        // `LiveDimensionGeometry.labelBox` placement math are UNCHANGED across states.
+        let text: String
+        let fill: NSColor
+        let stroke: NSColor
+        switch dim.editState {
+        case .idle:
+            text = dim.label
+            fill = Self.labelBoxFill
+            stroke = Self.labelBoxStroke
+        case .active:
+            text = dim.typedString ?? ""
+            fill = Self.labelBoxFillActive
+            stroke = Self.labelBoxStrokeActive
+        case .locked:
+            text = dim.typedString ?? dim.label
+            fill = Self.labelBoxFillLocked
+            stroke = Self.labelBoxStrokeLocked
+        }
+        // An idle chip with no value is nothing to draw; but an ACTIVE field with an empty
+        // buffer must still draw (the accent chip + caret show the focused-but-empty field
+        // so the user sees WHERE their typing lands). Locked falls back to `label`, so it
+        // is non-empty whenever the dim has a value.
+        guard !text.isEmpty || dim.editState == .active else { return }
+
+        let attr = NSAttributedString(string: text, attributes: Self.labelAttributes)
         let textSize = attr.size()
         let anchor = screen(dim.labelAnchor)
         let box = LiveDimensionGeometry.labelBox(anchor: anchor, size: textSize,
                                                  bounds: bounds, padding: Self.labelPadding)
 
         // The rounded translucent background chip (solid dash; reset the caller's dotted
-        // pattern so the box edge isn't dotted).
+        // pattern so the box edge isn't dotted). Fill / stroke vary by edit state.
         ctx.saveGState()
         ctx.setLineDash(phase: 0, lengths: [])
         let roundedPath = NSBezierPath(roundedRect: box,
                                        xRadius: Self.labelCornerRadius,
                                        yRadius: Self.labelCornerRadius)
-        Self.labelBoxFill.setFill()
+        fill.setFill()
         roundedPath.fill()
-        Self.labelBoxStroke.setStroke()
+        stroke.setStroke()
         roundedPath.lineWidth = 1
         roundedPath.stroke()
         ctx.restoreGState()
@@ -335,5 +426,22 @@ final class LiveDimensionOverlayView: NSView {
             x: box.minX + (box.width - textSize.width) * 0.5,
             y: box.minY + (box.height - textSize.height) * 0.5)
         attr.draw(at: textOrigin)
+
+        // The insertion CARET for the active field: a ~1pt vertical bar at the end of the
+        // typed string (its measured width via `caretX`), running the box height inset by
+        // 1pt top + bottom so it sits inside the chip edge.
+        if dim.editState == .active {
+            let caretOffset = LiveDimensionGeometry.caretX(prefix: text,
+                                                           attributes: Self.labelAttributes)
+            let caretRect = CGRect(x: textOrigin.x + caretOffset,
+                                   y: box.minY + 1,
+                                   width: 1,
+                                   height: box.height - 2)
+            ctx.saveGState()
+            ctx.setLineDash(phase: 0, lengths: [])
+            Self.caretColor.setFill()
+            ctx.fill(caretRect)
+            ctx.restoreGState()
+        }
     }
 }
