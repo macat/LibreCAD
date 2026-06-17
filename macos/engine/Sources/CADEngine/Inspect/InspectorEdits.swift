@@ -229,6 +229,19 @@ public enum InspectorEdits {
         return .hatch(d)
     }
 
+    /// Sets (or clears) a `.hatch`'s GRADIENT fill (`HatchData.gradient`). A
+    /// non-`nil` gradient SUPERSEDES the pattern/solid fill at resolve time
+    /// (`resolveHatch` prefers `gradient` and never diverts a gradient hatch to the
+    /// pattern-line path), so this turns the hatch into a color ramp; passing `nil`
+    /// clears the gradient and restores the prior solid/pattern fill (the
+    /// `patternName`/`solidFill` fields are left untouched, so they take over
+    /// again). Keeps the loops + all other fields. No-op for non-hatch kinds.
+    public static func setHatchGradient(_ kind: EntityKind, _ gradient: HatchGradient?) -> EntityKind {
+        guard case .hatch(var d) = kind else { return kind }
+        d.gradient = gradient
+        return .hatch(d)
+    }
+
     // MARK: - Solid field edits (RS_Solid, DXF SOLID/TRACE)
 
     /// Replaces a single `.solid` corner POINT by index, keeping the rest. An
