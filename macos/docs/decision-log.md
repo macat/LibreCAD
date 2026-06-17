@@ -6,6 +6,18 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-16 — LibreCAD FEATURE-GAP Waves 1–3 shipped (catalog was stale) (`native-macos @ 38e0702a0`, **2850 tests**, `.app` rebuilt)
+
+Owner: "check the catalog and parallel-implement the missing ones." The `feature-catalog.md` was confirmed stale; ran the `librecad-feature-gap-audit` workflow (10 code-grounded category auditors → synthesis → disjointness critic) → `macos/docs/feature-gap-plan.md` (the refreshed authoritative gap list). Finding: most of LibreCAD is already implemented; genuine gaps = cheap wire-waves + grip editing + a deferred heavy/niche tail. Executed engine-first then parallel UI waves, all reviewed/serial-gated/merged-by-hash.
+
+**Wave 1 (engine/isolated, 6 parallel):** EntityGrips grip-editing math (`grips`/`moveGrip`, the P0 foundation) · dim text-edit setters (setDimTextMiddle/Rotation/Oblique) · DivideTool `.length` (MEASURE) mode · SplineTool control-point NURBS mode · ScaleTool non-uniform X/Y mode · DrawingExporter JPG/BMP/TIFF + DPI. (All additive; no new EntityKind/ToolKind.)
+**Wave 2 (UI additive, parallel):** EntityGripOverlay (injectable grip overlay) · Inspector dim text-edit fields + hatch pattern dropdown · standalone DimStyleManagerView · Preferences polar-increment + R14/R2004/R2007 DXF tiers (coordinator fixed the stale DXFVersionPickerTests in the merge).
+**Wave 3 (wire-wave):** 3B CanvasModel foundation (applyToolConfig arms · grip-commit hook · LayerIsolation-backed layer ops · AppSettings snap-seed · pasteAsBlock — additive, reviewed APPROVE-WITH-NITS) → then parallel: 3B′ mount the grip overlay (P0 grip editing LIVE; gizmo/dynamic-grip/entity-grip arbitration; reviewed APPROVE-WITH-NITS) · 3C tool-mode flyouts (Spline/Divide/Scale) + export DPI/format accessory · 3D Edit-menu Cut/Copy/Paste + Paste-as-Block + Layers menu + DimStyle-manager sheet + Import/Merge DXF + custom About · 3E layer-row context items (make-current/isolate/unisolate/off-others/select-entities) · 3F ToolOptionsBar mode arms. + coordinator follow-up: ContentView `.onAppear` seeds new-window snap/polar from Preferences.
+
+**Deferred — Wave 4 (substantial P1, not yet built):** per-entity transparency (DXF 440; C-ABI lockstep + LineInstance byte-match) · LTSCALE + LTYPE real-dash export fidelity · rich MTEXT inline authoring. **Deferred — XL/niche (audit-recommended):** the unified command line (P0 but gates scripting) · spline-edit-tool wiring (needs a new ToolKind = exhaustive-switch wave) · XREF · MLEADER · GD&T · tables · UCS · DWG-write >R2000 · plot styles · gradient hatch · dynamic input · tracking guides · localization · scripting. **`.app` rebuilt for GUI verification** (grip editing, mode flyouts, clipboard/paste-as-block, layer ops, DimStyle manager, raster export, About). Small flags: 3D's Import/Merge duplicates `paste(records:)`'s body (it's private — future: relax visibility); non-uniform scale of a circle/arc uses a uniform factor (engine-primitive limit).
+
+---
+
 ## 2026-06-16 — ARCHITECTURE REMEDIATION (R4 + R10) + visible resize/rotate gizmo (`native-macos @ 0e98b2be7`, **2634 tests**, `.app` rebuilt)
 
 Acting on the architecture review (`macos/docs/architecture-review.md`), the owner chose R4 (silent data loss) + R10 (dead snaps) + "keep CanvasModel big / keep it simple." Planned via the `r4-r10-fix-plan` workflow (probe → disjoint build plan); the gizmo via `gizmo-transform-probe`. All reviewed + serial-gated + merged by hash.
