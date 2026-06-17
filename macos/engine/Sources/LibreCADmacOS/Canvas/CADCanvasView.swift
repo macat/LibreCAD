@@ -643,6 +643,17 @@ final class CADCanvasController {
     /// never affects select/draw/pan; refreshed on every `redraw` so it tracks pan/zoom.
     private(set) var ucsAxis: UCSAxisOverlayView?
 
+    /// The LIVE DIMENSION overlay (live-dim Wave 3, a subview of the MTKView). While a
+    /// draw tool runs with dynamic input on it draws the tool's `[LiveDimension]` — a
+    /// dotted dim line + a pre-formatted value chip at the cursor. SELF-CONTAINED +
+    /// INJECTED (owns no model): the mount supplies its `liveDimensionsProvider` (the
+    /// active tool's feedback, via `model.currentLiveDimensions()`) and `viewportProvider`
+    /// (for world→screen). Always click-through (`hitTest` returns nil) so it never affects
+    /// select/draw/pan. `isEnabled` is driven in `redraw()` from
+    /// `model.dynamicInputEnabled && model.isToolActive`; `refresh()` re-anchors it on
+    /// every cursor move / pan / zoom.
+    private(set) var liveDimOverlay: LiveDimensionOverlayView?
+
     func attach(view: FlippedMTKView, renderer: LineRenderer) {
         self.view = view
         self.renderer = renderer
@@ -715,6 +726,23 @@ final class CADCanvasController {
         entityGripView.autoresizingMask = [.width, .height]
         view.addSubview(entityGripView)
         entityGrip = entityGripView
+
+        // Float the LIVE DIMENSION overlay (live-dim Wave 3) at the TOP (added last) so its
+        // dotted dim line + value chip paint over every other overlay. It is ALWAYS
+        // click-through (its `hitTest` returns nil), so drawing/select/pan fall straight
+        // through — it never owns a gesture. Its providers read the model weakly: the
+        // active tool's `currentLiveDimensions()` (empty unless DYN is on AND a draw tool
+        // is mid-operation) and the live `viewport` (default `Viewport(size: .zero)` when
+        // the model is gone, matching the sibling overlays). `isEnabled` / `refresh()` are
+        // driven from `redraw()`.
+        let liveDimView = LiveDimensionOverlayView(
+            liveDimensionsProvider: { [weak self] in self?.model.currentLiveDimensions() ?? [] },
+            viewportProvider: { [weak self] in self?.model.viewport ?? Viewport(size: .zero) })
+        liveDimView.frame = view.bounds
+        liveDimView.autoresizingMask = [.width, .height]
+        liveDimView.isEnabled = model.dynamicInputEnabled && model.isToolActive
+        view.addSubview(liveDimView)
+        liveDimOverlay = liveDimView
 
         refreshGizmo()
         refreshCrosshair()
@@ -835,6 +863,14 @@ final class CADCanvasController {
         // Keep the UCS axis gizmo anchored at the (panned/zoomed) world origin (its
         // anchor is `worldToScreen(0,0)`, which moves when the viewport does).
         ucsAxis?.refresh()
+        // Live dimensional feedback: show ONLY while dynamic input is on AND a draw tool is
+        // active (the overlay's provider also blanks between operations), then re-anchor it
+        // to the (panned/zoomed) cursor + endpoints on every repaint (its points are
+        // `worldToScreen`-mapped). Setting `isEnabled` keeps `isHidden` in sync.
+        if let liveDimOverlay {
+            liveDimOverlay.isEnabled = model.dynamicInputEnabled && model.isToolActive
+            liveDimOverlay.refresh()
+        }
         view?.setNeedsDisplay(view?.bounds ?? .zero)
     }
 

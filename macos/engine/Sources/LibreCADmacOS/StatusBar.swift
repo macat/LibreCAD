@@ -268,6 +268,13 @@ struct StatusBar: View {
             // the model's `togglePolar` (the chip just reflects state) (backlog #7).
             modeToggle(title: "POLAR", isOn: model.polarEnabled,
                        help: "Polar tracking (F10)") { model.togglePolar(); requestRedraw() }
+            // DYN (F12) — dynamic input (live dimensional feedback while drawing). Mirrors
+            // the AutoCAD DYNMODE toggle; `toggleDynamicInput` flips + persists the pref and
+            // the canvas mount reads `dynamicInputEnabled` to show/suppress the overlay.
+            modeToggle(title: "DYN", isOn: model.dynamicInputEnabled,
+                       help: "Dynamic input — live dimensions (F12)") {
+                model.toggleDynamicInput(); requestRedraw()
+            }
         }
         .accessibilityElement(children: .contain)
     }
