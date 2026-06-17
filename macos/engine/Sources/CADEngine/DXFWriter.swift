@@ -897,6 +897,14 @@ private final class PODBuilder {
             e.imgClip = d.display.clipping ? 1 : 0
             e.imgShow = d.display.showImage ? 1 : 0
             e.textValue = intern(d.imageDef.path)
+
+        case .wipeout:
+            // W3-2 STUB: replaced by the real `LC_ENT_WIPEOUT` write arm in the next
+            // sub-phase (which adds the bridge POD field + dispatch). Until the bridge
+            // gains `LC_ENT_WIPEOUT`, mark it UNSUPPORTED so the C side counts it
+            // skipped (no bytes emitted), exactly like MLEADER's interim stub. The
+            // engine's own Codable document path still round-trips a wipeout losslessly.
+            e.kind = Int32(LC_ENT_UNSUPPORTED.rawValue)
         }
         return e
     }

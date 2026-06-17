@@ -244,6 +244,7 @@ public enum EntityTransform {
         case .leader(let ld):         return .leader(transformLeader(ld, t))
         case .multileader(let ml):    return .multileader(transformMultiLeader(ml, t))
         case .image(let im):          return .image(transformImage(im, t))
+        case .wipeout(let w):         return .wipeout(transformWipeout(w, t))
         }
     }
 
@@ -266,6 +267,27 @@ public enum EntityTransform {
             vVector: t.applyLinear(im.vVector),
             imageDef: im.imageDef,
             display: im.display
+        )
+    }
+
+    // MARK: wipeout — clones the IMAGE transform: the insertion (frame origin)
+    //       transforms full-affine; the per-pixel u/v are FREE direction-and-scale
+    //       vectors so they get the LINEAR part only (rotate + scale + reflect). The
+    //       pixel-space `boundary` and pixel size are size-independent (they ride the
+    //       u/v frame, which already carries the transform), so the WORLD mask polygon
+    //       — `insertion + u·bx + v·by` — translates/rotates/scales/mirrors correctly
+    //       exactly as the image quad does. The clipMode + frame flag are unchanged.
+
+    static func transformWipeout(_ w: WipeoutData, _ t: Affine2D) -> WipeoutData {
+        WipeoutData(
+            insertion: t.apply(w.insertion),
+            uVector: t.applyLinear(w.uVector),
+            vVector: t.applyLinear(w.vVector),
+            pixelWidth: w.pixelWidth,
+            pixelHeight: w.pixelHeight,
+            boundary: w.boundary,
+            clipMode: w.clipMode,
+            frameVisible: w.frameVisible
         )
     }
 

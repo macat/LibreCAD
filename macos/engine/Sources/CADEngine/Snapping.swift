@@ -512,6 +512,12 @@ public enum Snapping {
             // image — `corners[0]` IS the lower-left insertion point, so it is not
             // listed again (the quad center is offered by `centers(of:)` below).
             return d.corners.filter(\.valid)
+
+        case .wipeout(let d):
+            // The wipeout's world boundary vertices are its snappable defining points
+            // (mirroring the image's quad corners, but the boundary is an arbitrary
+            // polygon, not just four corners).
+            return d.worldBoundary.filter(\.valid)
         }
     }
 
@@ -653,6 +659,18 @@ public enum Snapping {
             var mids: [Vector] = []
             for i in 0..<4 {
                 mids.append((corners[i] + corners[(i + 1) % 4]) * 0.5)
+            }
+            return mids.filter(\.valid)
+
+        case .wipeout(let d):
+            // The midpoint of each edge of the wipeout boundary polygon (so the mask
+            // borders snap like a closed polyline's; the corners are the endpoint
+            // snap). The boundary closes implicitly (last → first edge included).
+            let world = d.worldBoundary.filter(\.valid)
+            guard world.count >= 2 else { return [] }
+            var mids: [Vector] = []
+            for i in 0..<world.count {
+                mids.append((world[i] + world[(i + 1) % world.count]) * 0.5)
             }
             return mids.filter(\.valid)
         }

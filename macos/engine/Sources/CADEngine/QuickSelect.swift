@@ -82,6 +82,11 @@ public enum QuickSelectKind: String, Sendable, Hashable, CaseIterable, Codable {
         // alongside leaders. A dedicated tag is a later wave's call.
         case .multileader:  return .leader
         case .image:        return .image
+        // WIPEOUT maps to the `.solid` tag (no new `QuickSelectKind` case): a
+        // wipeout is an areal filled masking polygon, so it is quick-selectable
+        // alongside SOLIDs. A dedicated tag is a later wave's call (mirrors the
+        // MLEADER→leader precedent above).
+        case .wipeout:      return .solid
         }
     }
 }

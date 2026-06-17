@@ -553,7 +553,7 @@ public enum SelectionTraversal {
             pts = [f, l]
 
         case .point, .circle, .text, .mtext, .hatch, .solid, .dimension, .insert,
-             .xline, .ray, .leader, .multileader, .image:
+             .xline, .ray, .leader, .multileader, .image, .wipeout:
             // No free ends to chain from (closed/areal/annotative, or infinite —
             // a construction line has no FINITE end to chain to). A (multi)leader is
             // an annotation callout (like a dimension), so it is terminal too; a

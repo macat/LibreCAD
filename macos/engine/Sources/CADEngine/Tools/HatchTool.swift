@@ -300,7 +300,7 @@ public struct HatchTool: Tool {
             // dimension / insert / point / leader can't bound a fill.
             case .ellipse, .spline, .splinePoints, .text, .mtext,
                  .hatch, .solid, .dimension, .point, .insert, .xline, .ray, .leader,
-                 .multileader, .image:
+                 .multileader, .image, .wipeout:
                 continue
             }
         }
