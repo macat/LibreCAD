@@ -538,6 +538,42 @@ extension CADEngine {
                 styleName: string(e.styleName)
             ))
 
+        case Int32(LC_ENT_MLEADER.rawValue):
+            // DXF MULTILEADER → `.multileader` (cloned from `.leader`). The leg-path
+            // vertices come from the flat array (bulge unused); the landing distance
+            // (code 41) + dogleg flag (code 291) + arrow size (code 42) ride the
+            // dedicated mleader* fields; the annotation text (CONTEXT_DATA textLabel,
+            // code 304) is folded inline as a `.text` annotation anchored at the last
+            // leg vertex (so it resolves through the SAME shared text path).
+            //
+            // FIDELITY: stock libdxfrw's DXF reader parses ONLY the entity-level
+            // scalars, NOT the CONTEXT_DATA{} block — so a foreign AutoCAD *.dxf*
+            // MULTILEADER imports with the landing/dogleg/arrow scalars set but an
+            // EMPTY leg path + no inline text (a valid, drawn-light callout). A *.dwg*
+            // libdxfrw decoded fully (or our own forward-compat write) supplies them.
+            let mleaderVerts = vertices(e).map(\.point)
+            let mleaderArrow = e.mleaderArrowSize > 0 ? e.mleaderArrowSize : 2.5
+            // Fold the CONTEXT_DATA text into an inline `.text` annotation anchored at
+            // the landing end (the last leg vertex), reusing the shared text path. If
+            // there are no vertices the anchor falls back to the origin.
+            var annotation: EntityKind? = nil
+            if let label = string(e.textValue), !label.isEmpty {
+                let anchor = mleaderVerts.last ?? Vector(0, 0)
+                let height = e.height > 0 ? e.height : mleaderArrow
+                annotation = .text(TextData(
+                    position: anchor, height: height, text: label,
+                    styleName: string(e.styleName)))
+            }
+            return .multileader(MultiLeaderData(
+                vertices: mleaderVerts,
+                hasArrow: e.mleaderHasArrow != 0,
+                arrowSize: mleaderArrow,
+                annotation: annotation,
+                styleName: string(e.styleName),
+                landingDistance: e.mleaderLandingDistance,
+                doglegEnabled: e.mleaderDoglegEnabled != 0
+            ))
+
         case Int32(LC_ENT_IMAGE.rawValue):
             // DXF IMAGE + IMAGEDEF → `.image` (the bridge linked them by handle and
             // folded the path + pixel size in). insertion ← p1 (code 10, lower-left);
