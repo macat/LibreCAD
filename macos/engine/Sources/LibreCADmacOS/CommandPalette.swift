@@ -160,6 +160,9 @@ enum CommandRegistry {
         // Parity-program W2: Revision Cloud markup (UNWIRED — no canvas chord yet,
         // so the palette surfaces it without a shortcut hint).
         case .revcloud:        return ("cloud", nil)
+        // Parity-program W2: Line Construction (UNWIRED — no canvas chord yet; the
+        // construction-mode picker is a later wave, so no shortcut hint).
+        case .lineConstruction: return ("line.diagonal", nil)
         }
     }
 

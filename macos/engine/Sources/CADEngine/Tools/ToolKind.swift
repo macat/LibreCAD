@@ -197,6 +197,11 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     /// ONE closed `.polyline` whose every segment is a fixed outward-bowing arc
     /// (the AutoCAD REVCLOUD scallop). No new `EntityKind` — it reuses `.polyline`.
     case revcloud
+    /// The Line Construction tool (`LineConstructionTool`) — draw a plain `.line`
+    /// constrained against existing geometry (perpendicular foot, parallel-through,
+    /// angle bisector, point→circle tangent, orth-tangent). No new `EntityKind`; it
+    /// reuses `.line`. Built UNWIRED — the construction-MODE picker is a later wave.
+    case lineConstruction
     // Append new draw tools here (one `case` per tool) — see the collision note.
 
     /// A short title for the UI (toolbar button / menu).
@@ -259,6 +264,7 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .image:           return "Image"
         case .viewport:        return "Viewport"
         case .revcloud:        return "Revision Cloud"
+        case .lineConstruction: return "Line Construction"
         // Append a title arm per new case.
         }
     }
@@ -351,6 +357,10 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .viewport:        return nil
         // Parity-program W2: Revision Cloud markup tool (UNWIRED — surfaced later).
         case .revcloud:        return RevisionCloudTool()
+        // Parity-program W2: Line Construction tool (UNWIRED — surfaced later). The
+        // construction-mode picker (which variant) is a later wave; minted with the
+        // default `.perpendicularFoot` mode.
+        case .lineConstruction: return LineConstructionTool()
         // Append a `case <kind>: return <Name>Tool()` arm per new tool.
         }
     }

@@ -90,6 +90,7 @@ struct ToolKindWiringTests {
             .image,                                                // wire-wave (image)
             .viewport,                                             // wire-wave-1 (paper-space, out-of-band)
             .revcloud,                                             // parity-program W2 (annotate — UNWIRED)
+            .lineConstruction,                                     // parity-program W2 (modify — UNWIRED)
         ]
         #expect(Set(ToolKind.allCases) == expected,
                 "ToolKind.allCases (\(ToolKind.allCases)) != expected roster")
@@ -324,6 +325,22 @@ struct ToolKindWiringTests {
         #expect(ToolKind.viewport != .select)
     }
 
+    /// The parity-program W2 Line Construction wiring addition: `.lineConstruction`
+    /// maps to the title "Line Construction" and mints a non-nil `LineConstructionTool`
+    /// whose own title matches. Built UNWIRED (no canvas chord / no activate routing —
+    /// the construction-mode picker is a later wave); the tool defaults to the
+    /// `.perpendicularFoot` mode.
+    @Test func lineConstructionKindIsWiredWithMatchingTitle() {
+        #expect(ToolKind.lineConstruction.title == "Line Construction")
+        let tool = ToolKind.lineConstruction.makeTool()
+        #expect(tool != nil, "ToolKind.lineConstruction minted a nil Tool")
+        #expect(tool?.title == "Line Construction")
+        let lc = tool as? LineConstructionTool
+        #expect(lc != nil, "ToolKind.lineConstruction did not mint a LineConstructionTool")
+        #expect(lc?.mode == .perpendicularFoot,
+                "a freshly-minted LineConstructionTool must default to .perpendicularFoot")
+    }
+
     /// `.image` shares no keyboard chord with another kind. Image takes ⇧Y (bare Y is
     /// unassigned, ⌥Y is Ray), so it adds cleanly to the chord set guarded by
     /// `toolShortcutsAreUnique` above. This focused check documents the chosen chord.
@@ -510,6 +527,7 @@ struct ToolKindWiringTests {
         .trim, .extend, .fillet, .chamfer,
         .polylineEdit, .join, .explodeText, .align,
         .createBlock, .explodeInsert,
+        .lineConstruction,   // parity-program W2 (construction lines — UNWIRED; grouped so it's not orphaned)
     ]
 
     /// The Annotate group roster — text, dimensions, leaders, measure
