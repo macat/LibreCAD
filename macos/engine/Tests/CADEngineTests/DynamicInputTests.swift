@@ -243,4 +243,181 @@ struct DynamicInputTests {
         #expect(PolygonTool().applyDynamicInput([.radius: 5],
                                                 cursor: .init(1, 1), reference: .init(0, 0)) == nil)
     }
+
+    // MARK: - PolylineTool (free angle, like LineTool — reference = last vertex)
+
+    @Test("Polyline: length-only types the reach along the live cursor angle")
+    func polylineLengthOnly() {
+        // Two vertices placed; the running anchor is the last one (5,5).
+        let tool = drive(PolylineTool(),
+                         [.click(.init(0, 0)), .click(.init(5, 5)), .move(.init(15, 5))])
+        let p = tool.applyDynamicInput([.length: 20], cursor: .init(15, 5), reference: .init(5, 5))
+        // Length 20 at the live angle (0) from (5,5) → (25, 5).
+        near(p ?? .invalid, .init(25, 5))
+    }
+
+    @Test("Polyline: angle-only keeps the live length, rotates to the typed angle")
+    func polylineAngleOnly() {
+        let tool = drive(PolylineTool(), [.click(.init(0, 0)), .move(.init(10, 0))])
+        // Live length 10; type 90° from the first vertex (0,0) → straight up.
+        let p = tool.applyDynamicInput([.angle: .pi / 2], cursor: .init(10, 0), reference: .init(0, 0))
+        near(p ?? .invalid, .init(0, 10))
+    }
+
+    @Test("Polyline: typing both length and angle fully fixes the point")
+    func polylineBoth() {
+        let tool = drive(PolylineTool(), [.click(.init(2, 2)), .move(.init(5, 5))])
+        // length 10 @ 45° from the anchor (2,2) → (2 + 10/√2, 2 + 10/√2).
+        let p = tool.applyDynamicInput([.length: 10, .angle: .pi / 4],
+                                       cursor: .init(5, 5), reference: .init(2, 2))
+        let r = 10.0 / 2.0.squareRoot()
+        near(p ?? .invalid, .init(2 + r, 2 + r))
+    }
+
+    @Test("Polyline: no typed values falls back to the live cursor reach")
+    func polylineNoValues() {
+        let tool = drive(PolylineTool(), [.click(.init(0, 0)), .move(.init(6, 8))])
+        let p = tool.applyDynamicInput([:], cursor: .init(6, 8), reference: .init(0, 0))
+        near(p ?? .invalid, .init(6, 8))
+    }
+
+    @Test("Polyline: nil before the first vertex is placed")
+    func polylineNilBeforeStart() {
+        let fresh = PolylineTool()
+        #expect(fresh.applyDynamicInput([.length: 5], cursor: .init(1, 1), reference: .init(0, 0)) == nil)
+        // After a bare move (still no fixed vertex) → still nil.
+        let moved = drive(PolylineTool(), [.move(.init(5, 0))])
+        #expect(moved.applyDynamicInput([.length: 5], cursor: .init(5, 0), reference: .init(0, 0)) == nil)
+    }
+
+    // MARK: - ArcTool (center→start→end mode only — reference = center)
+
+    @Test("Arc settingStart: typed radius places the start along the live direction")
+    func arcStartRadius() {
+        // Center at origin; cursor in the +X+Y direction. A typed radius 13 lands on the
+        // unit direction of the cursor.
+        let tool = drive(ArcTool(), [.click(.init(0, 0)), .move(.init(3, 4))])
+        let p = tool.applyDynamicInput([.radius: 13], cursor: .init(3, 4), reference: .init(0, 0))
+        near(p ?? .invalid, .init(7.8, 10.4))   // unit(3,4) × 13
+    }
+
+    @Test("Arc settingStart: no typed value falls back to the live radius")
+    func arcStartNoValue() {
+        let tool = drive(ArcTool(), [.click(.init(0, 0)), .move(.init(6, 8))])
+        let p = tool.applyDynamicInput([:], cursor: .init(6, 8), reference: .init(0, 0))
+        near(p ?? .invalid, .init(6, 8))         // live radius 10 along (6,8)
+    }
+
+    @Test("Arc settingStart: degenerate cursor==center falls back to +X direction")
+    func arcStartDegenerate() {
+        let tool = drive(ArcTool(), [.click(.init(0, 0)), .move(.init(5, 0))])
+        let p = tool.applyDynamicInput([.radius: 5], cursor: .init(0, 0), reference: .init(0, 0))
+        near(p ?? .invalid, .init(5, 0))         // +X fallback × 5
+    }
+
+    @Test("Arc settingEnd: typed end angle places the point on the FIXED-radius circle")
+    func arcEndAngle() {
+        // Center (0,0), start (10,0) → radius 10. Type 90° → the end point at (0, 10).
+        let tool = drive(ArcTool(),
+                         [.click(.init(0, 0)), .click(.init(10, 0)), .move(.init(5, 5))])
+        let p = tool.applyDynamicInput([.angle: .pi / 2], cursor: .init(5, 5), reference: .init(0, 0))
+        near(p ?? .invalid, .init(0, 10))
+    }
+
+    @Test("Arc settingEnd: no typed angle uses the live cursor angle at the fixed radius")
+    func arcEndNoValue() {
+        // Center (0,0), radius 10. Live cursor at 45° → the on-circle point at 45°.
+        let tool = drive(ArcTool(),
+                         [.click(.init(0, 0)), .click(.init(10, 0)), .move(.init(5, 5))])
+        let p = tool.applyDynamicInput([:], cursor: .init(5, 5), reference: .init(0, 0))
+        let h = 10.0 / 2.0.squareRoot()
+        near(p ?? .invalid, .init(h, h))
+    }
+
+    @Test("Arc: nil in the 3-point and tangential modes, and before the center")
+    func arcNilOtherModes() {
+        let threeP = drive(ArcTool(mode: .threePoint),
+                           [.click(.init(0, 0)), .click(.init(10, 0)), .move(.init(5, 5))])
+        #expect(threeP.applyDynamicInput([.radius: 5], cursor: .init(5, 5), reference: .init(0, 0)) == nil)
+
+        let tan = drive(ArcTool(mode: .tangential),
+                        [.click(.init(0, 0)), .click(.init(1, 0)), .move(.init(5, 5))])
+        #expect(tan.applyDynamicInput([.radius: 5], cursor: .init(5, 5), reference: .init(0, 0)) == nil)
+
+        // nil before the center is fixed (settingCenter).
+        #expect(ArcTool().applyDynamicInput([.radius: 5],
+                                            cursor: .init(1, 1), reference: .init(0, 0)) == nil)
+    }
+
+    // MARK: - EllipseTool (axis-style modes only — reference = center)
+
+    @Test("Ellipse settingMajor: typed axis distance places the endpoint along the live direction")
+    func ellipseMajorDistance() {
+        // Center at origin; cursor in the +X+Y direction. A typed distance 13 lands on
+        // the unit direction of the cursor.
+        let tool = drive(EllipseTool(), [.click(.init(0, 0)), .move(.init(3, 4))])
+        let p = tool.applyDynamicInput([.radius: 13], cursor: .init(3, 4), reference: .init(0, 0))
+        near(p ?? .invalid, .init(7.8, 10.4))   // unit(3,4) × 13
+    }
+
+    @Test("Ellipse settingMajor: degenerate cursor==center falls back to +X direction")
+    func ellipseMajorDegenerate() {
+        let tool = drive(EllipseTool(), [.click(.init(0, 0)), .move(.init(5, 0))])
+        let p = tool.applyDynamicInput([.radius: 5], cursor: .init(0, 0), reference: .init(0, 0))
+        near(p ?? .invalid, .init(5, 0))
+    }
+
+    @Test("Ellipse settingRatio: typed minor distance lands perpendicular, on the cursor's side")
+    func ellipseRatioMinor() {
+        // Center (0,0), major endpoint (10,0) → majorP (10,0). The perpendicular is +Y;
+        // the cursor (3,4) is on the +Y side. A typed minor distance 6 → (0, 6) (perp
+        // distance to the major line is exactly 6).
+        let tool = drive(EllipseTool(),
+                         [.click(.init(0, 0)), .click(.init(10, 0)), .move(.init(3, 4))])
+        let p = tool.applyDynamicInput([.length: 6], cursor: .init(3, 4), reference: .init(0, 0))
+        near(p ?? .invalid, .init(0, 6))
+    }
+
+    @Test("Ellipse settingRatio: follows the cursor's perpendicular side (below the major line)")
+    func ellipseRatioMinorBelow() {
+        // Same major axis, but the cursor is BELOW the major line (3, -4) → the typed
+        // minor distance lands on −Y.
+        let tool = drive(EllipseTool(),
+                         [.click(.init(0, 0)), .click(.init(10, 0)), .move(.init(3, -4))])
+        let p = tool.applyDynamicInput([.length: 6], cursor: .init(3, -4), reference: .init(0, 0))
+        near(p ?? .invalid, .init(0, -6))
+    }
+
+    @Test("Ellipse settingRatio: no typed value falls back to the live perpendicular distance")
+    func ellipseRatioNoValue() {
+        // Major (10,0); cursor (3,4) → live perpendicular leg = 4 → point at (0, 4).
+        let tool = drive(EllipseTool(),
+                         [.click(.init(0, 0)), .click(.init(10, 0)), .move(.init(3, 4))])
+        let p = tool.applyDynamicInput([:], cursor: .init(3, 4), reference: .init(0, 0))
+        near(p ?? .invalid, .init(0, 4))
+    }
+
+    @Test("Ellipse: nil in the foci / 4-point / inscribe / arc-angle steps, and before the center")
+    func ellipseNilOtherModes() {
+        // Foci + point: dragging the on-ellipse point.
+        let foci = drive(EllipseTool(mode: .fociPoint),
+                         [.click(.init(-3, 0)), .click(.init(3, 0)), .move(.init(0, 4))])
+        #expect(foci.applyDynamicInput([.radius: 5], cursor: .init(0, 4), reference: .init(0, 0)) == nil)
+
+        // 4-point: dragging the fourth.
+        let fourP = drive(EllipseTool(mode: .fourPoint),
+                          [.click(.init(5, 0)), .click(.init(0, 3)),
+                           .click(.init(-5, 0)), .move(.init(0, -3))])
+        #expect(fourP.applyDynamicInput([.radius: 5], cursor: .init(0, -3), reference: .init(0, 0)) == nil)
+
+        // .arc start-angle step (settingArcStart) — no clean editable scalar.
+        let arcStart = drive(EllipseTool(mode: .arc),
+                             [.click(.init(0, 0)), .click(.init(10, 0)),
+                              .click(.init(0, 5)), .move(.init(10, 0))])
+        #expect(arcStart.applyDynamicInput([.angle: 0], cursor: .init(10, 0), reference: .init(0, 0)) == nil)
+
+        // nil before the center is fixed.
+        #expect(EllipseTool().applyDynamicInput([.radius: 5],
+                                                cursor: .init(1, 1), reference: .init(0, 0)) == nil)
+    }
 }

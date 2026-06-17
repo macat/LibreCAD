@@ -234,6 +234,121 @@ public struct EllipseTool: Tool {
         }
     }
 
+    // MARK: - Live dimensional feedback (axis-style modes only)
+
+    /// AutoCAD-style live feedback while an AXIS-style ellipse (`.axis` / `.arc`) is
+    /// being dragged. Coverage is deliberately CONSERVATIVE — only the two states that
+    /// expose a single clean axis SCALAR carry an editable dim, both referenced to the
+    /// center:
+    ///
+    /// - `.settingMajor(center:)` — the cursor fixes the FIRST (major) axis endpoint,
+    ///   so center→cursor IS the major semi-axis being chosen: an EDITABLE `.linear`
+    ///   dim (`field: .radius`), reference = center.
+    /// - `.settingRatio(center, majorP)` — the major axis is fixed; the cursor's
+    ///   PERPENDICULAR distance to the major-axis line is the MINOR semi-axis. Emit
+    ///   that minor distance as an EDITABLE `.linear` dim (`field: .length`), drawn
+    ///   from the foot of the perpendicular on the major line to the cursor, reference
+    ///   = center.
+    ///
+    /// Every OTHER mode/state returns `[]`: the `.arc` start/end-angle steps, and the
+    /// `.fociPoint` / `.fourPoint` / `.inscribeQuad` modes, derive the ellipse from
+    /// picked points/foci with no single clean editable scalar mid-construction. Empty
+    /// before the first pick and after commit (the tool `reset()`s), and for a
+    /// degenerate drag — so it never leaks. The label is formatted IN-ENGINE via
+    /// `CoordinateFormatter` from `ctx` (no UI dependency).
+    public func liveDimensions(_ ctx: LiveDimensionContext) -> [LiveDimension] {
+        guard cursor.valid else { return [] }
+        switch state {
+        case .settingMajor(let center):
+            // Major semi-axis = center → cursor (the endpoint a click would fix).
+            guard center.valid else { return [] }
+            let len = (cursor - center).magnitude
+            guard len > Tolerance.distance else { return [] }
+            let label = CoordinateFormatter.length(
+                len, format: ctx.linearFormat, precision: ctx.linearPrecision, unit: ctx.unit
+            )
+            let midpoint = (center + cursor) * 0.5
+            return [
+                LiveDimension(kind: .linear(len), from: center, to: cursor,
+                              label: label, labelAnchor: midpoint,
+                              field: .radius, isEditable: true),
+            ]
+
+        case .settingRatio(let center, let majorP):
+            // Minor semi-axis = the cursor's perpendicular distance to the major line.
+            guard center.valid, majorP.valid else { return [] }
+            let majorLen = majorP.magnitude
+            guard majorLen > Tolerance.distance else { return [] }
+            let d = cursor - center
+            // Component of `d` ALONG the major axis → the foot of the perpendicular on
+            // the major line; the remaining (perpendicular) leg is the minor distance.
+            let along = d.dot(majorP) / (majorLen * majorLen)   // scalar projection (÷|majorP|²)
+            let foot = center + majorP * along
+            let minorLen = (cursor - foot).magnitude
+            guard minorLen > Tolerance.distance else { return [] }
+            let label = CoordinateFormatter.length(
+                minorLen, format: ctx.linearFormat, precision: ctx.linearPrecision, unit: ctx.unit
+            )
+            let midpoint = (foot + cursor) * 0.5
+            return [
+                LiveDimension(kind: .linear(minorLen), from: foot, to: cursor,
+                              label: label, labelAnchor: midpoint,
+                              field: .length, isEditable: true),
+            ]
+
+        default:
+            // .settingCenter, .settingArcStart/.settingArcEnd, the .fociPoint spine,
+            // and the .collecting (4-point / inscribe) modes — no single clean
+            // editable scalar maps mid-construction.
+            return []
+        }
+    }
+
+    // MARK: - Dynamic input (typed axis distance → the axis endpoint)
+
+    /// Resolves a typed axis distance into the next pick, ONLY in the two axis-style
+    /// states `liveDimensions` marks editable (returns `nil` everywhere else — the
+    /// center/arc-angle states and the foci/4-point/inscribe modes, where a typed
+    /// scalar has no well-defined point):
+    ///
+    /// - `.settingMajor(center:)` — a typed `.radius` (else the live reach) along the
+    ///   live center→cursor direction, fixing the major-axis endpoint. A degenerate
+    ///   cursor==center falls back to +X so a typed distance still yields a valid point.
+    /// - `.settingRatio(center, majorP)` — a typed `.length` (else the live minor
+    ///   distance) laid along the PERPENDICULAR to the major axis, on the side the live
+    ///   cursor is, fixing the minor-axis point. Routed so the resulting point's
+    ///   perpendicular distance to the major line is exactly the typed value (the same
+    ///   quantity the tool's `ratio(_:)` reads).
+    ///
+    /// `reference` is the ellipse center in both editable states.
+    public func applyDynamicInput(_ values: [LiveDimensionField: Double],
+                                  cursor: Vector, reference: Vector) -> Vector? {
+        switch state {
+        case .settingMajor:
+            let len = values[.radius] ?? (cursor - reference).magnitude
+            let d = cursor - reference
+            let u = d.magnitude > Tolerance.distance ? d / d.magnitude : Vector(angle: 0)
+            return reference + u * len
+
+        case .settingRatio(_, let majorP):
+            let majorLen = majorP.magnitude
+            guard majorLen > Tolerance.distance else { return nil }
+            // Unit perpendicular to the major axis (major rotated +90°).
+            let perp = Vector(-majorP.y, majorP.x) / majorLen
+            // Live perpendicular leg of the cursor → its signed component picks the side.
+            let d = cursor - reference
+            let liveSigned = d.dot(perp)
+            let liveMag = abs(liveSigned)
+            // Side: follow the live cursor; default to +perp when the cursor is on the line.
+            let sign: Double = liveSigned < 0 ? -1 : 1
+            let m = values[.length] ?? liveMag
+            return reference + perp * (sign * m)
+
+        default:
+            return nil
+        }
+    }
+
     // MARK: - Construction-mode command keywords (W2B)
 
     /// Whether the tool is still in its INITIAL waiting state (no point placed yet)

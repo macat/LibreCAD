@@ -93,6 +93,70 @@ public struct PolylineTool: Tool {
         return [ResolvedPolyline(points: points, closed: false, pen: .toolPreview)]
     }
 
+    // MARK: - Live dimensional feedback (mirrors LineTool's current-segment readout)
+
+    /// AutoCAD-style live feedback while the NEXT polyline segment is being dragged:
+    /// the running LENGTH from the last placed vertex to the cursor plus that
+    /// segment's ANGLE near the cursor — exactly like `LineTool` reports its running
+    /// segment (a polyline is, mid-draw, a chain of straight segments, so the same
+    /// per-segment length+angle readout applies). The dim line runs last-vertex →
+    /// cursor (the same rubber-band `preview` shows), so the numbers match what the
+    /// next click will fix.
+    ///
+    /// Empty before the first vertex (`.empty`) and after commit/cancel (the tool
+    /// `reset()`s to `.empty`), and for a degenerate (zero-length) drag — the same
+    /// invariant `preview` enforces, so it never leaks. Both labels are formatted
+    /// IN-ENGINE via `CoordinateFormatter` from `ctx` (no UI dependency). Both fields
+    /// are editable (dynamic input): Tab order is `[length, angle]`, mirroring
+    /// `LineTool`'s free-mode pair.
+    public func liveDimensions(_ ctx: LiveDimensionContext) -> [LiveDimension] {
+        guard case .building(let vertices) = state,
+              let last = vertices.last, last.valid, cursor.valid else {
+            return []
+        }
+        let delta = cursor - last
+        let length = delta.magnitude
+        // A degenerate (zero-length) drag shows nothing — mirrors the commit guard.
+        guard length > Tolerance.distance else { return [] }
+
+        let lengthLabel = CoordinateFormatter.length(
+            length, format: ctx.linearFormat, precision: ctx.linearPrecision, unit: ctx.unit
+        )
+        let angle = delta.angle
+        let angleLabel = CoordinateFormatter.angle(
+            angle, format: ctx.angleFormat, precision: ctx.anglePrecision
+        )
+        // Length dim runs along the segment, labeled at its midpoint; the angle dim
+        // shares the segment and is labeled near the cursor end — identical to LineTool.
+        let midpoint = (last + cursor) * 0.5
+        return [
+            LiveDimension(kind: .linear(length), from: last, to: cursor,
+                          label: lengthLabel, labelAnchor: midpoint,
+                          field: .length, isEditable: true),
+            LiveDimension(kind: .angle(angle), from: last, to: cursor,
+                          label: angleLabel, labelAnchor: cursor,
+                          field: .angle, isEditable: true),
+        ]
+    }
+
+    // MARK: - Dynamic input (typed length / angle → the next vertex)
+
+    /// Resolves typed LENGTH / ANGLE values into the next vertex, measured from the
+    /// last placed vertex (`reference`) — the SAME free-angle polar formula `LineTool`
+    /// uses (a polyline segment has no angle constraint). A field the user did not type
+    /// falls back to the live value the cursor currently implies.
+    ///
+    /// Returns `nil` before the first vertex is placed (no running anchor to measure
+    /// from) — `applyDynamicInput` is meaningful only while `.building`.
+    public func applyDynamicInput(_ values: [LiveDimensionField: Double],
+                                  cursor: Vector, reference: Vector) -> Vector? {
+        guard case .building = state else { return nil }
+        let liveDelta = cursor - reference
+        let len = values[.length] ?? liveDelta.magnitude
+        let ang = values[.angle] ?? liveDelta.angle
+        return reference + Vector(angle: ang) * len
+    }
+
     /// The AutoCAD-style mid-draw command KEYWORDS the polyline offers at its current
     /// step, derived PURELY from the committed-vertex count in `state` (no new stored
     /// fields — reads `state` exactly like `preview`/`status` do). The smart command
