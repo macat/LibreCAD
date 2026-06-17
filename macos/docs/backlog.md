@@ -8,6 +8,12 @@ pass or by the relevant downstream owner. Each cites its source.
 - **Partial 1071 fidelity** — reader extracts only TTF/bold/italic bits from code 1071; AutoCAD charset/pitch low-byte bits are dropped on round-trip. Acceptable (name is what renders); a raw-int `LCTextStyle.fontFamily` model field would be needed for full fidelity. *(review-w1a NIT-2)*
 - **Optional test** — add coverage for the loaded-file (non-default Standard) re-read path + the "txt"→native decode. *(review-w1a NIT-3)*
 
+## Parity program — W3 Wipeout follow-up NITs
+- **clipMode doc contradiction** — engine doc (Entity.swift ~1390) says `clipMode 0 ⇒ mask interior`; vendored `drw_entities.h` says `0 ⇒ outside masked`. Engine always masks the interior (round-trips clipMode losslessly but ignores it for region selection) — reconcile the comment so a future reader doesn't assume `0` is honored. *(review-w3 NIT-1)*
+- **InspectorEditors.swift ~625 comment** says the wipeout boundary is "edited by grips/transform" but `EntityGrips` returns `[]` for `.wipeout` (transform-only this wave) — drop "grips". *(review-w3 NIT-2)*
+- **`LineRenderer.uploadWipeoutVertices`** re-stamps every wipeout vertex each frame even when `view.clearColor` is unchanged — gate on a color-change check (optional micro-perf; early-returns when no wipeout). *(review-w3 NIT-3)*
+- **Wipeout masking residual** — a stroke deliberately raised ABOVE a wipeout in draw order is still masked (single post-line render pass); true per-entity interleaving deferred. Also CG/SVG/PDF export draws the mask with its fallback color (not background-aware). *(W3 builder, documented)*
+
 ## Build / tooling
 - **Bundle `.lff` fonts in `Package.swift`** (test currently reads `standard.lff` by `#filePath`). When
   network/XcodeGen returns or via a manifest edit, add the fonts dir as a resource and switch the LFF
