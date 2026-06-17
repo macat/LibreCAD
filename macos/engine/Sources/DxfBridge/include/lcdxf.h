@@ -261,6 +261,28 @@ typedef struct LCEntity {
      *  Defaults to 0 (Opaque/ByLayer) so a zero-initialized POD / pre-440 call site
      *  is byte-compatible. */
     int32_t transparency;
+    /** Per-entity LINETYPE SCALE (AutoCAD `celtscale`, DXF code 48). The RAW
+     *  `DRW_Entity::ltypeScale` value (a `double`, default 1.0), copied verbatim
+     *  across the bridge — the Swift reader/writer map it to/from `Pen.linetypeScale`,
+     *  which `resolve()` multiplies by the drawing-wide `$LTSCALE` to scale the dash
+     *  pattern period. `1.0` is the unscaled (historical) pattern.
+     *
+     *  READ: libdxfrw parses DXF code 48 straight into `DRW_Entity::ltypeScale`
+     *  (drw_entities.cpp:95; the DWG path decodes the same BD), so a code-48 from an
+     *  external file flows in here. WRITE LIMITATION: stock libdxfrw's
+     *  `dxfRW::writeEntity` does NOT emit code 48 (unlike code 440), so a per-entity
+     *  scale set in the app does NOT survive a .dxf write through the unmodified
+     *  vendored library — the bridge sets `DRW_Entity::ltypeScale` on write, but
+     *  nothing serializes it. (The drawing-wide `$LTSCALE` DOES round-trip — it is in
+     *  libdxfrw's curated HEADER emit list — so the global scale carries the
+     *  document. A per-entity-48 write would need a libdxfrw `writeEntity` patch,
+     *  which is intentionally out of scope for the vendored tree.)
+     *
+     *  Defaults to 1.0 (unscaled). NOTE: this is the ONE common field that does NOT
+     *  default to a zero-initialized value — a memset/`{}`-zeroed POD has
+     *  `linetypeScale == 0`, which the bridge's `makeEntity` / the Swift PODBuilder
+     *  set to 1.0 explicitly (a 0 here is treated as "unset ⇒ 1" on read). */
+    double linetypeScale;
     /** Which "space" the entity lives in (paper-space P1): 0 == model space (DXF
      *  code 67 == 0, the default), 1 == paper space (code 67 == 1). The reader
      *  copies DRW_Entity::space (which libdxfrw parses from code 67) here, AND

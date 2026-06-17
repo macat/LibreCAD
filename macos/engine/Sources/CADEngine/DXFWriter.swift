@@ -974,6 +974,10 @@ private final class PODBuilder {
         // Double-typed doc-settings vars.
         if gv.has("$PDSIZE")   { appendDouble("$PDSIZE",  gv.double("$PDSIZE")) }
         if gv.has("$ANGBASE")  { appendDouble("$ANGBASE", gv.double("$ANGBASE")) }
+        // Drawing-wide LINETYPE SCALE ($LTSCALE, code 40). A standard AutoCAD header
+        // var in libdxfrw's curated emit list, so once it rides DRW_Header.vars it
+        // emits for free and round-trips on read (the bridge whitelists LTSCALE).
+        if gv.has("$LTSCALE")  { appendDouble("$LTSCALE", gv.double("$LTSCALE")) }
         // COORD-typed doc-settings vars (codes 10/20/30) — preserve the vector.
         if gv.has("$GRIDUNIT") { appendCoord("$GRIDUNIT", gv.vector("$GRIDUNIT", default: Vector(0, 0))) }
         if gv.has("$PINSBASE") { appendCoord("$PINSBASE", gv.vector("$PINSBASE", default: Vector(0, 0))) }
@@ -1049,6 +1053,12 @@ private final class PODBuilder {
         e.lineType = intern(lineTypeName(pen.lineType))
         e.lineWeightMM100 = lineWeightDXF(pen.lineWidth)
         e.transparency = transparency440(for: pen.transparency)
+        // Per-entity LINETYPE SCALE (DXF code 48). Set the POD value (≤ 0 ⇒ the 1.0
+        // unscaled default). LIMITATION: stock libdxfrw's `writeEntity` does not emit
+        // code 48, so this is dropped on the .dxf write (the bridge sets
+        // DRW_Entity::ltypeScale but nothing serializes it). The drawing-wide
+        // $LTSCALE round-trips via the HEADER (makeHeaderVars). See lcdxf.h.
+        e.linetypeScale = pen.linetypeScale > 0 ? pen.linetypeScale : 1
     }
 
     /// Maps a `PenTransparency` to the raw DXF code-440 integer (the inverse of

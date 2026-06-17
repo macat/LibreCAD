@@ -233,7 +233,14 @@ enum CGSceneRenderer {
         // any dash so the stroke is continuous. The pattern is scaled to a stroke
         // proportional to `width`, so a thicker pen gets proportionally longer dashes
         // and the gaps never collapse to nothing at a thin width.
-        let dash = dashLengths(for: poly.pen.lineType, scale: scale, strokeWorld: width)
+        // W4B Stage 3 — LINETYPE SCALE: scale the dash array by the resolved linetype
+        // scale (`ResolvedPen.linetypeScale` == entity DXF-48 × drawing $LTSCALE), the
+        // SAME factor the Metal renderer scales `dashPeriodPx` by, so screen + CG
+        // export agree. A scale of 1 (the default) leaves `dash` unchanged
+        // (byte-for-byte the historical export); a solid pen returns an empty array.
+        let dash = scaledDashLengths(for: poly.pen.lineType, scale: scale,
+                                     strokeWorld: width,
+                                     linetypeScale: poly.pen.linetypeScale)
         if dash.isEmpty {
             ctx.setLineDash(phase: 0, lengths: [])
         } else {
@@ -306,6 +313,25 @@ enum CGSceneRenderer {
             // ─── · · ─── : long dash then two dots.
             return [u * 1.4, gap, dot, gap, dot, gap]
         }
+    }
+
+    /// `dashLengths(...)` with every element multiplied by the resolved LINETYPE
+    /// SCALE (`ResolvedPen.linetypeScale` == the entity's DXF code-48 scale × the
+    /// drawing-wide `$LTSCALE`) — W4B Stage 3. A `linetypeScale` of `1` (the default)
+    /// returns the base array UNCHANGED, so an existing export is byte-for-byte the
+    /// same; a solid line stays `[]`. This is the CG counterpart of the Metal
+    /// renderer scaling `dashPeriodPx`/`dashOnPx`, so screen + CG export agree.
+    /// A `≤ 0` scale is floored to `1` (a malformed scale never collapses the dash).
+    ///
+    /// Pure value math (no CGContext) → unit-testable in `CGDashTests`.
+    static func scaledDashLengths(for lineType: PenLineType,
+                                  scale: Double,
+                                  strokeWorld: Double,
+                                  linetypeScale: Double) -> [CGFloat] {
+        let base = dashLengths(for: lineType, scale: scale, strokeWorld: strokeWorld)
+        let s = CGFloat(linetypeScale > 0 ? linetypeScale : 1)
+        guard s != 1 else { return base }          // scale 1 ⇒ unchanged (regression)
+        return base.map { $0 * s }
     }
 
     /// The stroke width in WORLD units for a resolved pen, consistent with the

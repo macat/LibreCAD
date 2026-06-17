@@ -282,6 +282,15 @@ public struct ResolveContext: Sendable {
     /// aware annotative is a later wave; this wires the mechanism + field now.
     public var annotationScale: Double = 1.0
 
+    /// The drawing-wide LINETYPE SCALE (AutoCAD `$LTSCALE`,
+    /// `GraphicVariables.linetypeScale`). `Pen.resolved` MULTIPLIES the entity's
+    /// per-entity scale (`Pen.linetypeScale`, DXF code 48) by this to produce
+    /// `ResolvedPen.linetypeScale`, which the renderer scales the dash period by.
+    /// `1.0` (the default) keeps the unscaled pattern, so an existing call site /
+    /// test that does not wire it renders dashes byte-for-byte as before. Wired by
+    /// `CADDrawing.makeResolveContext` from `graphicVariables.linetypeScale`.
+    public var globalLinetypeScale: Double = 1.0
+
     /// The document-default point display style + size (AutoCAD `$PDMODE` /
     /// `$PDSIZE`). The `.point` resolve arm consults this when a point carries no
     /// explicit per-entity style (its style is left at the `.dot` inherit
@@ -364,6 +373,7 @@ public struct ResolveContext: Sendable {
         fontProvider: (any FontProvider)? = nil,
         textStyleProvider: (@Sendable (String) -> TextStyle?)? = nil,
         annotationScale: Double = 1.0,
+        globalLinetypeScale: Double = 1.0,
         dimStyleProvider: (@Sendable () -> ResolvedDimStyle)? = nil,
         namedDimStyleProvider: (@Sendable (String) -> ResolvedDimStyle?)? = nil,
         pointStyleProvider: (@Sendable () -> (mode: PointDisplayMode, size: Double))? = nil,
@@ -379,6 +389,7 @@ public struct ResolveContext: Sendable {
         self.fontProvider = fontProvider
         self.textStyleProvider = textStyleProvider
         self.annotationScale = annotationScale
+        self.globalLinetypeScale = globalLinetypeScale
         self.dimStyleProvider = dimStyleProvider
         self.namedDimStyleProvider = namedDimStyleProvider
         self.pointStyleProvider = pointStyleProvider
@@ -444,7 +455,16 @@ extension Pen {
         case .opacity(let a): op = Swift.max(0, Swift.min(1, a))
         }
 
-        return ResolvedPen(color: color, lineType: lt, lineWidth: lw, opacity: op)
+        // Effective LINETYPE SCALE (DXF 48 × $LTSCALE): the per-entity scale
+        // multiplied by the drawing-wide scale. There is NO ByLayer/ByBlock sentinel
+        // for code 48 (AutoCAD's `celtscale` is a plain numeric multiplier), so this
+        // is a straight product — no inherit chain. `ResolvedPen.init` floors a
+        // 0/negative product to 1 so a malformed scale never collapses the dash. The
+        // renderer multiplies its dash period by this resolved value.
+        let lts = linetypeScale * ctx.globalLinetypeScale
+
+        return ResolvedPen(color: color, lineType: lt, lineWidth: lw,
+                           opacity: op, linetypeScale: lts)
     }
 }
 

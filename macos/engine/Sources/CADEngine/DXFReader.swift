@@ -880,7 +880,14 @@ extension CADEngine {
 
         let lw: PenLineWidth = penLineWidth(mm100: e.lineWeightMM100)
         let transparency = penTransparency(code440: e.transparency)
-        return Pen(lineColor: color, lineType: lt, lineWidth: lw, transparency: transparency)
+        // Per-entity LINETYPE SCALE (DXF code 48). The bridge copies the raw
+        // DRW_Entity::ltypeScale (default 1.0; absent ⇒ 1). A 0/negative (a zeroed
+        // POD) maps to the 1.0 unscaled default so a malformed value never collapses
+        // the resolved dash. (Reads in from external files; the app-side write is a
+        // documented vendored-lib gap — stock libdxfrw does not emit code 48.)
+        let lts = e.linetypeScale > 0 ? e.linetypeScale : 1
+        return Pen(lineColor: color, lineType: lt, lineWidth: lw,
+                   transparency: transparency, linetypeScale: lts)
     }
 
     /// Maps the bridge's raw DXF code-440 transparency value to a `PenTransparency`
