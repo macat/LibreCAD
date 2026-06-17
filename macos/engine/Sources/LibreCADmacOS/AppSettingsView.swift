@@ -117,6 +117,14 @@ enum AppSettings {
         /// `AppSettings.setBoolPreference` — because its toggle is also a status-bar/menu
         /// action, not only a Preferences control).
         static let dynamicInput = "app.snapping.dynamicInput"
+        /// Whether OBJECT-SNAP TRACKING (OTRACK — LibreCAD's object snap tracking,
+        /// AutoCAD F11) is on for NEW windows (Bool). When on, snaps the user dwells over
+        /// are ACQUIRED and the cursor locks onto alignment guides radiating from them.
+        /// INDEPENDENT of ortho/polar (it can be on together with either). Default OFF
+        /// (matching `CanvasModel.objectTrackingEnabled`'s `false` default). READ-SITE
+        /// (a one-line CanvasModel.init follow-up, see file header): seed the new window's
+        /// `objectTrackingEnabled` from this via `AppSettings.boolPreference`.
+        static let objectTracking = "app.snapping.objectTracking"
 
         /// Rendering tab.
         /// Whether antialiasing is on.
@@ -161,6 +169,12 @@ enum AppSettings {
         /// and the feedback is the point of the feature. Honored by `AppSettings.boolPreference`
         /// (which uses `object(forKey:)`, so a missing key yields this `true`, not `false`).
         static let dynamicInput = true
+        /// Object-snap tracking (OTRACK) defaults OFF — it is an advanced drafting aid the
+        /// user opts into (LibreCAD/AutoCAD ship it off), and OFF matches the model's own
+        /// `objectTrackingEnabled = false` default, so an unset key leaves new-window
+        /// behavior unchanged. Honored by `AppSettings.boolPreference` (`object(forKey:)`),
+        /// so a missing key yields this `false`.
+        static let objectTracking = false
 
         static let antialias = true
         static let renderQuality: RenderQuality = .high
@@ -646,6 +660,13 @@ private struct SnappingSettingsTab: View {
     // `CanvasModel.toggleDynamicInput()` writes it back, so this toggle, the status-bar DYN
     // chip, and the model flag all stay in sync.
     @AppStorage(AppSettings.Key.dynamicInput) private var dynamicInput = AppSettings.Default.dynamicInput
+    // READ-SITE (PENDING — a one-line CanvasModel.init follow-up; not in this wave's owned
+    // files): seed the new window's `objectTrackingEnabled` from this SAME key via
+    // `AppSettings.boolPreference(AppSettings.Key.objectTracking, default: AppSettings.Default.objectTracking)`,
+    // mirroring how `dynamicInputEnabled` is seeded. Default OFF == the model's current
+    // hardcoded `false`, so until that one line lands a fresh window simply ignores this
+    // pref (no behavior change); the status-bar OTRK chip + View-menu item still toggle live.
+    @AppStorage(AppSettings.Key.objectTracking) private var objectTracking = AppSettings.Default.objectTracking
 
     var body: some View {
         Form {
@@ -677,6 +698,11 @@ private struct SnappingSettingsTab: View {
             Section("Dynamic input") {
                 Toggle("Dynamic input — show live dimensions while drawing", isOn: $dynamicInput)
                 Text("Shows the running length / radius / size as a value chip and dotted dimension line at the cursor while a draw tool is active (DYN in the status bar).")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Object snap tracking") {
+                Toggle("Object snap tracking — alignment guides from acquired points", isOn: $objectTracking)
+                Text("Locks the cursor onto horizontal / vertical / polar alignment guides radiating from object snaps you acquire (OTRK in the status bar). Independent of ortho and polar — it can be on together with either.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

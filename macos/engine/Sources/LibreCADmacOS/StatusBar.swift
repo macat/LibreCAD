@@ -31,7 +31,10 @@
 //    • ORTHO (F8)  → `model.orthoEnabled`      via `model.toggleOrtho()`
 //    • OSNAP (F3)  → `model.objectSnapEnabled` via `model.setObjectSnapEnabled(!…)`
 //    • POLAR (F10) → `model.polarEnabled`      via `model.togglePolar()`
-//  (OSNAP + POLAR became real status flags in backlog Phase 0 — #7.) Ortho/polar
+//    • OTRK        → `model.objectTrackingEnabled` via `model.toggleObjectTracking()`
+//  (OSNAP + POLAR became real status flags in backlog Phase 0 — #7; OTRK — object-snap
+//  tracking — is the snap-tracking wave's 7th toggle, INDEPENDENT of ortho/polar.)
+//  Ortho/polar
 //  mutual exclusion is handled in the model; the chips just reflect state. The
 //  detailed per-osnap list also lives in the Inspector's Snap & Grid section and in
 //  this bar's gear `.popover` (`SnapGridPopover`, backlog #3) — the chips are the
@@ -274,6 +277,17 @@ struct StatusBar: View {
             modeToggle(title: "DYN", isOn: model.dynamicInputEnabled,
                        help: "Dynamic input — live dimensions (F12)") {
                 model.toggleDynamicInput(); requestRedraw()
+            }
+            // OTRK (OTRACK — object-snap tracking) — alignment guides radiating from
+            // ACQUIRED object snaps. INDEPENDENT of ortho/polar (it can be on together
+            // with either), so `toggleObjectTracking` never disturbs those flags. The
+            // short "OTRK" label (vs the full "OTRACK") keeps this 7th toggle inside the
+            // bar's narrow-window `.lineLimit(1)` headroom, matching the others' compact
+            // 3–5-char convention. The model bumps `modelVersion`; we still ask the canvas
+            // to repaint so the acquired-point "+"s / guides clear immediately on toggle-off.
+            modeToggle(title: "OTRK", isOn: model.objectTrackingEnabled,
+                       help: "Object snap tracking — alignment guides from acquired points") {
+                model.toggleObjectTracking(); requestRedraw()
             }
         }
         .accessibilityElement(children: .contain)

@@ -50,6 +50,8 @@ struct AppSettingsKeyTests {
         AppSettings.Key.defaultSnapMask,
         AppSettings.Key.snapAperturePx,
         AppSettings.Key.polarIncrementDegrees,
+        AppSettings.Key.dynamicInput,
+        AppSettings.Key.objectTracking,
         AppSettings.Key.antialias,
         AppSettings.Key.renderQuality,
         AppSettings.Key.defaultLineWidthMM,
@@ -82,6 +84,8 @@ struct AppSettingsKeyTests {
         #expect(AppSettings.Key.defaultSnapMask == "app.snapping.defaultSnapMask")
         #expect(AppSettings.Key.snapAperturePx == "app.snapping.snapAperturePx")
         #expect(AppSettings.Key.polarIncrementDegrees == "app.snapping.polarIncrementDegrees")
+        #expect(AppSettings.Key.dynamicInput == "app.snapping.dynamicInput")
+        #expect(AppSettings.Key.objectTracking == "app.snapping.objectTracking")
         #expect(AppSettings.Key.renderQuality == "app.rendering.renderQuality")
         #expect(AppSettings.Key.defaultTextFont == "app.text.defaultTextFont")
     }
@@ -101,6 +105,8 @@ struct AppSettingsDefaultTests {
         #expect(AppSettings.Default.canvasBackgroundHex.isEmpty)    // empty = follow theme
         #expect(AppSettings.Default.gridColorHex.isEmpty)
         #expect(AppSettings.Default.crosshairStyle == .full)
+        #expect(AppSettings.Default.dynamicInput == true)       // DYNMODE ships on
+        #expect(AppSettings.Default.objectTracking == false)    // OTRACK is opt-in (matches the model's false default)
         #expect(AppSettings.Default.snapAperturePx == 12)
         #expect(AppSettings.Default.polarIncrementDegrees == 15)   // LibreCAD's classic 15° polar step
         #expect(AppSettings.Default.antialias == true)
@@ -194,6 +200,54 @@ struct AppSettingsValidatorTests {
         #expect(back.contains(.free))          // free is the always-on fallback
         // A 0/blank mask still yields .free so the cursor is never un-snappable.
         #expect(AppSettings.snapMode(fromMask: 0) == .free)
+    }
+}
+
+// MARK: - Bool preference read/write (DYN + OTRACK — the model-seeded toggles)
+
+/// The two snapping toggles the MODEL seeds + persists directly through
+/// `AppSettings.boolPreference` / `setBoolPreference` (dynamic input + object-snap
+/// tracking). Verifies the missing-key-honors-default semantics (so an unset OTRACK key
+/// yields its `false` default, and an unset DYN key yields its `true` default — NOT the
+/// `false` that plain `UserDefaults.bool(forKey:)` would return) and a write→read
+/// round-trip. Uses an isolated, named `UserDefaults` suite so it never touches the real
+/// `.standard` domain (hermetic, parallel-safe).
+@Suite("App Settings — bool preference seeding (DYN / OTRACK)")
+struct AppSettingsBoolPreferenceTests {
+
+    /// A throwaway, isolated defaults domain for one test (removed on teardown).
+    private func makeDefaults() -> (UserDefaults, String) {
+        let suite = "AppSettingsBoolPreferenceTests.\(UUID().uuidString)"
+        return (UserDefaults(suiteName: suite)!, suite)
+    }
+
+    @Test("a missing key falls back to the typed default (true for DYN, false for OTRACK)")
+    func missingKeyHonorsDefault() {
+        let (defaults, suite) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        // Nothing stored yet → each key returns ITS OWN default, not the bool() `false`.
+        #expect(AppSettings.boolPreference(AppSettings.Key.objectTracking,
+                                           default: AppSettings.Default.objectTracking,
+                                           defaults: defaults) == false)
+        #expect(AppSettings.boolPreference(AppSettings.Key.dynamicInput,
+                                           default: AppSettings.Default.dynamicInput,
+                                           defaults: defaults) == true)
+    }
+
+    @Test("OTRACK pref round-trips: writing true then reading yields true (and false→false)")
+    func objectTrackingRoundTrips() {
+        let (defaults, suite) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        AppSettings.setBoolPreference(AppSettings.Key.objectTracking, true, defaults: defaults)
+        #expect(AppSettings.boolPreference(AppSettings.Key.objectTracking,
+                                           default: AppSettings.Default.objectTracking,
+                                           defaults: defaults) == true)
+
+        AppSettings.setBoolPreference(AppSettings.Key.objectTracking, false, defaults: defaults)
+        #expect(AppSettings.boolPreference(AppSettings.Key.objectTracking,
+                                           default: AppSettings.Default.objectTracking,
+                                           defaults: defaults) == false)
     }
 }
 
