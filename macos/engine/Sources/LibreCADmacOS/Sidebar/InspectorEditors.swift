@@ -36,46 +36,80 @@ struct EntityCommonEditor: View {
     @State private var layer: String = "0"
     @State private var color: Color = .green
     @State private var widthMM: Double = 0.25
+    /// Draft EXPLICIT opacity percent (0…100, 100 = opaque) for the transparency
+    /// field, shown only in `.explicit` transparency mode. Seeded from the record.
+    @State private var opacityPercent: Double = 100
 
     var body: some View {
         Section("Common") {
-            Picker("Layer", selection: $layer) {
-                ForEach(layerNames, id: \.self) { Text($0).tag($0) }
-            }
-            .onChange(of: layer) { _, newValue in
-                guard newValue != record.layer.name else { return }
-                var r = record
-                r.layer = LayerID(newValue)
-                onCommit([r])
-            }
-
-            ColorPicker("Pen color", selection: $color, supportsOpacity: false)
-                .onChange(of: color) { _, newColor in
-                    let rgba = newColor.rgbaColor
-                    var r = record
-                    r.pen.lineColor = .explicit(rgba)
-                    onCommit([r])
-                }
-
-            Picker("Pen color mode", selection: penColorModeBinding) {
-                Text("By Layer").tag(PenColorMode.byLayer)
-                Text("By Block").tag(PenColorMode.byBlock)
-                Text("Explicit").tag(PenColorMode.explicit)
-            }
-
-            LabeledContent {
-                TextField("Width", value: $widthMM, format: .number)
-                    .frame(width: DS.Field.std).multilineTextAlignment(.trailing)
-                    .onSubmit(commitWidth)
-                    .onChange(of: widthMM) { _, _ in commitWidth() }
-            } label: {
-                Text("Line width (mm)").lineLimit(1)
-            }
+            commonLayerColorWidth
+            transparencyControls
         }
         .onAppear(perform: seed)
         .onChange(of: record.id) { _, _ in seed() }
         .onChange(of: record.layer.name) { _, newValue in
             if layer != newValue { layer = newValue }
+        }
+    }
+
+    /// Layer / pen color / color mode / line width (the original common fields),
+    /// decomposed into its own `@ViewBuilder` so the `Section` body stays small for
+    /// the SwiftUI type-checker.
+    @ViewBuilder private var commonLayerColorWidth: some View {
+        Picker("Layer", selection: $layer) {
+            ForEach(layerNames, id: \.self) { Text($0).tag($0) }
+        }
+        .onChange(of: layer) { _, newValue in
+            guard newValue != record.layer.name else { return }
+            var r = record
+            r.layer = LayerID(newValue)
+            onCommit([r])
+        }
+
+        ColorPicker("Pen color", selection: $color, supportsOpacity: false)
+            .onChange(of: color) { _, newColor in
+                let rgba = newColor.rgbaColor
+                var r = record
+                r.pen.lineColor = .explicit(rgba)
+                onCommit([r])
+            }
+
+        Picker("Pen color mode", selection: penColorModeBinding) {
+            Text("By Layer").tag(PenColorMode.byLayer)
+            Text("By Block").tag(PenColorMode.byBlock)
+            Text("Explicit").tag(PenColorMode.explicit)
+        }
+
+        LabeledContent {
+            TextField("Width", value: $widthMM, format: .number)
+                .frame(width: DS.Field.std).multilineTextAlignment(.trailing)
+                .onSubmit(commitWidth)
+                .onChange(of: widthMM) { _, _ in commitWidth() }
+        } label: {
+            Text("Line width (mm)").lineLimit(1)
+        }
+    }
+
+    /// Per-entity TRANSPARENCY (DXF 440): a mode picker (By Layer / By Block /
+    /// Explicit) plus an opacity-percent field shown only in `.explicit` mode (100%
+    /// = opaque). Routes through the SAME `r.pen.transparency = …; onCommit([r])`
+    /// funnel as the color/width edits (undoable `.replace`). Its own subview so the
+    /// `Section` body stays type-checkable.
+    @ViewBuilder private var transparencyControls: some View {
+        Picker("Transparency mode", selection: transparencyModeBinding) {
+            Text("By Layer").tag(PenTransparencyMode.byLayer)
+            Text("By Block").tag(PenTransparencyMode.byBlock)
+            Text("Explicit").tag(PenTransparencyMode.explicit)
+        }
+        if case .opacity = record.pen.transparency {
+            LabeledContent {
+                TextField("Opacity", value: $opacityPercent, format: .number)
+                    .frame(width: DS.Field.std).multilineTextAlignment(.trailing)
+                    .onSubmit(commitOpacity)
+                    .onChange(of: opacityPercent) { _, _ in commitOpacity() }
+            } label: {
+                Text("Opacity (%)").lineLimit(1)
+            }
         }
     }
 
@@ -109,6 +143,39 @@ struct EntityCommonEditor: View {
         onCommit([r])
     }
 
+    /// Transparency mode (the `.byLayer`/`.byBlock` sentinels vs an explicit opacity).
+    private enum PenTransparencyMode { case byLayer, byBlock, explicit }
+
+    private var transparencyModeBinding: Binding<PenTransparencyMode> {
+        Binding(
+            get: {
+                switch record.pen.transparency {
+                case .byLayer: return .byLayer
+                case .byBlock: return .byBlock
+                case .opacity: return .explicit
+                }
+            },
+            set: { mode in
+                var r = record
+                switch mode {
+                case .byLayer:  r.pen.transparency = .byLayer
+                case .byBlock:  r.pen.transparency = .byBlock
+                case .explicit:
+                    // Seed an explicit opacity from the current draft percent.
+                    r.pen.transparency = .opacity(max(0, min(1, opacityPercent / 100)))
+                }
+                onCommit([r])
+            }
+        )
+    }
+
+    private func commitOpacity() {
+        let clamped = max(0, min(100, opacityPercent))
+        var r = record
+        r.pen.transparency = .opacity(clamped / 100)
+        onCommit([r])
+    }
+
     private func seed() {
         layer = record.layer.name
         if case .explicit(let rgba) = record.pen.lineColor {
@@ -116,6 +183,13 @@ struct EntityCommonEditor: View {
         }
         if case .millimeters(let mm) = record.pen.lineWidth {
             widthMM = mm
+        }
+        // Seed the opacity percent from an explicit transparency, else leave the
+        // field at fully opaque (so switching to Explicit starts at 100%).
+        if let op = record.pen.transparency.explicitOpacity {
+            opacityPercent = op * 100
+        } else {
+            opacityPercent = 100
         }
     }
 }

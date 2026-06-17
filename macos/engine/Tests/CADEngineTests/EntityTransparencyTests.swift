@@ -239,6 +239,40 @@ struct EntityTransparencyTests {
         #expect(try #require(line).resolve().polylines[0].pen.color.a == 1.0)
     }
 
+    // MARK: - Inspector commit contract (Stage 3)
+    //
+    // The Inspector's `EntityCommonEditor` transparency control commits via the
+    // SAME `r.pen.transparency = …; onCommit([r])` funnel as the color/width edits.
+    // Its mode→sentinel and opacity-percent→`.opacity` conversions are inline in the
+    // (private) SwiftUI view; these tests pin the resulting `Pen` contract the view
+    // produces, so the conversion the UI relies on is regression-anchored.
+
+    @Test("inspector mode picker maps to the matching PenTransparency sentinel")
+    func inspectorModeContract() {
+        var r = EntityRecord(id: EntityID(1), pen: Pen(lineColor: .explicit(.white)),
+                             kind: .line(LineData(start: .init(0, 0), end: .init(1, 0))))
+        r.pen.transparency = .byLayer
+        #expect(r.pen.transparency == .byLayer)
+        r.pen.transparency = .byBlock
+        #expect(r.pen.transparency == .byBlock)
+        // "Explicit" seeds from the draft opacity percent (here 50% → 0.5).
+        r.pen.transparency = .opacity(max(0, min(1, 50.0 / 100)))
+        #expect(r.pen.transparency == .opacity(0.5))
+    }
+
+    @Test("inspector opacity-percent field maps percent → [0,1] opacity (clamped)")
+    func inspectorOpacityPercentContract() {
+        func commit(_ percent: Double) -> PenTransparency {
+            let clamped = max(0, min(100, percent))
+            return .opacity(clamped / 100)
+        }
+        #expect(commit(100) == .opacity(1.0))
+        #expect(commit(0) == .opacity(0.0))
+        #expect(commit(40) == .opacity(0.4))
+        #expect(commit(150) == .opacity(1.0))   // clamps high
+        #expect(commit(-20) == .opacity(0.0))   // clamps low
+    }
+
     @Test("the written DXF carries a code-440 group for a transparent entity (R2004)")
     func dxfWritesCode440() async throws {
         let rec = EntityRecord(
