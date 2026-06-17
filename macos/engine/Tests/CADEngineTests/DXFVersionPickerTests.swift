@@ -64,9 +64,9 @@ struct DXFVersionPickerMappingTests {
         #expect(raws.allSatisfy { !$0.isEmpty })
     }
 
-    @Test("allCases covers the three exposed tiers and every case has a label")
+    @Test("allCases covers the six exposed tiers and every case has a label")
     func allCasesAndLabels() {
-        #expect(DXFExportVersion.allCases == [.r12, .r2000, .r2018])
+        #expect(DXFExportVersion.allCases == [.r12, .r14, .r2000, .r2004, .r2007, .r2018])
         for v in DXFExportVersion.allCases {
             #expect(!v.label.isEmpty, "every tier needs a Picker label")
         }
@@ -87,7 +87,10 @@ struct DXFVersionPickerDecodeTests {
     @Test("a valid raw string round-trips to its tier")
     func validRawRoundTrips() {
         #expect(AppSettings.dxfExportVersion(fromRaw: "r12") == .r12)
+        #expect(AppSettings.dxfExportVersion(fromRaw: "r14") == .r14)
         #expect(AppSettings.dxfExportVersion(fromRaw: "r2000") == .r2000)
+        #expect(AppSettings.dxfExportVersion(fromRaw: "r2004") == .r2004)
+        #expect(AppSettings.dxfExportVersion(fromRaw: "r2007") == .r2007)
         #expect(AppSettings.dxfExportVersion(fromRaw: "r2018") == .r2018)
     }
 
@@ -96,7 +99,7 @@ struct DXFVersionPickerDecodeTests {
         #expect(AppSettings.dxfExportVersion(fromRaw: "") == .r2000)
         #expect(AppSettings.dxfExportVersion(fromRaw: "bogus") == .r2000)
         #expect(AppSettings.dxfExportVersion(fromRaw: "R12") == .r2000)   // case-sensitive rawValue
-        #expect(AppSettings.dxfExportVersion(fromRaw: "r14") == .r2000)   // engine has r14 but UI doesn't expose it
+        #expect(AppSettings.dxfExportVersion(fromRaw: "R14") == .r2000)   // case-sensitive rawValue
     }
 }
 
