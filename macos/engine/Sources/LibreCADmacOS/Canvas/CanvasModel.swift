@@ -438,6 +438,84 @@ final class CanvasModel {
     /// Divide tool: number of equal pieces (drops `count − 1` division points).
     var divideCount: Int = 2
 
+    // MARK: Wave-3B parameterized-tool options (Divide / Spline / Scale / Hatch)
+    //
+    // These mirror the existing circle/arc construction-mode pattern: the live engine
+    // tool fixes the mode at construction (or carries it as a public `var`), so
+    // `applyToolConfig` re-mints / re-applies it from the model state the Tool Options
+    // bar (Wave 3F) binds to. Defaults reproduce each tool's original behavior, so an
+    // un-touched bar is byte-for-byte the pre-Wave-3 flow.
+
+    /// Divide tool: whether the DivideTool runs in DIVIDE-by-COUNT (`.count`, the
+    /// default — drop `n−1` interior points) or MEASURE-by-LENGTH (`.length` — drop a
+    /// node every `divideSpacing` units along the curve). The options bar (3F) toggles
+    /// this; `applyToolConfig` re-mints the DivideTool with the assembled `DivideMode`.
+    /// `0` selects count; `1` selects length. Stored as an INDEX (the engine
+    /// `DivideTool.DivideMode` carries an associated value, so it can't be a Picker tag
+    /// — the same UI-simple split the Polygon/Rectangle/Ellipse pickers use).
+    var divideModeStyle: Int = 0
+
+    /// The MEASURE spacing (world units along the curve) used when `divideModeStyle ==
+    /// 1` (`.length`). A non-positive spacing yields no nodes (the tool's own guard), so
+    /// the bar should keep it > 0. Ignored in count mode.
+    var divideSpacing: Double = 10.0
+
+    /// The `DivideTool.DivideMode` assembled from the split UI state (`divideModeStyle`
+    /// + `divideCount` / `divideSpacing`). The single mapping `applyToolConfig` and the
+    /// wiring test share, so the options bar and the re-mint never drift. Mode `1`
+    /// (length) clamps the spacing finite-and-positive; otherwise count (clamped ≥ 2).
+    var divideMode: DivideTool.DivideMode {
+        if divideModeStyle == 1 {
+            let s = (divideSpacing.isFinite && divideSpacing > 0) ? divideSpacing : 10.0
+            return .length(s)
+        }
+        return .count(Swift.max(2, divideCount))
+    }
+
+    /// Spline tool: how the picked points are interpreted on commit — FIT points
+    /// (`.fit`, the default `.splinePoints` interpolation curve) vs NURBS CONTROL
+    /// points (`.controlPoints`, a `.spline` B-spline whose control polygon IS the
+    /// picks). `SplineTool.mode` is a `let` fixed at construction, so `applyToolConfig`
+    /// RE-MINTS the tool with this (the DivideTool/ArcTool re-mint pattern).
+    var splineMode: SplineMode = .fit
+
+    /// Scale tool: the construction MODE — `.factor` (the original three-pick
+    /// distance-ratio scale, the default), `.reference` (scale-by-reference-length), or
+    /// `.nonUniform` (independent per-axis `(sx, sy)` about a single base). `ScaleTool`
+    /// carries `mode` + `nonUniformFactors` as public `var`s (no-arg `init()`), so
+    /// `applyToolConfig` sets them IN PLACE on the live tool. The non-uniform factors
+    /// come from `scaleX` / `scaleY`.
+    var scaleMode: ScaleTool.ScaleMode = .factor
+    /// Scale tool: the per-axis X factor used by `.nonUniform` mode (default 1 ⇒ no-op).
+    var scaleX: Double = 1
+    /// Scale tool: the per-axis Y factor used by `.nonUniform` mode (default 1 ⇒ no-op).
+    var scaleY: Double = 1
+
+    /// Hatch tool: the chosen pattern NAME (case-insensitive; resolved against the
+    /// bundled `HatchPatternLibrary` at draw time), or `nil` ⇒ a SOLID fill (the
+    /// back-compatible default). The options bar (3F) picks a name from
+    /// `HatchPatternLibrary.patterns`; `applyToolConfig` assembles it into the
+    /// `HatchTool.Fill` (`.solid` for `nil`/"SOLID", else `.pattern`).
+    var currentHatchPattern: String?
+    /// Hatch tool: the per-hatch pattern SCALE (DXF code 41) applied to a named
+    /// pattern. `<= 0`/non-finite is normalized to 1 by the tool. Ignored for solid.
+    var hatchPatternScale: Double = 1
+    /// Hatch tool: an EXTRA pattern rotation (DXF code 52, RADIANS). The options bar
+    /// may edit a friendlier degrees value over this. Ignored for solid.
+    var hatchPatternAngle: Double = 0
+
+    /// The `HatchTool.Fill` assembled from the split UI state (`currentHatchPattern` +
+    /// scale/angle). The single mapping `applyToolConfig` and the wiring test share. A
+    /// `nil`/empty/"SOLID" name (case-insensitive) is a solid fill; any other name is a
+    /// named pattern carrying the scale + angle.
+    var hatchFillValue: HatchTool.Fill {
+        guard let name = currentHatchPattern,
+              !name.trimmingCharacters(in: .whitespaces).isEmpty,
+              name.uppercased() != "SOLID" else { return .solid }
+        let s = (hatchPatternScale.isFinite && hatchPatternScale > 0) ? hatchPatternScale : 1
+        return .pattern(name: name, scale: s, angle: hatchPatternAngle)
+    }
+
     // MARK: Draw-tool options (NEW — UX-plan U2, surfaced by the Tool Options bar)
 
     /// Polygon tool: number of sides (clamped ≥ 3 by the tool) and whether the
@@ -1933,10 +2011,35 @@ final class CanvasModel {
             )
             tool = t
         case is DivideTool:
-            // DivideTool's `divisions` is set at construction, so re-mint with the
-            // configured count (its public `var divisions` is settable too, but the
-            // init carries the clamp/validation, so prefer the init).
-            tool = DivideTool(divisions: Swift.max(2, divideCount))
+            // DivideTool's `mode` is set at construction, so re-mint with the assembled
+            // `DivideMode` (DIVIDE-by-count or MEASURE-by-length — the split UI state in
+            // `divideMode`). The `init(mode:)` carries the clamp/validation. The default
+            // (`divideModeStyle == 0`) reproduces the historical count-based DIVIDE.
+            tool = DivideTool(mode: divideMode)
+
+        // MARK: Wave-3B parameterized tools (Spline / Scale / Hatch)
+
+        case is SplineTool:
+            // SplineTool's `mode` is a `let` fixed at construction (it seeds how the
+            // picks are interpreted on commit — fit points vs NURBS control points), so
+            // RE-MINT with the chosen mode (the DivideTool/ArcTool re-mint pattern). The
+            // default `.fit` keeps the original fit-point interpolation behavior.
+            tool = SplineTool(mode: splineMode)
+        case var t as ScaleTool:
+            // ScaleTool carries `mode` + `nonUniformFactors` as settable `var`s (no-arg
+            // init), so apply them IN PLACE on the live tool (the FilletTool/ArrayTool
+            // pattern). `.factor` (the default) leaves the original three-pick distance
+            // ratio behavior untouched; `.nonUniform` reads the typed X/Y factors.
+            t.mode = scaleMode
+            t.nonUniformFactors = (sx: scaleX, sy: scaleY)
+            tool = t
+        case var t as HatchTool:
+            // HatchTool's `fill` is a settable `var`, so apply the assembled fill IN
+            // PLACE (solid for no/blank/"SOLID" pattern, else a named `.pat` pattern
+            // carrying the scale + angle). The default (no pattern) keeps a solid fill —
+            // the original behavior — so an un-configured Hatch is byte-for-byte unchanged.
+            t.fill = hatchFillValue
+            tool = t
 
         // MARK: NEW draw-tool options (UX-plan U2)
 
@@ -2108,7 +2211,7 @@ final class CanvasModel {
         // state, per the review NIT.)
         if tool is DivideTool || tool is CircleTool || tool is ArcTool || tool is LineTool
             || tool is EllipseTool || tool is BaselineDimTool || tool is ImageTool
-            || tool is InsertTool {
+            || tool is InsertTool || tool is SplineTool {
             toolStatus = tool?.status ?? ""
         } else {
             toolStatus = savedStatus
