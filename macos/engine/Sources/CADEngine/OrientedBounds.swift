@@ -21,8 +21,13 @@
 //    - collinear points               → a zero-thickness box along the line dir
 //    - near-square within an epsilon   → angle 0 (axis-aligned tie-break)
 //    - the axis-aligned box is already (near-)minimal → angle 0
-//  The angle is normalized to (−π/2, +π/2] so a rectangle and its 90° rotation
-//  report the same canonical orientation (a box has no "front").
+//  The angle reports the LONG axis as the primary (width) direction, normalized to
+//  (−π/2, +π/2] — a mod-π band. The long axis is the consistent primary direction
+//  through a full 0→180° turn (it only "flips" at 180°, where the rectangle is
+//  geometrically identical, so it's invisible). This keeps the resting gizmo's
+//  rotate-knob anchored to a CONSISTENT edge across the 45°/90° boundaries instead
+//  of swapping to the short axis (the old mod-π/2 fold did, which made the knob
+//  "reset to the top" mid-rotation).
 //
 //  PURE (ADR-001/-003): value types, f64, no GUI/Metal/AppKit. Unit-tested in
 //  `OrientedBoundsTests`.
@@ -51,7 +56,9 @@ public struct OrientedBounds: Sendable, Equatable {
     /// The box center in world coords.
     public var center: Vector
     /// The CCW rotation (radians) of the box's local x-axis, normalized to
-    /// `(−π/2, +π/2]`. `0` means axis-aligned.
+    /// `(−π/2, +π/2]` (a mod-π band). The local x-axis is the box's LONG axis, so
+    /// the direction stays continuous through a full 0→180° turn. `0` means
+    /// axis-aligned.
     public var angle: Double
     /// Half-extents along the box's LOCAL (rotated) axes: `x` along `û`, `y` along
     /// `v̂`. Both `>= 0`.
@@ -185,8 +192,9 @@ public struct OrientedBounds: Sendable, Equatable {
     }
 
     /// The bounding box of `pts` measured in the frame rotated by `angle` (the
-    /// box's local x-axis along `angle`). Returns the OBB in WORLD coords. The
-    /// returned `angle` is normalized to `(−π/2, +π/2]`.
+    /// box's local x-axis along `angle`). Returns the OBB in WORLD coords with the
+    /// box's LONG axis chosen as the primary (width) direction, normalized to the
+    /// mod-π band `(−π/2, +π/2]`.
     static func boxAligned(to angle: Double, points pts: [Vector]) -> OrientedBounds? {
         let c = cos(angle), s = sin(angle)
         // Project each point onto the rotated axes (u = (c,s), v = (−s,c)) by
@@ -206,27 +214,41 @@ public struct OrientedBounds: Sendable, Equatable {
         let cv = (minV + maxV) * 0.5
         // Un-rotate the local center back to world.
         let center = Vector(cu * c - cv * s, cu * s + cv * c)
-        let normalized = normalizeAngle(angle)
-        // When the angle is normalized by ±90°, the local axes swap; recompute the
-        // half-extents in the normalized frame so they stay consistent.
-        return canonical(center: center, angle: angle, normalizedAngle: normalized,
-                         halfU: (maxU - minU) * 0.5, halfV: (maxV - minV) * 0.5)
+        let halfU = (maxU - minU) * 0.5
+        let halfV = (maxV - minV) * 0.5
+        // Report the LONG axis as the primary (width) direction, normalized mod π.
+        return canonical(center: center, axisAngle: angle, halfU: halfU, halfV: halfV)
     }
 
-    /// Builds the canonical `OrientedBounds` whose `angle` is `normalizedAngle`
-    /// (in `(−π/2, +π/2]`), swapping the half-extents if the normalization rotated
-    /// the frame by an odd multiple of 90° relative to `angle`.
-    private static func canonical(center: Vector, angle: Double,
-                                  normalizedAngle: Double,
+    /// Builds the canonical `OrientedBounds` from a box measured in the frame whose
+    /// x-axis (`û`) is at `axisAngle` with half-extents `halfU` (along `û`) and
+    /// `halfV` (along `v̂ = û + 90°`).
+    ///
+    /// Long-axis convention: pick whichever of `û` / `v̂` carries the LARGER extent
+    /// as the box's primary (width) direction, then normalize THAT direction into
+    /// the mod-π band `(−π/2, +π/2]`. Normalizing by ±π flips both axes
+    /// (`û → −û`, `v̂ → −v̂`) which preserves the box (corners use ±extents), so the
+    /// half-extent ↔ axis attachment stays consistent with the reported angle — the
+    /// reported `angle`/`halfExtents` reproduce the SAME 4 corners. There is NO
+    /// 90° swap at 45° anymore, so the orientation is continuous through 0→180°.
+    private static func canonical(center: Vector, axisAngle: Double,
                                   halfU: Double, halfV: Double) -> OrientedBounds {
-        // How many quarter-turns separate `angle` from its normalized form?
-        let delta = angle - normalizedAngle
-        let quarter = Double.pi / 2
-        let k = Int((delta / quarter).rounded(.toNearestOrAwayFromZero))
-        let swapped = (abs(k) % 2 == 1)
-        let hx = swapped ? halfV : halfU
-        let hy = swapped ? halfU : halfV
-        return OrientedBounds(center: center, angle: normalizedAngle,
+        // Choose the primary (width) axis = the longer half-extent's axis.
+        let primaryAngle: Double
+        let hx: Double  // half-extent along the primary axis
+        let hy: Double  // half-extent along the perpendicular (secondary) axis
+        if halfV > halfU {
+            // `v̂` (at axisAngle + 90°) is the long axis → make it primary.
+            primaryAngle = axisAngle + Double.pi / 2
+            hx = halfV
+            hy = halfU
+        } else {
+            primaryAngle = axisAngle
+            hx = halfU
+            hy = halfV
+        }
+        return OrientedBounds(center: center,
+                              angle: normalizeAngle(primaryAngle),
                               halfExtents: Vector(hx, hy))
     }
 
@@ -265,13 +287,17 @@ public struct OrientedBounds: Sendable, Equatable {
         return false
     }
 
-    /// Normalizes an angle to `(−π/2, +π/2]` — a rectangle and its 90° rotation
-    /// share one canonical orientation (a box has no preferred "up").
+    /// Normalizes a DIRECTION angle into the mod-π band `(−π/2, +π/2]` — a
+    /// direction and its 180° reverse are the same line, so reducing by ±π keeps
+    /// the long-axis direction in one half-plane while preserving the box (the box
+    /// uses ±extents, so flipping the axis by 180° reproduces the same corners).
     static func normalizeAngle(_ a: Double) -> Double {
-        let quarter = Double.pi / 2
-        // Reduce into (−π/2, +π/2] by adding/subtracting π/2 steps.
-        var x = a.remainder(dividingBy: quarter)   // → [−π/4, +π/4]
-        // `remainder` already lands in (−π/4, +π/4]; that's inside the target band.
+        let pi = Double.pi
+        // `remainder(dividingBy: π)` lands in [−π/2, +π/2]; nudge an exact −π/2 up to
+        // +π/2 so the band is the half-open (−π/2, +π/2] (its two endpoints are the
+        // same direction).
+        var x = a.remainder(dividingBy: pi)
+        if x <= -pi / 2 { x += pi }
         // Snap a numerically-tiny angle to exactly 0 for a stable axis-aligned case.
         if abs(x) < Tolerance.angle { x = 0 }
         return x

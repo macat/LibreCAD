@@ -35,12 +35,27 @@ struct OrientedBoundsTests {
     }
 
     /// The unsigned angular difference between two ORIENTATION angles (mod π/2),
-    /// so a box and its 90° rotation read as the same orientation.
+    /// so a box and its 90° rotation read as the same orientation. Used for the
+    /// extent-agnostic checks (a rotated rectangle's recovered angle equals the
+    /// rectangle's angle either exactly or as its perpendicular, depending on which
+    /// extent is longer); the long-axis convention is asserted separately.
     private func orientationDiff(_ a: Double, _ b: Double) -> Double {
         let quarter = Double.pi / 2
         var d = (a - b).truncatingRemainder(dividingBy: quarter)
         if d > quarter / 2 { d -= quarter }
         if d < -quarter / 2 { d += quarter }
+        return abs(d)
+    }
+
+    /// The unsigned angular difference between two DIRECTION angles (mod π), so a
+    /// direction and its 180° reverse read as the same line/long-axis direction.
+    /// This is the band `OrientedBounds.angle` lives in under the long-axis
+    /// convention — use it for continuity (no 45°/90° flip) assertions.
+    private func directionDiff(_ a: Double, _ b: Double) -> Double {
+        let pi = Double.pi
+        var d = (a - b).truncatingRemainder(dividingBy: pi)
+        if d > pi / 2 { d -= pi }
+        if d < -pi / 2 { d += pi }
         return abs(d)
     }
 
@@ -69,19 +84,23 @@ struct OrientedBoundsTests {
         let obb = OrientedBounds.minAreaRect(corners)
         #expect(obb != nil)
         let b = obb!
-        // The recovered orientation matches the rectangle's angle (mod π/2).
-        #expect(orientationDiff(b.angle, angle) <= 1e-7)
+        // Long-axis convention: the recovered DIRECTION matches the rectangle's
+        // long-axis angle (mod π) EXACTLY — the long edge (hx = 6) lies along
+        // `angle`, so `b.angle` == 0.6 (no 45°/90° fold to the short axis).
+        #expect(directionDiff(b.angle, angle) <= 1e-7)
+        // The half-extent along the primary (width) axis is the LONG one.
+        #expect(b.halfExtents.x >= b.halfExtents.y)
+        #expect(approx(b.halfExtents.x, hx, 1e-7))
+        #expect(approx(b.halfExtents.y, hy, 1e-7))
         // The center is recovered.
         #expect(approx(b.center, center, 1e-7))
-        // The extents match (each pair {hx,hy} appears, order may swap with the
-        // ±90° angle normalization).
-        let exts = [b.halfExtents.x, b.halfExtents.y].sorted()
-        let want = [hx, hy].sorted()
-        #expect(approx(exts[0], want[0], 1e-7))
-        #expect(approx(exts[1], want[1], 1e-7))
         // The reconstructed corners enclose the input corners tightly: the area
         // equals the true rectangle area.
         #expect(approx(b.width * b.height, (2 * hx) * (2 * hy), 1e-6))
+        // The hug invariant: reconstructed corners reproduce the input corners.
+        for inp in corners {
+            #expect(b.corners.contains { approx($0, inp, 1e-7) })
+        }
     }
 
     @Test("a rectangle rotated by a small angle still recovers that angle")
@@ -110,6 +129,67 @@ struct OrientedBoundsTests {
         #expect(obb != nil)
         #expect(orientationDiff(obb!.angle, angle) <= 1e-6)
         #expect(approx(obb!.width * obb!.height, (2 * hx) * (2 * hy), 1e-5))
+    }
+
+    // MARK: - Continuity regression (the knob-reset fix)
+
+    @Test("a rotated rectangle's orientation is CONTINUOUS through 0–180° (no 45°/90° flip)")
+    func orientationContinuousAcross90() {
+        // The original bug: the OBB angle folded to a mod-π/2 band and swapped to
+        // the SHORT axis at each 45° boundary, so the gizmo rotate-knob jumped ~90°
+        // mid-rotation ("reset to the top"). Under the long-axis mod-π convention
+        // the reported direction must track the rectangle's actual rotation with NO
+        // ~90° discontinuity across the old 45°/90° boundaries.
+        let center = Vector(-2, 5)
+        let hx = 7.0, hy = 2.0           // clearly non-square (long axis well-defined)
+        // A sweep straddling the old 45°(≈0.785) and 90°(≈1.571) fold boundaries.
+        let sweep = [0.2, 0.6, 1.0, 1.4, 2.0, 2.8]
+
+        var recovered: [Double] = []
+        for a in sweep {
+            let corners = rotatedRectCorners(center: center, hx: hx, hy: hy, angle: a)
+            let obb = OrientedBounds.minAreaRect(corners)
+            #expect(obb != nil)
+            let b = obb!
+            // Each sample: the long axis is the primary (width) axis, and its
+            // DIRECTION (mod π) matches the input rotation EXACTLY.
+            #expect(b.halfExtents.x >= b.halfExtents.y)
+            #expect(directionDiff(b.angle, a) <= 1e-6)
+            recovered.append(b.angle)
+        }
+
+        // The regression guard: between ADJACENT samples the recovered orientation
+        // changes by the SAME small amount the input changed (mod π) — NOT a ~90°
+        // jump. The input steps are ≤ 0.8 rad; assert each recovered step (mod π)
+        // matches the input step (mod π) and stays well under the ~π/2 the old fold
+        // would have produced.
+        for i in 1..<sweep.count {
+            let inputStep = directionDiff(sweep[i], sweep[i - 1])
+            let recoveredStep = directionDiff(recovered[i], recovered[i - 1])
+            // No ~90° flip: a fold-induced jump would read as ~π/2 here.
+            #expect(recoveredStep < Double.pi / 2 - 0.1)
+            // And it tracks the actual rotation increment.
+            #expect(abs(recoveredStep - inputStep) <= 1e-6)
+        }
+    }
+
+    @Test("crossing exactly 45° does not swap the primary axis to the short side")
+    func noSwapAt45() {
+        // Just below and just above the old 45° fold boundary: the long axis (hx=5)
+        // must stay the primary (width) axis on BOTH sides — the old code swapped to
+        // the short axis (hy=2) the moment the angle crossed π/4.
+        let hx = 5.0, hy = 2.0
+        let below = OrientedBounds.minAreaRect(
+            rotatedRectCorners(center: Vector(0, 0), hx: hx, hy: hy, angle: Double.pi / 4 - 0.05))!
+        let above = OrientedBounds.minAreaRect(
+            rotatedRectCorners(center: Vector(0, 0), hx: hx, hy: hy, angle: Double.pi / 4 + 0.05))!
+        // Both keep the long extent on the primary (width) axis.
+        #expect(approx(below.halfExtents.x, hx, 1e-7))
+        #expect(approx(below.halfExtents.y, hy, 1e-7))
+        #expect(approx(above.halfExtents.x, hx, 1e-7))
+        #expect(approx(above.halfExtents.y, hy, 1e-7))
+        // The angle is continuous across the boundary (no ~90° jump).
+        #expect(directionDiff(above.angle, below.angle) < 0.2)
     }
 
     // MARK: - Axis-aligned + tie-break
@@ -179,13 +259,17 @@ struct OrientedBoundsTests {
         #expect(approx(obb!.center, Vector(3, 3), 1e-9))
     }
 
-    @Test("a vertical line recovers a ~vertical orientation")
+    @Test("a vertical line recovers a vertical orientation (π/2 in the mod-π band)")
     func verticalLine() {
         let obb = OrientedBounds.minAreaRect([Vector(2, -3), Vector(2, 5)])
         #expect(obb != nil)
-        // Vertical == π/2, which normalizes to π/2 (the top of the (−π/2, π/2] band)
-        // or equivalently the orientation diff to π/2 is ~0.
-        #expect(orientationDiff(obb!.angle, .pi / 2) <= 1e-7)
+        // The line's long axis is vertical (π/2). Under the mod-π band (−π/2, π/2],
+        // π/2 is the (inclusive) top endpoint, so the reported angle is exactly π/2.
+        #expect(directionDiff(obb!.angle, .pi / 2) <= 1e-7)
+        #expect(approx(obb!.angle, .pi / 2, 1e-7))
+        // The non-zero extent is on the primary (width) axis; the thickness is ~0.
+        #expect(approx(obb!.halfExtents.y, 0, 1e-9))
+        #expect(approx(obb!.halfExtents.x, 4, 1e-7))
     }
 
     @Test("collinear points (3+) yield a zero-thickness box along the line")
