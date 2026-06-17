@@ -262,6 +262,42 @@ final class CanvasModel {
     /// persisted), consumed by `polarConstrained` via `PolarConstraint.constrain`.
     var polarAngleIncrement: Double = .pi / 12
 
+    /// The live ⇧ flag for the polar-TRACKING gate (the dotted-ray DISPLAY), mirroring
+    /// the `shiftHeld` parameter `polarConstrained` already takes on the point-input
+    /// path: ⇧ releases polar, so while it is held no tracking ray is shown either.
+    /// CanvasModel imports no AppKit, so the model cannot read `NSEvent.modifierFlags`
+    /// itself; the canvas view (which already reads `Self.shiftHeld`) pushes the flag
+    /// here on each cursor event in a later wire-wave. `@ObservationIgnored` like `tool`
+    /// — it is interaction state consumed by `updateSnap`, not a directly-rendered
+    /// property. Defaults `false` (no ⇧) so headless tests and the not-yet-wired state
+    /// behave as "⇧ not held". This is DISPLAY-only and does NOT touch the always-on
+    /// angle LOCK (`polarConstrained` keeps reading its own `shiftHeld` parameter).
+    @ObservationIgnored
+    var polarTrackingShiftHeld: Bool = false
+
+    /// Half-width of the polar-tracking engagement wedge, in RADIANS (≈3°). The dotted
+    /// tracking ray + distance readout are SHOWN only while the cursor lies within this
+    /// aperture of the engaged increment ray (`PolarTracking.Result.withinAperture`).
+    /// Draw-gating ONLY — it never affects the always-on angle lock (see the kernel
+    /// header). A constant, not a user setting (the lock increment is the tunable knob).
+    static let polarApertureRadians: Double = 3.0 * .pi / 180.0
+
+    /// Length of the drawn polar tracking ray, in WORLD units — a generous constant so
+    /// the dotted ray spans any realistic viewport; the overlay clips it to the visible
+    /// rect, so over-long is harmless and avoids threading a per-frame view extent into
+    /// the model. Rendering-only (the kernel degrades a non-finite length gracefully).
+    static let polarTrackingRayLengthWorld: Double = 1.0e9
+
+    /// The latest polar-TRACKING result under the cursor — the engaged increment ray,
+    /// its draw-gating `withinAperture` bit, and the far ray endpoint a future overlay
+    /// draws. Refreshed inside `updateSnap` AFTER the snap is set (so a real osnap can
+    /// suppress it), or `nil` when polar tracking is not engaged. DISPLAY data only: it
+    /// is the visual sibling of the always-on `polarConstrained` lock and never changes
+    /// it. `@ObservationIgnored` like `tool` — the overlay reads it via `trackingDisplay()`
+    /// on the same redraw the snap marker drives, so it needs no independent observation.
+    @ObservationIgnored
+    var polarTrackingResult: PolarTracking.Result?
+
     /// Whether DYNAMIC INPUT — the AutoCAD-style live dimensional feedback (a dotted dim
     /// line + value chip an active draw tool shows while you drag) — is on (AutoCAD F12,
     /// DYNMODE). When on, `currentLiveDimensions()` returns the active tool's
@@ -368,7 +404,7 @@ final class CanvasModel {
     /// can reflect the armed "pick a point" state.
     private(set) var settingRelativeZeroArmed: Bool = false
 
-    /// The most recent error from a command-line submission (`submitCommandText`),
+    /// The most recent error from a command-line submission (`interpretCommandLine`),
     /// or `nil` after a successful submit. The command field echoes it so a typo
     /// like `1,,2` shows "Expected x,y" instead of silently doing nothing.
     private(set) var lastCommandError: String?
@@ -378,7 +414,7 @@ final class CanvasModel {
     /// The live text typed into the bottom command BAR's tool-filter field. While
     /// empty the bar shows the adaptive default chip set; as it fills, the chips
     /// narrow to the fuzzy matches (see `ToolSuggester`). Distinct from the
-    /// coordinate/command-line text the view owns for `submitCommandText` — this one
+    /// coordinate/command-line text the view owns for `interpretCommandLine` — this one
     /// drives ONLY the tool-launcher filter (Phase 1). Observed so the chip row
     /// recomputes as the user types.
     var commandBarQuery: String = ""
@@ -411,14 +447,6 @@ final class CanvasModel {
     /// button the user already has. Pure read over the MRU + the pure `ToolSuggester`.
     func commandBarRecents(pinned: Set<ToolKind>) -> [ToolKind] {
         ToolSuggester.recents(mru: commandBarMRU, excluding: pinned)
-    }
-
-    /// The top-ranked suggestion for the current query — what ⏎ activates. `nil` when
-    /// the query is empty (⏎ on an empty launcher does nothing) or nothing matches.
-    var commandBarTopMatch: ToolKind? {
-        let trimmed = commandBarQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        return commandBarSuggestions.first
     }
 
     // MARK: Selection interaction state (UX-plan U5 — marquee + hover)
@@ -1925,7 +1953,34 @@ final class CanvasModel {
         )
         let changed = result != snap
         snap = result
+        refreshPolarTracking()
         return changed
+    }
+
+    /// Recomputes `polarTrackingResult` for the DOTTED-RAY DISPLAY. Called from
+    /// `updateSnap` AFTER `snap` is set so a real object snap can suppress the ray (the
+    /// ray must not fight the snap marker). Mirrors the `polarConstrained` gates exactly
+    /// — polar on, a reference (`relativeZero`) to radiate from, ⇧ not held, and no live
+    /// osnap — so the SHOWN ray and the always-on angle LOCK always agree about when
+    /// polar is in effect. This is display-only: it never alters the lock (`polarConstrained`
+    /// is untouched); `withinAperture` further draw-gates the actual rendering in
+    /// `trackingDisplay()`.
+    private func refreshPolarTracking() {
+        guard polarEnabled,                 // polar mode on
+              !polarTrackingShiftHeld,       // ⇧ releases polar (mirror polarConstrained)
+              !osnapActive,                  // a real osnap wins — yield the ray to it
+              let reference = relativeZero,  // need a datum to radiate from
+              let cursor = cursorWorld       // need a live cursor
+        else {
+            polarTrackingResult = nil
+            return
+        }
+        polarTrackingResult = PolarTracking.resolve(
+            reference: reference,
+            cursor: cursor,
+            incrementRadians: polarAngleIncrement,
+            apertureRadians: Self.polarApertureRadians,
+            rayLengthWorld: Self.polarTrackingRayLengthWorld)
     }
 
     /// The snapped world point for a screen point — the point a draw tool should
@@ -2026,6 +2081,7 @@ final class CanvasModel {
     func clearCursor() {
         cursorWorld = nil
         snap = nil
+        polarTrackingResult = nil   // no cursor → no tracking ray
     }
 
     // MARK: - Tool activation + routing
@@ -2066,25 +2122,11 @@ final class CanvasModel {
         activateTool(.image)
     }
 
-    /// Activates `kind` FROM the command bar: it activates the tool through the SAME
-    /// `activateTool` path the toolbar/menu/palette use (so behavior is identical),
-    /// promotes `kind` to the front of the MRU (the pure `ToolSuggester.updatedMRU`,
-    /// deduping + capping), and clears the launcher query so the chip row returns to
-    /// the adaptive set. It does NOT handle `.image` (that needs the View-layer
-    /// file-picker — the bar special-cases `.image` to its own picker closure and
-    /// records the MRU via `recordCommandBarUse` instead), so callers route `.image`
-    /// separately to keep modals out of the model (headless-test-safe).
-    func activateToolFromCommandBar(_ kind: ToolKind) {
-        recordCommandBarUse(kind)
-        activateTool(kind)
-        commandBarQuery = ""
-    }
-
     /// Promotes `kind` to the front of the command bar's MRU (most-recent first,
-    /// deduped, capped) via the pure `ToolSuggester.updatedMRU`. Split out from
-    /// `activateToolFromCommandBar` so the `.image` flow — which activates via the
-    /// View-layer file-picker, NOT `activateTool(.image)` — can still record its use
-    /// in the MRU. The view persists the updated list to `@AppStorage`.
+    /// deduped, capped) via the pure `ToolSuggester.updatedMRU`. The `.image` flow —
+    /// which activates via the View-layer file-picker, NOT `activateTool(.image)` —
+    /// calls this directly to still record its use in the MRU. The view persists the
+    /// updated list to `@AppStorage`.
     func recordCommandBarUse(_ kind: ToolKind) {
         commandBarMRU = ToolSuggester.updatedMRU(commandBarMRU, used: kind)
     }
@@ -2617,34 +2659,6 @@ final class CanvasModel {
     var commandHint: String {
         guard isToolActive, !toolStatus.isEmpty else { return "" }
         return "\(activeToolKind.title): \(toolStatus) — x,y · @dx,dy · dist<angle"
-    }
-
-    /// Parses a command/coordinate string the user typed on the bottom field and,
-    /// on success, feeds the resolved world point to the active tool as
-    /// `ToolInput.value(point)` — exactly as a click at that exact coordinate would,
-    /// with NO snap drift (the typed value is the truth). Uses the current
-    /// `relativeZero` as the `@`/polar/distance origin and `cursorWorld` for the
-    /// bare-distance bearing. Returns whether the canvas should redraw.
-    ///
-    /// On a parse error it stores `lastCommandError` (the field echoes it) and does
-    /// NOT touch the tool. A no-op (false) in select mode (no tool to receive the
-    /// point) or for empty input.
-    @discardableResult
-    func submitCommandText(_ text: String) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return false }
-        guard isToolActive else {
-            lastCommandError = "Start a tool first (e.g. press L for Line)"
-            return false
-        }
-        switch CommandParser.parse(trimmed, reference: relativeZero, cursor: cursorWorld) {
-        case .point(let p):
-            lastCommandError = nil
-            return handleToolInput(.value(p))
-        case .error(let message):
-            lastCommandError = message
-            return false
-        }
     }
 
     // MARK: - Smart command line dispatch (merged command + coordinate field, Wave 3)
@@ -5522,4 +5536,78 @@ final class CanvasModel {
     /// Short status-bar label for the polar readout: "Polar" when the persistent flag
     /// is on, "—" when off (mirrors `orthoReadout`).
     var polarReadout: String { polarEnabled ? "Polar" : "\u{2014}" }
+
+    // MARK: - Snap tracking display (polar tracking now; OTRACK next wave — W5)
+
+    /// PURE display data the snap-tracking overlay reads — the dotted polar ray, the
+    /// OTRACK alignment guides / acquired-point markers / lock marker, and a
+    /// PRE-FORMATTED on-canvas readout. It carries values + already-formatted strings
+    /// ONLY: NO AppKit, NO label-box placement (the overlay does its own layout in a
+    /// later wave). ALL fields are defined now so the OTRACK wave (W5) only has to FILL
+    /// `guides` / `acquiredMarkers` / `lockMarker` (and may reuse `readout`); this wave
+    /// populates only the polar ray + readout.
+    struct TrackingDisplay {
+        /// The dotted polar tracking ray to draw, `from` the relative-zero `to` the far
+        /// ray endpoint (`PolarTracking.Result.rayFar`). `nil` when polar tracking is
+        /// not engaged / not within the draw aperture. The overlay clips it to the view.
+        var polarRay: (from: Vector, to: Vector)? = nil
+        /// OTRACK alignment guides to draw (horizontal / vertical / polar / extension).
+        /// Filled in W5; empty this wave.
+        var guides: [TrackingGuide] = []
+        /// Markers for the user's ACQUIRED snap points (the small "+" glyphs OTRACK
+        /// radiates guides from). Filled in W5; empty this wave.
+        var acquiredMarkers: [Vector] = []
+        /// The point the cursor is currently LOCKED to by tracking (a guide projection
+        /// or a two-guide intersection). Filled in W5; `nil` this wave.
+        var lockMarker: Vector? = nil
+        /// A pre-formatted on-canvas readout (`text`) anchored at a world `anchor` — for
+        /// polar this is the `dist<angle` chip placed at the snapped point. The overlay
+        /// DRAWS the string + places the chip; it does NOT format. `nil` when there is
+        /// nothing to read out.
+        var readout: (text: String, anchor: Vector)? = nil
+    }
+
+    /// Builds the snap-tracking overlay's PURE display data (mirrors
+    /// `currentLiveDimensions()`'s build-and-return shape, but is NOT gated on
+    /// `dynamicInputEnabled` — the polar ray/readout must show whenever polar tracking
+    /// is engaged, independent of DYN).
+    ///
+    /// THIS WAVE (W2 — polar only): when `polarTrackingResult` is non-nil AND its
+    /// `withinAperture` draw-gate is set (and a `relativeZero` exists to anchor the
+    /// near end), emits the dotted polar `polarRay` (relativeZero → `rayFar`) and a
+    /// pre-formatted `dist<angle` `readout` anchored at the snapped point. The distance
+    /// + angle are formatted IN-ENGINE via `CoordinateFormatter` using the same
+    /// `graphicVariables` (linear + angular format/precision/unit) `currentLiveDimensions()`
+    /// builds its context from, so the chip reads consistently with the status bar. The
+    /// `<` is LibreCAD's polar separator (matching `CoordinateFormatter.polarPair`).
+    ///
+    /// `guides` / `acquiredMarkers` / `lockMarker` stay empty (OTRACK — W5). Returns an
+    /// empty `TrackingDisplay()` whenever polar tracking is not engaged. This never
+    /// touches the always-on angle LOCK (`polarConstrained` is independent).
+    func trackingDisplay() -> TrackingDisplay {
+        var display = TrackingDisplay()
+        guard let result = polarTrackingResult,
+              result.withinAperture,
+              let reference = relativeZero
+        else { return display }
+
+        display.polarRay = (from: reference, to: result.rayFar)
+
+        // Pre-format the `dist<angle` readout in-engine, honoring the drawing's display
+        // settings (same source as `currentLiveDimensions()` / the status bar). The
+        // overlay draws this string verbatim and does no formatting itself.
+        let gv = drawing.graphicVariables
+        let distStr = CoordinateFormatter.length(
+            result.distance,
+            format: gv.linearFormat,
+            precision: gv.linearPrecision,
+            unit: gv.unit)
+        let angStr = CoordinateFormatter.angle(
+            result.engagedAngle,
+            format: gv.angleFormat,
+            precision: gv.anglePrecision)
+        display.readout = (text: "\(distStr)<\(angStr)", anchor: result.snappedPoint)
+
+        return display
+    }
 }
