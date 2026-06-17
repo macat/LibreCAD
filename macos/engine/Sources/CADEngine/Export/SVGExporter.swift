@@ -178,9 +178,44 @@ public struct ExportScene: Sendable, Equatable {
     }
 }
 
+/// Which drawing space an export targets — the export-side mirror of the live
+/// canvas's `activeSpace`/`activeLayout` so a default export captures exactly what
+/// is on screen (NOT the union of model + every layout). The engine-level twin of
+/// the app's `PaperSpaceLayout.isInActiveSpace` predicate (the app type lives in
+/// the app module, which `CADEngine` may not import; the predicate is trivial, so
+/// it is replicated here over `EntityRecord.space`/`layoutName`).
+public enum ExportSpace: Sendable, Equatable {
+    /// Every entity in EVERY space (model + all paper layouts) — the historical
+    /// export behavior, kept as the default so existing callers are unchanged.
+    case all
+    /// Only the model-space entities.
+    case model
+    /// Only the named paper layout's entities (case-insensitive name match,
+    /// mirroring the engine's case-insensitive layout names). A `nil`/empty name
+    /// yields nothing — the same as the live canvas with no active layout.
+    case paper(layoutName: String?)
+
+    /// Whether `record` belongs in this export space — the per-entity predicate the
+    /// scene builder filters on. `.all` admits everything (historical behavior).
+    func includes(_ record: EntityRecord) -> Bool {
+        switch self {
+        case .all:
+            return true
+        case .model:
+            return record.space == .model
+        case .paper(let layoutName):
+            guard let layoutName, !layoutName.isEmpty else { return false }
+            return record.space == .paper
+                && (record.layoutName?.caseInsensitiveCompare(layoutName) == .orderedSame)
+        }
+    }
+}
+
 /// Builds an `ExportScene` from a drawing: resolves every entity, drops entities
 /// on a frozen/hidden layer (mirroring the on-screen `LineRenderer.packEntity`
-/// filter — a layer's `isVisible == false` ⇔ frozen), and accumulates the
+/// filter — a layer's `isVisible == false` ⇔ frozen) and entities outside the
+/// target `space` (so a default export captures exactly the active space, like the
+/// live canvas — not model + every layout unioned), and accumulates the
 /// world-space bounds of what is actually drawn.
 ///
 /// `@MainActor` because `CADDrawing` is main-actor isolated; callers (the export
@@ -188,6 +223,7 @@ public struct ExportScene: Sendable, Equatable {
 @MainActor
 public enum ExportSceneBuilder {
     public static func build(_ drawing: CADDrawing,
+                             space: ExportSpace = .all,
                              context: ResolveContext? = nil) -> ExportScene {
         let ctx = context ?? drawing.makeResolveContext()
         let layers = drawing.layers
@@ -197,6 +233,10 @@ public enum ExportSceneBuilder {
         var bounds = AABB.empty
 
         for e in drawing.entities {
+            // Space filter — only the targeted space's entities (the export twin of
+            // the live `PaperSpaceLayout.isInActiveSpace` scope). `.all` (the
+            // default) admits every space, so existing callers are unchanged.
+            guard space.includes(e) else { continue }
             // Layer-visibility filter — identical policy to the live renderer:
             // a frozen/hidden layer contributes nothing; an entity referencing an
             // unknown layer (no record) still draws (resolve falls back to the
@@ -260,11 +300,29 @@ public enum SVGExporter {
         let w = fmt(page.width)
         let h = fmt(page.height)
 
+        // Light-mode "automatic color" auto-invert is gated on a LIGHT page
+        // background (the export slice of the on-screen behavior): a near-white page
+        // makes color-7/white "automatic" geometry invisible, so flip it to ink. A
+        // dark/transparent page leaves the color untouched (white ink is correct
+        // there). Mirrors `CGSceneRenderer`'s gating so PDF/PNG/SVG agree.
+        let invert = isLightBackground(options.background)
+
         var out = ""
         out += "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n"
         out += "<svg xmlns=\"http://www.w3.org/2000/svg\" "
         out += "width=\"\(w)\" height=\"\(h)\" "
         out += "viewBox=\"0 0 \(w) \(h)\">\n"
+
+        // GRADIENT <defs>: one <linearGradient>/<radialGradient> per gradient fill,
+        // keyed by index so the fill <path> references it via fill="url(#grad-N)".
+        // Emitted in USER-SPACE-ON-USE units inside the world→page group so the
+        // ramp axis is in plain world coords (same space the fill path lives in).
+        let gradientDefs = buildGradientDefs(scene: scene)
+        if !gradientDefs.defs.isEmpty {
+            out += "  <defs>\n"
+            for def in gradientDefs.defs { out += "    " + def + "\n" }
+            out += "  </defs>\n"
+        }
 
         // Optional background rectangle (the page).
         if let bg = options.background {
@@ -283,24 +341,125 @@ public enum SVGExporter {
         let f = page.height - xform.offsetY + s * xform.worldOrigin.y
         out += "  <g transform=\"matrix(\(fmt(a)),\(fmt(b)),\(fmt(c)),\(fmt(d)),\(fmt(e)),\(fmt(f)))\">\n"
 
+        // The PAGE BACKGROUND color a WIPEOUT mask paints (the engine is view-free,
+        // so it carries only a fallback `color`; the export supplies the real page
+        // bg here — mirroring the live renderer substituting `view.clearColor`).
+        // Defaults to white when the page is transparent so a mask still erases.
+        let maskColor = options.background ?? .white
+
         // Fills first (so strokes overlay them — matches the renderer's draw order).
+        // WIPEOUT masks (`isMask`) are DEFERRED to a post-stroke pass (below), so a
+        // mask hides BOTH lower fills AND lower strokes — exactly the Metal
+        // renderer's separate wipeout pass (LineRenderer "pass 2b").
+        var gradIndex = 0
         for fill in scene.fills {
-            if let path = fillPath(fill) { out += "    " + path + "\n" }
+            if fill.isMask { continue }
+            let ref = fill.gradient != nil ? "grad-\(gradIndex)" : nil
+            if fill.gradient != nil { gradIndex += 1 }
+            if let path = fillPath(fill, gradientRef: ref, invert: invert) {
+                out += "    " + path + "\n"
+            }
         }
 
-        // Then strokes. Stroke width is expressed in WORLD units (so it scales with
-        // the group transform); a hairline maps to a small fraction of the drawing
-        // extent — vector-stroke-width is a backlog refinement. We use a constant
-        // world-space stroke chosen relative to the page scale so 1:1 and fit both
-        // render visible hairlines.
+        // Then strokes. Stroke width comes from the pen's lineweight (mm → world,
+        // mirroring `CGSceneRenderer.strokeWidthWorld`); a pen with no explicit
+        // lineweight keeps the shared ~1pt page hairline. Dashed/center/hidden pens
+        // emit a `stroke-dasharray` (mirroring `CGSceneRenderer.scaledDashLengths`).
         let strokeWorld = strokeWorldWidth(scale: s)
         for poly in scene.polylines {
-            if let el = polylineElement(poly, strokeWidth: strokeWorld) { out += "    " + el + "\n" }
+            if let el = polylineElement(poly, strokeWorld: strokeWorld, scale: s, invert: invert) {
+                out += "    " + el + "\n"
+            }
+        }
+
+        // WIPEOUT mask pass — AFTER strokes (so it masks lower fills + strokes),
+        // painting the page background color into each mask region. Matches the live
+        // renderer drawing the wipeout triangles re-colored to the canvas bg in a
+        // pass after the model lines.
+        for fill in scene.fills where fill.isMask {
+            if let path = maskPath(fill, color: maskColor) { out += "    " + path + "\n" }
         }
 
         out += "  </g>\n"
         out += "</svg>\n"
         return out
+    }
+
+    // MARK: - Gradient defs
+
+    /// The `<defs>` block for a scene's gradient fills: one element per gradient
+    /// fill, in the SAME order the fill paths are emitted (so the Nth gradient fill
+    /// references `grad-N`). Linear gradients carry the resolved ramp axis (x1,y1 →
+    /// x2,y2 in world coords, `userSpaceOnUse`); radial gradients center on the
+    /// fill's bbox center with the bbox half-diagonal as radius — mirroring
+    /// `RendererGeometry.gradientColor`'s axis/center/maxRadius math so screen + SVG
+    /// agree. A one-color gradient gets a synthetic 50%-lightened second stop (the
+    /// same `lightenedTint` the renderer uses).
+    static func buildGradientDefs(scene: ExportScene) -> (defs: [String], count: Int) {
+        var defs: [String] = []
+        var idx = 0
+        for fill in scene.fills where !fill.isMask {
+            guard let g = fill.gradient else { continue }
+            let id = "grad-\(idx)"
+            idx += 1
+            let bounds = AABB(points: fill.loops.flatMap { $0 })
+            defs.append(gradientDef(id: id, gradient: g, bounds: bounds, fallback: fill.color))
+        }
+        return (defs, idx)
+    }
+
+    /// One `<linearGradient>`/`<radialGradient>` def in `userSpaceOnUse` world coords.
+    static func gradientDef(id: String, gradient: ResolvedGradient,
+                            bounds: AABB, fallback: RGBAColor) -> String {
+        // Resolve the two ramp endpoint colors (c0 → c1), mirroring the renderer:
+        // 2+ stops → first two; 1 stop → first + a 50%-lightened tint; 0 → fallback.
+        let c0: RGBAColor
+        let c1: RGBAColor
+        switch gradient.colors.count {
+        case 0:  c0 = fallback;            c1 = fallback
+        case 1:  c0 = gradient.colors[0];  c1 = lightenedTint(gradient.colors[0])
+        default: c0 = gradient.colors[0];  c1 = gradient.colors[1]
+        }
+        func stop(_ off: String, _ c: RGBAColor) -> String {
+            let op = c.a < 1 ? " stop-opacity=\"\(fmt(Double(c.a)))\"" : ""
+            return "<stop offset=\"\(off)\" stop-color=\"\(hex(c))\"\(op)/>"
+        }
+        let stops = stop("0", c0) + stop("1", c1)
+
+        if bounds.isEmpty {
+            // Degenerate bounds: a trivial linear gradient (still valid markup).
+            return "<linearGradient id=\"\(id)\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\">\(stops)</linearGradient>"
+        }
+        let center = bounds.center
+        let halfW = (bounds.max.x - bounds.min.x) * 0.5
+        let halfH = (bounds.max.y - bounds.min.y) * 0.5
+
+        switch gradient.kind {
+        case .linear:
+            // Endpoints span the full bbox along the ramp axis (center ± e·axis),
+            // where e is the bbox half-extent projected onto the axis — the same
+            // span `gradientColor` normalizes `t` over.
+            let ax = cos(gradient.angle)
+            let ay = sin(gradient.angle)
+            let ext = abs(halfW * ax) + abs(halfH * ay)
+            let x1 = center.x - ext * ax, y1 = center.y - ext * ay
+            let x2 = center.x + ext * ax, y2 = center.y + ext * ay
+            return "<linearGradient id=\"\(id)\" gradientUnits=\"userSpaceOnUse\" "
+                + "x1=\"\(fmt(x1))\" y1=\"\(fmt(y1))\" x2=\"\(fmt(x2))\" y2=\"\(fmt(y2))\">"
+                + "\(stops)</linearGradient>"
+        case .radial:
+            let r = (halfW * halfW + halfH * halfH).squareRoot()
+            return "<radialGradient id=\"\(id)\" gradientUnits=\"userSpaceOnUse\" "
+                + "cx=\"\(fmt(center.x))\" cy=\"\(fmt(center.y))\" r=\"\(fmt(r))\">"
+                + "\(stops)</radialGradient>"
+        }
+    }
+
+    /// A 50%-toward-white lightened tint of `c` (alpha preserved) — the synthetic
+    /// second endpoint for a single-color gradient (mirrors the renderer's
+    /// `RendererGeometry.lightenedTint`).
+    static func lightenedTint(_ c: RGBAColor) -> RGBAColor {
+        RGBAColor(c.r + (1 - c.r) * 0.5, c.g + (1 - c.g) * 0.5, c.b + (1 - c.b) * 0.5, c.a)
     }
 
     // MARK: - Element emitters
@@ -315,29 +474,55 @@ public enum SVGExporter {
 
     /// A `<polyline>` (open) or `<polygon>` (closed) for a resolved stroke. A
     /// single-point polyline (a resolved `.point`) emits a tiny `<circle>` marker.
-    static func polylineElement(_ poly: ResolvedPolyline, strokeWidth: Double) -> String? {
+    ///
+    /// - `strokeWorld`: the shared ~1pt page hairline in world units (the fallback
+    ///   width for a pen with no explicit lineweight).
+    /// - `scale`: the world→page scale, used to derive the per-pen mm stroke width
+    ///   and the fixed-paper-size dash lengths.
+    /// - `invert`: light-mode color-7 auto-invert gate (a near-white "automatic"
+    ///   pen becomes ink on a light page).
+    static func polylineElement(_ poly: ResolvedPolyline,
+                                strokeWorld: Double, scale: Double,
+                                invert: Bool) -> String? {
         let pts = poly.points
         guard !pts.isEmpty else { return nil }
         let color = poly.pen.color
-        let stroke = hex(color)
+        let stroke = autoInvertHex(color, invert: invert)
         let opacity = color.a < 1 ? " stroke-opacity=\"\(fmt(Double(color.a)))\"" : ""
+
+        // Per-pen stroke width (mm → world, mirroring CGSceneRenderer.strokeWidthWorld).
+        let width = strokeWidthWorld(for: poly.pen, strokeWorld: strokeWorld, scale: scale)
 
         if pts.count == 1 {
             // A point marker: a small filled dot (radius == stroke width).
             let (x, y) = (pts[0].x, pts[0].y)
-            return "<circle cx=\"\(fmt(x))\" cy=\"\(fmt(y))\" r=\"\(fmt(strokeWidth))\" fill=\"\(stroke)\"\(opacity.replacingOccurrences(of: "stroke-opacity", with: "fill-opacity"))/>"
+            return "<circle cx=\"\(fmt(x))\" cy=\"\(fmt(y))\" r=\"\(fmt(width))\" fill=\"\(stroke)\"\(opacity.replacingOccurrences(of: "stroke-opacity", with: "fill-opacity"))/>"
         }
+
+        // Per-pen dash array (mirroring CGSceneRenderer.scaledDashLengths) — empty
+        // for a solid pen (no attribute, so a solid stroke is byte-for-byte as before).
+        let dash = scaledDashLengths(for: poly.pen.lineType, scale: scale,
+                                     strokeWorld: width,
+                                     linetypeScale: poly.pen.linetypeScale)
+        let dashAttr = dash.isEmpty
+            ? ""
+            : " stroke-dasharray=\"\(dash.map { fmt($0) }.joined(separator: ","))\""
 
         let coords = pts.map { "\(fmt($0.x)),\(fmt($0.y))" }.joined(separator: " ")
         let tag = poly.closed ? "polygon" : "polyline"
-        return "<\(tag) points=\"\(coords)\" fill=\"none\" stroke=\"\(stroke)\"\(opacity) stroke-width=\"\(fmt(strokeWidth))\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/>"
+        return "<\(tag) points=\"\(coords)\" fill=\"none\" stroke=\"\(stroke)\"\(opacity) stroke-width=\"\(fmt(width))\"\(dashAttr) stroke-linejoin=\"round\" stroke-linecap=\"round\"/>"
     }
 
     /// A `<path>` for a resolved fill: the outer boundary `loops[0]` plus every
     /// hole `loops[1...]` as additional subpaths, with `fill-rule:evenodd` so the
     /// holes cut out (glyph counters, hatch islands) — the declarative equivalent
     /// of the renderer's earcut bridge.
-    static func fillPath(_ fill: ResolvedFill) -> String? {
+    ///
+    /// - `gradientRef`: when non-nil, the fill references a `<linearGradient>`/
+    ///   `<radialGradient>` def (`fill="url(#…)"`) instead of a flat color.
+    /// - `invert`: the light-mode auto-invert gate (applied to the flat-color path
+    ///   only; a gradient carries its own resolved stop colors).
+    static func fillPath(_ fill: ResolvedFill, gradientRef: String?, invert: Bool) -> String? {
         let loops = fill.loops.filter { $0.count >= 3 }
         guard !loops.isEmpty else { return nil }
         var d = ""
@@ -346,7 +531,75 @@ public enum SVGExporter {
         }
         let color = fill.color
         let opacity = color.a < 1 ? " fill-opacity=\"\(fmt(Double(color.a)))\"" : ""
-        return "<path d=\"\(d.trimmingCharacters(in: .whitespaces))\" fill=\"\(hex(color))\"\(opacity) fill-rule=\"evenodd\" stroke=\"none\"/>"
+        let fillVal = gradientRef.map { "url(#\($0))" } ?? autoInvertHex(color, invert: invert)
+        return "<path d=\"\(d.trimmingCharacters(in: .whitespaces))\" fill=\"\(fillVal)\"\(opacity) fill-rule=\"evenodd\" stroke=\"none\"/>"
+    }
+
+    /// A `<path>` painting a WIPEOUT mask region with the page background `color`
+    /// (the export substitutes the page bg for the engine's view-free fallback,
+    /// exactly as the live renderer substitutes `view.clearColor`). Drawn in a
+    /// post-stroke pass so it masks lower fills AND strokes. Always opaque (a mask
+    /// erases — it never lets lower geometry bleed through).
+    static func maskPath(_ fill: ResolvedFill, color: RGBAColor) -> String? {
+        let loops = fill.loops.filter { $0.count >= 3 }
+        guard !loops.isEmpty else { return nil }
+        var d = ""
+        for loop in loops {
+            d += "M " + loop.map { "\(fmt($0.x)) \(fmt($0.y))" }.joined(separator: " L ") + " Z "
+        }
+        return "<path d=\"\(d.trimmingCharacters(in: .whitespaces))\" fill=\"\(hex(color))\" fill-rule=\"evenodd\" stroke=\"none\"/>"
+    }
+
+    // MARK: - Per-pen stroke width / dash (SVG mirrors of CGSceneRenderer)
+
+    /// The stroke width in WORLD units for a resolved pen — the SVG twin of
+    /// `CGSceneRenderer.strokeWidthWorld`. An EXPLICIT `.millimeters` lineweight is
+    /// its physical paper width (`mm / mmPerPoint` page points ÷ `scale`), floored
+    /// to the shared `strokeWorld` hairline; a non-explicit width keeps `strokeWorld`.
+    static func strokeWidthWorld(for pen: ResolvedPen, strokeWorld: Double, scale: Double) -> Double {
+        switch pen.lineWidth {
+        case .millimeters(let mm):
+            guard scale > Tolerance.distance else { return strokeWorld }
+            let pagePoints = mm / mmPerPoint
+            return Swift.max(strokeWorld, pagePoints / scale)
+        case .default, .byLayer, .byBlock:
+            return strokeWorld
+        }
+    }
+
+    /// Millimeters per typographic point (1 pt = 1/72 in, 1 in = 25.4 mm) — mirrors
+    /// `CGSceneRenderer.mmPerPoint`.
+    static let mmPerPoint: Double = 25.4 / 72.0
+
+    /// The dash-length array (alternating ON, OFF, … in WORLD units) for a pen line
+    /// type — the SVG twin of `CGSceneRenderer.dashLengths`. Empty for a solid (or
+    /// residual byLayer/byBlock) pen. A base ~3.5 pt page dash unit is divided by
+    /// `scale` so dashes are a FIXED PHYSICAL paper size; `strokeWorld` sizes a dot.
+    static func dashLengths(for lineType: PenLineType, scale: Double, strokeWorld: Double) -> [Double] {
+        let unitPage = 3.5
+        let u = scale > Tolerance.distance ? unitPage / scale : strokeWorld * 8
+        let dot = Swift.max(strokeWorld, u * 0.12)
+        let gap = u * 0.5
+        switch lineType {
+        case .solid, .byLayer, .byBlock: return []
+        case .dashed:  return [u, gap]
+        case .dotted:  return [dot, gap]
+        case .dashDot: return [u, gap, dot, gap]
+        case .center:  return [u * 1.6, gap, u * 0.4, gap]
+        case .border:  return [u, gap, u, gap, dot, gap]
+        case .divide:  return [u * 1.4, gap, dot, gap, dot, gap]
+        }
+    }
+
+    /// `dashLengths` with each element multiplied by the resolved LINETYPE SCALE —
+    /// the SVG twin of `CGSceneRenderer.scaledDashLengths`. A scale of 1 returns the
+    /// base array unchanged; a `<= 0` scale is floored to 1; a solid pen stays `[]`.
+    static func scaledDashLengths(for lineType: PenLineType, scale: Double,
+                                  strokeWorld: Double, linetypeScale: Double) -> [Double] {
+        let base = dashLengths(for: lineType, scale: scale, strokeWorld: strokeWorld)
+        let s = linetypeScale > 0 ? linetypeScale : 1
+        guard s != 1 else { return base }
+        return base.map { $0 * s }
     }
 
     // MARK: - Formatting
@@ -370,5 +623,50 @@ public enum SVGExporter {
     static func hex(_ c: RGBAColor) -> String {
         func ch(_ f: Float) -> Int { Swift.max(0, Swift.min(255, Int((f * 255).rounded()))) }
         return String(format: "#%02x%02x%02x", ch(c.r), ch(c.g), ch(c.b))
+    }
+
+    // MARK: - Light-mode auto-invert (export slice)
+
+    /// `hex(...)` with the LIGHT-MODE "automatic color" auto-invert applied when
+    /// `invert` is set: a near-white pen (CAD color-7 / "automatic", which the
+    /// engine resolves to white for a dark canvas) is flipped to near-black so it
+    /// stays legible on a LIGHT page; any explicit non-white color is unchanged.
+    /// Mirrors the renderer's `RendererGeometry.autoInvertWhite` threshold (0.85)
+    /// and near-black target so screen + SVG agree. `invert == false` is the prior
+    /// behavior (plain `hex`).
+    ///
+    /// NOTE (deferral): the broader auto-invert refactor — also inverting FILLS, also
+    /// applying on screen via a single resolve-time pass — is OUT OF SCOPE here (it
+    /// would touch Resolve.swift / RendererGeometry, which this lane does not own).
+    /// This is the EXPORT SLICE only: strokes + flat fills in the CG/SVG backends.
+    static func autoInvertHex(_ c: RGBAColor, invert: Bool) -> String {
+        guard invert else { return hex(c) }
+        return hex(autoInvertWhite(c))
+    }
+
+    /// The export-side auto-invert color transform (matches
+    /// `RendererGeometry.autoInvertWhite`): a near-white color (min channel ≥ 0.85)
+    /// becomes near-black (0.10, 0.10, 0.12), alpha preserved; any other color is
+    /// returned unchanged. `public` so the app-target `CGSceneRenderer` shares the
+    /// exact same transform (PDF/PNG/Print/SVG agree).
+    public static func autoInvertWhite(_ c: RGBAColor) -> RGBAColor {
+        let whiteThreshold: Float = 0.85
+        if Swift.min(c.r, Swift.min(c.g, c.b)) >= whiteThreshold {
+            return RGBAColor(0.10, 0.10, 0.12, c.a)
+        }
+        return c
+    }
+
+    /// Whether a page background counts as LIGHT (so auto-invert should fire): a
+    /// near-white opaque page. A `nil` (transparent) or dark page returns `false`
+    /// (white "automatic" ink is correct there, as on a dark canvas). Mirrors the
+    /// renderer's light-mode gate (`OverlayStyle.invertNearWhiteEntities`) for the
+    /// export slice — keyed off the page color the export actually paints. `public`
+    /// so the app-target `CGSceneRenderer` gates PDF/PNG/Print on the SAME rule.
+    public static func isLightBackground(_ bg: RGBAColor?) -> Bool {
+        guard let bg, bg.a >= 0.5 else { return false }
+        // Perceptual luminance > ~0.6 ⇒ a light page.
+        let lum = 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b
+        return lum > 0.6
     }
 }

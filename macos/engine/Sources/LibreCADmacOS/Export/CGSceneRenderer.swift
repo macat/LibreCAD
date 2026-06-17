@@ -60,6 +60,12 @@ enum CGSceneRenderer {
                      minStrokeDevicePx: CGFloat = 0) {
         let page = transform.pageSize
 
+        // Light-mode "automatic color" auto-invert gate (export slice): on a LIGHT
+        // page, near-white color-7/"automatic" geometry would be invisible, so flip
+        // it to ink — keyed off the page background the export actually paints, so
+        // PDF/PNG/Print and SVG agree. A dark/transparent page leaves colors as-is.
+        let invert = SVGExporter.isLightBackground(background)
+
         // Opaque page background (so PNG isn't transparent / PDF isn't black).
         if let bg = background {
             ctx.saveGState()
@@ -95,9 +101,13 @@ enum CGSceneRenderer {
             : 0.0
         let strokeWorld = Swift.max(baseStrokeWorld, minStrokeWorld)
 
-        // Fills first (even-odd, holes cut out).
-        for fill in scene.fills {
-            drawFill(fill, in: ctx)
+        // Fills first (even-odd, holes cut out). WIPEOUT masks (`isMask`) are
+        // DEFERRED to a post-stroke pass (below) so a mask hides BOTH lower fills
+        // AND lower strokes — exactly the Metal renderer's separate wipeout pass
+        // (LineRenderer "pass 2b"). A non-mask fill with a gradient paints a
+        // CGGradient clipped to its path; a flat fill paints a solid color.
+        for fill in scene.fills where !fill.isMask {
+            drawFill(fill, in: ctx, invert: invert)
         }
 
         // Raster images next — OVER fills, UNDER strokes: a fill never hides the
@@ -119,9 +129,39 @@ enum CGSceneRenderer {
         ctx.setLineJoin(.round)
         ctx.setLineCap(.round)
         for poly in scene.polylines {
-            drawPolyline(poly, in: ctx, strokeWorld: strokeWorld, scale: s)
+            drawPolyline(poly, in: ctx, strokeWorld: strokeWorld, scale: s, invert: invert)
         }
 
+        // WIPEOUT mask pass — AFTER strokes (so it masks lower fills + strokes),
+        // painting the page background color into each mask region. Mirrors the live
+        // renderer's separate wipeout pass (the engine is view-free, so it carries a
+        // fallback `color`; the export substitutes the real page bg here, exactly as
+        // the renderer substitutes `view.clearColor`). A transparent page falls back
+        // to white so a mask still erases. No-op when the scene has no mask.
+        let maskColor = background ?? .white
+        for fill in scene.fills where fill.isMask {
+            drawMask(fill, in: ctx, color: maskColor)
+        }
+
+        ctx.restoreGState()
+    }
+
+    /// Paints a WIPEOUT mask region with the page background `color` (always opaque
+    /// — a mask erases). Even-odd so a multi-loop mask cuts its holes consistently
+    /// with the rest of the fill path handling.
+    private static func drawMask(_ fill: ResolvedFill, in ctx: CGContext, color: RGBAColor) {
+        let loops = fill.loops.filter { $0.count >= 3 }
+        guard !loops.isEmpty else { return }
+        let path = CGMutablePath()
+        for loop in loops {
+            path.move(to: CGPoint(x: loop[0].x, y: loop[0].y))
+            for p in loop.dropFirst() { path.addLine(to: CGPoint(x: p.x, y: p.y)) }
+            path.closeSubpath()
+        }
+        ctx.saveGState()
+        ctx.setFillColor(cgColor(color))
+        ctx.addPath(path)
+        ctx.fillPath(using: .evenOdd)
         ctx.restoreGState()
     }
 
@@ -184,7 +224,7 @@ enum CGSceneRenderer {
 
     // MARK: - Element drawing
 
-    private static func drawFill(_ fill: ResolvedFill, in ctx: CGContext) {
+    private static func drawFill(_ fill: ResolvedFill, in ctx: CGContext, invert: Bool) {
         let loops = fill.loops.filter { $0.count >= 3 }
         guard !loops.isEmpty else { return }
         let path = CGMutablePath()
@@ -195,20 +235,100 @@ enum CGSceneRenderer {
             }
             path.closeSubpath()
         }
+
+        // GRADIENT fill: clip to the even-odd path and paint a CGGradient across the
+        // fill's bbox, matching the Metal ramp (`RendererGeometry.gradientColor`)
+        // axis/center/maxRadius so screen + export agree. A gradient carries its own
+        // resolved stop colors, so the light-mode auto-invert does NOT apply to it.
+        if let gradient = fill.gradient, drawGradientFill(gradient, path: path, loops: loops, in: ctx) {
+            return
+        }
+
         ctx.saveGState()
-        ctx.setFillColor(cgColor(fill.color))
+        // Flat solid fill — light-mode auto-invert flips a near-white "automatic"
+        // fill to ink on a light page (export slice; gradients excluded above).
+        ctx.setFillColor(cgColor(fill.color, invert: invert))
         ctx.addPath(path)
         // Even-odd so islands (glyph counters / hatch holes) are subtracted.
         ctx.fillPath(using: .evenOdd)
         ctx.restoreGState()
     }
 
+    /// Paints a `ResolvedGradient` clipped to `path` (even-odd), mirroring the Metal
+    /// renderer's per-vertex ramp (`RendererGeometry.gradientColor`): linear spans
+    /// the bbox along the ramp axis (`center ± e·axis`, e = bbox half-extent on the
+    /// axis); radial centers on the bbox center with the bbox half-diagonal radius.
+    /// A one-color gradient gets a synthetic 50%-lightened second stop (the same
+    /// `lightenedTint` the renderer uses). Returns `false` (caller falls back to the
+    /// flat color) if the gradient is empty / the CGGradient can't be built.
+    private static func drawGradientFill(_ gradient: ResolvedGradient,
+                                         path: CGPath, loops: [[Vector]],
+                                         in ctx: CGContext) -> Bool {
+        // Resolve the two ramp endpoints (c0 → c1) from the stop list, mirroring the
+        // renderer: 2+ → first two; 1 → first + lightened tint; 0 → bail (flat).
+        let c0: RGBAColor
+        let c1: RGBAColor
+        switch gradient.colors.count {
+        case 0:  return false
+        case 1:  c0 = gradient.colors[0]; c1 = lightenedTint(gradient.colors[0])
+        default: c0 = gradient.colors[0]; c1 = gradient.colors[1]
+        }
+
+        let bounds = AABB(points: loops.flatMap { $0 })
+        guard !bounds.isEmpty, bounds.center.valid else { return false }
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let comps: [CGFloat] = [
+            CGFloat(c0.r), CGFloat(c0.g), CGFloat(c0.b), CGFloat(c0.a),
+            CGFloat(c1.r), CGFloat(c1.g), CGFloat(c1.b), CGFloat(c1.a),
+        ]
+        guard let cgGradient = CGGradient(colorSpace: colorSpace,
+                                          colorComponents: comps,
+                                          locations: [0, 1], count: 2) else { return false }
+
+        let center = bounds.center
+        let halfW = (bounds.max.x - bounds.min.x) * 0.5
+        let halfH = (bounds.max.y - bounds.min.y) * 0.5
+
+        ctx.saveGState()
+        ctx.addPath(path)
+        ctx.clip(using: .evenOdd)   // even-odd clip = the fill region (holes cut out)
+        switch gradient.kind {
+        case .linear:
+            let ax = cos(gradient.angle)
+            let ay = sin(gradient.angle)
+            let ext = abs(halfW * ax) + abs(halfH * ay)
+            let start = CGPoint(x: center.x - ext * ax, y: center.y - ext * ay)
+            let end   = CGPoint(x: center.x + ext * ax, y: center.y + ext * ay)
+            // Extend at both ends so the ramp covers the whole clipped region.
+            ctx.drawLinearGradient(cgGradient, start: start, end: end,
+                                   options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+        case .radial:
+            let r = (halfW * halfW + halfH * halfH).squareRoot()
+            let c = CGPoint(x: center.x, y: center.y)
+            ctx.drawRadialGradient(cgGradient, startCenter: c, startRadius: 0,
+                                   endCenter: c, endRadius: CGFloat(r),
+                                   options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+        }
+        ctx.restoreGState()
+        return true
+    }
+
+    /// A 50%-toward-white lightened tint of `c` (alpha preserved) — the synthetic
+    /// second endpoint for a single-color gradient (mirrors the renderer's
+    /// `RendererGeometry.lightenedTint`).
+    static func lightenedTint(_ c: RGBAColor) -> RGBAColor {
+        RGBAColor(c.r + (1 - c.r) * 0.5, c.g + (1 - c.g) * 0.5, c.b + (1 - c.b) * 0.5, c.a)
+    }
+
     private static func drawPolyline(_ poly: ResolvedPolyline, in ctx: CGContext,
-                                     strokeWorld: Double, scale: Double) {
+                                     strokeWorld: Double, scale: Double, invert: Bool) {
         let pts = poly.points
         guard !pts.isEmpty else { return }
         ctx.saveGState()
-        ctx.setStrokeColor(cgColor(poly.pen.color))
+        // Light-mode auto-invert flips a near-white "automatic" pen to ink on a
+        // light page (export slice; a dark/transparent page leaves it untouched).
+        ctx.setStrokeColor(cgColor(poly.pen.color, invert: invert))
 
         // Per-pen stroke width in WORLD units: an explicit `.millimeters` lineweight
         // renders at its PHYSICAL page size (mm → page points ÷ world→page scale),
@@ -220,7 +340,7 @@ enum CGSceneRenderer {
 
         if pts.count == 1 {
             // A point marker: a small filled dot (radius == stroke width).
-            ctx.setFillColor(cgColor(poly.pen.color))
+            ctx.setFillColor(cgColor(poly.pen.color, invert: invert))
             let r = width
             ctx.fillEllipse(in: CGRect(x: pts[0].x - r, y: pts[0].y - r, width: 2 * r, height: 2 * r))
             ctx.restoreGState()
@@ -367,5 +487,17 @@ enum CGSceneRenderer {
     /// Builds a device-RGB `CGColor` from an engine `RGBAColor`.
     static func cgColor(_ c: RGBAColor) -> CGColor {
         CGColor(srgbRed: CGFloat(c.r), green: CGFloat(c.g), blue: CGFloat(c.b), alpha: CGFloat(c.a))
+    }
+
+    /// `cgColor(...)` with the LIGHT-MODE "automatic color" auto-invert applied when
+    /// `invert` is set (the export slice of the on-screen behavior): a near-white
+    /// pen (CAD color-7 / "automatic", resolved to white for a dark canvas) flips to
+    /// near-black so it stays ink on a LIGHT page; any explicit non-white color is
+    /// unchanged. The transform is shared with the SVG backend
+    /// (`SVGExporter.autoInvertWhite`) so PDF/PNG/Print/SVG agree, and mirrors the
+    /// renderer's `RendererGeometry.autoInvertWhite`. `invert == false` is the prior
+    /// behavior (plain `cgColor`).
+    static func cgColor(_ c: RGBAColor, invert: Bool) -> CGColor {
+        cgColor(invert ? SVGExporter.autoInvertWhite(c) : c)
     }
 }
