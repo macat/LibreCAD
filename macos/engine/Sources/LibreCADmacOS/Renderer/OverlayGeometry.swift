@@ -92,14 +92,31 @@ enum OverlayGeometry {
     ///     bypassed. `nil` (or a non-positive value) falls back to the adaptive
     ///     spacing. The returned spacing is still fed to snapping, so grid-snap tracks
     ///     whichever step is drawn.
+    ///   - ucs: the active user coordinate system. The grid is anchored at
+    ///     `ucs.origin` and its lines run along the UCS axes (rotated by `ucs.angle`),
+    ///     so the drawn grid matches UCS-relative grid snap (UCS-W4). The default
+    ///     `.world` keeps the world-aligned grid; when `ucs.isWorld` this takes the
+    ///     EXACT same code path as before this parameter existed, so the world-frame
+    ///     output is byte-identical (regression-lock — the grid is invisible until a
+    ///     UCS is actually set).
     /// - Returns: (vertices, spacing) — spacing is the world step used (also the
     ///   snap grid spacing the caller should pass to `Snapping.snap`).
     static func grid(
         viewport: Viewport,
         renderOrigin: Vector,
         targetCellPx: Double = 64,
-        preferredSpacing: Double? = nil
+        preferredSpacing: Double? = nil,
+        ucs: UCS = .world
     ) -> (vertices: [FlatVertex], spacing: Double) {
+        // UCS-aligned grid: anchor at the UCS origin and run the lines along the UCS
+        // axes. Split out so the world-frame path below stays byte-identical to the
+        // pre-UCS code (regression-lock). Only taken when a non-world UCS is active.
+        if !ucs.isWorld {
+            return ucsGrid(viewport: viewport, renderOrigin: renderOrigin,
+                           targetCellPx: targetCellPx, preferredSpacing: preferredSpacing,
+                           ucs: ucs)
+        }
+
         let rect = viewport.visibleWorldRect
         guard !rect.isEmpty, viewport.scale > 0 else { return ([], 1) }
 
@@ -144,6 +161,105 @@ enum OverlayGeometry {
             y += spacing
         }
         return (verts, spacing)
+    }
+
+    /// The UCS-aligned grid (UCS-W4): the same adaptive/preferred spacing as the
+    /// world grid, but the lines run along the UCS axes and are anchored at the UCS
+    /// origin so the drawn grid matches UCS-relative grid snap.
+    ///
+    /// Construction: the view's visible WORLD rect is mapped into UCS-local space
+    /// (its four corners → `ucs.toUCS`, then their UCS-local AABB), grid lines are
+    /// generated over that local rect exactly as the world grid does over the world
+    /// rect, and every endpoint is mapped back to world (`ucs.toWorld`) before being
+    /// offset against `renderOrigin`. With a world UCS this would reduce to the world
+    /// grid, but the caller only reaches it for a non-world UCS (see `grid(...)`),
+    /// keeping the world path byte-identical.
+    private static func ucsGrid(
+        viewport: Viewport,
+        renderOrigin: Vector,
+        targetCellPx: Double,
+        preferredSpacing: Double?,
+        ucs: UCS
+    ) -> (vertices: [FlatVertex], spacing: Double) {
+        let worldRect = viewport.visibleWorldRect
+        guard !worldRect.isEmpty, viewport.scale > 0 else { return ([], 1) }
+
+        // The visible region expressed in UCS-local coordinates: map the four world
+        // corners through `toUCS` and take their axis-aligned bounds in that frame.
+        // (A rotated rect's UCS-local bounds is the smallest UCS-aligned box that
+        // still covers the whole view, so no visible cell is missed.)
+        let corners = [
+            Vector(worldRect.min.x, worldRect.min.y),
+            Vector(worldRect.max.x, worldRect.min.y),
+            Vector(worldRect.max.x, worldRect.max.y),
+            Vector(worldRect.min.x, worldRect.max.y),
+        ].map { ucs.toUCS($0) }
+        var minX = corners[0].x, maxX = corners[0].x
+        var minY = corners[0].y, maxY = corners[0].y
+        for c in corners {
+            minX = Swift.min(minX, c.x); maxX = Swift.max(maxX, c.x)
+            minY = Swift.min(minY, c.y); maxY = Swift.max(maxY, c.y)
+        }
+        let rect = AABB(min: Vector(minX, minY), max: Vector(maxX, maxY))
+        guard !rect.isEmpty else { return ([], 1) }
+
+        // Spacing uses the SAME rule as the world grid (the adaptive step depends only
+        // on the scale, which the UCS rotation preserves; a preferred spacing wins).
+        let spacing: Double
+        if let pref = preferredSpacing, pref > 0, pref.isFinite {
+            spacing = pref
+        } else {
+            let rawWorld = targetCellPx / viewport.scale
+            spacing = niceStep(rawWorld)
+        }
+        guard spacing > 0, spacing.isFinite else { return ([], 1) }
+
+        // Cap pathological line counts at extreme zoom-out, mirroring the world grid.
+        let cols = (rect.size.x / spacing)
+        let rows = (rect.size.y / spacing)
+        guard cols.isFinite, rows.isFinite, cols + rows < 4000 else {
+            return (ucsAxisLines(rect: rect, renderOrigin: renderOrigin, ucs: ucs), spacing)
+        }
+
+        var verts: [FlatVertex] = []
+        // UCS-vertical lines at u = k·spacing (run along the UCS +Y axis in world).
+        let x0 = (rect.min.x / spacing).rounded(.down) * spacing
+        var x = x0
+        while x <= rect.max.x {
+            let isAxis = abs(x) < spacing * 1e-6
+            let c = isAxis ? OverlayStyle.gridAxisColor : OverlayStyle.gridColor
+            verts.append(FlatVertex(position: off(ucs.toWorld(Vector(x, rect.min.y)), renderOrigin), color: c))
+            verts.append(FlatVertex(position: off(ucs.toWorld(Vector(x, rect.max.y)), renderOrigin), color: c))
+            x += spacing
+        }
+        // UCS-horizontal lines at v = k·spacing (run along the UCS +X axis in world).
+        let y0 = (rect.min.y / spacing).rounded(.down) * spacing
+        var y = y0
+        while y <= rect.max.y {
+            let isAxis = abs(y) < spacing * 1e-6
+            let c = isAxis ? OverlayStyle.gridAxisColor : OverlayStyle.gridColor
+            verts.append(FlatVertex(position: off(ucs.toWorld(Vector(rect.min.x, y)), renderOrigin), color: c))
+            verts.append(FlatVertex(position: off(ucs.toWorld(Vector(rect.max.x, y)), renderOrigin), color: c))
+            y += spacing
+        }
+        return (verts, spacing)
+    }
+
+    /// The UCS axis cross (through the UCS origin) spanning the UCS-local `rect`,
+    /// mapped to world. The degenerate-density fallback for `ucsGrid`, mirroring the
+    /// world grid's `axisLines`.
+    private static func ucsAxisLines(rect: AABB, renderOrigin: Vector, ucs: UCS) -> [FlatVertex] {
+        var v: [FlatVertex] = []
+        let c = OverlayStyle.gridAxisColor
+        if rect.min.x <= 0 && 0 <= rect.max.x {
+            v.append(FlatVertex(position: off(ucs.toWorld(Vector(0, rect.min.y)), renderOrigin), color: c))
+            v.append(FlatVertex(position: off(ucs.toWorld(Vector(0, rect.max.y)), renderOrigin), color: c))
+        }
+        if rect.min.y <= 0 && 0 <= rect.max.y {
+            v.append(FlatVertex(position: off(ucs.toWorld(Vector(rect.min.x, 0)), renderOrigin), color: c))
+            v.append(FlatVertex(position: off(ucs.toWorld(Vector(rect.max.x, 0)), renderOrigin), color: c))
+        }
+        return v
     }
 
     /// Just the two axis lines (origin cross) spanning the visible rect.
