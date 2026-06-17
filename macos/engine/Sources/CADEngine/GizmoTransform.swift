@@ -257,4 +257,53 @@ public enum GizmoTransform {
         guard abs(delta) > Tolerance.angle else { return nil }
         return delta
     }
+
+    // MARK: Oriented frame chrome (for the DRAWN gizmo during a drag)
+
+    /// The four ORIENTED world corners of `base` after applying the live drag
+    /// transform `t`, in order **[bottomLeft, bottomRight, topRight, topLeft]**.
+    ///
+    /// This is the single source of truth the overlay draws its frame outline +
+    /// corner squares from while dragging, so the chrome rotates/scales WITH the
+    /// object preview (which re-resolves each entity through the SAME `t`) instead
+    /// of collapsing back to an upright AABB. Identity `t` yields exactly the base
+    /// AABB corners in that order.
+    ///
+    /// The order matches `GizmoHandle.Corner`'s geometry (`bottomLeft == min`,
+    /// `topRight == max`), traversed CCW (BL→BR→TR→TL) so consecutive entries form
+    /// a closed quad edge-by-edge.
+    public static func transformedQuad(base: GizmoFrame, t: Affine2D) -> [Vector] {
+        let corners: [GizmoHandle.Corner] = [.bottomLeft, .bottomRight, .topRight, .topLeft]
+        return corners.map { t.apply(base.corner($0)) }
+    }
+
+    /// The rotate-knob STALK anchor for the oriented frame: the world `root` (the
+    /// transformed top-edge midpoint) and the unit `outward` normal of the
+    /// transformed top edge, pointing AWAY from the transformed box center.
+    ///
+    /// The stalk rises from `root` along `outward`; the view places the knob a fixed
+    /// on-screen distance up that direction (projected to screen). The outward sign
+    /// is chosen so the stalk always points out of the box in all four quadrants
+    /// (for a 90° rotation the stalk turns with the box). Returns a zero `outward`
+    /// for a degenerate (zero-area / collinear) transformed top edge.
+    public static func transformedKnobAnchor(base: GizmoFrame, t: Affine2D) -> (root: Vector, outward: Vector) {
+        let topLeft = t.apply(base.topLeft)
+        let topRight = t.apply(base.topRight)
+        let root = Vector((topLeft.x + topRight.x) * 0.5, (topLeft.y + topRight.y) * 0.5)
+
+        // The top edge direction (TL→TR); its normal is the candidate outward.
+        let edge = topRight - topLeft
+        let len = (edge.x * edge.x + edge.y * edge.y).squareRoot()
+        guard len > Tolerance.distance else {
+            return (root: root, outward: Vector(0, 0))
+        }
+        // Two unit normals of the edge; pick the one pointing away from the center.
+        var normal = Vector(-edge.y / len, edge.x / len)
+        let center = t.apply(base.center)
+        let centerToRoot = root - center
+        if normal.x * centerToRoot.x + normal.y * centerToRoot.y < 0 {
+            normal = Vector(-normal.x, -normal.y)
+        }
+        return (root: root, outward: normal)
+    }
 }

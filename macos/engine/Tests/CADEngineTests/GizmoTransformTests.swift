@@ -214,4 +214,111 @@ struct GizmoTransformTests {
         // A point AT the center has no direction → nil.
         #expect(GizmoTransform.rotateAngle(frame: frame, from: center, to: p) == nil)
     }
+
+    // MARK: - Oriented frame chrome (transformedQuad / transformedKnobAnchor)
+
+    @Test("identity transform yields the base AABB corners in [BL,BR,TR,TL] order")
+    func transformedQuadIdentity() {
+        let f = Self.frame  // min (0,0), max (10,6)
+        let q = GizmoTransform.transformedQuad(base: f, t: .identity)
+        #expect(q.count == 4)
+        #expect(approx(q[0], Vector(0, 0)))   // bottomLeft
+        #expect(approx(q[1], Vector(10, 0)))  // bottomRight
+        #expect(approx(q[2], Vector(10, 6)))  // topRight
+        #expect(approx(q[3], Vector(0, 6)))   // topLeft
+        // The quad equals t.apply of each named corner in BL,BR,TR,TL order.
+        #expect(approx(q[0], f.bottomLeft))
+        #expect(approx(q[1], f.bottomRight))
+        #expect(approx(q[2], f.topRight))
+        #expect(approx(q[3], f.topLeft))
+    }
+
+    @Test("90° rotate-about-center rotates each corner and de-axis-aligns the quad")
+    func transformedQuad90Rotate() {
+        let f = Self.frame
+        let center = f.center  // (5,3)
+        let t = Affine2D.rotation(angle: .pi / 2, about: center)
+        let q = GizmoTransform.transformedQuad(base: f, t: t)
+        // Each quad corner equals the base corner rotated 90° about the center.
+        let corners: [GizmoHandle.Corner] = [.bottomLeft, .bottomRight, .topRight, .topLeft]
+        for (i, c) in corners.enumerated() {
+            #expect(approx(q[i], t.apply(f.corner(c))))
+        }
+        // The rotated quad is NOT axis-aligned: the bottom edge BL'→BR' is now
+        // vertical, so BL'.y != BR'.y (and BL'.x == BR'.x).
+        #expect(!approx(q[0].y, q[1].y))
+        #expect(approx(q[0].x, q[1].x))
+    }
+
+    @Test("uniform corner-scale keeps the quad axis-aligned at the scaled corners")
+    func transformedQuadUniformScale() {
+        let f = Self.frame
+        // 2× uniform scale about the bottomLeft pivot (0,0).
+        let t = Affine2D.scale(factor: 2, about: Vector(0, 0))
+        let q = GizmoTransform.transformedQuad(base: f, t: t)
+        let corners: [GizmoHandle.Corner] = [.bottomLeft, .bottomRight, .topRight, .topLeft]
+        for (i, c) in corners.enumerated() {
+            #expect(approx(q[i], t.apply(f.corner(c))))
+        }
+        // Uniform (non-rotating) scale stays axis-aligned: bottom edge horizontal,
+        // left edge vertical.
+        #expect(approx(q[0].y, q[1].y))   // BL'.y == BR'.y
+        #expect(approx(q[0].x, q[3].x))   // BL'.x == TL'.x
+        // Concrete scaled corners.
+        #expect(approx(q[0], Vector(0, 0)))
+        #expect(approx(q[1], Vector(20, 0)))
+        #expect(approx(q[2], Vector(20, 12)))
+        #expect(approx(q[3], Vector(0, 12)))
+    }
+
+    @Test("knob anchor root is the top-edge midpoint and outward points away from center (identity)")
+    func transformedKnobAnchorIdentity() {
+        let f = Self.frame  // top edge from (0,6) to (10,6), center (5,3)
+        let a = GizmoTransform.transformedKnobAnchor(base: f, t: .identity)
+        // Root is the midpoint of TL,TR.
+        #expect(approx(a.root, Vector(5, 6)))
+        // Outward is the unit +Y normal (points up, away from the center below).
+        #expect(approx(a.outward, Vector(0, 1)))
+        // Unit length.
+        #expect(approx((a.outward.x * a.outward.x + a.outward.y * a.outward.y).squareRoot(), 1))
+        // It points away from the transformed center.
+        let center = f.center
+        let centerToRoot = a.root - center
+        #expect(a.outward.x * centerToRoot.x + a.outward.y * centerToRoot.y > 0)
+    }
+
+    @Test("knob anchor turns with the box under a 90° rotation")
+    func transformedKnobAnchor90Rotate() {
+        let f = Self.frame
+        let center = f.center
+        let t = Affine2D.rotation(angle: .pi / 2, about: center)
+        let a = GizmoTransform.transformedKnobAnchor(base: f, t: t)
+        // Root is the midpoint of the TRANSFORMED top edge.
+        let tl = t.apply(f.topLeft)
+        let tr = t.apply(f.topRight)
+        #expect(approx(a.root, Vector((tl.x + tr.x) * 0.5, (tl.y + tr.y) * 0.5)))
+        // Outward is still unit length...
+        #expect(approx((a.outward.x * a.outward.x + a.outward.y * a.outward.y).squareRoot(), 1))
+        // ...and still points away from the (unchanged) center — the stalk turned
+        // with the box rather than staying upright.
+        let centerToRoot = a.root - t.apply(center)
+        #expect(a.outward.x * centerToRoot.x + a.outward.y * centerToRoot.y > 0)
+        // For a +90° rotation the original top edge (pointing +X normal +Y) turns:
+        // the outward normal is no longer +Y.
+        #expect(!approx(a.outward, Vector(0, 1)))
+    }
+
+    @Test("knob anchor outward stays outward across all four rotation quadrants")
+    func transformedKnobAnchorAllQuadrants() {
+        let f = Self.frame
+        let center = f.center
+        for deg in stride(from: 0.0, to: 360.0, by: 30.0) {
+            let t = Affine2D.rotation(angle: deg * .pi / 180, about: center)
+            let a = GizmoTransform.transformedKnobAnchor(base: f, t: t)
+            let centerToRoot = a.root - t.apply(center)
+            // Outward must have a positive component along center→root (points out).
+            let dotOut = a.outward.x * centerToRoot.x + a.outward.y * centerToRoot.y
+            #expect(dotOut > 0, "outward flipped inward at \(deg)°")
+        }
+    }
 }
