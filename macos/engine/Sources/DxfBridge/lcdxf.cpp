@@ -98,6 +98,31 @@ struct LCEntityList {
 
 namespace {
 
+// ----- dynamic-block JSON carrier (shared by the reader + writer) ------------
+// The native dynamic-block model (visibility states / parameters / actions on a
+// BLOCK; per-instance state on an INSERT) is persisted as compact JSON. The natural
+// DXF carrier is extended data (XDATA), but the (patched-)vendored libdxfrw's DXF
+// writer emits entity `extData` for only MTEXT/MLINE/UNDERLAY (NOT INSERT) and never
+// for the BLOCK record, while its appData/code-102 READER is broken — so neither
+// XDATA nor appData round-trips for INSERT/BLOCK through the unmodified library.
+//
+// What DOES round-trip cleanly is the block ATTRIBUTE path (ATTRIB on an INSERT,
+// ATTDEF inside a BLOCK): libdxfrw writes + re-reads their tag/text strings verbatim
+// (proven by the existing attribute round-trip). So the dynamic JSON rides a single
+// RESERVED-TAG attribute — an ATTRIB(tag=LIBRECAD$DYN, text=<instance-json>) on each
+// dynamic INSERT, and an ATTDEF(tag=LIBRECAD$DYN, text=<def-json>) inside each
+// dynamic BLOCK. The bridge appends it on write and FILTERS it back out on read
+// (surfacing the text as `dynamicJSON`, never as a user-visible attribute), so the
+// Swift model is unchanged. The tag uses '$' (illegal in a user attribute tag, which
+// AutoCAD restricts to letters/digits/'_') so it can never collide with a real one.
+// (Compact JSON keeps the text well within a DXF group-1 line; a very large dynamic
+// block could in theory exceed it — a documented limitation. DWG: dwgWriter15 makes
+// empty blocks + emits no attributes, so dynamic-on-DWG does not round-trip.)
+constexpr const char *kDynAttrTag = "LIBRECAD$DYN";
+
+// Whether an attribute tag is the reserved dynamic-block carrier tag.
+inline bool isDynamicAttrTag(const std::string &tag) { return tag == kDynAttrTag; }
+
 /**
  * FlatteningReader implements every DRW_Interface pure-virtual. The geometric
  * add* callbacks flatten their payload into POD copies on `out`; tables collect
@@ -129,6 +154,10 @@ public:
         // Block ATTDEF templates (delivered via addAttdef while this block is open).
         // Flattened into the block's `attribDefs` window at finalizeBlocks().
         std::vector<LCAttrib> attdefs;
+        // DYNAMIC BLOCK: the per-DEFINITION dynamic JSON, captured from the reserved-
+        // tag carrier ATTDEF (kDynAttrTag) while the block was open. Empty for a plain
+        // block. Surfaced on LCBlock.dynamicJSON at finalizeBlocks().
+        std::string dynamicJSON;
     };
 
     // A captured IMAGE entity awaiting its IMAGEDEF link (the entity arrives in the
@@ -214,6 +243,10 @@ public:
                 b.attribDefs = m_out->attribPool.back().data();
                 b.attribDefCount = static_cast<int32_t>(m_out->attribPool.back().size());
             }
+            // DYNAMIC BLOCK: surface the per-DEFINITION dynamic JSON captured from the
+            // block's reserved-tag carrier ATTDEF (see addAttdef). NULL for a plain
+            // block (no carrier ATTDEF — the common case).
+            b.dynamicJSON = pb.dynamicJSON.empty() ? nullptr : intern(pb.dynamicJSON);
             m_out->blocks.push_back(b);
         }
     }
@@ -355,6 +388,7 @@ public:
         e.textValue = nullptr;
         e.styleName = nullptr;
         e.typeName = nullptr;
+        e.dynamicJSON = nullptr;          // dynamic-block blob (INSERT only); none.
         return e;
     }
 
@@ -756,11 +790,18 @@ public:
         // Block ATTRIB values (code 66 → ATTRIB sub-entities, populated by
         // dxfRW::processInsert into data.attlist). Flatten into the stable attribute
         // pool; DRW_Attrib derives DRW_Text, so angle is in DEGREES → radians here.
+        // DYNAMIC BLOCK: the reserved-tag carrier ATTRIB (kDynAttrTag) is FILTERED
+        // out here — its text is the per-instance dynamic JSON, surfaced on
+        // `e.dynamicJSON` instead of appearing as a user attribute.
         if (!data.attlist.empty()) {
             std::vector<LCAttrib> attrs;
             attrs.reserve(data.attlist.size());
             for (const auto &att : data.attlist) {
                 if (!att) continue;
+                if (isDynamicAttrTag(att->tag)) {     // dynamic-block carrier, not a real attrib
+                    if (!att->text.empty()) e.dynamicJSON = intern(att->text);
+                    continue;
+                }
                 LCAttrib a{};
                 a.tag = intern(att->tag);
                 a.text = intern(att->text);
@@ -786,8 +827,15 @@ public:
     // so finalizeBlocks flattens them into `LCBlock.attribDefs`. An ATTDEF read
     // OUTSIDE a block (malformed input) is ignored gracefully. DRW_Attdef derives
     // DRW_Text, so angle is in DEGREES → radians here.
+    // DYNAMIC BLOCK: the reserved-tag carrier ATTDEF (kDynAttrTag) is FILTERED out of
+    // the block's attribute templates — its text is the per-DEFINITION dynamic JSON,
+    // stashed on the pending block (→ LCBlock.dynamicJSON at finalize) instead.
     void addAttdef(const DRW_Attdef &data) override {
         if (m_currentBlock == nullptr) return;   // ATTDEF only meaningful in a block
+        if (isDynamicAttrTag(data.tag)) {        // dynamic-block carrier, not a real ATTDEF
+            if (!data.text.empty()) m_currentBlock->dynamicJSON = data.text;
+            return;
+        }
         LCAttrib a{};
         a.tag = intern(data.tag);
         a.text = intern(data.text);              // default value (code 1)
@@ -1751,6 +1799,25 @@ public:
                     b.attdefs.push_back(def);
                 }
             }
+            // DYNAMIC BLOCK: persist the per-DEFINITION dynamic JSON as a reserved-tag
+            // carrier ATTDEF (kDynAttrTag) inside the block. The ATTDEF tag/text
+            // round-trips verbatim through libdxfrw (the def cannot ride entity XDATA —
+            // writeBlock omits it); the reader filters the reserved tag back out into
+            // LCBlock.dynamicJSON. Marked invisible (attribFlags bit 1). Empty ⇒ none.
+            if (blk.dynamicJSON != nullptr && blk.dynamicJSON[0] != '\0') {
+                auto carrier = std::make_shared<DRW_Attdef>();
+                carrier->layer = std::string("0");
+                carrier->tag = std::string(kDynAttrTag);
+                carrier->text = std::string(blk.dynamicJSON);    // def JSON (code 1)
+                carrier->prompt = std::string();
+                carrier->basePoint.x = blk.bx;
+                carrier->basePoint.y = blk.by;
+                carrier->basePoint.z = 0.0;
+                carrier->height = 0.0;
+                carrier->angle = 0.0;
+                carrier->attribFlags = 1;                        // invisible
+                b.attdefs.push_back(carrier);
+            }
             m_dxf->writeBlock(&b);
             // Member entities (the block's geometry), windowed into blockEntities.
             const int start = blk.memberOffset;
@@ -2063,6 +2130,27 @@ private:
                 att->attribFlags = static_cast<duint8>(a.flags);
                 ins.attlist.push_back(att);
             }
+        }
+        // DYNAMIC BLOCK: persist the per-instance dynamic JSON as a reserved-tag
+        // carrier ATTRIB (kDynAttrTag) appended to the INSERT's attribute list. The
+        // ATTRIB tag/text round-trips verbatim through the (patched-)vendored libdxfrw
+        // (unlike entity XDATA, which its INSERT writer omits); the reader filters the
+        // reserved tag back out into `dynamicJSON`. The carrier inherits the INSERT's
+        // layer and is marked invisible (attribFlags bit 1) so it never renders if
+        // another reader were to surface it. DXF only — dwgWriter15 emits no
+        // attributes (documented DWG limitation); skip on DWG. Empty ⇒ no-op.
+        if (!m_dwg && e.dynamicJSON != nullptr && e.dynamicJSON[0] != '\0') {
+            auto carrier = std::make_shared<DRW_Attrib>();
+            carrier->layer = ins.layer.empty() ? std::string("0") : ins.layer;
+            carrier->tag = std::string(kDynAttrTag);
+            carrier->text = std::string(e.dynamicJSON);
+            carrier->basePoint.x = ins.basePoint.x;
+            carrier->basePoint.y = ins.basePoint.y;
+            carrier->basePoint.z = 0.0;
+            carrier->height = 0.0;
+            carrier->angle = 0.0;
+            carrier->attribFlags = 1;            // invisible
+            ins.attlist.push_back(carrier);
         }
         // DWG: resolve the block name to the block_record handle captured in
         // writeBlocks (defineBlock). dwgWriter15 encodes INSERT by `blockRecH.ref`,

@@ -393,6 +393,18 @@ typedef struct LCEntity {
     const char *textValue;      /**< TEXT/MTEXT string, or HATCH pattern name (may be NULL). */
     const char *styleName;      /**< TEXT/MTEXT style name (code 7), may be NULL. */
     const char *typeName;       /**< DXF type name (e.g. "INSERT"); set for UNSUPPORTED. */
+    /** DYNAMIC-BLOCK per-INSTANCE state, a compact JSON string (the Swift
+     *  `InsertDynamicState` index-keyed wire form), persisted as DXF extended data
+     *  (XDATA) under the appid "LIBRECAD" on this INSERT. NULL when the insert is a
+     *  plain (non-dynamic) insert — the overwhelming common case, byte-identical to
+     *  before. Meaningful only when kind == LC_ENT_INSERT. On WRITE the string is
+     *  owned by the Swift `PODBuilder` pool (borrowed here, alive across the write);
+     *  on READ it is interned into the handle's `std::deque` (scanned out of the
+     *  INSERT's extData) and copied to a Swift `String` before the handle is freed.
+     *  Additive ABI: an old call site that leaves it zero-initialized writes no
+     *  XDATA. (DXF only — the DWG write path has no per-entity XDATA hook, so
+     *  dynamic-on-DWG does not round-trip; the def is empty-block-only on DWG.) */
+    const char *dynamicJSON;
 } LCEntity;
 
 /**
@@ -428,6 +440,20 @@ typedef struct LCBlock {
      *  `Block.attributeDefs`; the writer emits them as ATTDEF inside the block. */
     const LCAttrib *attribDefs;
     int32_t attribDefCount;
+    /** DYNAMIC-BLOCK per-DEFINITION authoring, a compact JSON string (the Swift
+     *  `DynamicBlockDef` index-keyed wire form — member references are member
+     *  INDICES, not stale EntityIDs). NULL when the block is a plain (non-dynamic)
+     *  block — byte-identical to before. Persisted as DXF application data (the
+     *  code-102 "{LIBRECAD ... }" group): libdxfrw's `writeBlock` emits BLOCK
+     *  `appData` but NOT `extData`, so the block-def blob rides appData while the
+     *  INSTANCE blob rides INSERT extData (see lcdxf.cpp). On WRITE the string is
+     *  owned by the Swift `PODBuilder` pool (borrowed, alive across the write); on
+     *  READ it is interned into the handle's `std::deque` (scanned out of the
+     *  block's appData) and copied to a Swift `String` before the handle is freed.
+     *  Additive ABI: an old call site that leaves it zero-initialized writes none.
+     *  DXF only — the DWG block writer makes empty blocks (no appData), so the
+     *  dynamic def does not round-trip on DWG (documented limitation). */
+    const char *dynamicJSON;
 } LCBlock;
 
 /* ------------------------------------------------------------------------- *

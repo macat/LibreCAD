@@ -270,7 +270,11 @@ extension CADEngine {
             let members = blockMembers[block.name] ?? []
             let offset = blockEntityPODs.count
             for m in members { blockEntityPODs.append(builder.makeEntity(m)) }
-            blockPODs.append(builder.makeBlock(block, memberOffset: offset, memberCount: members.count))
+            // `memberOrder` is the EXACT written member-id order (drives the dynamic-
+            // definition index remap so member refs survive the reader's fresh ids).
+            blockPODs.append(builder.makeBlock(
+                block, memberOffset: offset, memberCount: members.count,
+                memberOrder: members.map { $0.id }))
         }
 
         var skipped: Int32 = 0
@@ -740,6 +744,15 @@ private final class PODBuilder {
             let (aptr, acount) = internAttribValues(d.attributes)
             e.attribs = aptr
             e.attribCount = acount
+            // DYNAMIC BLOCK: embed this insert's per-INSTANCE state as a compact JSON
+            // string. The C bridge persists it as a RESERVED-tag ATTRIB on the INSERT
+            // (the block ATTRIB path round-trips through the unmodified libdxfrw; the
+            // bridge filters the reserved tag back out on read). NULL for a plain
+            // insert (the common case). The block DEFINITION rides its own reserved
+            // ATTDEF — see `makeBlock`.
+            if let instanceJSON = d.dynamic?.encodeJSON() {
+                e.dynamicJSON = intern(instanceJSON)
+            }
 
         case .xline(let d):
             // Emitted as a DXF XLINE (the C side writes DRW_Xline). Base point
@@ -850,7 +863,13 @@ private final class PODBuilder {
     /// of its member entities in the flat block-member POD array. The block's name +
     /// base point map straight onto the POD; the member PODs are built by the caller
     /// (so their backing storage lives on this builder).
-    func makeBlock(_ block: Block, memberOffset: Int, memberCount: Int) -> LCBlock {
+    ///
+    /// `memberOrder` is the ORDERED EntityIDs of the block's members as they are
+    /// WRITTEN (the resolved `blockMembers[name]` order) — the same declaration order
+    /// the reader re-mints fresh ids in. It keys the dynamic-DEFINITION index remap
+    /// so member references survive the reader's fresh-id minting.
+    func makeBlock(_ block: Block, memberOffset: Int, memberCount: Int,
+                   memberOrder: [EntityID]) -> LCBlock {
         var b = LCBlock()
         b.name = intern(block.name.isEmpty ? "block" : block.name)
         b.bx = block.basePoint.x; b.by = block.basePoint.y; b.bz = block.basePoint.z
@@ -862,6 +881,16 @@ private final class PODBuilder {
         let (dptr, dcount) = internAttribDefs(block.attributeDefs)
         b.attribDefs = dptr
         b.attribDefCount = dcount
+        // DYNAMIC BLOCK: embed the per-DEFINITION authoring as a compact JSON string,
+        // INDEX-KEYED against the written member order (member references → member
+        // INDICES, so they survive the reader's fresh-id minting). The C bridge
+        // persists it as a RESERVED-tag ATTDEF inside the block (the block ATTDEF
+        // path round-trips through the unmodified libdxfrw; the bridge filters the
+        // reserved tag back out on read). NULL for a plain block (the common case).
+        if let def = block.dynamic, !def.isEmpty,
+           let defJSON = def.encodeIndexKeyedJSON(memberOrder: memberOrder) {
+            b.dynamicJSON = intern(defJSON)
+        }
         return b
     }
 
