@@ -184,4 +184,62 @@ struct TrackingOverlayTests {
             }
         }
     }
+
+    // MARK: OTRACK alignment-guide far-points (W6)
+
+    private func nearV(_ a: Vector, _ b: Vector, eps: Double = 1e-6) -> Bool {
+        abs(a.x - b.x) < eps && abs(a.y - b.y) < eps && abs(a.z - b.z) < eps
+    }
+
+    @Test("guideFarPoints extends the origin both ways along the unit direction")
+    func guideFarPointsBothWays() {
+        // A horizontal guide (direction = +x) through (10, 5): the near point is far to the
+        // LEFT, the far point far to the RIGHT, both on the same horizontal line, symmetric.
+        let origin = Vector(10, 5, 0)
+        let dir = Vector(1, 0, 0)
+        let reach = 1e6
+        let (near, far) = TrackingOverlayGeometry.guideFarPoints(
+            origin: origin, direction: dir, reach: reach)
+        #expect(nearV(near, Vector(10 - reach, 5, 0)))
+        #expect(nearV(far, Vector(10 + reach, 5, 0)))
+        // Symmetric about the origin (the midpoint is the origin).
+        let mid = (near + far) * 0.5
+        #expect(nearV(mid, origin))
+    }
+
+    @Test("guideFarPoints follows the direction sign (vertical guide)")
+    func guideFarPointsVertical() {
+        // A vertical guide (direction = +y) through (3, 7): near below, far above, x fixed.
+        let origin = Vector(3, 7, 0)
+        let (near, far) = TrackingOverlayGeometry.guideFarPoints(
+            origin: origin, direction: Vector(0, 1, 0), reach: 1000)
+        #expect(nearV(near, Vector(3, 7 - 1000, 0)))
+        #expect(nearV(far, Vector(3, 7 + 1000, 0)))
+    }
+
+    @Test("guideFarPoints handles a diagonal unit direction")
+    func guideFarPointsDiagonal() {
+        // A 45° guide (unit dir = (√½, √½)) through the origin: the endpoints are reach·dir
+        // either side, so each component is ±reach·√½ and both points lie on y == x.
+        let r = 2.0.squareRoot() / 2  // √½
+        let dir = Vector(r, r, 0)
+        let (near, far) = TrackingOverlayGeometry.guideFarPoints(
+            origin: Vector(0, 0, 0), direction: dir, reach: 100)
+        #expect(nearV(far, Vector(100 * r, 100 * r, 0)))
+        #expect(nearV(near, Vector(-100 * r, -100 * r, 0)))
+        // On the y == x line.
+        #expect(abs(far.x - far.y) < 1e-6)
+        #expect(abs(near.x - near.y) < 1e-6)
+    }
+
+    @Test("guideFarPoints default reach is large enough to leave any sane view")
+    func guideFarPointsDefaultReach() {
+        // With the default reach the endpoints are ~1e9 units out — effectively infinite,
+        // so after projection the clip always trims them to the view (the same regime the
+        // polar ray's 1e9 far end is in).
+        let (near, far) = TrackingOverlayGeometry.guideFarPoints(
+            origin: Vector(0, 0, 0), direction: Vector(1, 0, 0))
+        #expect(far.x >= 1e8)
+        #expect(near.x <= -1e8)
+    }
 }
