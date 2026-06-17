@@ -434,6 +434,8 @@ struct ToolKindWiringTests {
             (.align, "a", false, true),
             (.arrayPath, "p", false, true),
             (.leader, "l", false, true),
+            // ML-W4 — Multileader on ⌥M (bare/⇧ M are Move/Mirror; ⌥M is free).
+            (.multileader, "m", false, true),
             (.baselineDim, "d", false, true),
             (.continueDim, "c", false, true),
             // wire-wave-1 — paper-space Viewport placement on ⌥V (bare V is Select; ⌥V
@@ -553,7 +555,7 @@ struct ToolKindWiringTests {
         let defaultPrimary: Set<ToolKind> = [
             .line, .circle, .arc, .rectangle, .polyline,   // draw
             .move, .copy, .rotate, .scale, .trim, .offset, // modify
-            .text, .linearDim, .leader,                    // annotate
+            .text, .linearDim, .leader, .multileader,      // annotate
         ]
         let grouped = Set(Self.drawGroup + Self.modifyGroup + Self.annotateGroup)
         // Every pinned default is a real, grouped tool (not `.select`, not orphaned).

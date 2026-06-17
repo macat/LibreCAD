@@ -497,12 +497,14 @@ struct GeometryEditor: View {
         }
     }
 
-    // MARK: Multileader (ML-W1 read-only summary; full inline editor is ML-W4)
+    // MARK: Multileader (editable: arrow + landing/dogleg + style + annotation text)
     //
-    // The multileader entity exists end-to-end in the engine (resolve / transform /
-    // snap / Codable) but its INLINE inspector editing is a later wire-wave (ML-W4).
-    // For now the GeometryEditor shows a read-only summary so a selected multileader
-    // reports its defining data without an unwired edit affordance.
+    // The full inline editor (ML-W4) mirrors `leaderEditor` — read-only vertex count,
+    // an arrowhead toggle + size, the annotation text field — and adds the two fields
+    // that distinguish a multileader from a plain leader: the landing ("dogleg") tail
+    // length and whether that tail is drawn. Each control commits through the pure
+    // `InspectorEdits.setMultiLeader*` helpers via the undoable `.replace` path.
+    // Decomposed into small `@ViewBuilder` subviews to keep the type-checker happy.
 
     @ViewBuilder
     private func multiLeaderEditor(_ d: MultiLeaderData) -> some View {
@@ -510,19 +512,59 @@ struct GeometryEditor: View {
             Text("\(d.vertices.count)").foregroundStyle(.secondary)
         }
         .lineLimit(1)
-        LabeledContent("Arrowhead") {
-            Text(d.hasArrow ? "On" : "Off").foregroundStyle(.secondary)
+        multiLeaderArrowControls(d)
+        multiLeaderLandingControls(d)
+        multiLeaderStyleAndText(d)
+    }
+
+    /// Arrowhead on/off + size (mirrors `leaderEditor`'s arrow controls).
+    @ViewBuilder
+    private func multiLeaderArrowControls(_ d: MultiLeaderData) -> some View {
+        Toggle("Arrowhead", isOn: Binding(
+            get: { d.hasArrow },
+            set: { onCommit([replacing(InspectorEdits.setMultiLeaderHasArrow(record.kind, $0))]) }
+        ))
+        ScalarField(label: "Arrow size", value: d.arrowSize) {
+            onCommit([replacing(InspectorEdits.setMultiLeaderArrowSize(record.kind, $0))])
         }
-        .lineLimit(1)
-        LabeledContent("Arrow size") {
-            Text(d.arrowSize, format: .number).foregroundStyle(.secondary)
+    }
+
+    /// Landing ("dogleg") tail toggle + length — the multileader-only fields.
+    @ViewBuilder
+    private func multiLeaderLandingControls(_ d: MultiLeaderData) -> some View {
+        Toggle("Landing (dogleg)", isOn: Binding(
+            get: { d.doglegEnabled },
+            set: { onCommit([replacing(InspectorEdits.setMultiLeaderDoglegEnabled(record.kind, $0))]) }
+        ))
+        ScalarField(label: "Landing distance", value: d.landingDistance) {
+            onCommit([replacing(InspectorEdits.setMultiLeaderLandingDistance(record.kind, $0))])
         }
-        .lineLimit(1)
-        LabeledContent("Landing") {
-            Text(d.doglegEnabled ? "On (\(d.landingDistance.formatted()))" : "Off")
-                .foregroundStyle(.secondary)
+    }
+
+    /// Style name (round-trip reference) + the annotation text field.
+    @ViewBuilder
+    private func multiLeaderStyleAndText(_ d: MultiLeaderData) -> some View {
+        LabeledContent {
+            TextField("Style", text: Binding(
+                get: { d.styleName ?? "" },
+                set: {
+                    let s = $0.isEmpty ? nil : $0
+                    onCommit([replacing(InspectorEdits.setMultiLeaderStyleName(record.kind, s))])
+                }
+            ))
+            .frame(width: DS.Field.wide).multilineTextAlignment(.trailing)
+        } label: {
+            Text("Style").lineLimit(1)
         }
-        .lineLimit(1)
+        LabeledContent {
+            TextField("Annotation", text: Binding(
+                get: { InspectorEdits.multiLeaderText(record.kind) },
+                set: { onCommit([replacing(InspectorEdits.setMultiLeaderText(record.kind, $0))]) }
+            ))
+            .frame(width: DS.Field.wide).multilineTextAlignment(.trailing)
+        } label: {
+            Text("Text").lineLimit(1)
+        }
     }
 
     // MARK: Text geometry (position / height / rotation)

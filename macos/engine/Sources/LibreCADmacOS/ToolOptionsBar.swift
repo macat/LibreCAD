@@ -94,7 +94,7 @@ struct ToolOptionsBar: View {
              // Wave-3B parameterized tools (mode + per-mode params on the live tool).
              .spline, .scale, .hatch,
              // Wire-wave-3 configurable tools.
-             .align, .arrayPath, .leader, .baselineDim,
+             .align, .arrayPath, .leader, .multileader, .baselineDim,
              // Block INSERT placement options: scale / rotation / MINSERT array.
              .insert:
             return true
@@ -414,6 +414,14 @@ struct ToolOptionsBar: View {
         case .leader:
             textField("Text", value: $model.leaderText, width: DS.Field.wide)
             numberField("Height", value: $model.leaderTextHeight, width: DS.Field.xy)
+
+        case .multileader:
+            textField("Text", value: $model.multiLeaderText, width: DS.Field.wide)
+            numberField("Height", value: $model.multiLeaderTextHeight, width: DS.Field.xy)
+            numberField("Landing", value: $model.multiLeaderLandingDistance, width: DS.Field.narrow)
+            Toggle("Dogleg", isOn: $model.multiLeaderDoglegEnabled)
+                .toggleStyle(.checkbox)
+                .onChange(of: model.multiLeaderDoglegEnabled) { _, _ in apply() }
 
         case .baselineDim:
             numberField("Spacing", value: $model.baselineSpacing, width: DS.Field.narrow)
