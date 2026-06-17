@@ -225,6 +225,16 @@ final class CanvasModel {
     /// renderer adoption is owned by the canvas agent — see the report).
     var preferredGridSpacing: Double = 1.0
 
+    /// The active ANNOTATION SCALE (the AutoCAD `CANNOSCALE` factor, e.g. 1:50 ⇒
+    /// `0.02`). The render path threads this into the resolve context
+    /// (`makeResolveContext(annotationScale:)`) so an annotative text/mtext STYLE
+    /// renders at this scale; the StatusBar scale picker binds to it. Seeded from /
+    /// written back to the drawing's `$CANNOSCALE` header var (so it persists), via
+    /// `loadSettingsFromDrawing` on open and `setAnnotationScale` on edit. Default
+    /// `1.0` (1:1) means annotative text draws at its authored height — so the
+    /// out-of-the-box render is byte-identical to before this wave.
+    var annotationScale: Double = 1.0
+
     /// Whether ORTHO restriction is on (LibreCAD's Ortho mode, AutoCAD F8). When on,
     /// a draw tool's candidate point is locked to the horizontal/vertical axis through
     /// the last placed point (`relativeZero`) before the tool receives it. This is the
@@ -1089,6 +1099,8 @@ final class CanvasModel {
         gridVisible = drawing.graphicVariables.gridOn
         let spacing = drawing.graphicVariables.gridSpacing
         if spacing > 0 { preferredGridSpacing = spacing }
+        let anno = drawing.graphicVariables.annotationScale
+        if anno > 0 { annotationScale = anno }
         if let raw = drawing.graphicVariables.snapModeRaw {
             snapModes = SnapMode(rawValue: UInt16(truncatingIfNeeded: raw))
         }
@@ -4977,6 +4989,17 @@ final class CanvasModel {
     func setDimArrowSize(_ s: Double) { guard s > 0 else { return }; applySetting { $0.dimArrowSize = s } }
     /// `$DIMSCALE` — overall dimension scale (>0).
     func setDimScale(_ s: Double) { guard s > 0 else { return }; applySetting { $0.dimScale = s } }
+
+    /// `$CANNOSCALE` ↔ `annotationScale`. Updates both the persisted header var and
+    /// the live render flag (so annotative text re-renders at the new scale on the
+    /// next repaint without a reload), mirroring `setGridSpacing`. A non-positive
+    /// scale is ignored (would collapse annotative text). The StatusBar scale picker
+    /// calls this; it is one undo step via the `applySetting` value-snapshot funnel.
+    func setAnnotationScale(_ s: Double) {
+        guard s > 0 else { return }
+        annotationScale = s
+        applySetting { $0.annotationScale = s }
+    }
     /// `$DIMLUNIT` — dimension-text linear format.
     func setDimLinearFormat(_ f: LinearFormat) { applySetting { $0.dimLinearFormat = f } }
     /// `$DIMDEC` — dimension-text linear precision (clamped 0…8).
