@@ -642,6 +642,49 @@ typedef struct LCDimStyle {
     double dimGap;          /**< code 147 — text gap (world units). */
 } LCDimStyle;
 
+/**
+ * Bit layout for `LCTextStyle::fontFamily` (DXF code 1071). A self-consistent
+ * encoding for the engine round-trip that is also broadly AutoCAD-compatible:
+ * AutoCAD packs the Windows LOGFONT into code 1071 with italic at bit 24 and bold
+ * at bit 25. The low `LC_TS_FONT_TTF` bit flags that the style's primary font
+ * (code 3) is a NATIVE TrueType family name (not a `.lff`/`.shx` file) — the
+ * discriminator the Swift reader uses alongside the code-3 file extension to
+ * reconstruct the engine `FontSource` (`.native` vs `.stroke`/`.shx`).
+ */
+enum LCTextStyleFontFlags {
+    LC_TS_FONT_TTF    = 0x00000001, /**< primaryFont (code 3) is a native TTF family. */
+    LC_TS_FONT_ITALIC = 0x01000000, /**< italic face. */
+    LC_TS_FONT_BOLD   = 0x02000000  /**< bold face. */
+};
+
+/**
+ * One captured STYLE table entry (a flat POD copy of the `DRW_Textstyle` fields
+ * the engine's `TextStyle` model needs — text-system-design §1.1). `name`/
+ * `primaryFont`/`bigFont` borrow the owning list's string pool. Populated by both
+ * the DXF and DWG read paths; emitted by the DXF writer (the DWG writer emits its
+ * own standard STYLE table internally — the documented DWG table gap, like
+ * layers / dim styles). Mirrors `LCDimStyle`.
+ *
+ * Font encoding (the round-trip contract, mirrored in DXFReader/DXFWriter): a
+ * `.native(family)` source writes the family into `primaryFont` (code 3) and sets
+ * `LC_TS_FONT_TTF` in `fontFamily`; a `.stroke(lff)` / `.shx(file)` source writes
+ * the `"<base>.lff"` / `"<base>.shx"` file name into `primaryFont`. The reader
+ * keys off the TTF flag, then the `.lff`/`.shx` extension.
+ */
+typedef struct LCTextStyle {
+    const char *name;        /**< style name, code 2 (borrows the list's string pool). */
+    const char *primaryFont; /**< code 3 — primary font file name / native family. */
+    const char *bigFont;     /**< code 4 — Asian big-font file ("" if none). */
+    double fixedTextHeight;  /**< code 40 — fixed text height (0 == not fixed). */
+    double widthFactor;      /**< code 41 — width factor (default 1). */
+    double oblique;          /**< code 50 — oblique angle, RADIANS (DXF stores
+                                  degrees; the bridge converts on read/write). */
+    double lastHeight;       /**< code 42 — last used height (default 1). */
+    int32_t generationFlags; /**< code 71 — generation flags (2 backward, 4 upside-down). */
+    int32_t fontFamily;      /**< code 1071 — TTF-family/bold/italic bits (LCTextStyleFontFlags). */
+    int32_t styleFlags;      /**< code 70 — STYLE flags (1 shape-file, 4 vertical). */
+} LCTextStyle;
+
 /* ------------------------------------------------------------------------- *
  *  Reconstructed paper-space LAYOUT (paper-space P1)
  *
@@ -819,6 +862,14 @@ int lc_dimstyle_count(const LCEntityList *list);
  *  `lc_entity_list_free`. NULL-safe. */
 const LCDimStyle *lc_dimstyles(const LCEntityList *list);
 
+/** Number of captured STYLE (text-style) table entries (>= 0). NULL-safe. */
+int lc_textstyle_count(const LCEntityList *list);
+
+/** Pointer to the contiguous flat array of `lc_textstyle_count` text styles, or
+ *  NULL. The pointer (and each style's `name`/`primaryFont`/`bigFont`) stays valid
+ *  until `lc_entity_list_free`. NULL-safe. */
+const LCTextStyle *lc_textstyles(const LCEntityList *list);
+
 /** Number of RECONSTRUCTED paper-space layouts (paper-space P1). 0 for a model-
  *  space-only drawing; 1 when the file carries paper-space content (a non-empty
  *  `*Paper_Space` block or a PLOTSETTINGS object). Never > 1 on stock libdxfrw
@@ -915,6 +966,12 @@ LCStatus lc_dxf_count_entities(const char *path, int *out_count);
  *                      offsets round-trip). NULL / 0 ⇒ only the default "Standard"
  *                      style libdxfrw always writes.
  * @param dimStyleCount Number of dimension styles (>= 0).
+ * @param textStyles    Optional pointer to `textStyleCount` LCTextStyle PODs to emit
+ *                      as the STYLE table (so named text styles + their font/width/
+ *                      oblique round-trip — the text-style data-loss fix). NULL / 0 ⇒
+ *                      only the default "Standard" style libdxfrw always writes (so
+ *                      a default/Standard-only table is byte-identical to before).
+ * @param textStyleCount Number of text styles (>= 0).
  * @param viewports     Optional pointer to `viewportCount` LCViewport PODs to emit
  *                      as paper-space VIEWPORT entities (paper-space P3). Each is
  *                      written as a real viewport (vpID/vpStatus forced > 1) so a
@@ -940,6 +997,7 @@ LCStatus lc_dxf_write(const char *path,
                       int *out_skipped,
                       const LCHeader *header,
                       const LCDimStyle *dimStyles, int dimStyleCount,
+                      const LCTextStyle *textStyles, int textStyleCount,
                       const LCViewport *viewports, int viewportCount,
                       const LCHeaderVar *headerVars, int headerVarCount);
 
@@ -995,6 +1053,13 @@ LCStatus lc_dxf_write(const char *path,
  *                      The header `$DIM*` vars ARE applied where the DWG writer
  *                      honors them.
  * @param dimStyleCount Number of dimension styles (>= 0).
+ * @param textStyles    Optional pointer to `textStyleCount` LCTextStyle PODs. NOTE:
+ *                      libdxfrw's DWG writer (dwgWriter15) emits the standard STYLE
+ *                      table internally and exposes no per-style write path, so these
+ *                      are accepted for ABI symmetry but NOT written to DWG (the
+ *                      documented DWG table gap, like layers / dim styles). Use DXF
+ *                      for a text-style round-trip.
+ * @param textStyleCount Number of text styles (>= 0).
  * @param viewports     Optional pointer to `viewportCount` LCViewport PODs (paper-
  *                      space P3). NOTE: libdxfrw's DWG writer (dwgWriter15) has no
  *                      VIEWPORT write path, so these are accepted for ABI symmetry
@@ -1023,6 +1088,7 @@ LCStatus lc_dwg_write(const char *path,
                       int *out_skipped,
                       const LCHeader *header,
                       const LCDimStyle *dimStyles, int dimStyleCount,
+                      const LCTextStyle *textStyles, int textStyleCount,
                       const LCViewport *viewports, int viewportCount,
                       const LCHeaderVar *headerVars, int headerVarCount);
 

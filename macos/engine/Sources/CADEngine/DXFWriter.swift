@@ -151,6 +151,7 @@ extension CADEngine {
         blockMembers: [String: [EntityRecord]] = [:],
         graphicVariables: GraphicVariables = GraphicVariables(),
         dimStyles: DimStyleTable = DimStyleTable(),
+        textStyles: TextStyleTable = TextStyleTable(),
         layouts: [Layout] = [],
         toPath path: String,
         version: DXFVersion = .r2000
@@ -158,6 +159,7 @@ extension CADEngine {
         try writeEntities(entities, layers: layers, blocks: blocks,
                           blockMembers: blockMembers,
                           graphicVariables: graphicVariables, dimStyles: dimStyles,
+                          textStyles: textStyles,
                           layouts: layouts,
                           toPath: path, version: version, writer: lc_dxf_write)
     }
@@ -183,12 +185,14 @@ extension CADEngine {
         blockMembers: [String: [EntityRecord]] = [:],
         graphicVariables: GraphicVariables = GraphicVariables(),
         dimStyles: DimStyleTable = DimStyleTable(),
+        textStyles: TextStyleTable = TextStyleTable(),
         layouts: [Layout] = [],
         toDWGPath path: String
     ) throws -> DXFWriteResult {
         try writeEntities(entities, layers: layers, blocks: blocks,
                           blockMembers: blockMembers,
                           graphicVariables: graphicVariables, dimStyles: dimStyles,
+                          textStyles: textStyles,
                           layouts: layouts,
                           toPath: path, version: .r2000, writer: lc_dwg_write)
     }
@@ -203,6 +207,7 @@ extension CADEngine {
         blockMembers: [String: [EntityRecord]],
         graphicVariables: GraphicVariables,
         dimStyles: DimStyleTable,
+        textStyles: TextStyleTable,
         layouts: [Layout],
         toPath path: String,
         version: DXFVersion,
@@ -216,6 +221,7 @@ extension CADEngine {
             UnsafeMutablePointer<Int32>?,
             UnsafePointer<LCHeader>?,
             UnsafePointer<LCDimStyle>?, Int32,
+            UnsafePointer<LCTextStyle>?, Int32,
             UnsafePointer<LCViewport>?, Int32,
             UnsafePointer<LCHeaderVar>?, Int32
         ) -> LCStatus
@@ -257,6 +263,20 @@ extension CADEngine {
         // be built while `builder` is alive (it is, through the write call below).
         let headerVarPODs = builder.makeHeaderVars(graphicVariables)
         let dimStylePODs = dimStyles.styles.map { builder.makeDimStyle($0) }
+        // The STYLE (text-style) table PODs so named text styles + their fonts
+        // round-trip (the text-style data-loss fix). BYTE-IDENTITY gate: a default /
+        // untouched table (the overwhelming common case — `CADDrawing` starts with a
+        // single default "Standard") emits NOTHING, so the bridge falls back to
+        // libdxfrw's plain default "Standard" and the output is byte-identical to
+        // before. Any customized / extra style makes the table differ from the
+        // default, so the WHOLE table is emitted (sorted by id → Standard first, then
+        // ascending — deterministic, since `styles` is an unordered dictionary).
+        let textStylePODs: [LCTextStyle] =
+            (textStyles == TextStyleTable())
+            ? []
+            : textStyles.styles.values
+                .sorted { $0.id.rawValue < $1.id.rawValue }
+                .map { builder.makeTextStyle($0) }
         // Paper-space P3: flatten every layout's viewports into LCViewport PODs (the
         // bridge emits them as DXF VIEWPORT entities). Empty unless the caller passed
         // layouts that carry viewports, so all other write paths are byte-identical.
@@ -293,22 +313,25 @@ extension CADEngine {
                     blockPODs.withUnsafeBufferPointer { blks -> LCStatus in
                         blockEntityPODs.withUnsafeBufferPointer { blkEnts -> LCStatus in
                             dimStylePODs.withUnsafeBufferPointer { dsty -> LCStatus in
-                                viewportPODs.withUnsafeBufferPointer { vps -> LCStatus in
-                                    headerVarPODs.withUnsafeBufferPointer { hvars -> LCStatus in
-                                        withUnsafePointer(to: &headerPODVar) { hdr -> LCStatus in
-                                            writer(
-                                                cpath,
-                                                ents.baseAddress, Int32(ents.count),
-                                                lays.baseAddress, Int32(lays.count),
-                                                blks.baseAddress, Int32(blks.count),
-                                                blkEnts.baseAddress, Int32(blkEnts.count),
-                                                version.rawValue,
-                                                &skipped,
-                                                hdr,
-                                                dsty.baseAddress, Int32(dsty.count),
-                                                vps.baseAddress, Int32(vps.count),
-                                                hvars.baseAddress, Int32(hvars.count)
-                                            )
+                                textStylePODs.withUnsafeBufferPointer { tsty -> LCStatus in
+                                    viewportPODs.withUnsafeBufferPointer { vps -> LCStatus in
+                                        headerVarPODs.withUnsafeBufferPointer { hvars -> LCStatus in
+                                            withUnsafePointer(to: &headerPODVar) { hdr -> LCStatus in
+                                                writer(
+                                                    cpath,
+                                                    ents.baseAddress, Int32(ents.count),
+                                                    lays.baseAddress, Int32(lays.count),
+                                                    blks.baseAddress, Int32(blks.count),
+                                                    blkEnts.baseAddress, Int32(blkEnts.count),
+                                                    version.rawValue,
+                                                    &skipped,
+                                                    hdr,
+                                                    dsty.baseAddress, Int32(dsty.count),
+                                                    tsty.baseAddress, Int32(tsty.count),
+                                                    vps.baseAddress, Int32(vps.count),
+                                                    hvars.baseAddress, Int32(hvars.count)
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -358,12 +381,16 @@ public func writeDrawing(
     // offsets are preserved on save (symmetric to the read path).
     let graphicVariables = drawing.graphicVariables
     let dimStyles = drawing.dimStyles
+    // The STYLE (text-style) table so named text styles + their fonts are preserved
+    // on save (the text-style data-loss fix; symmetric to the read path).
+    let textStyles = drawing.textStyles
     // Paper-space P3: the layout table (with each layout's viewports) so a Save
     // persists viewports as DXF VIEWPORT entities.
     let layouts = drawing.layouts
     return try await CADEngine.shared.writeEntities(
         entities, layers: layers, blocks: blocks, blockMembers: blockMembers,
         graphicVariables: graphicVariables, dimStyles: dimStyles,
+        textStyles: textStyles,
         layouts: layouts,
         toPath: path, version: version
     )
@@ -1100,6 +1127,43 @@ private final class PODBuilder {
         d.dimExe = s.style.extensionBeyond
         d.dimGap = s.style.textGap
         return d
+    }
+
+    /// Builds an `LCTextStyle` POD from a `TextStyle` (the inverse of DXFReader's
+    /// STYLE → `TextStyle` mapping). Encodes the `FontSource` into code 3 + the
+    /// code-1071 flags per the round-trip contract documented on `LCTextStyle`:
+    /// `.native(family)` ⇒ family in code 3 + the `LC_TS_FONT_TTF` bit; `.stroke`/
+    /// `.shx` ⇒ the `"<base>.lff"` / `"<base>.shx"` file name in code 3. Bold/italic
+    /// ride the high code-1071 bits for ALL source kinds (so a bold STROKE style
+    /// round-trips). The oblique angle stays in radians (the bridge converts to DXF
+    /// degrees). The C writer emits a DRW_Textstyle. The `annotative` flag is NOT
+    /// representable in DRW_Textstyle (it is AutoCAD XDATA) and does not round-trip.
+    func makeTextStyle(_ s: TextStyle) -> LCTextStyle {
+        var t = LCTextStyle()
+        t.name = intern(s.name.isEmpty ? TextStyleTable.standardName : s.name)
+        var family: Int32 = 0
+        let fontString: String
+        switch s.primaryFont {
+        case .native(let fam):
+            fontString = fam
+            family |= Int32(LC_TS_FONT_TTF.rawValue)
+        case .stroke(let lff):
+            fontString = lff + ".lff"
+        case .shx(let file):
+            fontString = file.lowercased().hasSuffix(".shx") ? file : file + ".shx"
+        }
+        t.primaryFont = intern(fontString)
+        t.bigFont = intern(s.bigFont ?? "")
+        t.fixedTextHeight = s.fixedTextHeight
+        t.widthFactor = s.widthFactor
+        t.oblique = s.obliqueAngle               // radians; the bridge → DXF degrees
+        t.lastHeight = s.lastHeight
+        t.generationFlags = Int32(s.generation.rawValue)
+        if s.bold   { family |= Int32(LC_TS_FONT_BOLD.rawValue) }
+        if s.italic { family |= Int32(LC_TS_FONT_ITALIC.rawValue) }
+        t.fontFamily = family
+        t.styleFlags = Int32(s.styleFlags.rawValue)
+        return t
     }
 
     // MARK: Viewport mapping (paper-space P3; inverse of DXFReader.mapViewports)

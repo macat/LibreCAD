@@ -66,6 +66,9 @@ struct LCEntityList {
     // addHeader / addDimStyle hooks; both DXF and DWG drive those hooks.
     LCHeader header{};
     std::vector<LCDimStyle> dimStyles;
+    // Captured STYLE (text-style) table. Filled by the FlatteningReader's
+    // addTextStyle hook; both DXF and DWG drive it. Mirrors `dimStyles`.
+    std::vector<LCTextStyle> textStyles;
 
     // R4b: generic extra HEADER vars (the document-settings vars NOT mapped into the
     // fixed `LCHeader` POD — $GRIDUNIT/$PDMODE/$PDSIZE/$ANGBASE/$ANGDIR/$PINSBASE,
@@ -556,7 +559,27 @@ public:
         m_out->dimStyles.push_back(s);
     }
     void addVport(const DRW_Vport &data) override { (void)data; }
-    void addTextStyle(const DRW_Textstyle &data) override { (void)data; }
+
+    // Capture one STYLE (text-style) table entry. DRW_Textstyle exposes the values
+    // as typed members (libdxfrw reset()s font="txt", width=lastHeight=1); we
+    // flatten the subset the engine's TextStyle model needs into an LCTextStyle POD,
+    // converting the oblique angle from DXF degrees to radians (the engine-native
+    // unit; see LCTextStyle.oblique). Driven by both the DXF and DWG read paths.
+    // Mirrors addDimStyle.
+    void addTextStyle(const DRW_Textstyle &data) override {
+        LCTextStyle s{};
+        s.name = intern(data.name);
+        s.primaryFont = intern(data.font);
+        s.bigFont = intern(data.bigFont);
+        s.fixedTextHeight = data.height;
+        s.widthFactor = data.width;
+        s.oblique = data.oblique * M_PI / 180.0;   // DXF degrees -> radians
+        s.lastHeight = data.lastHeight;
+        s.generationFlags = data.genFlag;
+        s.fontFamily = data.fontFamily;
+        s.styleFlags = data.flags;
+        m_out->textStyles.push_back(s);
+    }
     void addAppId(const DRW_AppId &data) override { (void)data; }
 
     // ----- block structure ------------------------------------------------
@@ -1667,6 +1690,7 @@ public:
                      const LCEntity *blockEntities, int blockEntityCount,
                      const LCHeader *header,
                      const LCDimStyle *dimStyles, int dimStyleCount,
+                     const LCTextStyle *textStyles, int textStyleCount,
                      const LCViewport *viewports, int viewportCount,
                      const LCHeaderVar *headerVars, int headerVarCount)
         : m_dxf(dxf),
@@ -1678,6 +1702,8 @@ public:
           m_header(header),
           m_dimStyles(dimStyles),
           m_dimStyleCount(dimStyleCount < 0 ? 0 : dimStyleCount),
+          m_textStyles(textStyles),
+          m_textStyleCount(textStyleCount < 0 ? 0 : textStyleCount),
           m_viewports(viewports),
           m_viewportCount(viewportCount < 0 ? 0 : viewportCount),
           m_headerVars(headerVars),
@@ -1695,6 +1721,7 @@ public:
                      const LCEntity *blockEntities, int blockEntityCount,
                      const LCHeader *header,
                      const LCDimStyle *dimStyles, int dimStyleCount,
+                     const LCTextStyle *textStyles, int textStyleCount,
                      const LCViewport *viewports, int viewportCount,
                      const LCHeaderVar *headerVars, int headerVarCount)
         : m_dwg(dwg),
@@ -1706,6 +1733,8 @@ public:
           m_header(header),
           m_dimStyles(dimStyles),
           m_dimStyleCount(dimStyleCount < 0 ? 0 : dimStyleCount),
+          m_textStyles(textStyles),
+          m_textStyleCount(textStyleCount < 0 ? 0 : textStyleCount),
           m_viewports(viewports),
           m_viewportCount(viewportCount < 0 ? 0 : viewportCount),
           m_headerVars(headerVars),
@@ -1857,14 +1886,36 @@ public:
                        { 0.5, -0.25, 0.0, -0.25, 0.0, -0.25 });
     }
 
+    // ----- STYLE (text-style) table -----------------------------------------
+    // libdxfrw drives writeTextstyles() inside the TABLES section; we emit one
+    // DRW_Textstyle per caller style (the inverse of FlatteningReader::addTextStyle
+    // — the named-text-style data-loss fix). If a "Standard" entry is among them,
+    // libdxfrw sees `dimstyleStd` set and does not append its own default; otherwise
+    // it adds a Standard for us. The oblique angle is converted from the engine's
+    // radians back to DXF degrees. GATED exactly like writeDimstyles: when the caller
+    // passes no STYLE table (m_textStyles == nullptr — the common case, e.g. a
+    // default/Standard-only drawing) we return and let libdxfrw emit its plain
+    // default "Standard", so the output is byte-identical to before. DWG: dwgWriter15
+    // emits the standard STYLE table internally and has no per-style write path, so
+    // this is a no-op for DWG (the documented DWG table gap, like writeLayers).
     void writeTextstyles() override {
-        // A single "Standard" text style keeps R2000 readers happy even though
-        // we emit no TEXT entities yet. DWG: dwgWriter15 emits the standard
-        // STANDARD text style internally — no-op here.
         if (m_dwg) return;
-        DRW_Textstyle ts;
-        ts.name = "Standard";
-        m_dxf->writeTextstyle(&ts);
+        if (m_textStyles == nullptr) return;
+        for (int i = 0; i < m_textStyleCount; ++i) {
+            const LCTextStyle &s = m_textStyles[i];
+            DRW_Textstyle ts;          // reset() seeds font="txt", width=lastHeight=1
+            ts.name = (s.name && s.name[0]) ? std::string(s.name) : std::string("Standard");
+            if (s.primaryFont && s.primaryFont[0]) ts.font = std::string(s.primaryFont);
+            ts.bigFont = (s.bigFont && s.bigFont[0]) ? std::string(s.bigFont) : std::string();
+            ts.height = s.fixedTextHeight;
+            if (s.widthFactor > 0) ts.width = s.widthFactor;
+            ts.oblique = s.oblique * 180.0 / M_PI;   // radians -> DXF degrees
+            if (s.lastHeight > 0) ts.lastHeight = s.lastHeight;
+            ts.genFlag = s.generationFlags;
+            ts.fontFamily = s.fontFamily;
+            ts.flags = s.styleFlags;
+            m_dxf->writeTextstyle(&ts);
+        }
     }
 
     // ----- header: emit the captured drawing vars on top of libdxfrw's --------
@@ -2109,6 +2160,9 @@ private:
     const LCHeader *m_header = nullptr;
     const LCDimStyle *m_dimStyles = nullptr;
     int m_dimStyleCount = 0;
+    // The STYLE (text-style) table to emit (optional / NULL — see writeTextstyles).
+    const LCTextStyle *m_textStyles = nullptr;
+    int m_textStyleCount = 0;
     // R4b: generic extra HEADER vars to emit verbatim (optional / NULL).
     const LCHeaderVar *m_headerVars = nullptr;
     int m_headerVarCount = 0;
@@ -3039,6 +3093,15 @@ extern "C" const LCDimStyle *lc_dimstyles(const LCEntityList *list) {
     return list->dimStyles.data();
 }
 
+extern "C" int lc_textstyle_count(const LCEntityList *list) {
+    return list ? static_cast<int>(list->textStyles.size()) : 0;
+}
+
+extern "C" const LCTextStyle *lc_textstyles(const LCEntityList *list) {
+    if (list == nullptr || list->textStyles.empty()) return nullptr;
+    return list->textStyles.data();
+}
+
 extern "C" int lc_layout_count(const LCEntityList *list) {
     return list ? static_cast<int>(list->layouts.size()) : 0;
 }
@@ -3095,6 +3158,7 @@ extern "C" LCStatus lc_dxf_write(const char *path,
                                  int *out_skipped,
                                  const LCHeader *header,
                                  const LCDimStyle *dimStyles, int dimStyleCount,
+                                 const LCTextStyle *textStyles, int textStyleCount,
                                  const LCViewport *viewports, int viewportCount,
                                  const LCHeaderVar *headerVars, int headerVarCount) {
     if (out_skipped != nullptr) {
@@ -3110,6 +3174,7 @@ extern "C" LCStatus lc_dxf_write(const char *path,
         (blockCount  > 0 && blocks   == nullptr) ||
         (blockEntityCount > 0 && blockEntities == nullptr) ||
         (dimStyleCount > 0 && dimStyles == nullptr) ||
+        (textStyleCount > 0 && textStyles == nullptr) ||
         (viewportCount > 0 && viewports == nullptr) ||
         (headerVarCount > 0 && headerVars == nullptr)) {
         return LC_ERR_INVALID_PATH;
@@ -3122,6 +3187,7 @@ extern "C" LCStatus lc_dxf_write(const char *path,
         WritingInterface iface(&dxf, entities, entityCount, layers, layerCount,
                                blocks, blockCount, blockEntities, blockEntityCount,
                                header, dimStyles, dimStyleCount,
+                               textStyles, textStyleCount,
                                viewports, viewportCount,
                                headerVars, headerVarCount);
         // bin=false -> ASCII DXF (matches the reader and rs_filterdxfrw).
@@ -3147,6 +3213,7 @@ extern "C" LCStatus lc_dwg_write(const char *path,
                                  int *out_skipped,
                                  const LCHeader *header,
                                  const LCDimStyle *dimStyles, int dimStyleCount,
+                                 const LCTextStyle *textStyles, int textStyleCount,
                                  const LCViewport *viewports, int viewportCount,
                                  const LCHeaderVar *headerVars, int headerVarCount) {
     (void)version;   // DWG write is R2000-only; the arg is accepted for ABI symmetry.
@@ -3161,6 +3228,7 @@ extern "C" LCStatus lc_dwg_write(const char *path,
         (blockCount  > 0 && blocks   == nullptr) ||
         (blockEntityCount > 0 && blockEntities == nullptr) ||
         (dimStyleCount > 0 && dimStyles == nullptr) ||
+        (textStyleCount > 0 && textStyles == nullptr) ||
         (viewportCount > 0 && viewports == nullptr) ||
         (headerVarCount > 0 && headerVars == nullptr)) {
         return LC_ERR_INVALID_PATH;
@@ -3173,6 +3241,7 @@ extern "C" LCStatus lc_dwg_write(const char *path,
         WritingInterface iface(&dwg, entities, entityCount, layers, layerCount,
                                blocks, blockCount, blockEntities, blockEntityCount,
                                header, dimStyles, dimStyleCount,
+                               textStyles, textStyleCount,
                                viewports, viewportCount,
                                headerVars, headerVarCount);
         // bin is ignored by dwgRW (DWG is always binary); pass false for symmetry.

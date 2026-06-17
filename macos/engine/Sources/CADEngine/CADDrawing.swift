@@ -1886,6 +1886,7 @@ public final class CADDrawing {
         blocks newBlocks: BlockTable = BlockTable(),
         graphicVariables newVariables: GraphicVariables = GraphicVariables(),
         dimStyles newDimStyles: DimStyleTable = DimStyleTable(),
+        textStyles newTextStyles: TextStyleTable = TextStyleTable(),
         layouts newLayouts: [Layout] = []
     ) {
         entities = newEntities
@@ -1893,6 +1894,10 @@ public final class CADDrawing {
         blocks = newBlocks
         graphicVariables = newVariables
         dimStyles = newDimStyles
+        // The STYLE (text-style) table so a TEXT/MTEXT entity's code-7 style name
+        // resolves to the file's real font (the text-style round-trip read side).
+        // Defaults to the standard table so existing callers are unchanged.
+        textStyles = newTextStyles
         // Carry the paper-space layout table (paperspace-plan P0), kept ordered by
         // tab position — symmetric to the block/dim-style tables. Defaults empty so
         // existing callers (and a model-space-only drawing) are unchanged.
