@@ -25,6 +25,7 @@
 
 import Testing
 import Foundation
+import CoreGraphics
 @testable import CADEngine
 
 @MainActor
@@ -436,5 +437,211 @@ struct LayoutViewportTests {
         // only that the write+read completed (no throw) — reaching here proves it.
         _ = layouts
         #expect(Bool(true))
+    }
+
+    // MARK: - W2-2D: per-viewport display-on/off · view twist · frozen layers
+    //
+    // The three additive fields (document-payload only; DXF persistence is a later
+    // wave). Covers: the defaults are a no-op; the pure render decisions the renderer
+    // consumes (`drawsContents`, `freezesLayer`); twist rotates the model→paper map;
+    // a default viewport's mapping + packed `LineInstance`s are BYTE-IDENTICAL to the
+    // pre-W2-2D behavior; the additive Codable back-compat (missing keys ⇒ defaults);
+    // and a renderer-loop replica showing display-off hides + a frozen layer drops.
+
+    private func pen(_ c: RGBAColor = .librecadGreen) -> ResolvedPen {
+        ResolvedPen(color: c, lineType: .solid, lineWidth: .default)
+    }
+
+    /// The PRE-W2-2D model→paper formula, computed inline (independent of
+    /// `modelToPaper`) — the byte-identity reference for a default (untwisted) vp.
+    private func refModelToPaper(_ vp: LayoutViewport, _ m: Vector) -> Vector {
+        let s = vp.scale
+        let c = vp.paperCenter
+        return Vector(c.x + (m.x - vp.viewCenter.x) * s, c.y + (m.y - vp.viewCenter.y) * s)
+    }
+
+    /// Packs a model-space polyline through `vp` EXACTLY as
+    /// `LineRenderer.packViewportContents` does (map → clip → 2-point instances),
+    /// taking the model→paper `map` as a parameter so a test can swap in the
+    /// reference formula and prove byte-identity.
+    private func packPolyline(_ poly: ResolvedPolyline, through vp: LayoutViewport,
+                              origin: Vector, halfWidthPx: Float, backingScale: CGFloat,
+                              map: (Vector) -> Vector, into out: inout [LineInstance]) {
+        let paperPoints = poly.points.map(map)
+        let segments = vp.clipPolylineToFrame(paperPoints, closed: poly.closed)
+        for (a, b) in segments {
+            let seg = ResolvedPolyline(points: [a, b], closed: false, pen: poly.pen)
+            RendererGeometry.appendInstances(for: seg, renderOrigin: origin,
+                                             halfWidthPx: halfWidthPx,
+                                             backingScale: backingScale, into: &out)
+        }
+    }
+
+    @Test("a default viewport is shown, untwisted, with no frozen layers")
+    func w2dDefaultsAreNoOp() {
+        let vp = sampleViewport()
+        #expect(vp.displayOn)
+        #expect(vp.twistRadians == 0)
+        #expect(vp.frozenLayers.isEmpty)
+        #expect(vp.drawsContents)              // default = (scale > 0), as before W2-2D
+    }
+
+    @Test("displayOn=false (or a degenerate frame) hides the viewport's contents")
+    func w2dDrawsContentsHonorsDisplayAndScale() {
+        let shown = sampleViewport()
+        #expect(shown.drawsContents)
+        let off = LayoutViewport(paperRect: shown.paperRect, viewCenter: shown.viewCenter,
+                                 viewHeight: shown.viewHeight, displayOn: false)
+        #expect(!off.drawsContents)            // display OFF hides contents
+        let degenerate = LayoutViewport(paperRect: .empty, viewCenter: Vector(0, 0), viewHeight: 1)
+        #expect(!degenerate.drawsContents)     // scale 0 → nothing visible (even if on)
+    }
+
+    @Test("a layer frozen IN the viewport is excluded; the default freezes nothing")
+    func w2dFreezesLayerExcludesNamed() {
+        let none = sampleViewport()
+        #expect(!none.freezesLayer("A"))       // empty set freezes nothing
+        let frozen = LayoutViewport(paperRect: none.paperRect, viewCenter: none.viewCenter,
+                                    viewHeight: none.viewHeight, frozenLayers: ["A"])
+        #expect(frozen.freezesLayer("A"))
+        #expect(!frozen.freezesLayer("B"))     // other layers unaffected
+    }
+
+    @Test("a non-finite twist is coerced to 0 (never NaN geometry)")
+    func w2dNonFiniteTwistCoercedToZero() {
+        let vp = LayoutViewport(paperRect: AABB(min: Vector(0, 0), max: Vector(10, 10)),
+                                viewCenter: Vector(0, 0), viewHeight: 5, twistRadians: .nan)
+        #expect(vp.twistRadians == 0)
+        #expect(vp.modelToPaper(Vector(1, 1)).x.isFinite)
+        #expect(vp.modelToPaper(Vector(1, 1)).y.isFinite)
+    }
+
+    @Test("model→paper for a DEFAULT viewport equals the pre-twist formula EXACTLY")
+    func w2dModelToPaperDefaultByteIdentical() {
+        let vp = sampleViewport()
+        for m in [Vector(0, 0), Vector(50, 50), Vector(60, 50), Vector(50, 70),
+                  Vector(-123.5, 88.25), Vector(1000, -2000)] {
+            // EXACT equality (no tolerance): the default-viewport mapping must be
+            // bit-for-bit unchanged from the original `paperCenter + (m - vc) * scale`.
+            #expect(vp.modelToPaper(m) == refModelToPaper(vp, m))
+        }
+    }
+
+    @Test("view twist rotates the model→paper mapping about the view center")
+    func w2dTwistRotatesMapping() {
+        let base = sampleViewport()            // scale 2, viewCenter (50,50), paperCenter (50,40)
+        let twisted = LayoutViewport(paperRect: base.paperRect, viewCenter: base.viewCenter,
+                                     viewHeight: base.viewHeight, twistRadians: .pi / 2)
+        // A +X model offset (60,50) maps to +Y on paper under a 90° CCW twist:
+        // (dx,dy)=(10,0) → rot90 (0,10) → ×scale 2 (0,20) → +paperCenter (50,60).
+        #expect(approxV(twisted.modelToPaper(Vector(60, 50)), Vector(50, 60), 1e-9))
+        // The view center still maps to the paper center (rotation fixes the center).
+        #expect(approxV(twisted.modelToPaper(base.viewCenter), base.paperCenter, 1e-9))
+        // It genuinely differs from the untwisted mapping (twist is honored).
+        #expect(!approxV(twisted.modelToPaper(Vector(60, 50)),
+                         base.modelToPaper(Vector(60, 50)), 1e-6))
+    }
+
+    @Test("renderer byte-identity: a DEFAULT viewport packs LineInstances bit-for-bit unchanged")
+    func w2dRendererByteIdenticalForDefaultViewport() {
+        let vp = sampleViewport()              // default: shown, twist 0, nothing frozen
+        let polys = [
+            ResolvedPolyline(points: [Vector(40, 40), Vector(60, 60), Vector(40, 60)],
+                             closed: true, pen: pen()),
+            ResolvedPolyline(points: [Vector(45, 45), Vector(80, 52)], closed: false, pen: pen()),
+            // Crosses the right frame edge so the Cohen–Sutherland clip participates.
+            ResolvedPolyline(points: [Vector(50, 50), Vector(200, 50)], closed: false, pen: pen()),
+        ]
+        let origin = Vector(0, 0)
+        let hw: Float = 1.5
+        let bs: CGFloat = 2
+        var current: [LineInstance] = []
+        var reference: [LineInstance] = []
+        for p in polys {
+            // `current` uses the SHIPPING `modelToPaper`; `reference` uses the inline
+            // pre-W2-2D formula. Everything else (clip + appendInstances) is identical.
+            packPolyline(p, through: vp, origin: origin, halfWidthPx: hw, backingScale: bs,
+                         map: { vp.modelToPaper($0) }, into: &current)
+            packPolyline(p, through: vp, origin: origin, halfWidthPx: hw, backingScale: bs,
+                         map: { refModelToPaper(vp, $0) }, into: &reference)
+        }
+        #expect(!current.isEmpty)
+        #expect(current == reference)          // LineInstance: Equatable → byte-identical
+    }
+
+    @Test("Codable carries displayOn / twistRadians / frozenLayers")
+    func w2dCodableCarriesNewFields() throws {
+        let vp = LayoutViewport(paperRect: AABB(min: Vector(0, 0), max: Vector(10, 10)),
+                                viewCenter: Vector(1, 2), viewHeight: 5,
+                                displayOn: false, twistRadians: .pi / 4,
+                                frozenLayers: ["A", "B"])
+        let back = try JSONDecoder().decode(
+            LayoutViewport.self, from: try JSONEncoder().encode(vp))
+        #expect(back.displayOn == false)
+        #expect(approx(back.twistRadians, .pi / 4))
+        #expect(back.frozenLayers == ["A", "B"])
+    }
+
+    @Test("an OLD-FORMAT LayoutViewport JSON (no W2-2D keys) decodes to the defaults")
+    func w2dOldViewportPayloadDecodesToDefaults() throws {
+        // Build the payload a PRE-W2-2D viewport would have produced: encode a
+        // viewport with NON-default new fields, then STRIP the three additive keys
+        // (so this does not depend on the exact JSON shape of Vector/AABB). A correct
+        // `decodeIfPresent` back-compat must then yield the DEFAULTS, not the values.
+        let vp = LayoutViewport(paperRect: AABB(min: Vector(0, 0), max: Vector(100, 80)),
+                                viewCenter: Vector(50, 50), viewHeight: 40,
+                                displayOn: false, twistRadians: 1.0, frozenLayers: ["X"])
+        let data = try JSONEncoder().encode(vp)
+        var obj = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        obj.removeValue(forKey: "displayOn")
+        obj.removeValue(forKey: "twistRadians")
+        obj.removeValue(forKey: "frozenLayers")
+        let stripped = try JSONSerialization.data(withJSONObject: obj)
+        let back = try JSONDecoder().decode(LayoutViewport.self, from: stripped)
+        #expect(back.id == vp.id)
+        #expect(back.displayOn)                // additive default: shown
+        #expect(back.twistRadians == 0)        // additive default: no twist
+        #expect(back.frozenLayers.isEmpty)     // additive default: nothing frozen
+    }
+
+    @Test("renderer loop replica: display-OFF packs nothing; a frozen layer is excluded")
+    func w2dRenderLoopHonorsDisplayAndFreeze() {
+        // Layers "A" and "B", both visible globally (so RendererVisibility passes).
+        let layers = LayerTable(layers: [Layer(name: "A"), Layer(name: "B")],
+                                activeLayerName: "A")
+        // One model entity per layer, both inside the frame (each → 1 segment instance).
+        let entities: [(layer: String, poly: ResolvedPolyline)] = [
+            ("A", ResolvedPolyline(points: [Vector(45, 45), Vector(55, 55)], closed: false, pen: pen())),
+            ("B", ResolvedPolyline(points: [Vector(46, 46), Vector(54, 54)], closed: false, pen: pen())),
+        ]
+        let origin = Vector(0, 0)
+        let hw: Float = 1.5
+        let bs: CGFloat = 2
+
+        // Mirrors `LineRenderer.packViewportContents` using the SAME pure helpers the
+        // renderer calls (`drawsContents`, `RendererVisibility.isRendered`,
+        // `freezesLayer`, `modelToPaper`) — one source of truth, no divergent copy.
+        func pack(_ vp: LayoutViewport) -> [LineInstance] {
+            var out: [LineInstance] = []
+            guard vp.drawsContents else { return out }
+            for (name, poly) in entities {
+                guard RendererVisibility.isRendered(LayerID(name), in: layers) else { continue }
+                if vp.freezesLayer(name) { continue }
+                packPolyline(poly, through: vp, origin: origin, halfWidthPx: hw,
+                             backingScale: bs, map: { vp.modelToPaper($0) }, into: &out)
+            }
+            return out
+        }
+
+        let shown = sampleViewport()
+        #expect(pack(shown).count == 2)        // both entities packed (1 segment each)
+
+        let off = LayoutViewport(paperRect: shown.paperRect, viewCenter: shown.viewCenter,
+                                 viewHeight: shown.viewHeight, displayOn: false)
+        #expect(pack(off).isEmpty)             // display OFF → nothing drawn
+
+        let frozenA = LayoutViewport(paperRect: shown.paperRect, viewCenter: shown.viewCenter,
+                                     viewHeight: shown.viewHeight, frozenLayers: ["A"])
+        #expect(pack(frozenA).count == 1)      // only layer "B" survives the freeze
     }
 }

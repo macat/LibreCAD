@@ -25,8 +25,10 @@
 //
 //  ## v1 cut (documented follow-ups)
 //  Rectangular clip; the scale is FIXED at creation (DERIVED, not stored — see
-//  `scale`). OMITTED for v1, all documented follow-ups: view twist, frozen-layers
-//  per viewport, a per-viewport UCS, and the on/off display flag.
+//  `scale`). W2-2D ADDED (DOCUMENT-PAYLOAD only — Codable carries them; DXF
+//  persistence is a later wave): the on/off display flag (`displayOn`), the view
+//  twist (`twistRadians`), and per-viewport frozen layers (`frozenLayers`). Still
+//  OMITTED for v1: a per-viewport UCS, and the DXF round-trip of these three fields.
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //
@@ -114,16 +116,52 @@ public struct LayoutViewport: Sendable, Hashable, Codable, Identifiable {
     /// child camera invertible even for a hand-built / corrupt value.
     public static let minViewHeight = 1.0e-9
 
+    // MARK: - W2-2D per-viewport display state (DOCUMENT-PAYLOAD only; DXF later)
+    //
+    // Three ADDITIVE fields that ride inside the `Layout` value (so layout undo +
+    // the document payload carry them for free). All default to "no effect", so a
+    // viewport built without them — and every OLD payload, which has none of these
+    // keys (see the `decodeIfPresent` `init(from:)` below) — behaves exactly as
+    // before: shown, untwisted, nothing frozen.
+
+    /// Whether this viewport's CONTENTS are drawn (the AutoCAD viewport "On/Off"
+    /// display flag, DXF VIEWPORT status bit). `false` hides everything the viewport
+    /// shows (its frame outline still draws — the window is just empty). Defaults to
+    /// `true` (shown).
+    public var displayOn: Bool = true
+
+    /// The view TWIST angle in RADIANS — the model view is rotated about
+    /// `viewCenter` by this angle inside the frame (the AutoCAD viewport "Twist
+    /// angle" / DXF code 51). Engine CCW convention (`Vector.rotated(by:)`). Defaults
+    /// to `0` (no twist); a non-finite stored value is coerced to `0` so it can never
+    /// produce NaN geometry.
+    public var twistRadians: Double = 0
+
+    /// Layer NAMES frozen IN THIS VIEWPORT (the AutoCAD per-viewport layer freeze /
+    /// DXF VP_FREEZE). An entity on a frozen layer is excluded from THIS viewport's
+    /// contents ONLY — model space and every other viewport still show it. Matched by
+    /// exact name (the same exact-name match `LayerTable.layer(_:)` uses). Defaults to
+    /// empty (nothing frozen).
+    public var frozenLayers: Set<String> = []
+
     public init(
         id: UUID = UUID(),
         paperRect: AABB,
         viewCenter: Vector,
-        viewHeight: Double
+        viewHeight: Double,
+        displayOn: Bool = true,
+        twistRadians: Double = 0,
+        frozenLayers: Set<String> = []
     ) {
         self.id = id
         self.paperRect = paperRect
         self.viewCenter = viewCenter.valid ? viewCenter : Vector(0, 0)
         self.viewHeight = LayoutViewport.clampHeight(viewHeight)
+        self.displayOn = displayOn
+        // Coerce a non-finite twist to 0 so a hand-built / corrupt value cannot
+        // produce NaN paper coordinates in `modelToPaper`.
+        self.twistRadians = twistRadians.isFinite ? twistRadians : 0
+        self.frozenLayers = frozenLayers
     }
 
     /// Clamps a model view height to a positive, finite value (`>= minViewHeight`),
@@ -255,14 +293,39 @@ public struct LayoutViewport: Sendable, Hashable, Codable, Identifiable {
     /// origin — composes directly with `paperRect`). Derivation: a model point at
     /// `viewCenter` lands at `paperCenter`; each model unit is `scale` paper units;
     /// +Y model goes +Y on the sheet (paper is Y-up, like model — no flip here).
-    ///   `paper = paperCenter + (model - viewCenter) * scale`.
+    ///   `paper = paperCenter + rot(model - viewCenter, twist) * scale`.
+    ///
+    /// The model offset is rotated about `viewCenter` by `twistRadians` BEFORE the
+    /// scale (the W2-2D view twist). A zero — or non-finite — twist takes the original
+    /// untwisted path, so a DEFAULT viewport (twist 0) maps BYTE-IDENTICALLY to
+    /// before (the `c.x + dx * s` expression is literally unchanged).
     public func modelToPaper(_ model: Vector) -> Vector {
         let s = scale
         let c = paperCenter
-        return Vector(
-            c.x + (model.x - viewCenter.x) * s,
-            c.y + (model.y - viewCenter.y) * s
-        )
+        let dx = model.x - viewCenter.x
+        let dy = model.y - viewCenter.y
+        if twistRadians != 0, twistRadians.isFinite {
+            let r = Vector(dx, dy).rotated(by: twistRadians)
+            return Vector(c.x + r.x * s, c.y + r.y * s)
+        }
+        return Vector(c.x + dx * s, c.y + dy * s)
+    }
+
+    // MARK: - W2-2D render decisions (PURE — one source of truth for the renderer)
+
+    /// Whether this viewport's CONTENTS should be drawn at all. `false` when the
+    /// display is turned OFF (`displayOn == false`) OR the frame is degenerate
+    /// (`scale == 0`, nothing visible). The renderer skips the whole viewport when
+    /// this is false. For a DEFAULT viewport (`displayOn == true`) this is exactly
+    /// `scale > 0` — the same gate the renderer used before W2-2D (byte-identical).
+    public var drawsContents: Bool { displayOn && scale > 0 }
+
+    /// Whether an entity on layer `name` is FROZEN in this viewport (so it is
+    /// excluded from THIS viewport's contents only — model space and other viewports
+    /// are unaffected). Always `false` for the default (empty `frozenLayers`), so a
+    /// default viewport excludes nothing (byte-identical). Exact-name match.
+    public func freezesLayer(_ name: String) -> Bool {
+        !frozenLayers.isEmpty && frozenLayers.contains(name)
     }
 
     // MARK: - Cohen–Sutherland segment clip to the frame
@@ -376,5 +439,37 @@ public struct LayoutViewport: Sendable, Hashable, Codable, Identifiable {
             out.append(seg)
         }
         return out
+    }
+}
+
+// MARK: - Codable (back-compat: tolerate the missing W2-2D fields)
+//
+// `displayOn` / `twistRadians` / `frozenLayers` are ADDITIVE (W2-2D): a viewport
+// encoded BEFORE they existed (every old document payload) has none of these keys.
+// A hand-written `init(from:)` with `decodeIfPresent` (the SAME pattern `Layout`
+// uses for its additive `viewports`, Layout.swift:184) decodes those absent keys to
+// their defaults (on / no twist / nothing frozen), so old payloads round-trip
+// unchanged. We DELEGATE to the memberwise init so the same validation runs on
+// decode (twist non-finite ⇒ 0, viewHeight clamped). `encode(to:)` stays synthesized
+// off the explicit `CodingKeys` (which list every field, so it emits all of them);
+// `Hashable`/`Equatable` stay synthesized too (they auto-include the new stored
+// properties).
+extension LayoutViewport {
+    private enum CodingKeys: String, CodingKey {
+        case id, paperRect, viewCenter, viewHeight, displayOn, twistRadians, frozenLayers
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let id = try c.decode(UUID.self, forKey: .id)
+        let paperRect = try c.decode(AABB.self, forKey: .paperRect)
+        let viewCenter = try c.decode(Vector.self, forKey: .viewCenter)
+        let viewHeight = try c.decode(Double.self, forKey: .viewHeight)
+        // Additive W2-2D fields: absent in old payloads ⇒ defaults.
+        let displayOn = try c.decodeIfPresent(Bool.self, forKey: .displayOn) ?? true
+        let twistRadians = try c.decodeIfPresent(Double.self, forKey: .twistRadians) ?? 0
+        let frozenLayers = try c.decodeIfPresent(Set<String>.self, forKey: .frozenLayers) ?? []
+        self.init(id: id, paperRect: paperRect, viewCenter: viewCenter, viewHeight: viewHeight,
+                  displayOn: displayOn, twistRadians: twistRadians, frozenLayers: frozenLayers)
     }
 }
