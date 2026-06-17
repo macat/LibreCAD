@@ -777,6 +777,56 @@ final class CanvasModel {
         rebuildIndex()
     }
 
+    // MARK: - App-settings snap seed (Wave 3B — NEW-window default drafting prefs)
+    //
+    // A NEW document/window should adopt the user's saved drafting PREFERENCES
+    // (Preferences ▸ Snapping): the default snap mask, pick aperture, and polar
+    // increment. The pure read-site is `AppSettingsModel` (every field already
+    // normalized/clamped via `AppSettings.snapMode(fromMask:)` / `clampAperture` /
+    // `polarIncrementRadians(fromDegrees:)`). This is OPT-IN — the plain `init` keeps the
+    // built-in interactive defaults (so the 2800+ existing tests / a loaded document are
+    // untouched); the Wave-3D window-creation path calls `seedSnapSettingsFromAppSettings()`.
+
+    /// Applies a resolved `AppSettingsModel` snapshot's drafting prefs onto this window's
+    /// LIVE snap state: `snapModes` (the saved default mask), `pickAperturePoints` (the
+    /// clamped aperture), and `polarAngleIncrement` (radians). PURE w.r.t. the snapshot
+    /// (no `UserDefaults` read here), so it is unit-testable headlessly with a synthetic
+    /// snapshot. Does NOT touch `gridVisible`/`preferredGridSpacing` (those are document
+    /// header vars, loaded via `loadSettingsFromDrawing`); this is the new-window default
+    /// for the three SNAP prefs only. Bumps `modelVersion` so chrome reflecting these
+    /// (snap chips) refreshes. A live policy — not document content, not undoable.
+    func applySnapSeed(_ settings: AppSettingsModel) {
+        snapModes = settings.defaultSnap
+        pickAperturePoints = AppSettings.clampAperture(settings.snapAperturePx)
+        polarAngleIncrement = settings.polarIncrementRadians
+        modelVersion &+= 1
+    }
+
+    /// Seeds this window's snap prefs from the user's SAVED preferences. The Wave-3D
+    /// new-window path calls this once after creating the model so a fresh window opens
+    /// with the user's chosen default snap mask / aperture / polar increment. Reads the
+    /// three `AppSettings.Key` snap keys off `UserDefaults` and runs each through the
+    /// documented `AppSettings` normalizer (`snapMode(fromMask:)` / `clampAperture` /
+    /// `polarIncrementRadians(fromDegrees:)`) so an absent/corrupt key falls back to the
+    /// documented default — the seed is always valid. Delegates to the pure
+    /// `applySnapSeed(_:)` (the unit-testable seam) with a snapshot built off the
+    /// all-defaults `AppSettingsModel.standard` with only the three snap fields overridden.
+    /// Reads `UserDefaults.standard` — keep it OUT of unit tests.
+    func seedSnapSettingsFromAppSettings(defaults: UserDefaults = .standard) {
+        let maskKey = AppSettings.Key.defaultSnapMask
+        let mask = (defaults.object(forKey: maskKey) as? Int) ?? AppSettings.Default.snapMask
+        let aperture = (defaults.object(forKey: AppSettings.Key.snapAperturePx) as? Double)
+            ?? AppSettings.Default.snapAperturePx
+        let polarDeg = (defaults.object(forKey: AppSettings.Key.polarIncrementDegrees) as? Double)
+            ?? AppSettings.Default.polarIncrementDegrees
+
+        var snapshot = AppSettingsModel.standard
+        snapshot.defaultSnap = AppSettings.snapMode(fromMask: mask)
+        snapshot.snapAperturePx = AppSettings.clampAperture(aperture)
+        snapshot.polarIncrementRadians = AppSettings.polarIncrementRadians(fromDegrees: polarDeg)
+        applySnapSeed(snapshot)
+    }
+
     // MARK: - Model lifecycle
 
     /// Replaces the model with a freshly-loaded drawing, rebuilds the spatial
@@ -1793,8 +1843,18 @@ final class CanvasModel {
     /// The pick/snap aperture in GUI points (LibreCAD `m_catchEntityGuiRange`).
     static let catchPoints: Double = 8
 
-    /// Snap tolerance in world units for the current zoom.
-    var worldTolerance: Double { Self.catchPoints * viewport.worldPerPixel }
+    /// The LIVE pick/snap aperture in GUI points for THIS window. Defaults to the
+    /// historical `catchPoints` (8) so existing behavior + tests are unchanged; a NEW
+    /// window seeds it from `AppSettings.snapAperturePx` (clamped) via
+    /// `seedSnapSettingsFromAppSettings()` / `applySnapSeed(_:)` (Wave-3D wires the call
+    /// at window creation). `worldTolerance` reads THIS, so the seed actually changes the
+    /// catch range. A live interaction policy (not persisted to the document).
+    var pickAperturePoints: Double = CanvasModel.catchPoints
+
+    /// Snap tolerance in world units for the current zoom (the live aperture × the
+    /// current world-per-pixel). Reads `pickAperturePoints` so a seeded/edited aperture
+    /// takes effect immediately.
+    var worldTolerance: Double { pickAperturePoints * viewport.worldPerPixel }
 
     /// Runs snapping for a cursor screen point, updating `cursorWorld` + `snap`.
     /// Returns whether the snap result changed (so the caller can skip a redraw).
@@ -4822,6 +4882,71 @@ final class CanvasModel {
         modelDirty = true
         modelVersion &+= 1
         return true
+    }
+
+    // MARK: - Paste as Block (Wave 3B — Edit ▸ Paste as Block)
+
+    /// Pastes the current clipboard as a NEW BLOCK + an INSERT of it at `target` (a
+    /// WORLD point), as ONE undoable group. It re-mints the clipboard records (ids +
+    /// the cursor-anchored offset, via the pure `EntityClipboard.pasteRecords(at:)`),
+    /// ADDS them to mint real ids, then wraps those ids into a block + drops one
+    /// `.insert` via the undoable engine op `CADDrawing.makeBlockFromEntities` (which
+    /// removes the just-added loose copies, re-authors them as members, registers the
+    /// block, and adds the INSERT) — all inside the SAME undo group, so a single ⌘Z
+    /// reverts the whole paste-as-block. The new INSERT becomes the selection. The block
+    /// name de-duplicates on a clash (the engine op picks a free name from the
+    /// suggestion), so a `nil`/blank name falls back to "Block". No-op (returns `false`)
+    /// for an empty clipboard. Returns whether a block was created.
+    ///
+    /// Plain Cut/Copy/Paste (`cutSelection`/`copySelection`/`paste`) are unchanged; this
+    /// is the additive "wrap the paste into a block" verb the Edit menu (Wave 3D) wires.
+    @discardableResult
+    func pasteAsBlock(name: String? = nil, at target: Vector) -> Bool {
+        let records = clipboard.pasteRecords(at: target)
+        guard !records.isEmpty else { return false }
+
+        // One undo group for the whole op: add the loose copies (capturing their ids),
+        // then makeBlockFromEntities removes them + creates the block + insert. The
+        // explicit group keeps it a single ⌘Z under a manual-grouping undo manager
+        // (tests); the live app's groupsByEvent coalesces it in one run-loop event.
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+
+        var ids: [EntityID] = []
+        ids.reserveCapacity(records.count)
+        for record in records {
+            var added = record
+            added.id = EntityID(0)                  // ensure a fresh mint
+            added.flags.remove(.selected)
+            ids.append(drawing.add(added))          // undoable; mints a real id
+        }
+
+        let blockName = (name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            ? name! : "Block"
+        let creation = drawing.makeBlockFromEntities(
+            name: blockName, basePoint: target, ids: ids)
+
+        // The engine op mutated `entities` directly (removed the loose copies, added the
+        // members + the insert), bypassing the quadtree-aware add path above — rebuild
+        // the index so the result is immediately snappable/selectable.
+        rebuildIndex()
+        if let insertID = creation?.insertID {
+            selection = Selection(ids: [insertID])   // select the placed INSERT
+        } else {
+            selection.clear()
+        }
+        modelDirty = true
+        modelVersion &+= 1
+        return creation != nil
+    }
+
+    /// Pastes the clipboard as a block at the current VIEW CENTER (world) — the menu /
+    /// keyboard Paste-as-Block default when there is no cursor anchor.
+    @discardableResult
+    func pasteAsBlock(name: String? = nil) -> Bool {
+        let centerScreen = CGPoint(x: viewport.size.width / 2, y: viewport.size.height / 2)
+        return pasteAsBlock(name: name, at: viewport.screenToWorld(centerScreen))
     }
 
     // MARK: - Ortho restriction (LibreCAD Ortho / AutoCAD F8)
