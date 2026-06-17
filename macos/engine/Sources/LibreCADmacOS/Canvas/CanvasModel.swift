@@ -3706,6 +3706,122 @@ final class CanvasModel {
         return box.isEmpty ? nil : box
     }
 
+    /// The WORLD-space orientation (radians, CCW) the resting/idle selection gizmo
+    /// should be drawn at, so a rotated object's resting chrome stays ORIENTED to it
+    /// (task #17) instead of reverting to an upright AABB after a rotate.
+    ///
+    /// Two tiers:
+    /// 1. **Intrinsic fast path** — a SINGLE selected entity whose kind carries a
+    ///    stored rotation (insert / text / mtext / ellipse / image / linear
+    ///    dimension) returns that stored angle directly. This is sourced from the
+    ///    entity's STORED rotation, not re-derived from a matrix, so a non-uniform
+    ///    scale-then-rotate never drifts the angle. No new `EntityKind` case — a
+    ///    read-only `switch` on the single selected entity.
+    /// 2. **General OBB fallback** — a rotated rectangle (a baked 4-vertex polyline
+    ///    with no angle field), free lines/polylines, or a multi-selection use the
+    ///    minimum-area oriented bounding box of the selection's resolved geometry
+    ///    points (`OrientedBounds.minAreaRect`). A symmetric shape (square / circle)
+    ///    or a degenerate selection falls back to `0` (upright), so the resting
+    ///    chrome never jitters onto an arbitrary axis.
+    ///
+    /// `0` when there is no selection, or when neither tier yields an orientation.
+    var gizmoOrientation: Double {
+        guard !selection.isEmpty else { return 0 }
+        if selection.count == 1, let id = selection.ids.first,
+           let e = drawing.entity(id),
+           let intrinsic = Self.intrinsicRotation(of: e.kind) {
+            return intrinsic
+        }
+        return OrientedBounds.minAreaRect(selectionWorldPoints())?.angle ?? 0
+    }
+
+    /// The stored intrinsic rotation (radians, CCW) of a single entity kind, or
+    /// `nil` for kinds with no meaningful single orientation (circle, point,
+    /// free polyline, non-linear dimensions, …) — those fall back to the OBB.
+    ///
+    /// READ-ONLY switch (NO new `EntityKind` case). Angles are read from STORED
+    /// fields so they don't drift under a non-uniform scale.
+    private static func intrinsicRotation(of kind: EntityKind) -> Double? {
+        switch kind {
+        case .insert(let d):  return d.rotation
+        case .text(let d):    return d.rotation
+        case .mtext(let d):   return d.rotation
+        case .image(let d):   return d.rotation
+        case .ellipse(let d): return d.rotationAngle   // == majorP.angle
+        case .dimension(let d):
+            // Only a LINEAR (rotated) dimension has a single defining direction.
+            if case .linear(_, _, let angle) = d.kind { return angle }
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    /// The selection's resolved geometry vertices in WORLD coords — the point cloud
+    /// the OBB orientation + oriented base frame are derived from. Reuses the same
+    /// resolve path as `gizmoPreviewPolylines` (the `.toolPreview` pen is irrelevant
+    /// to point positions). Image quads contribute their four corners. Empty for an
+    /// empty selection or all-unresolvable ids.
+    func selectionWorldPoints() -> [Vector] {
+        guard !selection.isEmpty else { return [] }
+        let ctx = drawing.makeResolveContext()
+        var pts: [Vector] = []
+        for id in selection.ids {
+            guard let record = drawing.entity(id) else { continue }
+            let geo = record.kind.resolve(pen: .toolPreview, ctx: ctx)
+            for poly in geo.polylines { pts.append(contentsOf: poly.points) }
+            for fill in geo.fills { for loop in fill.loops { pts.append(contentsOf: loop) } }
+            for img in geo.images { pts.append(contentsOf: img.corners) }
+        }
+        return pts
+    }
+
+    /// The ORIENTED base frame for the resting gizmo: an AXIS-ALIGNED `GizmoFrame`
+    /// (its stored `min`/`max` un-rotated) that, when rotated by `gizmoOrientation`
+    /// about its own `center` via `Affine2D.rotation(_:about:)`, hugs the selection
+    /// geometry. The overlay draws the oriented quad as `rotation(orientation,
+    /// about: base.center).apply(base.corner(·))` (Stage 3), so a base frame +
+    /// orientation pair reproduces the object's oriented box.
+    ///
+    /// Built by un-rotating the selection points by `-orientation` about the
+    /// selection's plain AABB center, taking that local AABB, and re-centering it at
+    /// the world point the local AABB center maps back to. For `orientation == 0`
+    /// this is exactly the plain world AABB (byte-identical to the legacy upright
+    /// frame). `nil` when there is no resolvable geometry.
+    var gizmoOrientedBaseFrame: GizmoFrame? {
+        let angle = gizmoOrientation
+        // Angle 0 → the legacy upright AABB frame, unchanged.
+        if angle == 0 { return selectionWorldBounds.flatMap { GizmoFrame(box: $0) } }
+
+        let pts = selectionWorldPoints()
+        guard pts.count >= 1 else {
+            return selectionWorldBounds.flatMap { GizmoFrame(box: $0) }
+        }
+        // The geometry's plain AABB center (a stable un-rotate pivot).
+        var minX = pts[0].x, maxX = pts[0].x, minY = pts[0].y, maxY = pts[0].y
+        for p in pts {
+            minX = Swift.min(minX, p.x); maxX = Swift.max(maxX, p.x)
+            minY = Swift.min(minY, p.y); maxY = Swift.max(maxY, p.y)
+        }
+        let g = Vector((minX + maxX) * 0.5, (minY + maxY) * 0.5)
+        let unrot = Affine2D.rotation(angle: -angle, about: g)
+        // AABB of the un-rotated points (the box in the rotated basis).
+        let local = unrot.apply(pts[0])
+        var lMinX = local.x, lMaxX = local.x, lMinY = local.y, lMaxY = local.y
+        for p in pts {
+            let q = unrot.apply(p)
+            lMinX = Swift.min(lMinX, q.x); lMaxX = Swift.max(lMaxX, q.x)
+            lMinY = Swift.min(lMinY, q.y); lMaxY = Swift.max(lMaxY, q.y)
+        }
+        let lc = Vector((lMinX + lMaxX) * 0.5, (lMinY + lMaxY) * 0.5)
+        // The local AABB center mapped back to world is the oriented box center.
+        let bc = Affine2D.rotation(angle: angle, about: g).apply(lc)
+        let hx = (lMaxX - lMinX) * 0.5
+        let hy = (lMaxY - lMinY) * 0.5
+        return GizmoFrame(min: Vector(bc.x - hx, bc.y - hy),
+                          max: Vector(bc.x + hx, bc.y + hy))
+    }
+
     /// The live gizmo drag transform (a preview only; not yet committed). The
     /// renderer reads it via `gizmoPreviewPolylines` to draw the selection at the
     /// dragged transform; `nil` when no gizmo drag is in progress. Set on every

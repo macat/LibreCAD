@@ -322,3 +322,168 @@ struct GizmoTransformTests {
         }
     }
 }
+
+// MARK: - Stage 2: CanvasModel orientation feeder (gizmoOrientation + oriented base)
+
+/// Tests for the resting-gizmo ORIENTATION feeder added to `CanvasModel` (task
+/// #17): the intrinsic-angle fast path for a single rotated entity, the min-area
+/// OBB fallback for a baked rotated rectangle / multi-select, and the oriented base
+/// frame that — rotated by that angle about its own center — hugs the geometry.
+///
+/// `@MainActor` because `CanvasModel` is a main-actor `@Observable` (reached via
+/// the `_SharedCanvasModel.swift` symlink into the test target).
+@MainActor
+@Suite("Gizmo orientation feeder (CanvasModel)")
+struct GizmoOrientationFeederTests {
+
+    private static let eps = 1e-7
+
+    private func approx(_ a: Double, _ b: Double, _ tol: Double = eps) -> Bool {
+        abs(a - b) <= tol
+    }
+    private func approx(_ a: Vector, _ b: Vector, _ tol: Double = eps) -> Bool {
+        approx(a.x, b.x, tol) && approx(a.y, b.y, tol)
+    }
+    /// Orientation difference mod π/2 (a box's angle is canonical to that band).
+    private func orientationDiff(_ a: Double, _ b: Double) -> Double {
+        let quarter = Double.pi / 2
+        var d = (a - b).truncatingRemainder(dividingBy: quarter)
+        if d > quarter / 2 { d -= quarter }
+        if d < -quarter / 2 { d += quarter }
+        return abs(d)
+    }
+
+    private func makeModel(_ records: [EntityRecord]) -> CanvasModel {
+        let drawing = CADDrawing()
+        for r in records { _ = drawing.add(r) }
+        let model = CanvasModel(drawing: drawing)
+        model.selection.ids = Set(records.map(\.id))
+        return model
+    }
+
+    /// The 4 corners of a rectangle (half-extents hx,hy) at `center`, rotated CCW.
+    private func rotatedRectCorners(center: Vector, hx: Double, hy: Double, angle: Double) -> [Vector] {
+        let u = Vector(cos(angle), sin(angle))
+        let v = Vector(-sin(angle), cos(angle))
+        return [
+            center + u * (-hx) + v * (-hy),
+            center + u * ( hx) + v * (-hy),
+            center + u * ( hx) + v * ( hy),
+            center + u * (-hx) + v * ( hy),
+        ]
+    }
+
+    private func closedPolyline(_ pts: [Vector], id: UInt64) -> EntityRecord {
+        EntityRecord(id: EntityID(id),
+                     kind: .polyline(PolylineData(vertices: pts.map { PolylineVertex(point: $0) },
+                                                  closed: true)))
+    }
+
+    // MARK: Intrinsic fast path (single entity)
+
+    @Test("a single rotated INSERT uses its stored rotation")
+    func insertIntrinsic() {
+        let m = makeModel([EntityRecord(id: EntityID(1),
+            kind: .insert(InsertData(blockName: "B", insertionPoint: Vector(3, 3), rotation: 0.7)))])
+        #expect(approx(m.gizmoOrientation, 0.7))
+    }
+
+    @Test("a single rotated TEXT uses its stored rotation")
+    func textIntrinsic() {
+        let m = makeModel([EntityRecord(id: EntityID(1),
+            kind: .text(TextData(position: Vector(0, 0), height: 2, rotation: 1.1, text: "hi")))])
+        #expect(approx(m.gizmoOrientation, 1.1))
+    }
+
+    @Test("a single ELLIPSE uses its major-axis angle")
+    func ellipseIntrinsic() {
+        // major axis along 30°, length 5; minor ratio 0.5.
+        let major = Vector(5 * cos(0.5236), 5 * sin(0.5236))
+        let m = makeModel([EntityRecord(id: EntityID(1),
+            kind: .ellipse(EllipseData(center: Vector(2, 2), majorP: major, ratio: 0.5)))])
+        #expect(approx(m.gizmoOrientation, major.angle))
+    }
+
+    @Test("a single CIRCLE has no intrinsic angle → falls back to 0 (symmetric)")
+    func circleNoIntrinsic() {
+        let m = makeModel([EntityRecord(id: EntityID(1),
+            kind: .circle(CircleData(center: Vector(0, 0), radius: 4)))])
+        #expect(approx(m.gizmoOrientation, 0))
+    }
+
+    // MARK: OBB fallback (baked rotated rectangle / multi-select)
+
+    @Test("a baked rotated RECTANGLE polyline recovers the OBB angle (the user's bug)")
+    func rotatedRectangleOBB() {
+        let angle = 0.5
+        let corners = rotatedRectCorners(center: Vector(10, 4), hx: 7, hy: 2, angle: angle)
+        let m = makeModel([closedPolyline(corners, id: 1)])
+        // No intrinsic angle on a polyline → OBB path.
+        #expect(orientationDiff(m.gizmoOrientation, angle) <= 1e-6)
+    }
+
+    @Test("an axis-aligned rectangle polyline stays upright (angle 0)")
+    func axisAlignedRectangle() {
+        let pts = [Vector(0, 0), Vector(10, 0), Vector(10, 4), Vector(0, 4)]
+        let m = makeModel([closedPolyline(pts, id: 1)])
+        #expect(approx(m.gizmoOrientation, 0))
+    }
+
+    @Test("a multi-selection of two separated lines falls back to its OBB / 0")
+    func multiSelect() {
+        // Two horizontal lines → the selection's bounding shape is axis-aligned → 0.
+        let l1 = EntityRecord(id: EntityID(1), kind: .line(LineData(start: Vector(0, 0), end: Vector(6, 0))))
+        let l2 = EntityRecord(id: EntityID(2), kind: .line(LineData(start: Vector(0, 4), end: Vector(6, 4))))
+        let m = makeModel([l1, l2])
+        #expect(m.selection.count == 2)
+        #expect(approx(m.gizmoOrientation, 0))
+    }
+
+    @Test("no selection → orientation 0")
+    func emptySelection() {
+        let m = CanvasModel(drawing: CADDrawing())
+        #expect(approx(m.gizmoOrientation, 0))
+    }
+
+    // MARK: Oriented base frame
+
+    @Test("the oriented base box, rotated by the orientation about its center, hugs a rotated rectangle")
+    func orientedBaseHugsRectangle() {
+        let angle = 0.6
+        let hx = 7.0, hy = 2.0
+        let corners = rotatedRectCorners(center: Vector(12, 5), hx: hx, hy: hy, angle: angle)
+        let m = makeModel([closedPolyline(corners, id: 1)])
+
+        guard let base = m.gizmoOrientedBaseFrame else {
+            Issue.record("expected an oriented base frame"); return
+        }
+        let orient = m.gizmoOrientation
+        // The base box is AXIS-ALIGNED in its own frame; rotate by the orientation
+        // about its center → the drawn oriented quad. Each input corner must be hit.
+        let t = Affine2D.rotation(angle: orient, about: base.center)
+        let drawn = GizmoTransform.transformedQuad(base: base, t: t)
+        for inp in corners {
+            #expect(drawn.contains { approx($0, inp, 1e-6) },
+                    "corner \(inp) not hit by the oriented base quad")
+        }
+        // The base box's extents match the rectangle's (orientation may swap them).
+        let exts = [base.width * 0.5, base.height * 0.5].sorted()
+        let want = [hx, hy].sorted()
+        #expect(approx(exts[0], want[0], 1e-6))
+        #expect(approx(exts[1], want[1], 1e-6))
+    }
+
+    @Test("for orientation 0 the oriented base frame equals the plain upright AABB")
+    func orientedBaseZeroEqualsAABB() {
+        let pts = [Vector(1, 2), Vector(9, 2), Vector(9, 7), Vector(1, 7)]
+        let m = makeModel([closedPolyline(pts, id: 1)])
+        #expect(approx(m.gizmoOrientation, 0))
+        guard let base = m.gizmoOrientedBaseFrame,
+              let aabbBox = m.selectionWorldBounds,
+              let aabbFrame = GizmoFrame(box: aabbBox) else {
+            Issue.record("expected frames"); return
+        }
+        // Byte-identical to the legacy upright frame (no regression for angle 0).
+        #expect(base == aabbFrame)
+    }
+}
