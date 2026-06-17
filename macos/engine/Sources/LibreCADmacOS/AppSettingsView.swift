@@ -61,6 +61,36 @@ import AppKit
 #endif
 import CADEngine
 
+// MARK: - Live-apply notifications (open windows refresh INSTANTLY on a pref change)
+//
+// Changing a canvas-appearance or rendering preference must take effect on every
+// ALREADY-OPEN window immediately — not just on the next window or the next light/dark
+// switch (findings #29/#30 residual). The seam is a pair of DEDICATED app-level
+// notifications this file POSTS from the relevant `@AppStorage` `.onChange` handlers
+// and the canvas Coordinator (`CADCanvasController`) OBSERVES for its lifetime:
+//   • `.lcCanvasAppearanceDidChange` — the canvas BACKGROUND / GRID color overrides
+//     changed. An observer re-runs `CanvasTheme.apply(to:appearance:)` (which re-reads
+//     the override keys fresh) and forces a model rebuild + redraw, so the open canvas
+//     repaints with the new colors (and the light-mode auto-invert re-runs).
+//   • `.lcRenderPrefsDidChange` — a RENDERING pref (antialias / LOD / default line
+//     width) changed. An observer just forces a redraw; `LineRenderer` already re-reads
+//     `RenderPrefs.fromDefaults()` at the top of `draw(in:)` (Wave 2, Lane P) and so
+//     picks the change up on that forced repaint.
+// These are scoped, named posts — NOT a global `UserDefaults` KVO — so only the two
+// relevant pref groups wake the canvas. Defined here (the file the test target
+// symlinks as `_SharedAppSettings.swift`) so `PrefsWiringTests` can assert their names
+// directly; `CADCanvasView.swift` references the SAME constants.
+
+extension Notification.Name {
+    /// Posted when a Preferences ▸ Appearance CANVAS color override (background or
+    /// grid) changes, so open canvases re-apply `CanvasTheme` + repaint immediately.
+    static let lcCanvasAppearanceDidChange = Notification.Name("lc.canvasAppearanceDidChange")
+    /// Posted when a Preferences ▸ Rendering pref (antialias / LOD / default line
+    /// width) changes, so open canvases force a repaint and the renderer re-reads
+    /// `RenderPrefs` on its next `draw(in:)`.
+    static let lcRenderPrefsDidChange = Notification.Name("lc.renderPrefsDidChange")
+}
+
 // MARK: - Pure settings model (testable, no SwiftUI/AppKit)
 //
 // This namespace is the single source of truth for the preference KEYS, their typed
@@ -617,8 +647,19 @@ private struct AppearanceSettingsTab: View {
                 colorRow("Grid", hex: $gridHex)
                 Text("Leave at default to follow the light/dark theme palette.")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("Applies to windows opened after changing this. (Open windows refresh on the next light/dark switch.)")
+                Text("Applies immediately to every open window.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            // Background / grid overrides drive `CanvasTheme.apply`, which re-reads these
+            // keys fresh. A change must reach ALREADY-OPEN windows now (not only the next
+            // window / light-dark switch — findings #29/#30 residual): post the dedicated
+            // appearance notification so each canvas Coordinator re-applies the theme +
+            // repaints. (`@AppStorage` has already persisted the new hex by this point.)
+            .onChange(of: bgHex) { _, _ in
+                NotificationCenter.default.post(name: .lcCanvasAppearanceDidChange, object: nil)
+            }
+            .onChange(of: gridHex) { _, _ in
+                NotificationCenter.default.post(name: .lcCanvasAppearanceDidChange, object: nil)
             }
             Section("Cursor") {
                 Picker("Crosshair", selection: $crosshairRaw) {
@@ -783,7 +824,7 @@ private struct RenderingSettingsTab: View {
                         Text(q.label).tag(q.rawValue)
                     }
                 }
-                Text("Applies to every open window on its next repaint (pan / zoom / edit).")
+                Text("Applies immediately to every open window.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("New geometry") {
@@ -799,6 +840,20 @@ private struct RenderingSettingsTab: View {
             }
         }
         .formStyle(.grouped)
+        // All three rendering prefs are read fresh by `LineRenderer` at the top of every
+        // `draw(in:)` (Wave 2, Lane P), but an IDLE open window won't repaint on its own.
+        // Post the dedicated render-prefs notification so each canvas Coordinator forces a
+        // redraw NOW and the renderer picks the change up on that repaint (findings #30
+        // residual). (`@AppStorage` has already persisted the new value by this point.)
+        .onChange(of: antialias) { _, _ in
+            NotificationCenter.default.post(name: .lcRenderPrefsDidChange, object: nil)
+        }
+        .onChange(of: qualityRaw) { _, _ in
+            NotificationCenter.default.post(name: .lcRenderPrefsDidChange, object: nil)
+        }
+        .onChange(of: lineWidthMM) { _, _ in
+            NotificationCenter.default.post(name: .lcRenderPrefsDidChange, object: nil)
+        }
     }
 }
 
