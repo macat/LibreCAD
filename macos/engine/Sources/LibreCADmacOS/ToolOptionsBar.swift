@@ -29,7 +29,11 @@
 //      • Fillet    → radius
 //      • Chamfer   → distance 1 / distance 2
 //      • Array     → rectangular (rows/cols/spacing) or polar (count/angle/rotate)
-//      • Divide    → pieces
+//      • Divide    → mode {By number → pieces, By length → spacing}
+//  - WAVE-3B parameterized tools (mode + per-mode params on the live tool):
+//      • Spline    → mode {Fit, Control points}
+//      • Scale     → mode {Uniform, Non-uniform → X / Y factors}
+//      • Hatch     → pattern {Solid sentinel + bundled .pat names} + scale + angle
 //  Tools without options render NOTHING (the bar collapses), so it never adds chrome
 //  for Select/Line/etc.
 //
@@ -87,6 +91,8 @@ struct ToolOptionsBar: View {
              // arms below).
              .line,
              .fillet, .chamfer, .array, .divide,
+             // Wave-3B parameterized tools (mode + per-mode params on the live tool).
+             .spline, .scale, .hatch,
              // Wire-wave-3 configurable tools.
              .align, .arrayPath, .leader, .baselineDim,
              // Block INSERT placement options: scale / rotation / MINSERT array.
@@ -314,7 +320,83 @@ struct ToolOptionsBar: View {
             }
 
         case .divide:
-            stepperField("Pieces", value: $model.divideCount, range: 2...1000, width: DS.Field.xy)
+            // Mode: DIVIDE-by-NUMBER (`divideModeStyle == 0`, the default — drop n−1
+            // interior points) vs MEASURE-by-LENGTH (`== 1` — a node every `divideSpacing`
+            // world units). DivideTool's mode is fixed at construction, so applyToolConfig
+            // RE-MINTS it from the assembled `divideMode`. (Index-bound: `DivideMode`
+            // carries an associated value, so it can't be a Picker tag.)
+            Picker("Mode", selection: $model.divideModeStyle) {
+                Text("By number").tag(0)
+                Text("By length").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .labelsHidden()
+            .onChange(of: model.divideModeStyle) { _, _ in apply() }
+            if model.divideModeStyle == 1 {
+                // Length mode: the spacing (world units along the curve) between nodes.
+                numberField("Spacing", value: $model.divideSpacing, width: DS.Field.narrow)
+            } else {
+                // Number mode: the count of equal pieces (drops count − 1 interior points).
+                stepperField("Pieces", value: $model.divideCount, range: 2...1000, width: DS.Field.xy)
+            }
+
+        // MARK: Wave-3B parameterized tools (Spline / Scale / Hatch)
+
+        case .spline:
+            // How the picks are interpreted on commit: FIT points (the default
+            // `.splinePoints` interpolation curve) vs NURBS CONTROL points (`.spline`
+            // B-spline whose control polygon IS the picks). SplineTool's `mode` is a `let`
+            // fixed at construction, so applyToolConfig RE-MINTS the tool on change.
+            Picker("Mode", selection: $model.splineMode) {
+                Text("Fit").tag(SplineMode.fit)
+                Text("Control points").tag(SplineMode.controlPoints)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .labelsHidden()
+            .onChange(of: model.splineMode) { _, _ in apply() }
+
+        case .scale:
+            // Mode: UNIFORM (`.factor`, the original distance-ratio scale — the default)
+            // vs NON-UNIFORM (independent per-axis `(sx, sy)` about one base). ScaleTool
+            // carries `mode` + `nonUniformFactors` as settable `var`s, so applyToolConfig
+            // sets them IN PLACE. (Index-bound: `ScaleMode` is Equatable but not Hashable,
+            // so it can't be a Picker tag — bind a computed Int index over it.)
+            Picker("Mode", selection: scaleModeIndex) {
+                Text("Uniform").tag(0)
+                Text("Non-uniform").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .labelsHidden()
+            .onChange(of: model.scaleMode) { _, _ in apply() }
+            if model.scaleMode == .nonUniform {
+                Divider().frame(height: DS.Size.barDivider)
+                numberField("Scale X", value: $model.scaleX, width: DS.Field.xy)
+                numberField("Scale Y", value: $model.scaleY, width: DS.Field.xy)
+            }
+
+        case .hatch:
+            // Pattern dropdown: a "Solid" sentinel (no pattern ⇒ a solid fill, the
+            // back-compatible default) plus every bundled `.pat` pattern name. Bound to
+            // `currentHatchPattern` (nil ⇒ Solid); applyToolConfig assembles the
+            // `HatchTool.Fill` (solid for nil/"SOLID", else a named pattern + scale/angle).
+            Picker("Pattern", selection: hatchPatternSelection) {
+                Text("Solid").tag(Self.hatchSolidTag)
+                ForEach(hatchPatternNames, id: \.self) { name in
+                    Text(name).tag(name)
+                }
+            }
+            .fixedSize()
+            .labelsHidden()
+            .onChange(of: model.currentHatchPattern) { _, _ in apply() }
+            // Scale + angle apply only to a NAMED pattern (a solid fill ignores them).
+            if model.currentHatchPattern != nil {
+                Divider().frame(height: DS.Size.barDivider)
+                numberField("Scale", value: $model.hatchPatternScale, width: DS.Field.narrow)
+                numberField("Angle°", value: degreesBinding($model.hatchPatternAngle), width: DS.Field.narrow)
+            }
 
         // MARK: Wire-wave-3 configurable tools
 
@@ -425,6 +507,42 @@ struct ToolOptionsBar: View {
                 .labelsHidden()
                 .onChange(of: value.wrappedValue) { _, _ in apply() }
         }
+    }
+
+    // MARK: - Scale mode (Int index ↔ ScaleTool.ScaleMode — not Hashable, so no tag)
+
+    /// A 0/1 index view over `model.scaleMode` for the {Uniform, Non-uniform} segmented
+    /// control. `ScaleMode` is `Equatable` (not `Hashable`), so it can't be a Picker tag
+    /// — this maps the index the segmented control needs to the engine mode the model
+    /// stores. 0 ⇒ `.factor` (uniform / original behavior), 1 ⇒ `.nonUniform`.
+    /// (`.reference` is a third engine mode not exposed by this 2-way control; selecting
+    /// "Uniform" while in `.reference` leaves it as `.factor`, matching the brief.)
+    private var scaleModeIndex: Binding<Int> {
+        Binding(
+            get: { model.scaleMode == .nonUniform ? 1 : 0 },
+            set: { model.scaleMode = ($0 == 1) ? .nonUniform : .factor }
+        )
+    }
+
+    // MARK: - Hatch pattern dropdown (Solid sentinel + the bundled library names)
+
+    /// The Picker tag standing in for "Solid" (no pattern). A real pattern name is its
+    /// own tag; this sentinel maps to/from `currentHatchPattern == nil`. Empty-string
+    /// can never collide with a parsed pattern name (names are non-empty, upper-cased).
+    private static let hatchSolidTag = ""
+
+    /// Every bundled hatch-pattern name, sorted for a stable dropdown order.
+    private var hatchPatternNames: [String] {
+        HatchPatternLibrary.patterns.keys.sorted()
+    }
+
+    /// A selection view over `model.currentHatchPattern` for the pattern dropdown: maps
+    /// `nil` (solid) ↔ the `hatchSolidTag` sentinel, and any real name to/from itself.
+    private var hatchPatternSelection: Binding<String> {
+        Binding(
+            get: { model.currentHatchPattern ?? Self.hatchSolidTag },
+            set: { model.currentHatchPattern = ($0 == Self.hatchSolidTag) ? nil : $0 }
+        )
     }
 
     /// A degrees view over a radians-backed binding (the UI edits friendlier degrees;
