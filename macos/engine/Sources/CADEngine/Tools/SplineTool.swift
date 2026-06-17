@@ -160,6 +160,31 @@ public struct SplineTool: Tool {
         return [ResolvedPolyline(points: tessellated, closed: false, pen: .toolPreview)]
     }
 
+    /// The AutoCAD-style mid-draw command KEYWORDS the spline offers at its current
+    /// step, derived PURELY from the committed fit/control-point count in `state` (no
+    /// new stored fields — reads `state` like `preview`/`status` do). The smart command
+    /// line (Wave 4) renders these as `[Close]`/`[Undo]` chips, and a chosen keyword is
+    /// dispatched back through the EXISTING `ToolInput` events (Wave 3):
+    ///   - `Undo` ↔ `.backspace` (removes the last point).
+    ///   - `Close` ↔ `.click(firstPoint)` — clicking on the first point closes the
+    ///     spline and commits (`commitSpline(closed: true)`); there is no standalone
+    ///     close input, so Wave 3 feeds the first point back as a `.click`.
+    /// Step gating matches the REAL close path in `handleClick`, which requires
+    /// `points.count >= 3` to close: <1 point → none; exactly 1 → `Undo` only; 2 →
+    /// `Undo` only (cannot close yet); ≥3 → `Close` + `Undo`. Applies to BOTH modes
+    /// (`.fit`/`.controlPoints`) — they share the same accumulation + close flow.
+    /// Empty before the first point and after commit/reset (`state == .empty`).
+    public var keywordOptions: [ToolKeyword] {
+        guard case .building(let points) = state, !points.isEmpty else { return [] }
+        if points.count >= 3 {
+            return [
+                ToolKeyword(keyword: "Close", label: "Close"),
+                ToolKeyword(keyword: "Undo", label: "Undo"),
+            ]
+        }
+        return [ToolKeyword(keyword: "Undo", label: "Undo")]
+    }
+
     /// A draw tool: it IGNORES `context` (it needs only the snapped world points)
     /// and emits new geometry as a single `.add` edit on commit.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
