@@ -286,6 +286,7 @@ struct CommandLineBar: View {
     private func keywordChip(_ kw: ToolKeyword) -> some View {
         Button {
             model.invokeToolKeyword(kw.keyword)
+            focused.wrappedValue = true   // keep the field hot so the next coordinate lands here
             requestRedraw()
         } label: {
             Text("[\(kw.label)]")
