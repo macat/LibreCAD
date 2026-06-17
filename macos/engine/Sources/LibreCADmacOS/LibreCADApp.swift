@@ -47,6 +47,27 @@ struct LibreCADApp: App {
         if !saved.isEmpty {
             CADFonts.addUserFontDirectory(URL(fileURLWithPath: saved))
         }
+        // #28 — APPLY THE PERSISTED THEME AT LAUNCH. `AppSettingsView` drives
+        // `NSApp.appearance` live when the picker changes, but a FORCED Light/Dark
+        // theme was lost on a cold start because nothing re-applied it before the first
+        // window drew. Read the same `@AppStorage`-backed key (`app.appearance.theme`)
+        // straight off `UserDefaults` and set `NSApp.appearance` here so the choice
+        // survives relaunch. `.system` (or an unset/garbage value) clears the override so
+        // AppKit tracks System Settings ▸ Appearance — identical to `applyTheme(.system)`.
+        // We DON'T touch any `AppSettingsView` internals (the brief's "~4 lines inline"):
+        // this is a self-contained read + the public `AppTheme` enum. SwiftUI runs
+        // `App.init()` on the main actor at launch, so the `NSApp.appearance` write is
+        // main-actor-safe (`assumeIsolated`; this is the App init, NOT the off-main
+        // document init the SIGTRAP note warns about).
+        let themeRaw = UserDefaults.standard.string(forKey: AppSettings.Key.theme)
+        let theme = themeRaw.flatMap(AppTheme.init(rawValue:)) ?? .system
+        MainActor.assumeIsolated {
+            switch theme {
+            case .system: NSApp.appearance = nil
+            case .light:  NSApp.appearance = NSAppearance(named: .aqua)
+            case .dark:   NSApp.appearance = NSAppearance(named: .darkAqua)
+            }
+        }
     }
 
     /// The F8 key as a SwiftUI `KeyEquivalent`. SwiftUI ships no function-key
@@ -146,6 +167,16 @@ struct LibreCADApp: App {
     /// the matching menu item is disabled.
     @FocusedValue(\.matchPropPickUp) private var matchPropPickUp
     @FocusedValue(\.matchPropApply) private var matchPropApply
+    /// Toggle the trailing Inspector pane on the focused window (#03 — View ▸ Show
+    /// Inspector, ⌃⌘I). `nil` ⇒ no canvas focused ⇒ the menu item is disabled.
+    @FocusedValue(\.toggleInspector) private var toggleInspector
+    /// Layout-menu actions on the focused window (#00). `newLayout` is published whenever
+    /// a canvas is focused; `deleteActiveLayout` / `duplicateActiveLayout` are published
+    /// only when a layout TAB is active (paper space) and `nil` in model space, so the
+    /// matching Layout-menu items disable when there is no active layout to act on.
+    @FocusedValue(\.newLayout) private var newLayout
+    @FocusedValue(\.deleteActiveLayout) private var deleteActiveLayout
+    @FocusedValue(\.duplicateActiveLayout) private var duplicateActiveLayout
 
     var body: some Scene {
         // The document scene: a brand-new document is the empty `LibreCADDocument()`;
@@ -353,22 +384,26 @@ struct LibreCADApp: App {
                     NSApp.sendAction(Selector(("selectContourAction:")), to: nil, from: nil)
                 }
 
-                Divider()
-                // Edit ▸ Match Properties (#2) — the AutoCAD MATCHPROP / format-painter
-                // pair. Pick Up (⌘⇧C) loads the property brush from the single selected
-                // entity; Apply (⌘⇧V) paints it onto the whole current selection (one
-                // undoable group). Routed to the focused window via focused values
+                // Edit ▸ Match Properties (#2, #10) — the AutoCAD MATCHPROP / format-painter
+                // pair, grouped under a "Match Properties" SECTION header so the umbrella
+                // name is consistent with the toolbar's "Match Properties" button (#10 — keep
+                // the umbrella; the verbs Pick Up / Apply read beneath it). The `Section`
+                // draws its own separator + header, so the prior explicit `Divider()` is gone.
+                // Pick Up (⌘⇧C) loads the property brush from the single selected entity;
+                // Apply (⌘⇧V) paints it onto the whole current selection (one undoable group).
+                // Routed to the focused window via focused values
                 // (`CanvasModel.loadPaintBrushFromSelection` / `applyPaintBrushToSelection`,
                 // P0-D). ⌘⇧C / ⌘⇧V are FREE in the app menus (system Copy/Paste are bare
-                // ⌘C/⌘V; verified no other menu item binds the shifted chords). The toolbar
-                // `eyedropper` button (ContentView) also fires Pick Up. Each is disabled
-                // when its focused value is `nil` (no canvas focused).
-                Button("Pick Up Properties") { matchPropPickUp?() }
-                    .keyboardShortcut("c", modifiers: [.command, .shift])
-                    .disabled(matchPropPickUp == nil)
-                Button("Apply Properties") { matchPropApply?() }
-                    .keyboardShortcut("v", modifiers: [.command, .shift])
-                    .disabled(matchPropApply == nil)
+                // ⌘C/⌘V). The toolbar `eyedropper` button (ContentView) also fires Pick Up.
+                // Each is disabled when its focused value is `nil` (no canvas focused).
+                Section("Match Properties") {
+                    Button("Pick Up Properties") { matchPropPickUp?() }
+                        .keyboardShortcut("c", modifiers: [.command, .shift])
+                        .disabled(matchPropPickUp == nil)
+                    Button("Apply Properties") { matchPropApply?() }
+                        .keyboardShortcut("v", modifiers: [.command, .shift])
+                        .disabled(matchPropApply == nil)
+                }
             }
             CommandGroup(after: .toolbar) {
                 // ⌘K — the command palette: fuzzy-find and run any tool/app action.
@@ -384,6 +419,17 @@ struct LibreCADApp: App {
                 Button("Zoom to Fit") { zoomToFit?() }
                     .keyboardShortcut("0", modifiers: .command)
                     .disabled(zoomToFit == nil)
+                // View ▸ Show Inspector (⌃⌘I — #03). Toggles the trailing Inspector pane
+                // (entity properties + snap/grid + tool options). Previously the toggle was
+                // ONLY the toolbar `sidebar.trailing` button + the ⌘K palette entry — there
+                // was no menu item or shortcut. Fires the SAME `showInspector.toggle()`
+                // closure via the focused value. ⌃⌘I is free: the menus use ⌘ / ⌥⌘ chords
+                // (⌥⌘I is Isolate Layers) and the canvas keymap is bare/⇧/⌥ letters, so a
+                // ⌃⌘ chord never collides. (Title "Show Inspector" matches the macOS
+                // convention; the item is a plain toggle, like the toolbar button.)
+                Button("Show Inspector") { toggleInspector?() }
+                    .keyboardShortcut("i", modifiers: [.control, .command])
+                    .disabled(toggleInspector == nil)
                 // View ▸ Zoom Window (⇧⌘Z is taken by Redo; use ⌥⌘Z) — arm the
                 // transient drag-box zoom: the next drag draws a box, releasing zooms
                 // to fit it (F23). Routed through the responder chain to the focused
@@ -548,6 +594,12 @@ struct LibreCADApp: App {
                 modifyMenu
                 annotateMenu
             }
+            // Arrange / Layers / Layout are wrapped in a `Group` so the `.commands`
+            // result-builder stays within its ~10-child block limit (adding the new
+            // Layout menu pushed the top-level count over). `Group` conforms to `Commands`
+            // and just bundles its children — the three menus still render as separate
+            // top-level menu-bar menus, unchanged.
+            Group {
             // The Arrange menu (F16) — draw-order (Z-stack) ops + Revert Direction on
             // the current selection. Routed through the responder chain to the focused
             // canvas (like the Edit/View selection items), which acts on its
@@ -591,8 +643,12 @@ struct LibreCADApp: App {
             // undoable and are safe no-ops with no selection / nothing isolated, so the
             // items never corrupt state; `validateUserInterfaceItem`'s `default` arm
             // keeps them enabled while a canvas is focused (greyed out with none).
-            // ⌥⌘ chords avoid the canvas keymap + the existing command-modifier menu
-            // chords (⌥⌘I / ⌥⌘U confirmed free in the menus).
+            // ⌥⌘I is free in the menus and used by Isolate. Unisolate gets NO chord:
+            // ⌥⌘U is ALREADY taken by View ▸ "Set UCS by 2 Points" (above), and AppKit's
+            // key-equivalent matching fires only the FIRST item bound to a chord — so a
+            // duplicate ⌥⌘U here would be DEAD (UCS would always win) AND mask the
+            // collision. Unisolate stays menu-only, matching the no-chord pattern of the
+            // other Layers verbs below (Make Current / Turn Off Others).
             CommandMenu("Layers") {
                 Button("Isolate Selection’s Layers") {
                     NSApp.sendAction(Selector(("isolateSelectionLayersAction:")), to: nil, from: nil)
@@ -601,7 +657,6 @@ struct LibreCADApp: App {
                 Button("Unisolate Layers") {
                     NSApp.sendAction(Selector(("unisolateLayersAction:")), to: nil, from: nil)
                 }
-                .keyboardShortcut("u", modifiers: [.command, .option])
 
                 Divider()
                 // Make the selection's layer the CURRENT (active) layer where new
@@ -615,6 +670,40 @@ struct LibreCADApp: App {
                     NSApp.sendAction(Selector(("turnOffOtherLayersAction:")), to: nil, from: nil)
                 }
             }
+            // The Layout menu (#00) — paper-space LAYOUT (Model/Layout tab) management,
+            // surfacing the verbs that previously lived ONLY on the layout TAB STRIP's
+            // right-click menu (so they were unreachable in model space / without a tab).
+            // New / Delete / Duplicate act on the ACTIVE layout via focused values wired in
+            // ContentView to the existing undoable `CanvasModel` ops; each closure runs
+            // exactly what the tab-strip context menu runs.
+            //
+            // SCOPE (per the lane decision "Curated + Layout menu"): New Layout is always
+            // available on a focused canvas; Delete / Duplicate are published only when a
+            // layout TAB is active (paper space) and `nil` otherwise, so they auto-disable
+            // in model space. RENAME / PAGE SETUP are DEFERRED: both raise a SHEET that
+            // lives in the non-owned `LayoutTabStrip` (the editor + its `@State` flags),
+            // which this menu can't present without editing that file — they stay on the
+            // tab's right-click menu (double-click a tab to rename; ⋯ → Page Setup). The
+            // menu carries a disabled hint so the affordance is discoverable.
+            CommandMenu("Layout") {
+                Button("New Layout") { newLayout?() }
+                    .disabled(newLayout == nil)
+                Button("Duplicate Layout") { duplicateActiveLayout?() }
+                    .disabled(duplicateActiveLayout == nil)
+                Button("Delete Layout") { deleteActiveLayout?() }
+                    .disabled(deleteActiveLayout == nil)
+
+                Divider()
+                // Rename / Page Setup live on the layout TAB (their sheets are owned by
+                // LayoutTabStrip). Shown disabled here for discoverability — see the
+                // comment above. (A future wire-wave can route these through a focused
+                // value that LayoutTabStrip raises.)
+                Button("Rename Layout… (use the tab’s right-click menu)") { }
+                    .disabled(true)
+                Button("Page Setup… (use the tab’s ⋯ menu)") { }
+                    .disabled(true)
+            }
+            }   // end Group (Arrange / Layers / Layout)
         }
 
         // The APPLICATION-LEVEL Preferences window (audit G7). On macOS a `Settings`

@@ -9,13 +9,17 @@
 //  Three pieces live here:
 //    - `PaletteCommand`   — one runnable entry: a title, an optional shortcut
 //                           hint (shown right-aligned), and an action closure.
-//    - `CommandRegistry`  — assembles the full command list: every `ToolKind`
-//                           (activates the tool via the SAME controller call the
-//                           toolbar uses) plus the main app actions (Open, Save,
-//                           Save As, Export PDF/PNG/SVG, Print, Zoom to Fit,
-//                           Undo, Redo, toggle Inspector, toggle Grid). Each app
-//                           action fires exactly the focused-scene-value closure
-//                           the menu fires.
+//    - `CommandRegistry`  — assembles the command list: every `ToolKind` (activates
+//                           the tool via the SAME controller call the toolbar uses)
+//                           plus a CURATED set of high-value app actions (Open, Save,
+//                           Save As, Export PDF/PNG/SVG, Print, Zoom to Fit, Undo,
+//                           Redo, Inspector, Show Grid, Document Settings, Import/Merge
+//                           DXF, Dimension Style Manager, Save/Restore View, Insert/Save
+//                           Block from/to File, New Layout). Each fires exactly the
+//                           closure/selector the matching menu item fires. This is a
+//                           CURATED roster, NOT every menu action — the menu bar remains
+//                           the exhaustive source of truth (e.g. the full Arrange / UCS /
+//                           relative-zero verbs are menu-only).
 //    - `CommandPalette`   — the SwiftUI overlay: dim backdrop, search field,
 //                           ranked result list. Esc dismisses, ↑/↓ navigate,
 //                           Return runs the highlighted command. Filtering +
@@ -87,6 +91,17 @@ enum CommandRegistry {
         var toggleInspector: () -> Void
         var toggleGrid: () -> Void
         var documentSettings: () -> Void
+        // Curated parity additions (#01) — each fires the SAME closure/selector the
+        // matching menu item fires (see `ContentView.paletteCommands`), so running it
+        // from ⌘K is byte-for-byte the menu action. View-layer modals (file panels,
+        // sheets) stay in those closures — never reachable from a test.
+        var importMergeDXF: () -> Void
+        var dimensionStyleManager: () -> Void
+        var saveNamedView: () -> Void
+        var restoreNamedView: () -> Void
+        var insertBlockFromFile: () -> Void
+        var saveBlockToFile: () -> Void
+        var newLayout: () -> Void
     }
 
     /// SF Symbol + shortcut hint for each tool, mirroring the toolbar/menu so the
@@ -222,16 +237,58 @@ enum CommandRegistry {
                            systemImage: "arrow.uturn.backward", shortcut: "⌘Z", run: actions.undo),
             PaletteCommand(id: "app.redo", title: "Redo",
                            systemImage: "arrow.uturn.forward", shortcut: "⇧⌘Z", run: actions.redo),
-            PaletteCommand(id: "app.toggleInspector", title: "Toggle Inspector",
+            // Titled "Inspector" (not "Toggle Inspector") to MATCH the toolbar button's
+            // "Inspector" label + the View ▸ Show Inspector menu item (#11 — the
+            // entity-property panel is "Inspector" everywhere). It still toggles the pane.
+            PaletteCommand(id: "app.toggleInspector", title: "Inspector",
                            systemImage: "sidebar.trailing", run: actions.toggleInspector),
-            PaletteCommand(id: "app.toggleGrid", title: "Toggle Grid",
+            // Titled "Show Grid" to MATCH the View ▸ Show Grid menu item: the palette's
+            // matcher is a strict case-insensitive SUBSEQUENCE, so a "Toggle Grid" title
+            // returned ZERO hits when the user typed the menu wording "Show Grid". (The
+            // action still toggles; the title mirrors the discoverable menu label.)
+            PaletteCommand(id: "app.toggleGrid", title: "Show Grid",
                            systemImage: "grid", run: actions.toggleGrid),
             PaletteCommand(id: "app.documentSettings", title: "Document Settings…",
                            systemImage: "gearshape", shortcut: "⌥⌘,", run: actions.documentSettings),
+            // Curated parity additions (#01) — high-value menu actions that were missing
+            // from ⌘K. Each fires the SAME closure/selector the menu uses; the file
+            // panels / sheets these raise stay in the View layer.
+            PaletteCommand(id: "app.importMergeDXF", title: "Import / Merge DXF…",
+                           systemImage: "square.and.arrow.down.on.square", run: actions.importMergeDXF),
+            PaletteCommand(id: "app.dimStyleManager", title: "Dimension Style Manager…",
+                           systemImage: "ruler", run: actions.dimensionStyleManager),
+            PaletteCommand(id: "app.saveView", title: "Save View…",
+                           systemImage: "bookmark", shortcut: "⌥⌘S", run: actions.saveNamedView),
+            PaletteCommand(id: "app.restoreView", title: "Restore View…",
+                           systemImage: "bookmark.fill", run: actions.restoreNamedView),
+            PaletteCommand(id: "app.insertBlockFromFile", title: "Insert Block from File…",
+                           systemImage: "square.and.arrow.down", run: actions.insertBlockFromFile),
+            PaletteCommand(id: "app.saveBlockToFile", title: "Save Block to File…",
+                           systemImage: "square.and.arrow.up", run: actions.saveBlockToFile),
+            PaletteCommand(id: "app.newLayout", title: "New Layout",
+                           systemImage: "plus.rectangle.on.folder", run: actions.newLayout),
         ])
 
         return list
     }
+}
+
+// MARK: - Focused value: raise the ⌘K palette
+
+/// The "open command palette" (⌘K) action published by the focused window. Lives HERE
+/// (next to `CommandPaletteModifier`, its sole publisher, and the registry) so the
+/// palette compiles standalone in its unit-test symlink — the rest of the app's focused
+/// values stay in ContentView. Same module: LibreCADApp's `@FocusedValue(\.commandPalette)`
+/// reader is unaffected.
+extension FocusedValues {
+    var commandPalette: (() -> Void)? {
+        get { self[CommandPaletteKey.self] }
+        set { self[CommandPaletteKey.self] = newValue }
+    }
+}
+
+private struct CommandPaletteKey: FocusedValueKey {
+    typealias Value = () -> Void
 }
 
 // MARK: - Presentation modifier
@@ -330,8 +387,11 @@ struct CommandPalette: View {
                 .onKeyPress(.return) { runSelected(); return .handled }
                 .onKeyPress(.escape) { dismiss(); return .handled }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
+        // #45 — sanctioned DS spacing: the search field used a retired `14` vertical
+        // pad (off the 4pt scale {2,4,6,8,12,16,24}); snap it to `DS.Space.lg` (12),
+        // matching the on-scale 12 the result rows below already use. Horizontal → `xl` (16).
+        .padding(.horizontal, DS.Space.xl)
+        .padding(.vertical, DS.Space.lg)
     }
 
     private var resultList: some View {
