@@ -421,6 +421,13 @@ public struct TextData: Sendable, Hashable, Codable {
 /// - `patternAngle`: an EXTRA rotation (radians, DXF code 52) applied to the
 ///                  whole pattern, on top of each `.pat` line's own angle.
 ///                  Ignored for a solid fill.
+/// - `gradient`:    an optional GRADIENT fill descriptor (`HatchGradient`). When
+///                  non-`nil` the hatch is filled with a color ramp instead of a
+///                  flat solid/pattern; `nil` (the default — and what every older
+///                  hatch decodes to) keeps the prior solid/pattern behavior. The
+///                  field is additive and render/DXF/inspector support land in
+///                  later waves; this wave only carries it through the model,
+///                  resolve, and transform.
 public struct HatchData: Sendable, Hashable, Codable {
     public var loops: [[PolylineVertex]]
     public var solidFill: Bool
@@ -431,22 +438,64 @@ public struct HatchData: Sendable, Hashable, Codable {
     /// Extra pattern rotation in radians (DXF code 52), added to each pattern
     /// line's own angle. Additive — older data decodes to `0`.
     public var patternAngle: Double
+    /// An optional GRADIENT fill (DXF gradient hatch). `nil` (the default, and what
+    /// older data decodes to) means a flat solid/pattern fill — the prior behavior.
+    public var gradient: HatchGradient?
 
     public init(loops: [[PolylineVertex]], solidFill: Bool = true, patternName: String? = nil,
-                patternScale: Double = 1, patternAngle: Double = 0) {
+                patternScale: Double = 1, patternAngle: Double = 0,
+                gradient: HatchGradient? = nil) {
         self.loops = loops
         self.solidFill = solidFill
         self.patternName = patternName
         self.patternScale = patternScale
         self.patternAngle = patternAngle
+        self.gradient = gradient
     }
 }
 
-// MARK: - Decodable (back-compat: tolerate missing pattern scale/angle)
+/// A GRADIENT hatch fill — a color ramp the renderer paints across the hatch's
+/// boundary (DXF gradient hatch: codes 450–453 / 460–463 / 470). Mirrors the
+/// defining gradient fields; the render-ready form is produced by `resolve()`
+/// (ADR-001), not stored.
+///
+/// - `kind`:   `.linear` (a directional ramp) or `.radial` (a centered ramp),
+///             matching the DXF gradient types.
+/// - `colors`: the gradient stops. **1** color is a single-color gradient (the
+///             DXF "one-color" gradient — the renderer ramps it toward white/a
+///             tint); **2** colors is the standard two-color gradient. More than
+///             two are tolerated/carried but only the first two are meaningful to
+///             the current model. Stored as concrete `RGBAColor` (gradient stops
+///             are explicit colors in DXF, not ByLayer/ByBlock sentinels).
+/// - `angle`: the gradient rotation in RADIANS (DXF code 460 is radians) — the
+///            direction of a `.linear` ramp / the orientation hint of a `.radial`
+///            one. Transform-rotated like `HatchData.patternAngle`.
+public struct HatchGradient: Equatable, Codable, Sendable, Hashable {
+    /// The gradient geometry: a directional (`linear`) or centered (`radial`) ramp.
+    public enum Kind: String, Codable, Sendable, Hashable {
+        case linear
+        case radial
+    }
+
+    public var kind: Kind
+    /// 1 or 2 (or more, tolerated) gradient stops. A single stop is the DXF
+    /// one-color gradient; two stops is the standard two-color gradient.
+    public var colors: [RGBAColor]
+    /// Gradient rotation in radians (DXF code 460 is radians).
+    public var angle: Double
+
+    public init(kind: Kind, colors: [RGBAColor], angle: Double = 0) {
+        self.kind = kind
+        self.colors = colors
+        self.angle = angle
+    }
+}
+
+// MARK: - Decodable (back-compat: tolerate missing pattern scale/angle/gradient)
 
 extension HatchData {
     private enum CodingKeys: String, CodingKey {
-        case loops, solidFill, patternName, patternScale, patternAngle
+        case loops, solidFill, patternName, patternScale, patternAngle, gradient
     }
 
     public init(from decoder: any Decoder) throws {
@@ -459,6 +508,8 @@ extension HatchData {
         let s = try c.decodeIfPresent(Double.self, forKey: .patternScale) ?? 1
         patternScale = (s.isFinite && s > 0) ? s : 1
         patternAngle = try c.decodeIfPresent(Double.self, forKey: .patternAngle) ?? 0
+        // Additive: older data has no `gradient` ⇒ `nil` (a flat fill).
+        gradient = try c.decodeIfPresent(HatchGradient.self, forKey: .gradient)
     }
 }
 

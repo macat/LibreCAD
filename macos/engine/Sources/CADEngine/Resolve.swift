@@ -52,20 +52,56 @@ public struct ResolvedPolyline: Sendable, Equatable {
 public struct ResolvedFill: Sendable, Equatable {
     /// Boundary + holes. `loops[0]` outer (CCW), `loops[1...]` holes (CW).
     public var loops: [[Vector]]
+    /// The flat fill color (the SOLID case). Always present; for a gradient fill
+    /// the renderer prefers `gradient` but `color` stays a sensible fallback (the
+    /// gradient's first stop, or the pen color), so a gradient-unaware draw path
+    /// still paints a plausible solid.
     public var color: RGBAColor
+    /// A GRADIENT descriptor when this fill is a gradient hatch; `nil` (the
+    /// default) is a flat solid fill — the prior behavior. Additive, so all
+    /// existing fill producers/consumers stay byte-for-byte unchanged.
+    public var gradient: ResolvedGradient?
 
     /// The outer boundary loop, if any (`loops[0]`).
     public var outerLoop: [Vector]? { loops.first }
 
-    public init(loops: [[Vector]], color: RGBAColor) {
+    public init(loops: [[Vector]], color: RGBAColor, gradient: ResolvedGradient? = nil) {
         self.loops = loops
         self.color = color
+        self.gradient = gradient
     }
 
     /// Convenience for the common single-boundary (no holes) case.
-    public init(outline: [Vector], color: RGBAColor) {
+    public init(outline: [Vector], color: RGBAColor, gradient: ResolvedGradient? = nil) {
         self.loops = [outline]
         self.color = color
+        self.gradient = gradient
+    }
+}
+
+/// A render-ready GRADIENT fill descriptor — the resolved form of `HatchGradient`
+/// the renderer paints across a `ResolvedFill`'s boundary. Carries the fully
+/// resolved stop colors (no ByLayer/ByBlock sentinels remain), the ramp geometry,
+/// and the (transform-rotated) angle. Additive; produced only by `resolveHatch`
+/// when the source hatch carries a gradient.
+public struct ResolvedGradient: Sendable, Equatable {
+    /// The ramp geometry: a directional (`linear`) or centered (`radial`) gradient.
+    public enum Kind: Sendable, Equatable {
+        case linear
+        case radial
+    }
+
+    public var kind: Kind
+    /// The resolved gradient stops (1 = single-color gradient; 2 = two-color).
+    /// Concrete colors — any ByLayer/ByBlock resolution already happened.
+    public var colors: [RGBAColor]
+    /// The gradient rotation in radians (already transform-rotated upstream).
+    public var angle: Double
+
+    public init(kind: Kind, colors: [RGBAColor], angle: Double = 0) {
+        self.kind = kind
+        self.colors = colors
+        self.angle = angle
     }
 }
 
@@ -1250,12 +1286,30 @@ extension EntityKind {
             .filter { $0.count >= 3 }
         guard !rings.isEmpty else { return ResolvedGeometry() }
 
+        // A gradient hatch resolves to a fill carrying the render-ready gradient.
+        // Gradient stops are concrete colors in the model (DXF gradient stops are
+        // explicit, not ByLayer/ByBlock), so they carry straight through; the flat
+        // `color` keeps the first stop (or the pen color) as a gradient-unaware
+        // fallback. Render/DXF support for the gradient itself is a later wave.
+        let resolvedGradient: ResolvedGradient? = d.gradient.map { g in
+            ResolvedGradient(
+                kind: g.kind == .radial ? .radial : .linear,
+                colors: g.colors,
+                angle: g.angle)
+        }
+
         let solidFill: () -> ResolvedGeometry = {
-            ResolvedGeometry(fills: [ResolvedFill(loops: rings, color: pen.color)])
+            let fallback = resolvedGradient?.colors.first ?? pen.color
+            return ResolvedGeometry(fills: [
+                ResolvedFill(loops: rings, color: fallback, gradient: resolvedGradient)
+            ])
         }
 
         // Solid hatch ⇒ fill. Pattern hatch ⇒ try the bundled `.pat` library.
-        guard !d.solidFill, let pattern = HatchPatternLibrary.pattern(named: d.patternName)
+        // A gradient ALWAYS resolves through the fill path (the gradient supersedes
+        // a pattern), so don't divert a gradient hatch to the pattern-line path.
+        guard d.gradient == nil,
+              !d.solidFill, let pattern = HatchPatternLibrary.pattern(named: d.patternName)
         else { return solidFill() }
 
         let segs = HatchPatternGenerator.segments(
