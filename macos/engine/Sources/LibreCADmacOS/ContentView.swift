@@ -1846,6 +1846,9 @@ enum ToolCatalog {
         case .viewport:    return .init(symbol: "rectangle.dashed",
                                         help: "Place a paper-space viewport — drag two corners on a layout sheet (⌥V)",
                                         shortcut: "⌥V")
+        // Parity-program W2: Revision Cloud markup (UNWIRED — coupled no-default arm
+        // only; no toolbar group / pinned / activate wiring, that's the W4 wire-wave).
+        case .revcloud:    return .init(symbol: "cloud", help: "Revision cloud", shortcut: nil)
         }
     }
 }
