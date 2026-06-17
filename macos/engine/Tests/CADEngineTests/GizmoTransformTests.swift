@@ -215,6 +215,60 @@ struct GizmoTransformTests {
         #expect(GizmoTransform.rotateAngle(frame: frame, from: center, to: p) == nil)
     }
 
+    // MARK: - Point-based overloads (oriented gizmo pivot/center)
+
+    @Test("point-based cornerScale about an explicit pivot matches the frame-based form")
+    func cornerScalePivotOverload() {
+        let frame = Self.frame
+        let corner: GizmoHandle.Corner = .topRight
+        let pivot = frame.oppositeCorner(corner)
+        let p0 = frame.corner(corner)
+        let p1 = Vector(20, 12)
+        let viaFrame = GizmoTransform.cornerScale(frame: frame, corner: corner, from: p0, to: p1)
+        let viaPivot = GizmoTransform.cornerScale(pivot: pivot, from: p0, to: p1)
+        #expect(viaPivot == viaFrame)
+        // It scales about an ARBITRARY (oriented) pivot the frame can't express.
+        let oriented = GizmoTransform.cornerScale(pivot: Vector(2, 1), from: Vector(4, 3), to: Vector(6, 5))
+        #expect(approx(oriented.apply(Vector(2, 1)), Vector(2, 1)))   // pivot fixed
+    }
+
+    @Test("point-based cornerScale is identity for a degenerate drag")
+    func cornerScalePivotDegenerate() {
+        // pivot == p0 → oldDist 0 → identity.
+        let t = GizmoTransform.cornerScale(pivot: Vector(5, 5), from: Vector(5, 5), to: Vector(9, 9))
+        #expect(t == .identity)
+    }
+
+    @Test("point-based rotate about an explicit center matches the frame-based form")
+    func rotateCenterOverload() {
+        let frame = Self.frame
+        let center = frame.center
+        let p0 = center + Vector(4, 0)
+        let p1 = center + Vector(0, 4)
+        let viaFrame = GizmoTransform.rotate(frame: frame, from: p0, to: p1)
+        let viaCenter = GizmoTransform.rotate(center: center, from: p0, to: p1)
+        #expect(viaCenter == viaFrame)
+        // About an arbitrary oriented center.
+        let c = Vector(2, 2)
+        let t = GizmoTransform.rotate(center: c, from: c + Vector(3, 0), to: c + Vector(0, 3))
+        #expect(approx(t.apply(c + Vector(3, 0)), c + Vector(0, 3)))
+        #expect(approx(t.apply(c), c))   // center fixed
+    }
+
+    @Test("point-based rotateAngle snaps and rejects degenerate drags")
+    func rotateAngleCenterOverload() {
+        let c = Vector(0, 0)
+        // ~20° → snaps to 15°.
+        let p0 = c + Vector(4, 0)
+        let p1 = c + Vector(4 * cos(20 * .pi / 180), 4 * sin(20 * .pi / 180))
+        let a = GizmoTransform.rotateAngle(center: c, from: p0, to: p1, snap: true)
+        #expect(a != nil)
+        #expect(approx(a!, .pi / 12, 1e-9))
+        // p0 == p1 → nil; a point at the center → nil.
+        #expect(GizmoTransform.rotateAngle(center: c, from: p0, to: p0) == nil)
+        #expect(GizmoTransform.rotateAngle(center: c, from: c, to: p0) == nil)
+    }
+
     // MARK: - Oriented frame chrome (transformedQuad / transformedKnobAnchor)
 
     @Test("identity transform yields the base AABB corners in [BL,BR,TR,TL] order")
@@ -308,6 +362,49 @@ struct GizmoTransformTests {
         #expect(!approx(a.outward, Vector(0, 1)))
     }
 
+    // MARK: - Oriented hit-testing (pointInConvexQuad)
+
+    @Test("point-in-quad: inside / outside an axis-aligned quad")
+    func pointInQuadAxisAligned() {
+        let q = [Vector(0, 0), Vector(10, 0), Vector(10, 6), Vector(0, 6)]
+        #expect(GizmoTransform.pointInConvexQuad(Vector(5, 3), quad: q))   // center
+        #expect(GizmoTransform.pointInConvexQuad(Vector(0, 0), quad: q))   // corner
+        #expect(!GizmoTransform.pointInConvexQuad(Vector(-1, 3), quad: q)) // left of it
+        #expect(!GizmoTransform.pointInConvexQuad(Vector(5, 7), quad: q))  // above it
+    }
+
+    @Test("point-in-quad: a ROTATED quad accepts points the AABB would and rejects corners the AABB wouldn't")
+    func pointInQuadRotated() {
+        // A 10×4 box rotated 45° about its center (5,2): its AABB is much larger.
+        let center = Vector(5, 2)
+        let t = Affine2D.rotation(angle: .pi / 4, about: center)
+        let q = GizmoTransform.transformedQuad(base: GizmoFrame(min: Vector(0, 0), max: Vector(10, 4)), t: t)
+        // The center is inside.
+        #expect(GizmoTransform.pointInConvexQuad(center, quad: q))
+        // A point near a CORNER of the rotated box's AABB but OUTSIDE the rotated
+        // quad is rejected — the oriented test is tighter than a screen AABB.
+        // The rotated box's AABB spans roughly x∈[~-0.95, ~10.95]; pick a far corner.
+        let aabbCorner = Vector(center.x - 4.9, center.y - 4.9)
+        #expect(!GizmoTransform.pointInConvexQuad(aabbCorner, quad: q))
+    }
+
+    @Test("point-in-quad: slop expands the accept region")
+    func pointInQuadSlop() {
+        let q = [Vector(0, 0), Vector(10, 0), Vector(10, 6), Vector(0, 6)]
+        // Just outside the right edge by 0.5.
+        let p = Vector(10.5, 3)
+        #expect(!GizmoTransform.pointInConvexQuad(p, quad: q))            // no slop
+        #expect(GizmoTransform.pointInConvexQuad(p, quad: q, slop: 1.0))  // within slop
+    }
+
+    @Test("point-in-quad: degenerate / non-quad input is rejected")
+    func pointInQuadDegenerate() {
+        #expect(!GizmoTransform.pointInConvexQuad(Vector(0, 0), quad: [Vector(0, 0), Vector(1, 1), Vector(2, 2)]))
+        // Zero-area quad (all points coincide) → rejected.
+        let z = Vector(3, 3)
+        #expect(!GizmoTransform.pointInConvexQuad(z, quad: [z, z, z, z]))
+    }
+
     @Test("knob anchor outward stays outward across all four rotation quadrants")
     func transformedKnobAnchorAllQuadrants() {
         let f = Self.frame
@@ -320,5 +417,170 @@ struct GizmoTransformTests {
             let dotOut = a.outward.x * centerToRoot.x + a.outward.y * centerToRoot.y
             #expect(dotOut > 0, "outward flipped inward at \(deg)°")
         }
+    }
+}
+
+// MARK: - Stage 2: CanvasModel orientation feeder (gizmoOrientation + oriented base)
+
+/// Tests for the resting-gizmo ORIENTATION feeder added to `CanvasModel` (task
+/// #17): the intrinsic-angle fast path for a single rotated entity, the min-area
+/// OBB fallback for a baked rotated rectangle / multi-select, and the oriented base
+/// frame that — rotated by that angle about its own center — hugs the geometry.
+///
+/// `@MainActor` because `CanvasModel` is a main-actor `@Observable` (reached via
+/// the `_SharedCanvasModel.swift` symlink into the test target).
+@MainActor
+@Suite("Gizmo orientation feeder (CanvasModel)")
+struct GizmoOrientationFeederTests {
+
+    private static let eps = 1e-7
+
+    private func approx(_ a: Double, _ b: Double, _ tol: Double = eps) -> Bool {
+        abs(a - b) <= tol
+    }
+    private func approx(_ a: Vector, _ b: Vector, _ tol: Double = eps) -> Bool {
+        approx(a.x, b.x, tol) && approx(a.y, b.y, tol)
+    }
+    /// Orientation difference mod π/2 (a box's angle is canonical to that band).
+    private func orientationDiff(_ a: Double, _ b: Double) -> Double {
+        let quarter = Double.pi / 2
+        var d = (a - b).truncatingRemainder(dividingBy: quarter)
+        if d > quarter / 2 { d -= quarter }
+        if d < -quarter / 2 { d += quarter }
+        return abs(d)
+    }
+
+    private func makeModel(_ records: [EntityRecord]) -> CanvasModel {
+        let drawing = CADDrawing()
+        for r in records { _ = drawing.add(r) }
+        let model = CanvasModel(drawing: drawing)
+        model.selection.ids = Set(records.map(\.id))
+        return model
+    }
+
+    /// The 4 corners of a rectangle (half-extents hx,hy) at `center`, rotated CCW.
+    private func rotatedRectCorners(center: Vector, hx: Double, hy: Double, angle: Double) -> [Vector] {
+        let u = Vector(cos(angle), sin(angle))
+        let v = Vector(-sin(angle), cos(angle))
+        return [
+            center + u * (-hx) + v * (-hy),
+            center + u * ( hx) + v * (-hy),
+            center + u * ( hx) + v * ( hy),
+            center + u * (-hx) + v * ( hy),
+        ]
+    }
+
+    private func closedPolyline(_ pts: [Vector], id: UInt64) -> EntityRecord {
+        EntityRecord(id: EntityID(id),
+                     kind: .polyline(PolylineData(vertices: pts.map { PolylineVertex(point: $0) },
+                                                  closed: true)))
+    }
+
+    // MARK: Intrinsic fast path (single entity)
+
+    @Test("a single rotated INSERT uses its stored rotation")
+    func insertIntrinsic() {
+        let m = makeModel([EntityRecord(id: EntityID(1),
+            kind: .insert(InsertData(blockName: "B", insertionPoint: Vector(3, 3), rotation: 0.7)))])
+        #expect(approx(m.gizmoOrientation, 0.7))
+    }
+
+    @Test("a single rotated TEXT uses its stored rotation")
+    func textIntrinsic() {
+        let m = makeModel([EntityRecord(id: EntityID(1),
+            kind: .text(TextData(position: Vector(0, 0), height: 2, rotation: 1.1, text: "hi")))])
+        #expect(approx(m.gizmoOrientation, 1.1))
+    }
+
+    @Test("a single ELLIPSE uses its major-axis angle")
+    func ellipseIntrinsic() {
+        // major axis along 30°, length 5; minor ratio 0.5.
+        let major = Vector(5 * cos(0.5236), 5 * sin(0.5236))
+        let m = makeModel([EntityRecord(id: EntityID(1),
+            kind: .ellipse(EllipseData(center: Vector(2, 2), majorP: major, ratio: 0.5)))])
+        #expect(approx(m.gizmoOrientation, major.angle))
+    }
+
+    @Test("a single CIRCLE has no intrinsic angle → falls back to 0 (symmetric)")
+    func circleNoIntrinsic() {
+        let m = makeModel([EntityRecord(id: EntityID(1),
+            kind: .circle(CircleData(center: Vector(0, 0), radius: 4)))])
+        #expect(approx(m.gizmoOrientation, 0))
+    }
+
+    // MARK: OBB fallback (baked rotated rectangle / multi-select)
+
+    @Test("a baked rotated RECTANGLE polyline recovers the OBB angle (the user's bug)")
+    func rotatedRectangleOBB() {
+        let angle = 0.5
+        let corners = rotatedRectCorners(center: Vector(10, 4), hx: 7, hy: 2, angle: angle)
+        let m = makeModel([closedPolyline(corners, id: 1)])
+        // No intrinsic angle on a polyline → OBB path.
+        #expect(orientationDiff(m.gizmoOrientation, angle) <= 1e-6)
+    }
+
+    @Test("an axis-aligned rectangle polyline stays upright (angle 0)")
+    func axisAlignedRectangle() {
+        let pts = [Vector(0, 0), Vector(10, 0), Vector(10, 4), Vector(0, 4)]
+        let m = makeModel([closedPolyline(pts, id: 1)])
+        #expect(approx(m.gizmoOrientation, 0))
+    }
+
+    @Test("a multi-selection of two separated lines falls back to its OBB / 0")
+    func multiSelect() {
+        // Two horizontal lines → the selection's bounding shape is axis-aligned → 0.
+        let l1 = EntityRecord(id: EntityID(1), kind: .line(LineData(start: Vector(0, 0), end: Vector(6, 0))))
+        let l2 = EntityRecord(id: EntityID(2), kind: .line(LineData(start: Vector(0, 4), end: Vector(6, 4))))
+        let m = makeModel([l1, l2])
+        #expect(m.selection.count == 2)
+        #expect(approx(m.gizmoOrientation, 0))
+    }
+
+    @Test("no selection → orientation 0")
+    func emptySelection() {
+        let m = CanvasModel(drawing: CADDrawing())
+        #expect(approx(m.gizmoOrientation, 0))
+    }
+
+    // MARK: Oriented base frame
+
+    @Test("the oriented base box, rotated by the orientation about its center, hugs a rotated rectangle")
+    func orientedBaseHugsRectangle() {
+        let angle = 0.6
+        let hx = 7.0, hy = 2.0
+        let corners = rotatedRectCorners(center: Vector(12, 5), hx: hx, hy: hy, angle: angle)
+        let m = makeModel([closedPolyline(corners, id: 1)])
+
+        guard let base = m.gizmoOrientedBaseFrame else {
+            Issue.record("expected an oriented base frame"); return
+        }
+        let orient = m.gizmoOrientation
+        // The base box is AXIS-ALIGNED in its own frame; rotate by the orientation
+        // about its center → the drawn oriented quad. Each input corner must be hit.
+        let t = Affine2D.rotation(angle: orient, about: base.center)
+        let drawn = GizmoTransform.transformedQuad(base: base, t: t)
+        for inp in corners {
+            #expect(drawn.contains { approx($0, inp, 1e-6) },
+                    "corner \(inp) not hit by the oriented base quad")
+        }
+        // The base box's extents match the rectangle's (orientation may swap them).
+        let exts = [base.width * 0.5, base.height * 0.5].sorted()
+        let want = [hx, hy].sorted()
+        #expect(approx(exts[0], want[0], 1e-6))
+        #expect(approx(exts[1], want[1], 1e-6))
+    }
+
+    @Test("for orientation 0 the oriented base frame equals the plain upright AABB")
+    func orientedBaseZeroEqualsAABB() {
+        let pts = [Vector(1, 2), Vector(9, 2), Vector(9, 7), Vector(1, 7)]
+        let m = makeModel([closedPolyline(pts, id: 1)])
+        #expect(approx(m.gizmoOrientation, 0))
+        guard let base = m.gizmoOrientedBaseFrame,
+              let aabbBox = m.selectionWorldBounds,
+              let aabbFrame = GizmoFrame(box: aabbBox) else {
+            Issue.record("expected frames"); return
+        }
+        // Byte-identical to the legacy upright frame (no regression for angle 0).
+        #expect(base == aabbFrame)
     }
 }
