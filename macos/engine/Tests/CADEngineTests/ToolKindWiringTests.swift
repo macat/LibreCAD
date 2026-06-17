@@ -86,6 +86,7 @@ struct ToolKindWiringTests {
             .xline, .ray,                                          // wire-wave-3 (construction lines)
             .align, .arrayPath,                                    // wire-wave-3 (modify)
             .leader, .baselineDim, .continueDim,                   // wire-wave-3 (annotate)
+            .multileader,                                          // ML-W2 (annotate — MLEADER)
             .image,                                                // wire-wave (image)
             .viewport,                                             // wire-wave-1 (paper-space, out-of-band)
         ]
@@ -514,7 +515,7 @@ struct ToolKindWiringTests {
         .text,
         .linearDim, .alignedDim, .radialDim, .diameterDim, .angularDim,
         .ordinateDim, .arcLengthDim, .angular3pDim,
-        .leader, .baselineDim, .continueDim,
+        .leader, .multileader, .baselineDim, .continueDim,
         .measureDistance, .measureAngle, .measureArea, .measureLength,
     ]
 

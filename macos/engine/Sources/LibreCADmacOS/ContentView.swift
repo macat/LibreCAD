@@ -1705,7 +1705,7 @@ enum ToolCatalog {
         .text,
         .linearDim, .alignedDim, .radialDim, .diameterDim, .angularDim,
         .ordinateDim, .arcLengthDim, .angular3pDim,
-        .leader, .baselineDim, .continueDim,
+        .leader, .multileader, .baselineDim, .continueDim,
         .measureDistance, .measureAngle, .measureArea, .measureLength,
     ]
 
@@ -1782,6 +1782,8 @@ enum ToolCatalog {
                                          help: "Arc length dimension (⌥G)", shortcut: "⌥G")
         case .angular3pDim: return .init(symbol: "angle", help: "Angular dimension, 3-point (⌥N)", shortcut: "⌥N")
         case .leader:      return .init(symbol: "text.bubble", help: "Leader callout (⌥L)", shortcut: "⌥L")
+        case .multileader: return .init(symbol: "text.bubble.fill",
+                                        help: "Multileader (MLEADER) callout", shortcut: nil)
         case .baselineDim: return .init(symbol: "arrow.up.and.line.horizontal.and.arrow.down",
                                         help: "Baseline dimension chain (⌥D)", shortcut: "⌥D")
         case .continueDim: return .init(symbol: "arrow.left.and.line.vertical.and.arrow.right",
