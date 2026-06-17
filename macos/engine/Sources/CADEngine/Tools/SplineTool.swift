@@ -50,13 +50,49 @@
 
 import Foundation
 
+/// How the Spline tool interprets the points the user picks — surfaced later by the
+/// tool-options bar (via `applyToolConfig` + `ToolOptionsBar`, NOT this tool's job).
+/// The two modes are the two CAD spline-construction families and produce DIFFERENT
+/// entity kinds from the SAME multi-click flow:
+///
+/// - `.fit`           — the picks are FIT (interpolation) points the curve runs
+///                      through/near; commits a `.splinePoints` (`LC_SplinePoints`)
+///                      quadratic-Bézier interpolation spline. The DEFAULT — the
+///                      original behavior, fully unchanged.
+/// - `.controlPoints` — the picks are the CONTROL polygon of a NURBS curve; commits
+///                      a `.spline` (`RS_Spline`) B-spline with those control points
+///                      and an auto-generated clamped knot vector (so the curve
+///                      interpolates its endpoints), mirroring LibreCAD's
+///                      `RS_ActionDrawSpline` (control-point spline action).
+public enum SplineMode: Sendable, Hashable, CaseIterable {
+    /// Picks are fit points → `.splinePoints` interpolation spline (the default).
+    case fit
+    /// Picks are NURBS control points → `.spline` B-spline.
+    case controlPoints
+}
+
 /// The interactive Spline tool (spline through points). Click to place successive
-/// fit points; press Return (or double-click) to finish, committing all the points
-/// as ONE `.splinePoints` (fit-point interpolation) entity that runs through /
-/// near them. Clicking near the first point closes the spline. Mirrors
-/// `PolylineTool`'s multi-click accumulation but commits a smooth curve instead of
-/// straight segments.
+/// points; press Return (or double-click) to finish, committing all the points as
+/// ONE entity. The `mode` selects how the picks are interpreted:
+///
+/// - `.fit` (default): commits ONE `.splinePoints` (fit-point interpolation) entity
+///   that runs through / near the picks — the original behavior.
+/// - `.controlPoints`: commits ONE `.spline` (NURBS B-spline) entity whose control
+///   polygon IS the picks, with a default cubic degree (clamped to the pick count)
+///   and an auto-generated clamped knot vector.
+///
+/// Clicking near the first point closes the spline. Mirrors `PolylineTool`'s
+/// multi-click accumulation but commits a smooth curve instead of straight segments.
 public struct SplineTool: Tool {
+
+    /// The default degree for a `.controlPoints` (NURBS) spline — cubic, matching
+    /// LibreCAD's `RS_Spline` default (`RS_ActionDrawSpline` mints degree 3). The
+    /// emitted degree is clamped down to `controlPoints.count - 1` when there are
+    /// too few picks for a true cubic (and to ≥ 1), so the commit is ALWAYS a
+    /// resolvable NURBS — the engine's `NURBS.knotVector` needs
+    /// `controlPoints.count >= degree + 1` to build a curve, else the resolve path
+    /// falls back to drawing the control polygon.
+    public static let defaultControlPointDegree = 3
 
     // MARK: - Private state machine (no magic Int — engine-architecture note)
 
@@ -79,16 +115,28 @@ public struct SplineTool: Tool {
     /// the first move.
     private var cursor: Vector = .invalid
 
-    public init() {}
+    /// How the picked points are interpreted on commit — fit points (`.splinePoints`)
+    /// vs. NURBS control points (`.spline`). Surfaced by the tool-options bar (via
+    /// `applyToolConfig` + `ToolOptionsBar`, NOT this tool's job). Back-compatible:
+    /// the default `.fit` keeps the original fit-point interpolation behavior.
+    public let mode: SplineMode
+
+    /// Creates a Spline tool in the given construction mode (default `.fit`, the
+    /// original fit-point interpolation flow). The app's `applyToolConfig` mints the
+    /// tool in the mode the options bar selected.
+    public init(mode: SplineMode = .fit) {
+        self.mode = mode
+    }
 
     // MARK: - Tool
 
     public var title: String { "Spline" }
 
     public var status: String {
+        let noun = (mode == .controlPoints) ? "control point" : "point"
         switch state {
-        case .empty:    return "Specify first point"
-        case .building: return "Specify next point (Return to finish)"
+        case .empty:    return "Specify first \(noun)"
+        case .building: return "Specify next \(noun) (Return to finish)"
         }
     }
 
@@ -105,9 +153,9 @@ public struct SplineTool: Tool {
         }
         var pts = points
         if cursor.valid, pts.last.map({ !$0.coincides(with: cursor) }) ?? true {
-            pts.append(cursor)   // provisional last fit point at the cursor
+            pts.append(cursor)   // provisional last point at the cursor
         }
-        let tessellated = SplineTool.tessellatedSpline(points: pts, closed: false)
+        let tessellated = tessellatedSpline(points: pts, closed: false)
         guard tessellated.count >= 2 else { return [] }
         return [ResolvedPolyline(points: tessellated, closed: false, pen: .toolPreview)]
     }
@@ -200,17 +248,44 @@ public struct SplineTool: Tool {
         }
     }
 
-    /// Builds the single `.add(.splinePoints)` commit (the clicked fit points as the
-    /// quadratic-Bézier control polygon the resolve path interpolates) and resets
-    /// the tool, returning `.commit`. The app re-mints the id and applies the edit
-    /// as one undoable group.
+    /// Builds the single `.add` commit from the picked points and resets the tool,
+    /// returning `.commit`. The entity KIND depends on `mode`:
+    ///
+    /// - `.fit`: the picks are the quadratic-Bézier control polygon the
+    ///   `.splinePoints` resolve path interpolates (the original behavior).
+    /// - `.controlPoints`: the picks are the NURBS control polygon of a `.spline`
+    ///   with `SplineTool.degree(forControlPointCount:)` (default cubic, clamped) and
+    ///   an empty knot vector — the resolve path's `NURBS.knotVector` then generates
+    ///   a clamped (open) uniform vector so the curve interpolates its endpoints.
+    ///
+    /// The app re-mints the id and applies the edit as one undoable group.
     private mutating func commitSpline(points: [Vector], closed: Bool) -> ToolOutcome {
-        let record = EntityRecord(
-            id: .placeholder,
-            kind: .splinePoints(SplinePointsData(controlPoints: points, closed: closed))
-        )
+        let kind: EntityKind
+        switch mode {
+        case .fit:
+            kind = .splinePoints(SplinePointsData(controlPoints: points, closed: closed))
+        case .controlPoints:
+            kind = .spline(SplineData(
+                degree: SplineTool.degree(forControlPointCount: points.count),
+                controlPoints: points,
+                knots: [],     // resolver builds a clamped (endpoint-interpolating) vector
+                weights: [],   // non-rational (all weights == 1)
+                closed: closed
+            ))
+        }
+        let record = EntityRecord(id: .placeholder, kind: kind)
         reset()
         return .commit([.add(record)])
+    }
+
+    /// The NURBS degree to emit for `count` picked control points: the default cubic
+    /// (`defaultControlPointDegree`), clamped DOWN so there are always at least
+    /// `degree + 1` control points (the minimum `NURBS.knotVector` needs for a real
+    /// curve), and clamped UP to ≥ 1 (degree 0 is not a curve). With 2 picks this
+    /// yields a degree-1 polyline, 3 picks a quadratic, 4+ the default cubic — every
+    /// case resolves to non-empty geometry.
+    static func degree(forControlPointCount count: Int) -> Int {
+        Swift.max(1, Swift.min(defaultControlPointDegree, count - 1))
     }
 
     /// Returns to the initial waiting-for-first-point state.
@@ -221,18 +296,35 @@ public struct SplineTool: Tool {
 
     // MARK: - Preview tessellation (shared model with the committed entity)
 
-    /// Tessellates the given fit points with the SAME quadratic-Bézier model the
-    /// committed `.splinePoints` entity resolves with, so the rubber-band preview is
-    /// pixel-faithful to the final curve. Falls back to the raw points (the control
-    /// polyline) when there are too few for a real Bézier segment — the same
-    /// degenerate fallback `QuadSpline.tessellate` uses.
-    static func tessellatedSpline(points: [Vector], closed: Bool) -> [Vector] {
+    /// Tessellates the given picked points with the SAME model the committed entity
+    /// will resolve with — so the rubber-band preview is pixel-faithful to the final
+    /// curve in BOTH modes:
+    ///
+    /// - `.fit`: the `QuadSpline` quadratic-Bézier interpolation model of
+    ///   `.splinePoints` (the original behavior).
+    /// - `.controlPoints`: the `NURBS` B-spline model of `.spline`, with the same
+    ///   degree the commit will use.
+    ///
+    /// Falls back to the raw points (the control polyline) when there are too few for
+    /// a real segment — the same degenerate fallback the resolve paths use.
+    func tessellatedSpline(points: [Vector], closed: Bool) -> [Vector] {
         guard points.count >= 1 else { return [] }
-        let data = SplinePointsData(controlPoints: points, closed: closed)
-        if let (pts, _) = QuadSpline.tessellate(
-            data, tolerance: ResolveContext.default.tessellationTolerance
-        ) {
-            return pts
+        let tolerance = ResolveContext.default.tessellationTolerance
+        switch mode {
+        case .fit:
+            let data = SplinePointsData(controlPoints: points, closed: closed)
+            if let (pts, _) = QuadSpline.tessellate(data, tolerance: tolerance) {
+                return pts
+            }
+        case .controlPoints:
+            let data = SplineData(
+                degree: SplineTool.degree(forControlPointCount: points.count),
+                controlPoints: points,
+                closed: closed
+            )
+            if let pts = NURBS.tessellate(data, tolerance: tolerance) {
+                return pts
+            }
         }
         return points
     }
