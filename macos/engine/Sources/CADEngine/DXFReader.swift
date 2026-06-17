@@ -61,18 +61,27 @@ extension CADEngine {
         /// model-space-only drawing. Multi-layout + true tab names are a libdxfrw-
         /// patch follow-up (the LAYOUT dictionary is not parsed by stock libdxfrw).
         public var layouts: [Layout]
+        /// The parsed STYLE (text-style) table — named text styles + their font /
+        /// width / oblique / generation flags (the text-style round-trip). Always
+        /// contains at least "Standard" (the `TextStyleTable` default seed, replaced
+        /// by the file's Standard when present). Downstream `CADDrawing.load(…,
+        /// textStyles:)` adopts it so a TEXT/MTEXT entity's code-7 style name resolves
+        /// to the file's real font.
+        public var textStyles: TextStyleTable
         public var warnings: [String]
 
         public init(records: [EntityRecord], layers: LayerTable,
                     blocks: BlockTable = BlockTable(),
                     graphicVariables: GraphicVariables = GraphicVariables(),
                     layouts: [Layout] = [],
+                    textStyles: TextStyleTable = TextStyleTable(),
                     warnings: [String]) {
             self.records = records
             self.layers = layers
             self.blocks = blocks
             self.graphicVariables = graphicVariables
             self.layouts = layouts
+            self.textStyles = textStyles
             self.warnings = warnings
         }
     }
@@ -207,9 +216,11 @@ extension CADEngine {
 
         let graphicVariables = Self.mapGraphicVariables(list)
         let layouts = Self.mapLayouts(list)
+        let textStyles = Self.mapTextStyles(list)
 
         return DXFReadResult(records: records, layers: layers, blocks: blocks,
                              graphicVariables: graphicVariables, layouts: layouts,
+                             textStyles: textStyles,
                              warnings: warnings)
     }
 
@@ -369,6 +380,60 @@ extension CADEngine {
         }
         // Else the first defined style.
         return styles.first
+    }
+
+    /// Maps the bridge's captured STYLE table (`lc_textstyles`) into a
+    /// `TextStyleTable` — the inverse of `DXFWriter.PODBuilder.makeTextStyle` and the
+    /// read side of the text-style data-loss fix. Starts from a fresh
+    /// `TextStyleTable` (so the always-present default "Standard" exists even for a
+    /// file whose STYLE table omits it) and `upsert`s every captured style (the
+    /// file's "Standard" replaces the seed by case-insensitive name).
+    ///
+    /// Font decode (mirrors the writer's encoding contract on `LCTextStyle`): the
+    /// `LC_TS_FONT_TTF` bit ⇒ `.native(family:)` (code 3 is the family); else a
+    /// `.lff` / `.shx` extension ⇒ `.stroke(lff:)` / `.shx(file:)`; else (a bare
+    /// name with no extension and no TTF flag — e.g. libdxfrw's default "txt") ⇒
+    /// `.native(family:)` and the font provider substitutes. Bold/italic ride the
+    /// high code-1071 bits for every source kind. Oblique arrives in radians (the
+    /// bridge converted from DXF degrees).
+    private static func mapTextStyles(_ list: OpaquePointer) -> TextStyleTable {
+        var table = TextStyleTable()
+        let count = Int(lc_textstyle_count(list))
+        guard count > 0, let base = lc_textstyles(list) else { return table }
+        let styles = UnsafeBufferPointer(start: base, count: count)
+        let ttf = Int32(LC_TS_FONT_TTF.rawValue)
+        let bold = Int32(LC_TS_FONT_BOLD.rawValue)
+        let italic = Int32(LC_TS_FONT_ITALIC.rawValue)
+        for t in styles {
+            guard let name = string(t.name), !name.isEmpty else { continue }
+            let fontStr = string(t.primaryFont) ?? ""
+            let lower = fontStr.lowercased()
+            let font: FontSource
+            if (t.fontFamily & ttf) != 0 {
+                font = .native(family: fontStr.isEmpty ? TextStyle.defaultNativeFamily : fontStr)
+            } else if lower.hasSuffix(".lff") {
+                font = .stroke(lff: String(fontStr.dropLast(4)))
+            } else if lower.hasSuffix(".shx") {
+                font = .shx(file: String(fontStr.dropLast(4)))
+            } else {
+                font = .native(family: fontStr.isEmpty ? TextStyle.defaultNativeFamily : fontStr)
+            }
+            let big = string(t.bigFont)
+            let style = TextStyle(
+                name: name,
+                primaryFont: font,
+                bigFont: (big?.isEmpty == false) ? big : nil,
+                fixedTextHeight: t.fixedTextHeight,
+                widthFactor: t.widthFactor,
+                obliqueAngle: t.oblique,
+                lastHeight: t.lastHeight,
+                generation: TextGenerationFlags(rawValue: Int(t.generationFlags)),
+                bold: (t.fontFamily & bold) != 0,
+                italic: (t.fontFamily & italic) != 0,
+                styleFlags: TextStyleFlags(rawValue: Int(t.styleFlags)))
+            table.upsert(style)
+        }
+        return table
     }
 
     // MARK: - Layer-table mapping
@@ -1056,6 +1121,7 @@ public func loadDrawing(dxfPath: String) async throws -> CADDrawing {
     // plus the reconstructed paper-space layout table (paper-space P1).
     drawing.load(entities: result.records, layers: result.layers,
                  blocks: result.blocks, graphicVariables: result.graphicVariables,
+                 textStyles: result.textStyles,
                  layouts: result.layouts)
     return drawing
 }
@@ -1069,6 +1135,7 @@ public func loadDrawing(dwgPath: String) async throws -> CADDrawing {
     let drawing = CADDrawing()
     drawing.load(entities: result.records, layers: result.layers,
                  blocks: result.blocks, graphicVariables: result.graphicVariables,
+                 textStyles: result.textStyles,
                  layouts: result.layouts)
     return drawing
 }
