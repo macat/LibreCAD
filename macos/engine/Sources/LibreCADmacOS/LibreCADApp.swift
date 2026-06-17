@@ -30,6 +30,23 @@ import SwiftUI
 import AppKit
 import CADEngine
 
+/// Minimal app delegate: applies the persisted Light/Dark appearance theme at launch,
+/// on the main actor with `NSApp` ready. This work CANNOT live in `App.init()` — that runs
+/// before the main-actor executor is asserted at launch, so `MainActor.assumeIsolated`
+/// there traps (SIGTRAP, observed on macOS 26 / SwiftUI 7.5.3). `applicationWillFinishLaunching`
+/// runs on the main actor before the first window draws, so a forced theme applies without
+/// a flash. (#28)
+final class LCAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        let raw = UserDefaults.standard.string(forKey: AppSettings.Key.theme)
+        switch raw.flatMap(AppTheme.init(rawValue:)) ?? .system {
+        case .system: NSApp.appearance = nil
+        case .light:  NSApp.appearance = NSAppearance(named: .aqua)
+        case .dark:   NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
+    }
+}
+
 @main
 struct LibreCADApp: App {
 
@@ -47,28 +64,18 @@ struct LibreCADApp: App {
         if !saved.isEmpty {
             CADFonts.addUserFontDirectory(URL(fileURLWithPath: saved))
         }
-        // #28 — APPLY THE PERSISTED THEME AT LAUNCH. `AppSettingsView` drives
-        // `NSApp.appearance` live when the picker changes, but a FORCED Light/Dark
-        // theme was lost on a cold start because nothing re-applied it before the first
-        // window drew. Read the same `@AppStorage`-backed key (`app.appearance.theme`)
-        // straight off `UserDefaults` and set `NSApp.appearance` here so the choice
-        // survives relaunch. `.system` (or an unset/garbage value) clears the override so
-        // AppKit tracks System Settings ▸ Appearance — identical to `applyTheme(.system)`.
-        // We DON'T touch any `AppSettingsView` internals (the brief's "~4 lines inline"):
-        // this is a self-contained read + the public `AppTheme` enum. SwiftUI runs
-        // `App.init()` on the main actor at launch, so the `NSApp.appearance` write is
-        // main-actor-safe (`assumeIsolated`; this is the App init, NOT the off-main
-        // document init the SIGTRAP note warns about).
-        let themeRaw = UserDefaults.standard.string(forKey: AppSettings.Key.theme)
-        let theme = themeRaw.flatMap(AppTheme.init(rawValue:)) ?? .system
-        MainActor.assumeIsolated {
-            switch theme {
-            case .system: NSApp.appearance = nil
-            case .light:  NSApp.appearance = NSAppearance(named: .aqua)
-            case .dark:   NSApp.appearance = NSAppearance(named: .darkAqua)
-            }
-        }
+        // #28 — the persisted Light/Dark theme is applied at launch by `LCAppDelegate`
+        // (`applicationWillFinishLaunching`), NOT here. `App.init()` runs at launch BEFORE
+        // the main-actor executor is asserted, so `MainActor.assumeIsolated` in init TRAPS
+        // (SIGTRAP) — the same crash class the DocumentGroup note above warns about. The
+        // app-delegate hook runs on the main actor with `NSApp` ready, before the first
+        // window draws (so a forced theme applies without a flash).
     }
+
+    /// Installs `LCAppDelegate`, which applies the persisted appearance theme at launch
+    /// (#28). This must NOT be done in `App.init()` — setting `NSApp.appearance` there
+    /// traps on the main-actor executor assertion at launch.
+    @NSApplicationDelegateAdaptor(LCAppDelegate.self) private var appDelegate
 
     /// The F8 key as a SwiftUI `KeyEquivalent`. SwiftUI ships no function-key
     /// constants, so it is built from AppKit's `NSF8FunctionKey` Unicode scalar — the
