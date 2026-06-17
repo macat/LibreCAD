@@ -415,15 +415,43 @@ struct AlignToolTests {
         #expect(outcome == .none)
     }
 
-    // MARK: - Typed value ignored (selection-based MODIFY tool)
+    // MARK: - Typed coordinate (.value) parity with .click
 
-    @Test("a typed .value coordinate is ignored")
-    func typedValueIgnored() {
+    @Test("a typed .value coordinate is treated like a .click pick (advances the run)")
+    func typedValueFixesPick() {
         var tool = AlignTool()
         let ctx = context([lineRecord()])
-        let outcome = tool.handle(.value(Vector(7, 7)), context: ctx)
+        // With a selection, a typed first source point behaves like the first click:
+        // it captures the selection and fixes src1 (no commit yet, status advances).
+        let outcome = tool.handle(.value(Self.src1), context: ctx)
+        #expect(outcome == .none)
+        #expect(tool.status == "Specify first destination point")
+    }
+
+    @Test(".value with an empty selection is still a no-op (nothing to align)")
+    func typedValueEmptySelectionNoOp() {
+        var tool = AlignTool()
+        let outcome = tool.handle(.value(Vector(7, 7)), context: emptyContext())
         #expect(outcome == .none)
         #expect(tool.status == "Select objects to align first")
+    }
+
+    @Test(".value(p) matches .click(p) across all four picks (identical commit)")
+    func typedValueMatchesClick() {
+        var typed = AlignTool()
+        let ctxA = context([lineRecord()])
+        _ = typed.handle(.value(Self.src1), context: ctxA)
+        _ = typed.handle(.value(Self.dst1), context: ctxA)
+        _ = typed.handle(.value(Self.src2), context: ctxA)
+        let typedOutcome = typed.handle(.value(Self.dst2), context: ctxA)
+
+        var clicked = AlignTool()
+        let clickedOutcome = align(&clicked, ctx: context([lineRecord()]),
+                                   src1: Self.src1, dst1: Self.dst1,
+                                   src2: Self.src2, dst2: Self.dst2)
+
+        #expect(typedOutcome == clickedOutcome)
+        #expect(replacedKinds(typedOutcome)?.count == 1)
     }
 
     // MARK: - Direct align-math unit (rotation + scale composition)

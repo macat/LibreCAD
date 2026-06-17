@@ -51,10 +51,20 @@ public enum ToolInput: Sendable, Equatable {
     /// distance, against the relative-zero + cursor. It is a "pick a point" event
     /// just like `.click`, but it lands at the *exact* typed coordinate (no snap
     /// drift): a DRAW or DIMENSION tool treats it like a `.click` at that point,
-    /// placing the next point. MODIFY / SELECT tools ignore it (safe default —
-    /// their pick semantics are entity-based, not coordinate-typed). Append-only
-    /// extension of the frozen contract (decision D7); every tool's `handle`
-    /// switch handles it (the build flags any that don't).
+    /// placing the next point.
+    ///
+    /// POINT-PICKING MODIFY tools (Move / Copy / Rotate / Mirror / Align / Scale /
+    /// Offset) treat `.value` IDENTICALLY to `.click` at that exact point — they
+    /// route it through the same pick path — so the user can type a base /
+    /// destination / center / axis point and modify-by-exact-coordinate works (e.g.
+    /// MOVE-by-`@dx,dy`). With nothing selected those tools still no-op (the same
+    /// guard the first `.click` hits). The intentional exceptions are:
+    ///   - StretchTool reads `.value` as the displacement DELTA (LibreCAD lets you
+    ///     type the stretch delta), so it is NOT the same as a `.click` point.
+    ///   - SELECT and ENTITY-pick tools (Trim / Join / Explode-Text / …) ignore it
+    ///     (safe default — a typed coordinate can't name an entity to act on).
+    /// Append-only extension of the frozen contract (decision D7); every tool's
+    /// `handle` switch handles it (the build flags any that don't).
     case value(Vector)
     /// Finish the current operation (Return / double-click / Enter): commit any
     /// pending geometry and end the tool's current run.

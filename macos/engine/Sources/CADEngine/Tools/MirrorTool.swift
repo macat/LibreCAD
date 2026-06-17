@@ -143,9 +143,14 @@ public struct MirrorTool: Tool {
     /// mode, or `.add(newRecord)` (originals kept) when `keepOriginal` is set.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
         switch input {
-        case .value:
-            // A typed coordinate doesn't apply to this selection-based MODIFY tool — ignore.
-            return .none
+        case .value(let p):
+            // A TYPED point (U1 coordinate line) is a "pick a point" event just like
+            // `.click`, landing at the EXACT typed coordinate (no snap drift): route it
+            // through the same axis-point pick path so the user can type the two mirror-
+            // line points instead of clicking. Unified with `.click` (the ScaleTool/
+            // OffsetTool precedent) — an empty selection still no-ops via the
+            // `.pickingAxis1` guard inside `handleClick`.
+            return handleClick(p, context: context)
 
         case .move(let p):
             cursor = p

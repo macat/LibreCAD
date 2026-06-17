@@ -333,4 +333,37 @@ struct MoveToolTests {
         let real = tool.handle(.click(Vector(8, 3)), context: ctx)
         #expect(replacedKinds(real)?.count == 2)
     }
+
+    // MARK: - Typed coordinate (.value) parity with .click
+
+    @Test(".value(p) is treated exactly like .click(p): typed base + destination commits the same translation")
+    func typedValueMatchesClick() {
+        let base = Vector(2, 2)
+        let dest = Vector(5, 9)
+
+        // Drive one run entirely with typed values, another entirely with clicks.
+        var typed = MoveTool()
+        let ctxA = selectionContext()
+        let typedFirst = typed.handle(.value(base), context: ctxA)
+        #expect(typedFirst == .none)   // a typed base only fixes the base point
+        #expect(typed.status == "Specify destination")
+        let typedOutcome = typed.handle(.value(dest), context: ctxA)
+
+        var clicked = MoveTool()
+        let ctxB = selectionContext()
+        _ = clicked.handle(.click(base), context: ctxB)
+        let clickedOutcome = clicked.handle(.click(dest), context: ctxB)
+
+        // Same commit: the typed-coordinate path produces an identical translation.
+        #expect(typedOutcome == clickedOutcome)
+        #expect(replacedKinds(typedOutcome)?.count == 2)
+    }
+
+    @Test(".value with an empty selection is still a no-op (nothing to move)")
+    func typedValueEmptySelectionNoOp() {
+        var tool = MoveTool()
+        let outcome = tool.handle(.value(Vector(5, 5)), context: emptyContext())
+        #expect(outcome == .none)
+        #expect(tool.status == "Select objects to move first")
+    }
 }

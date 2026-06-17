@@ -324,4 +324,36 @@ struct CopyToolTests {
         let outcome = tool.handle(.backspace, context: ctx)
         #expect(outcome == .none)
     }
+
+    // MARK: - Typed coordinate (.value) parity with .click
+
+    @Test(".value(p) is treated exactly like .click(p): typed base + destination adds the same copies")
+    func typedValueMatchesClick() {
+        let base = Vector(1, 1)
+        let dest = Vector(6, 4)
+
+        var typed = CopyTool()
+        let ctxA = selectionContext()
+        let typedFirst = typed.handle(.value(base), context: ctxA)
+        #expect(typedFirst == .none)   // a typed base only fixes the base point
+        #expect(typed.status == "Specify destination point")
+        let typedOutcome = typed.handle(.value(dest), context: ctxA)
+
+        var clicked = CopyTool()
+        let ctxB = selectionContext()
+        _ = clicked.handle(.click(base), context: ctxB)
+        let clickedOutcome = clicked.handle(.click(dest), context: ctxB)
+
+        // Same commit: the typed-coordinate path adds identical translated copies.
+        #expect(typedOutcome == clickedOutcome)
+        #expect(addedRecords(typedOutcome)?.count == 2)
+    }
+
+    @Test(".value with an empty selection is still a no-op (nothing to copy)")
+    func typedValueEmptySelectionNoOp() {
+        var tool = CopyTool()
+        let outcome = tool.handle(.value(Vector(5, 5)), context: .empty)
+        #expect(outcome == .none)
+        #expect(tool.status == "Select objects to copy first")
+    }
 }

@@ -275,10 +275,21 @@ struct ToolValueInputTests {
         #expect(abs(line.end.y - line.start.y) < 1e-9)
     }
 
-    @Test("a MODIFY tool (MoveTool) ignores .value (safe default — no outcome)")
-    func modifyToolIgnoresValue() {
+    @Test("a MODIFY tool (MoveTool) treats .value like .click: it picks the base point")
+    func modifyToolValueIsAPick() {
+        // With an EMPTY selection there is nothing to move, so a typed .value is a
+        // no-op (the same guard the first .click hits) — it does NOT advance.
+        var empty = MoveTool()
+        #expect(empty.handle(.value(Vector(5, 5)), context: .empty) == .none)
+        #expect(empty.status == "Select objects to move first")
+
+        // With a selection, a typed .value lands at the EXACT coordinate and behaves
+        // exactly like a first .click: it fixes the base point (status advances).
+        let line = EntityRecord(id: EntityID(1),
+                                kind: .line(LineData(start: Vector(0, 0), end: Vector(1, 0))))
+        let ctx = ToolContext(selected: [line], entity: { _ in line }, gridSpacing: nil)
         var tool = MoveTool()
-        let outcome = tool.handle(.value(Vector(5, 5)), context: .empty)
-        #expect(outcome == .none)
+        #expect(tool.handle(.value(Vector(2, 2)), context: ctx) == .none)
+        #expect(tool.status == "Specify destination")
     }
 }

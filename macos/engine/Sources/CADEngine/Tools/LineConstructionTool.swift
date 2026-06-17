@@ -98,8 +98,13 @@ public struct LineConstructionTool: Tool {
         case orthTangent
     }
 
-    /// The active construction variant. Internal config (no UI wiring yet); the
-    /// app's mode-picker (a later wave) mutates it before the picks.
+    /// The active construction variant. Internal config (no UI wiring yet). It is
+    /// read LIVE on every `handle`/`status`/`preview` — the private `State` is
+    /// mode-agnostic (always starts at `.pickingFirst`), so NOTHING is seeded from
+    /// `mode` at construction. The app's mode-picker (a later wave) doesn't mutate this
+    /// in place: `applyToolConfig` RE-MINTS the tool via `init(mode:)` with the chosen
+    /// variant (the DivideTool/ArcTool re-mint pattern). `var` only because the
+    /// `init(mode:)` convenience assigns it.
     public var mode: Mode = .perpendicularFoot
 
     // MARK: - Private state machine

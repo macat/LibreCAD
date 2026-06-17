@@ -146,6 +146,38 @@ struct StretchToolModifyTests {
         #expect(tool.handle(.value(Vector(4, 0)), context: ctx) == .none)
     }
 
+    @Test("INTENTIONAL: StretchTool treats .value as a DELTA, not a .click point (kept distinct by design)")
+    func typedValueIsDeltaNotClickPoint() {
+        // Unlike the other point-picking modify tools (Move/Copy/Rotate/Mirror/Align/
+        // Scale/Offset), where .value(p) == .click(p) at the exact typed point, Stretch
+        // interprets a typed .value as the displacement VECTOR itself once the window is
+        // set (LibreCAD lets you type the stretch delta). So .value short-circuits the
+        // reference→destination picks and commits immediately, whereas .click(p) in the
+        // same state only fixes the reference base (no commit yet). This test pins that
+        // deliberate difference so a future "unify .value" pass doesn't silently break it.
+        let ctxValue = Self.context(selected: [Self.line()])
+        var byValue = StretchTool()
+        _ = byValue.handle(.click(Vector(8, -1)), context: ctxValue)
+        _ = byValue.handle(.click(Vector(12, 1)), context: ctxValue)
+        #expect(byValue.status == "Specify base point")
+        // A typed (4,0) is the DELTA → it commits the stretch right away.
+        let valueOutcome = byValue.handle(.value(Vector(4, 0)), context: ctxValue)
+        guard let (_, kind) = replaced(valueOutcome), case .line(let d) = kind else {
+            Issue.record("typed .value should commit a stretch immediately"); return
+        }
+        #expect(approx(d.end, Vector(14, 0)))   // right endpoint (10,0) + delta (4,0)
+
+        // In contrast, a .click at the SAME coordinate (4,0) in the same state only
+        // fixes the reference base — it does NOT commit (proving the two are distinct).
+        let ctxClick = Self.context(selected: [Self.line()])
+        var byClick = StretchTool()
+        _ = byClick.handle(.click(Vector(8, -1)), context: ctxClick)
+        _ = byClick.handle(.click(Vector(12, 1)), context: ctxClick)
+        let clickOutcome = byClick.handle(.click(Vector(4, 0)), context: ctxClick)
+        #expect(clickOutcome == .none)                       // reference base only — no commit
+        #expect(byClick.status == "Specify destination (or type a displacement)")
+    }
+
     // MARK: - Polyline: only the in-window vertex moves
 
     @Test("a polyline stretches only the vertices inside the window")
