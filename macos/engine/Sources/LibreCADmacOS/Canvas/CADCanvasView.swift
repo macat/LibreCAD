@@ -602,6 +602,27 @@ final class CADCanvasController {
     /// controller merely signals "the user asked to create a block".
     var requestCreateBlockFromSelection: (() -> Void)?
 
+    /// Owns the app-level live-apply preference observers (`.lcCanvasAppearanceDidChange`
+    /// / `.lcRenderPrefsDidChange`, defined in `AppSettingsView.swift`) and removes them
+    /// when the Coordinator deallocs. The box is a `nonisolated` reference type so its
+    /// OWN `deinit` can do the teardown off any actor (`removeObserver` is thread-safe) —
+    /// the `@MainActor` Coordinator's own `deinit` is `nonisolated` and cannot touch its
+    /// `@MainActor`-isolated, non-`Sendable` stored state, so the cleanup lives here.
+    /// Registered exactly once in `attach` (the view is live by then); never leaves a
+    /// zombie observer behind across window open/close.
+    private let prefObservers = PrefObserverBox()
+
+    /// A tiny, actor-free holder for the block-based notification tokens. `addObserver`
+    /// returns tokens we must explicitly remove (NotificationCenter does not weakly drop
+    /// block observers); collecting them here lets the box's `deinit` remove them when the
+    /// owning Coordinator is released — no main-actor hop needed for teardown.
+    private final class PrefObserverBox {
+        var tokens: [NSObjectProtocol] = []
+        deinit {
+            for token in tokens { NotificationCenter.default.removeObserver(token) }
+        }
+    }
+
     init(model: CanvasModel) {
         self.model = model
     }
@@ -795,6 +816,58 @@ final class CADCanvasController {
 
         refreshGizmo()
         refreshCrosshair()
+        registerLiveApplyObservers()
+    }
+
+    // MARK: Live-apply preference observers (findings #29/#30 residual)
+
+    /// Subscribes the Coordinator to the two app-level preference notifications so an
+    /// ALREADY-OPEN window reacts INSTANTLY to a Preferences change — not only on the
+    /// next window / the next light↔dark switch / the next incidental repaint. Called
+    /// once from `attach` (the view is live by then); the tokens are removed in `deinit`.
+    /// Idempotent (no-op if already registered) so a re-`attach` cannot double-subscribe.
+    ///
+    /// • `.lcCanvasAppearanceDidChange` → re-apply the canvas chrome. `CanvasTheme.apply`
+    ///   re-reads the background / grid override keys FRESH from `UserDefaults`, so this
+    ///   swaps the live clear color + grid/axis `OverlayStyle` colors; then mark the model
+    ///   dirty (so the light-mode near-white entity auto-invert re-runs, mirroring
+    ///   `viewDidChangeEffectiveAppearance`) and redraw.
+    /// • `.lcRenderPrefsDidChange` → just force a redraw; `LineRenderer` re-reads
+    ///   `RenderPrefs.fromDefaults()` at the top of `draw(in:)` (Wave 2) and picks up the
+    ///   antialias / LOD / line-width change on that repaint.
+    private func registerLiveApplyObservers() {
+        guard prefObservers.tokens.isEmpty else { return }
+        let center = NotificationCenter.default
+        let appearanceToken = center.addObserver(
+            forName: .lcCanvasAppearanceDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.applyCanvasAppearanceChange() }
+        }
+        let renderToken = center.addObserver(
+            forName: .lcRenderPrefsDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.applyRenderPrefsChange() }
+        }
+        prefObservers.tokens = [appearanceToken, renderToken]
+    }
+
+    /// Re-apply the canvas background / grid color overrides to THIS open window and
+    /// repaint (see `registerLiveApplyObservers`). No-op until the view is attached.
+    private func applyCanvasAppearanceChange() {
+        guard let view else { return }
+        CanvasTheme.apply(to: view, appearance: view.effectiveAppearance)
+        // Force the line/fill buffers to repack so the near-white auto-invert reflects the
+        // (possibly custom) background — same step `viewDidChangeEffectiveAppearance` takes.
+        model.modelDirty = true
+        redraw()
+    }
+
+    /// Force a repaint of THIS open window so `LineRenderer` re-reads the rendering prefs
+    /// (antialias / LOD / line width) on its next `draw(in:)` (see
+    /// `registerLiveApplyObservers`). No-op until the view is attached.
+    private func applyRenderPrefsChange() {
+        guard view != nil else { return }
+        redraw()
     }
 
     /// Shows/hides + repaints the CAD crosshair overlay to match the current mode:

@@ -352,6 +352,59 @@ struct PrefsWiringSnapDefaultsTests {
     }
 }
 
+// MARK: - Live-apply notifications: open windows refresh instantly (#29/#30 residual)
+//
+// Changing a canvas-appearance (background / grid) or rendering (antialias / LOD / line
+// width) preference must reach ALREADY-OPEN windows immediately. The seam is a pair of
+// dedicated app-level notifications `AppSettingsView` POSTS from the relevant
+// `@AppStorage` `.onChange` handlers and the canvas Coordinator OBSERVES. The post/observe
+// wiring itself is View-layer (a live `MTKView` + `CADCanvasController`, not reachable
+// headlessly), so this suite pins the testable CONTRACT: the two `Notification.Name`
+// constants exist, are stable, distinct, and a post round-trips through `NotificationCenter`
+// to a subscribed observer (proving the channel both sides use is the same one).
+
+@Suite("Prefs wiring — live-apply notifications (#29/#30)")
+struct PrefsWiringLiveApplyTests {
+
+    @Test("the two live-apply notification names are stable + distinct")
+    func namesStableAndDistinct() {
+        // Stable raw strings (an accidental rename would silently break the live-apply
+        // channel between AppSettingsView's post and the canvas Coordinator's observer).
+        #expect(Notification.Name.lcCanvasAppearanceDidChange.rawValue == "lc.canvasAppearanceDidChange")
+        #expect(Notification.Name.lcRenderPrefsDidChange.rawValue == "lc.renderPrefsDidChange")
+        // The appearance + rendering channels are SEPARATE (an appearance change must not
+        // wake the render-prefs observer and vice-versa).
+        #expect(Notification.Name.lcCanvasAppearanceDidChange != Notification.Name.lcRenderPrefsDidChange)
+    }
+
+    @Test("posting .lcCanvasAppearanceDidChange reaches a subscribed observer")
+    func appearancePostRoundTrips() {
+        let center = NotificationCenter()
+        var received = 0
+        let token = center.addObserver(
+            forName: .lcCanvasAppearanceDidChange, object: nil, queue: nil
+        ) { _ in received += 1 }
+        defer { center.removeObserver(token) }
+        center.post(name: .lcCanvasAppearanceDidChange, object: nil)
+        // A DIFFERENT name must NOT trigger this observer (channels are isolated).
+        center.post(name: .lcRenderPrefsDidChange, object: nil)
+        #expect(received == 1)
+    }
+
+    @Test("posting .lcRenderPrefsDidChange reaches a subscribed observer")
+    func renderPostRoundTrips() {
+        let center = NotificationCenter()
+        var received = 0
+        let token = center.addObserver(
+            forName: .lcRenderPrefsDidChange, object: nil, queue: nil
+        ) { _ in received += 1 }
+        defer { center.removeObserver(token) }
+        center.post(name: .lcRenderPrefsDidChange, object: nil)
+        center.post(name: .lcCanvasAppearanceDidChange, object: nil)
+        #expect(received == 1)
+    }
+}
+
 // MARK: - Design tokens: field-width tiers (#40)
 //
 // The settings views adopted `DS.Field.{xy,narrow,std,wide}` in place of the retired
