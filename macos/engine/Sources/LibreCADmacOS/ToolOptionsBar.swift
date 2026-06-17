@@ -95,6 +95,9 @@ struct ToolOptionsBar: View {
              .spline, .scale, .hatch,
              // Wire-wave-3 configurable tools.
              .align, .arrayPath, .leader, .multileader, .baselineDim,
+             // Wire-wave-4 configurable tools: Offset modes, Rotate/Mirror copy,
+             // Line-construction method.
+             .offset, .rotate, .mirror, .lineConstruction,
              // Block INSERT placement options: scale / rotation / MINSERT array.
              .insert:
             return true
@@ -214,36 +217,7 @@ struct ToolOptionsBar: View {
             }
 
         case .circle:
-            // Construction mode: Center+Radius (the original two-click flow), 2-Point
-            // (diameter endpoints), or 3-Point (circumcircle). Fixed at construction, so
-            // applyToolConfig RE-MINTS on change.
-            Picker("Mode", selection: $model.circleConstructionMode) {
-                Text("Center, Radius").tag(CircleConstructionMode.centerRadius)
-                Text("2 Points").tag(CircleConstructionMode.twoPoint)
-                Text("3 Points").tag(CircleConstructionMode.threePoint)
-            }
-            .pickerStyle(.segmented)
-            .fixedSize()
-            .labelsHidden()
-            .onChange(of: model.circleConstructionMode) { _, _ in apply() }
-            // The size mode + exact-size entry only label/scale the NUMERIC entry on the
-            // center+radius path (orthogonal to the construction mode), so show them only
-            // for that mode (the 2-/3-point modes are pick-defined, no numeric size).
-            if model.circleConstructionMode == .centerRadius {
-                Divider().frame(height: DS.Size.barDivider)
-                Picker("Size", selection: $model.circleSizeMode) {
-                    Text("Radius").tag(CircleSizeMode.radius)
-                    Text("Diameter").tag(CircleSizeMode.diameter)
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                .labelsHidden()
-                .onChange(of: model.circleSizeMode) { _, _ in apply() }
-                numberField(model.circleSizeMode == .diameter ? "Diameter" : "Radius",
-                            value: $model.circleFixedSize, width: DS.Field.narrow)
-                Text("0 = drag radius")
-                    .font(.caption).foregroundStyle(.tertiary)
-            }
+            circleOptionControls
 
         case .arc:
             Picker("Mode", selection: $model.arcMode) {
@@ -426,6 +400,43 @@ struct ToolOptionsBar: View {
         case .baselineDim:
             numberField("Spacing", value: $model.baselineSpacing, width: DS.Field.narrow)
 
+        // MARK: Wire-wave-4 configurable tools (Offset / Rotate / Mirror / Line construction)
+
+        case .offset:
+            offsetOptionControls
+
+        case .rotate:
+            // ROTATE "Copy": keep the originals and add rotated copies. Off (the
+            // default) rotates in place. In-place var, so applyToolConfig applies it
+            // without a re-mint.
+            Toggle("Copy (keep original)", isOn: $model.rotateKeepOriginal)
+                .toggleStyle(.checkbox)
+                .onChange(of: model.rotateKeepOriginal) { _, _ in apply() }
+
+        case .mirror:
+            // MIRROR "keep source": keep the originals and add mirrored copies. Off
+            // (the default) mirrors in place. In-place var (no re-mint).
+            Toggle("Copy (keep original)", isOn: $model.mirrorKeepOriginal)
+                .toggleStyle(.checkbox)
+                .onChange(of: model.mirrorKeepOriginal) { _, _ in apply() }
+
+        case .lineConstruction:
+            // Construction method: perpendicular-foot / parallel-through / bisector /
+            // tangent-1 / tangent-2 / orth-tangent. LineConstructionTool.Mode is a
+            // String-raw CaseIterable, so it binds directly as a Picker tag. Fixed at
+            // construction, so applyToolConfig RE-MINTS on change.
+            Picker("Method", selection: $model.lineConstructionMode) {
+                Text("Perpendicular").tag(LineConstructionTool.Mode.perpendicularFoot)
+                Text("Parallel").tag(LineConstructionTool.Mode.parallelThrough)
+                Text("Bisector").tag(LineConstructionTool.Mode.angleBisector)
+                Text("Tangent 1").tag(LineConstructionTool.Mode.tangent1)
+                Text("Tangent 2").tag(LineConstructionTool.Mode.tangent2)
+                Text("Orthogonal tangent").tag(LineConstructionTool.Mode.orthTangent)
+            }
+            .fixedSize()
+            .labelsHidden()
+            .onChange(of: model.lineConstructionMode) { _, _ in apply() }
+
         // MARK: Block Insert — scale / rotation / MINSERT array
         case .insert:
             insertScaleControls
@@ -437,6 +448,90 @@ struct ToolOptionsBar: View {
         default:
             EmptyView()
         }
+    }
+
+    // MARK: - Circle option group (decomposed to keep the body type-checkable)
+
+    /// The Circle tool's CONSTRUCTION-MODE picker + the size controls. The size mode +
+    /// exact-size entry are shown for the center+radius path (orthogonal to the
+    /// construction mode); the TTR (tan-tan-radius) mode REQUIRES a radius, so its
+    /// numeric entry is shown there too. The 2-/3-point and TTT/from-arc modes are
+    /// pick-defined (no numeric size). Construction mode is fixed at construction, so
+    /// applyToolConfig RE-MINTS on change; the size mode + size are settable vars.
+    @ViewBuilder
+    private var circleOptionControls: some View {
+        Picker("Mode", selection: $model.circleConstructionMode) {
+            Text("Center, Radius").tag(CircleConstructionMode.centerRadius)
+            Text("2 Points").tag(CircleConstructionMode.twoPoint)
+            Text("3 Points").tag(CircleConstructionMode.threePoint)
+            Text("Tan, Tan, Radius").tag(CircleConstructionMode.tanTanRadius)
+            Text("Tan, Tan, Tan").tag(CircleConstructionMode.tanTanTan)
+            Text("From Arc").tag(CircleConstructionMode.fromArc)
+        }
+        .fixedSize()
+        .labelsHidden()
+        .onChange(of: model.circleConstructionMode) { _, _ in apply() }
+        // Center+Radius: size mode + an optional exact size (0 ⇒ drag radius).
+        if model.circleConstructionMode == .centerRadius {
+            Divider().frame(height: DS.Size.barDivider)
+            Picker("Size", selection: $model.circleSizeMode) {
+                Text("Radius").tag(CircleSizeMode.radius)
+                Text("Diameter").tag(CircleSizeMode.diameter)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .labelsHidden()
+            .onChange(of: model.circleSizeMode) { _, _ in apply() }
+            numberField(model.circleSizeMode == .diameter ? "Diameter" : "Radius",
+                        value: $model.circleFixedSize, width: DS.Field.narrow)
+            Text("0 = drag radius")
+                .font(.caption).foregroundStyle(.tertiary)
+        } else if model.circleConstructionMode == .tanTanRadius {
+            // TTR requires a positive radius (reuses the same circleSizeMode /
+            // circleFixedSize field the tool resolves into the TTR radius). With no
+            // size set the picks are no-ops, so prompt for one.
+            Divider().frame(height: DS.Size.barDivider)
+            Picker("Size", selection: $model.circleSizeMode) {
+                Text("Radius").tag(CircleSizeMode.radius)
+                Text("Diameter").tag(CircleSizeMode.diameter)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .labelsHidden()
+            .onChange(of: model.circleSizeMode) { _, _ in apply() }
+            numberField(model.circleSizeMode == .diameter ? "Diameter" : "Radius",
+                        value: $model.circleFixedSize, width: DS.Field.narrow)
+            Text("required")
+                .font(.caption).foregroundStyle(.tertiary)
+        }
+    }
+
+    // MARK: - Offset option group (decomposed to keep the body type-checkable)
+
+    /// The Offset tool's MODE segmented control + a Distance field (shown only in the
+    /// fixed-distance mode) + the Both-sides and Erase-source toggles. The mode is
+    /// bound to an Int index (OffsetMode is Equatable-not-Hashable, so no Picker tag);
+    /// every var is settable in place, so applyToolConfig applies without a re-mint.
+    @ViewBuilder
+    private var offsetOptionControls: some View {
+        Picker("Mode", selection: $model.offsetModeIndex) {
+            Text("Through point").tag(0)
+            Text("Distance").tag(1)
+        }
+        .pickerStyle(.segmented)
+        .fixedSize()
+        .labelsHidden()
+        .onChange(of: model.offsetModeIndex) { _, _ in apply() }
+        if model.offsetModeIndex == 1 {
+            numberField("Distance", value: $model.offsetDistance, width: DS.Field.narrow)
+        }
+        Divider().frame(height: DS.Size.barDivider)
+        Toggle("Both sides", isOn: $model.offsetBothSides)
+            .toggleStyle(.checkbox)
+            .onChange(of: model.offsetBothSides) { _, _ in apply() }
+        Toggle("Erase source", isOn: $model.offsetEraseSource)
+            .toggleStyle(.checkbox)
+            .onChange(of: model.offsetEraseSource) { _, _ in apply() }
     }
 
     // MARK: - Insert tool option groups (decomposed to keep the body type-checkable)

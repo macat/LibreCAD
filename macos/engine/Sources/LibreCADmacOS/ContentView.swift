@@ -1617,17 +1617,22 @@ enum ToolCatalog {
     /// The DRAW-group flyouts (#1), in toolbar order. ONLY the pinned Draw tools that
     /// have meaningful variants/modes are flyouts; every other Draw tool stays a plain
     /// button (and the whole group stays reachable via the `▾` overflow menu).
-    ///   • Line ▸ {Construction Line (XLine), Ray}  — separate KINDS.
+    ///   • Line ▸ {Construction Line (XLine), Ray, Line Construction}  — separate KINDS.
     ///   • Rectangle ▸ {Polygon}                    — a separate KIND.
-    ///   • Circle ▸ {Center+Radius, 2 Points, 3 Points} — construction MODES.
+    ///   • Circle ▸ {Center+Radius, 2 Points, 3 Points, TTR, TTT, From Arc} — modes.
     ///   • Arc ▸ {Center/Start/End, 3 Points, Tangential} — creation MODES.
     ///   • Spline ▸ {Fit points (default), Control points} — `SplineMode` (Wave-3B).
-    /// (Circle has no TTR mode and Rectangle has no rounded/chamfer KIND in this build,
-    /// so neither is offered — only existing kinds/modes are listed.)
+    /// (Rectangle has no rounded/chamfer KIND in this build, so only the Polygon kind is
+    /// offered there — every flyout case resolves to an existing kind/mode.)
     static let drawFlyouts: [Flyout] = [
-        Flyout(primary: .line, variants: [.kind(.xline), .kind(.ray)]),
+        Flyout(primary: .line, variants: [.kind(.xline), .kind(.ray),
+            // Wire-wave-4: the LINE CONSTRUCTION tool (a separate kind; its construction
+            // METHOD is chosen in the Tool Options bar after activation).
+            .kind(.lineConstruction)]),
         Flyout(primary: .circle, variants: [
             .circleMode(.centerRadius), .circleMode(.twoPoint), .circleMode(.threePoint),
+            // Wire-wave-4: TTR (tan-tan-radius), TTT (tan-tan-tan), and From-Arc.
+            .circleMode(.tanTanRadius), .circleMode(.tanTanTan), .circleMode(.fromArc),
         ]),
         Flyout(primary: .arc, variants: [
             .arcMode(.centerStartEnd), .arcMode(.threePoint), .arcMode(.tangential),
@@ -1747,6 +1752,8 @@ enum ToolCatalog {
         .line, .circle, .arc, .rectangle, .polyline, .point,
         .ellipse, .polygon, .spline, .hatch, .image,
         .xline, .ray, .insert, .viewport,
+        // Wire-wave-4: WIPEOUT masking polygon (a normal draw tool — makeTool mints it).
+        .wipeout,
     ]
 
     private static let modifyTools: [ToolKind] = [
@@ -1755,6 +1762,8 @@ enum ToolCatalog {
         .trim, .extend, .fillet, .chamfer,
         .polylineEdit, .join, .explodeText, .align,
         .createBlock, .explodeInsert,
+        // Wire-wave-4: LINE CONSTRUCTION (perpendicular / parallel / bisector / tangent).
+        .lineConstruction,
     ]
 
     private static let annotateTools: [ToolKind] = [
@@ -1763,6 +1772,8 @@ enum ToolCatalog {
         .ordinateDim, .arcLengthDim, .angular3pDim,
         .leader, .multileader, .baselineDim, .continueDim,
         .measureDistance, .measureAngle, .measureArea, .measureLength,
+        // Wire-wave-4: REVISION CLOUD markup (a normal draw/markup tool).
+        .revcloud,
     ]
 
     // MARK: Per-tool display metadata

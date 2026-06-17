@@ -950,6 +950,51 @@ final class CanvasModel {
     /// `BaselineDimTool.baselineSpacing`.
     var baselineSpacing: Double = BaselineDimTool.defaultBaselineSpacing
 
+    // MARK: Wire-wave-4 tool options (Offset modes / Rotate-Mirror copy / Line construction)
+
+    /// Offset tool: which mode decides the offset distance. `OffsetTool.OffsetMode`
+    /// is `Equatable` but NOT `Hashable`, so it can't be a SwiftUI Picker tag — bound
+    /// as a case INDEX (the Trim/Scale/Ellipse split the brief prescribes). 0 =
+    /// `.through` (the original behavior — the offset copy passes through the picked
+    /// point; the default), 1 = `.distance` (offset by a fixed `offsetDistance`, the
+    /// click only chooses the side). `applyToolConfig` maps the index → `OffsetMode`.
+    var offsetModeIndex: Int = 0
+    /// Offset tool: the fixed offset distance (world units) used by `.distance` mode
+    /// (`offsetModeIndex == 1`). Ignored in `.through` mode. Non-positive ⇒ no offset
+    /// (the tool's own safe no-op).
+    var offsetDistance: Double = 10.0
+    /// Offset tool: when `true`, also emit the OPPOSITE-side offset copy for each
+    /// source (LibreCAD "both sides"). Default `false` ⇒ a single copy (the original
+    /// behavior). `applyToolConfig` pushes it onto `OffsetTool.bothSides`.
+    var offsetBothSides: Bool = false
+    /// Offset tool: when `true`, ERASE each source that produced an offset copy
+    /// (LibreCAD "delete original"). Default `false` ⇒ copy-only (the original
+    /// behavior). `applyToolConfig` pushes it onto `OffsetTool.eraseSource`.
+    var offsetEraseSource: Bool = false
+
+    /// The `OffsetTool.OffsetMode` for the current `offsetModeIndex` (assembled here
+    /// so `applyToolConfig` and the wiring test share one mapping).
+    var offsetModeValue: OffsetTool.OffsetMode {
+        offsetModeIndex == 1 ? .distance : .through
+    }
+
+    /// Rotate tool: when `true`, KEEP the originals and add rotated COPIES (AutoCAD
+    /// ROTATE "Copy" — `RotateTool.keepOriginal`). Default `false` ⇒ rotate in place
+    /// (the original behavior). `applyToolConfig` pushes it onto `RotateTool`.
+    var rotateKeepOriginal: Bool = false
+
+    /// Mirror tool: when `true`, KEEP the originals and add mirrored COPIES (AutoCAD
+    /// MIRROR "keep source" — `MirrorTool.keepOriginal`). Default `false` ⇒ mirror in
+    /// place. `applyToolConfig` pushes it onto `MirrorTool`.
+    var mirrorKeepOriginal: Bool = false
+
+    /// Line-construction tool: the construction METHOD. `LineConstructionTool.Mode` is
+    /// a `String`-raw `CaseIterable` enum (so it CAN be a Picker tag directly — unlike
+    /// the index-bound modes). `LineConstructionTool.mode` is fixed at construction, so
+    /// `applyToolConfig` RE-MINTS the tool with this (the DivideTool/ArcTool pattern).
+    /// Defaults to `.perpendicularFoot` (the tool's own default).
+    var lineConstructionMode: LineConstructionTool.Mode = .perpendicularFoot
+
     // MARK: Layer defaults (Document Settings — app policy for new layers)
 
     /// The default color a NEW layer is born with (Document Settings ▸ Layers).
@@ -2519,6 +2564,33 @@ final class CanvasModel {
             // re-mint with the configured spacing (mirrors the DivideTool/ArcTool pattern).
             tool = BaselineDimTool(baselineSpacing: baselineSpacing)
 
+        // MARK: Wire-wave-4 configurable tools (Offset / Rotate / Mirror / Line construction)
+
+        case var t as OffsetTool:
+            // OffsetTool carries `mode` / `distance` / `bothSides` / `eraseSource` as
+            // settable `var`s (no-arg init), so apply them IN PLACE on the live tool
+            // (the FilletTool/ScaleTool pattern). The defaults (`.through`, single copy,
+            // copy-only) reproduce the original behavior byte-for-byte.
+            t.mode = offsetModeValue
+            t.distance = offsetDistance
+            t.bothSides = offsetBothSides
+            t.eraseSource = offsetEraseSource
+            tool = t
+        case var t as RotateTool:
+            // RotateTool carries `keepOriginal` as a settable `var`; apply IN PLACE.
+            // `false` (the default) is rotate-in-place (the original behavior).
+            t.keepOriginal = rotateKeepOriginal
+            tool = t
+        case var t as MirrorTool:
+            // MirrorTool carries `keepOriginal` as a settable `var`; apply IN PLACE.
+            // `false` (the default) is mirror-in-place (the original behavior).
+            t.keepOriginal = mirrorKeepOriginal
+            tool = t
+        case is LineConstructionTool:
+            // LineConstructionTool's `mode` seeds the start state at construction, so
+            // RE-MINT with the chosen mode (the DivideTool/ArcTool re-mint pattern).
+            tool = LineConstructionTool(mode: lineConstructionMode)
+
         default:
             break
         }
@@ -2543,7 +2615,7 @@ final class CanvasModel {
         // state, per the review NIT.)
         if tool is DivideTool || tool is CircleTool || tool is ArcTool || tool is LineTool
             || tool is EllipseTool || tool is BaselineDimTool || tool is ImageTool
-            || tool is InsertTool || tool is SplineTool {
+            || tool is InsertTool || tool is SplineTool || tool is LineConstructionTool {
             toolStatus = tool?.status ?? ""
         } else {
             toolStatus = savedStatus
