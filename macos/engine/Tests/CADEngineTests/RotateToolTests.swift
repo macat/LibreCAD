@@ -331,4 +331,123 @@ struct RotateToolTests {
         let real = tool.handle(.click(Self.target), context: ctx)
         #expect(replacedKinds(real)?.count == 2)
     }
+
+    // MARK: - Rotate-a-copy (keepOriginal — W1-1B)
+
+    /// Distinctive, non-default identity so the copy path's metadata preservation is
+    /// actually observable (a named layer, a `.byBlock` pen, an extra flag, paper
+    /// space + a layout) — none of which equals the `EntityRecord` defaults.
+    private static let taggedLayer = LayerID("walls")
+    private static let taggedPen = Pen(lineColor: .byBlock)
+    private static let taggedFlags: EntityFlags = [.visible, .selected]
+
+    /// The line + circle fixtures, but carrying the distinctive identity above.
+    private func taggedContext() -> ToolContext {
+        let line = EntityRecord(
+            id: Self.lineID, layer: Self.taggedLayer, pen: Self.taggedPen,
+            flags: Self.taggedFlags,
+            kind: .line(LineData(start: Vector(0, 0), end: Vector(10, 0))),
+            space: .paper, layoutName: "Layout1")
+        let circle = EntityRecord(
+            id: Self.circleID, layer: Self.taggedLayer, pen: Self.taggedPen,
+            flags: Self.taggedFlags,
+            kind: .circle(CircleData(center: Vector(10, 0), radius: 2)),
+            space: .paper, layoutName: "Layout1")
+        let records = [line, circle]
+        let byID = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0) })
+        return ToolContext(selected: records, entity: { byID[$0] }, gridSpacing: nil)
+    }
+
+    /// Pulls the `.add`ed records out of a `.commit` (returns nil if the outcome
+    /// isn't a `.commit` of ONLY `.add` edits — so a stray `.replace` fails the test).
+    private func addedRecords(_ outcome: ToolOutcome) -> [EntityRecord]? {
+        guard case .commit(let edits) = outcome else { return nil }
+        var out: [EntityRecord] = []
+        for edit in edits {
+            guard case .add(let record) = edit else { return nil }
+            out.append(record)
+        }
+        return out
+    }
+
+    @Test("keepOriginal=true commits ONLY .add copies (placeholder id; identity preserved; geometry rotated)")
+    func keepOriginalCommitsOnlyAdds() {
+        var tool = RotateTool()
+        tool.keepOriginal = true
+        let ctx = taggedContext()
+
+        let outcome = rotate(&tool, ctx: ctx,
+                             center: Self.center, reference: Self.reference, target: Self.target)
+        guard let added = addedRecords(outcome) else {
+            Issue.record("expected a .commit of only .add edits"); return
+        }
+        // One ADD per selected entity (originals are left untouched — no .replace).
+        #expect(added.count == 2)
+
+        // Every copy carries the placeholder id (the app re-mints on add) and
+        // preserves the source's full identity — layer/pen/flags + space/layout.
+        for record in added {
+            #expect(record.id == .placeholder)
+            #expect(record.layer == Self.taggedLayer)
+            #expect(record.pen == Self.taggedPen)
+            #expect(record.flags == Self.taggedFlags)
+            #expect(record.space == .paper)
+            #expect(record.layoutName == "Layout1")
+        }
+
+        // The line copy is rotated 90° CCW about the origin to (0,0)→(0,10).
+        guard let lineRec = added.first(where: { if case .line = $0.kind { return true } else { return false } }),
+              case .line(let rotatedLine) = lineRec.kind else {
+            Issue.record("expected a rotated line copy"); return
+        }
+        #expect(vecClose(rotatedLine.start, Vector(0, 0)))
+        #expect(vecClose(rotatedLine.end, Vector(0, 10)))
+
+        // The circle copy's center rotates (10,0) → (0,10); radius unchanged.
+        guard let circleRec = added.first(where: { if case .circle = $0.kind { return true } else { return false } }),
+              case .circle(let rotatedCircle) = circleRec.kind else {
+            Issue.record("expected a rotated circle copy"); return
+        }
+        #expect(vecClose(rotatedCircle.center, Vector(0, 10)))
+        #expect(abs(rotatedCircle.radius - 2) < Self.tol)
+    }
+
+    @Test("default (keepOriginal=false) still commits .replace edits — no .add (regression guard)")
+    func defaultModeStillReplaces() {
+        var tool = RotateTool()              // keepOriginal defaults to false
+        #expect(tool.keepOriginal == false)
+        let ctx = selectionContext()
+
+        let outcome = rotate(&tool, ctx: ctx,
+                             center: Self.center, reference: Self.reference, target: Self.target)
+        // replacedKinds returns nil unless the commit is ONLY .replace edits.
+        #expect(replacedKinds(outcome)?.count == 2)
+        // And it is emphatically NOT an .add commit.
+        #expect(addedRecords(outcome) == nil)
+    }
+
+    @Test("the .add copy geometry equals the .replace geometry for identical picks")
+    func copyGeometryEqualsReplaceGeometry() {
+        // Replace path (keepOriginal=false).
+        var replaceTool = RotateTool()
+        let outcomeReplace = rotate(&replaceTool, ctx: selectionContext(),
+                                    center: Self.center, reference: Self.reference, target: Self.target)
+        guard let replacedKinds = replacedKinds(outcomeReplace) else {
+            Issue.record("expected a .replace commit"); return
+        }
+
+        // Copy path (keepOriginal=true) — same selection, same three picks.
+        var copyTool = RotateTool()
+        copyTool.keepOriginal = true
+        let outcomeCopy = rotate(&copyTool, ctx: selectionContext(),
+                                 center: Self.center, reference: Self.reference, target: Self.target)
+        guard let added = addedRecords(outcomeCopy) else {
+            Issue.record("expected an .add commit"); return
+        }
+
+        // The set of rotated kinds is identical between the two paths (EntityKind is
+        // Hashable): the copy rotates byte-for-byte the same as the in-place replace,
+        // differing only in WHICH edit (.add vs .replace) carries it.
+        #expect(Set(added.map { $0.kind }) == Set(replacedKinds.values))
+    }
 }

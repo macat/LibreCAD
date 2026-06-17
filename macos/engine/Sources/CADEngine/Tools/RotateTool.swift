@@ -22,10 +22,11 @@
 //                        to `[ResolvedPolyline]` (the `.toolPreview` pen) so the
 //                        live overlay shows the selection rotating about the pivot.
 //    - third `.click`  → commit: `angle = angle(center→target) − refAngle`; emit
-//                        one `.replace(id, kind.transformed(by: .rotation(...)))`
-//                        per selected entity, then reset and report `.finished`.
-//                        A ~zero angle (target collinear with the reference) is
-//                        ignored.
+//                        one edit per selected entity — `.replace(id, rotatedKind)`
+//                        in the default ROTATE-IN-PLACE mode, or, when `keepOriginal`
+//                        is set, an `.add` rotated COPY (originals kept; CopyTool
+//                        precedent) — then reset and report `.finished`. A ~zero
+//                        angle (target collinear with the reference) is ignored.
 //    - `.backspace`    → step back one pick (pickingTarget → pickingRef →
 //                        pickingCenter), undoing the in-progress picks without
 //                        committing.
@@ -84,6 +85,15 @@ public struct RotateTool: Tool {
     /// rebuilds `context.selected` per call, but it stays stable for this run).
     private var selection: [EntityRecord] = []
 
+    /// When `true`, the commit ROTATES A COPY: the originals stay in place and one
+    /// `.add` (a rotated duplicate carrying the source's id-less identity) is emitted
+    /// per selected entity, mirroring the COPY tool's `.add` precedent. When `false`
+    /// (the default) the tool ROTATES IN PLACE — one `.replace` per entity — which is
+    /// byte-identical to the original behavior. ADDITIVE: this flag is the only new
+    /// public surface; the interaction (center → reference → target), preview,
+    /// reset-after-commit, and empty-selection no-op are unchanged in both modes.
+    public var keepOriginal: Bool = false
+
     public init() {}
 
     // MARK: - Tool
@@ -123,8 +133,9 @@ public struct RotateTool: Tool {
         }
     }
 
-    /// A MODIFY tool: it reads `context.selected` (the entities to rotate) and
-    /// emits `.replace(id, newKind)` edits — never `.add`.
+    /// A MODIFY tool: it reads `context.selected` (the entities to rotate) and, by
+    /// default, emits `.replace(id, newKind)` edits. With `keepOriginal` set it
+    /// instead emits `.add` rotated COPIES (the originals are kept).
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
         switch input {
         case .value:
@@ -188,8 +199,28 @@ public struct RotateTool: Tool {
                 return .none
             }
             let t = Affine2D.rotation(angle: angle, about: center)
-            let edits: [ToolEdit] = selection.map {
-                .replace($0.id, $0.kind.transformed(by: t))
+            let edits: [ToolEdit] = selection.map { record in
+                let rotated = record.kind.transformed(by: t)
+                if keepOriginal {
+                    // ROTATE-A-COPY (W1-1B): leave the original in place and ADD a
+                    // rotated duplicate (CopyTool precedent). The copy carries the
+                    // `.placeholder` id (the app re-mints on add) and preserves the
+                    // source's full identity — layer/pen/flags plus model/paper space
+                    // and layout — so it matches the `.replace` path exactly except
+                    // for the new id and the (rotated) geometry.
+                    return .add(EntityRecord(
+                        id: .placeholder,
+                        layer: record.layer,
+                        pen: record.pen,
+                        flags: record.flags,
+                        kind: rotated,
+                        space: record.space,
+                        layoutName: record.layoutName
+                    ))
+                }
+                // ROTATE-IN-PLACE (default): replace each original with its rotated
+                // geometry; the app preserves the existing id/layer/pen/flags.
+                return .replace(record.id, rotated)
             }
             reset()
             return .commit(edits)
