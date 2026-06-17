@@ -428,6 +428,14 @@ public:
         e.mleaderArrowSize = 0.0;       // <= 0 ⇒ Swift falls back to the default arrow
         e.mleaderLandingDistance = 0.0;
         e.mleaderDoglegEnabled = 1;     // the landing tail is drawn by default
+        e.imgVVecX = e.imgVVecY = e.imgVVecZ = 0.0;
+        e.imgSizeU = e.imgSizeV = 0.0;
+        e.imgBrightness = 50;
+        e.imgContrast = 50;
+        e.imgFade = 0;
+        e.imgClip = 0;
+        e.imgShow = 1;
+        e.wipeoutClipMode = 0;          // code 290 absent ⇒ 0 (mask polygon interior)
         e.attribs = nullptr;
         e.attribCount = 0;
         e.vertices = nullptr;
@@ -975,6 +983,39 @@ public:
     // right target. We can't push immediately because the IMAGEDEF (with the file
     // path + pixel size) arrives LATER in the OBJECTS section.
     void addImage(const DRW_Image *data) override { capturePendingImage(data); }
+    // WIPEOUT entity (DRW_Image with the AcDbWipeout subclass marker): a masking
+    // polygon with NO raster — so UNLIKE addImage there is no IMAGEDEF to wait for,
+    // and we flatten + push DIRECTLY (no PendingImage deferral). The placement frame
+    // reuses the IMAGE fields (insertion p1, U vector p2, V vector imgVVec*, pixel
+    // size imgSizeU/V) and the masking polygon is `DRW_Image::clipPath` (codes 91 +
+    // 14/24), copied into the flat `vertices` array; the clip mode (code 290) is
+    // `DRW_Image::clipMode`.
+    void addWipeout(const DRW_Image *data) override {
+        ++m_out->geometryCount;
+        LCEntity e = makeEntity(LC_ENT_WIPEOUT);
+        if (data != nullptr) {
+            fillCommon(e, *data);
+            e.p1x = data->basePoint.x; e.p1y = data->basePoint.y; e.p1z = data->basePoint.z;
+            e.p2x = data->secPoint.x;  e.p2y = data->secPoint.y;  e.p2z = data->secPoint.z;
+            e.imgVVecX = data->vVector.x; e.imgVVecY = data->vVector.y; e.imgVVecZ = data->vVector.z;
+            e.imgSizeU = data->sizeu;
+            e.imgSizeV = data->sizev;
+            e.wipeoutClipMode = data->clipMode ? 1 : 0;
+            // The masking polygon (clipPath, codes 91/14/24) → the flat vertex array.
+            m_out->vertexPool.emplace_back();
+            std::vector<LCVertex> &verts = m_out->vertexPool.back();
+            verts.reserve(data->clipPath.size());
+            for (const auto &c : data->clipPath) {
+                verts.push_back(LCVertex{c.x, c.y, 0.0});
+            }
+            e.vertices = verts.empty() ? nullptr : verts.data();
+            e.vertexCount = static_cast<int32_t>(verts.size());
+        } else {
+            e.layer = intern("0");
+            e.lineType = intern("BYLAYER");
+        }
+        pushEntity(e);
+    }
     // IMAGEDEF object (DRW_ImageDef): recorded in the handle→def map so a pending
     // IMAGE can resolve its path + pixel size by its code-340 reference.
     void linkImage(const DRW_ImageDef *data) override {
@@ -2228,6 +2269,7 @@ private:
         case LC_ENT_LEADER:     writeLeader(e);     break;
         case LC_ENT_MLEADER:    writeMLeader(e);    break;
         case LC_ENT_IMAGE:      writeImage(e);      break;
+        case LC_ENT_WIPEOUT:    writeWipeout(e);    break;
         default:                ++m_skipped;        break; // UNSUPPORTED / ...
         }
     }
@@ -2370,6 +2412,33 @@ private:
         // Carry the pixel size into the IMAGEDEF (written in writeObjects).
         if (e.imgSizeU > 0) def->u = e.imgSizeU;
         if (e.imgSizeV > 0) def->v = e.imgSizeV;
+    }
+
+    // ----- WIPEOUT (masking polygon) -------------------------------------
+    // Emit a DXF WIPEOUT via dxfRW::writeWipeout(DRW_Image*) — a vendored helper that
+    // writes the AcDbRasterImage + AcDbWipeout subclass markers + the placement frame
+    // (insertion 10, U vector 11, V vector 12, pixel size 13/23) + the masking polygon
+    // (code 91 count + repeated 14/24 vertices from clipPath) + the clip mode (290).
+    // UNLIKE writeImage there is NO IMAGEDEF (a wipeout carries no raster), so no
+    // name/def handling. Scope: WIPEOUT needs R2000+ and the DWG writer has no wipeout
+    // path — both skipped + counted, exactly like IMAGE.
+    void writeWipeout(const LCEntity &e) {
+        if (m_dwg != nullptr || writerVersion() <= DRW::AC1009) { ++m_skipped; return; }
+        DRW_Image img;
+        fillCommon(img, e);
+        img.basePoint.x = e.p1x; img.basePoint.y = e.p1y; img.basePoint.z = e.p1z;
+        img.secPoint.x  = e.p2x; img.secPoint.y  = e.p2y; img.secPoint.z  = e.p2z;
+        img.vVector.x = e.imgVVecX; img.vVector.y = e.imgVVecY; img.vVector.z = e.imgVVecZ;
+        img.sizeu = e.imgSizeU;
+        img.sizev = e.imgSizeV;
+        img.clipMode = (e.wipeoutClipMode != 0);   // code 290
+        // The masking polygon (the flat vertex array) → clipPath (codes 91/14/24).
+        img.clipPath.clear();
+        img.clipPath.reserve(static_cast<size_t>(e.vertexCount));
+        for (int32_t i = 0; i < e.vertexCount; ++i) {
+            img.clipPath.emplace_back(e.vertices[i].x, e.vertices[i].y);
+        }
+        if (!m_dxf->writeWipeout(&img)) { ++m_skipped; }
     }
 
     // ----- VIEWPORT (paper-space window) ---------------------------------

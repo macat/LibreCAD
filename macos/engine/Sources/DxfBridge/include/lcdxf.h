@@ -182,6 +182,20 @@ typedef enum LCEntityKind {
      *  out of scope. Distinct from LC_ENT_UNSUPPORTED so the reader maps it to
      *  `.multileader` (ML-W1 stubbed write → UNSUPPORTED; ML-W3 replaces that). */
     LC_ENT_MLEADER = 19,
+    /** A WIPEOUT — a masking polygon (DXF WIPEOUT / AcDbWipeout). In DXF a WIPEOUT
+     *  is an AcDbRasterImage subclass with NO raster, so libdxfrw delivers it as a
+     *  `DRW_Image` (there is no DRW_Wipeout class): the placement frame is the IMAGE
+     *  convention — insertion (`p1`, code 10), per-pixel U vector (`p2`, code 11),
+     *  per-pixel V vector (`imgVVec*`, code 12), pixel size (`imgSizeU`/`imgSizeV`,
+     *  codes 13/23) — and the MASKING POLYGON is the clip boundary in `vertices`/
+     *  `vertexCount` (codes 91 + repeated 14/24, bulge unused), in IMAGE-PIXEL space.
+     *  The clip mode (code 290) is in `wipeoutClipMode`. NO IMAGEDEF, no path/raster.
+     *  Read: the reader overrides `addWipeout` (a non-pure DRW_Interface default
+     *  no-op) and flattens DIRECTLY (no PendingImage/IMAGEDEF deferral). Write: the
+     *  writer calls `dxfRW::writeWipeout(DRW_Image*)`. WIPEOUT needs R2000+ (dropped/
+     *  skipped at R12 and on DWG, like IMAGE). Distinct from LC_ENT_UNSUPPORTED so
+     *  the reader maps it to `.wipeout`. */
+    LC_ENT_WIPEOUT = 20,
     /** An entity libdxfrw delivered but the reader does not flatten
      *  (ordinate-DIMENSION/...). Carries only its `typeName` so Swift
      *  can collect a warning; geometry fields are unset. */
@@ -462,6 +476,12 @@ typedef struct LCEntity {
     int32_t imgFade;             /**< code 283, 0–100; default 0. */
     int32_t imgClip;             /**< code 280 clip on/off; default 0. */
     int32_t imgShow;             /**< show-image display flag (code 70 bit 1); default 1. */
+
+    /* WIPEOUT-only field (meaningful when kind == LC_ENT_WIPEOUT). A WIPEOUT reuses
+     * the IMAGE placement fields above (p1 insertion, p2 U vector, imgVVec* V vector,
+     * imgSizeU/V pixel size) PLUS the masking polygon in `vertices`/`vertexCount`
+     * (the clip boundary, codes 91 + 14/24, in IMAGE-PIXEL space, bulge unused). */
+    int32_t wipeoutClipMode;     /**< code 290 — clip-mode flag (0/1). Round-trips. */
 
     /* Variable-length data — borrowed pointers into the owning list's pools. */
     const LCVertex *vertices;   /**< polyline vertices, spline control points, hatch

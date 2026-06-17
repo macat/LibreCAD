@@ -865,12 +865,11 @@ struct DXFWriterTests {
         switch r.kind {
         case .line, .point, .circle, .arc, .ellipse, .polyline,
              .text, .mtext, .solid, .hatch, .dimension, .insert,
-             .spline, .splinePoints, .xline, .ray, .leader, .image: return true
+             .spline, .splinePoints, .xline, .ray, .leader, .image,
+             .wipeout: return true   // WIPEOUT is written (DRW_Image + AcDbWipeout)
         // MLEADER write is ML-W3 (the writer stubs `.multileader` to UNSUPPORTED for
-        // now), so it is NOT in the supported set yet. WIPEOUT write is W3-2 (the
-        // writer stubs `.wipeout` to UNSUPPORTED until the bridge POD lands), so it is
-        // NOT in the supported set yet either — flipped to `true` in the W3-2 sub-phase.
-        case .multileader, .wipeout: return false
+        // now), so it is NOT in the supported set yet.
+        case .multileader: return false
         }
     }
 }

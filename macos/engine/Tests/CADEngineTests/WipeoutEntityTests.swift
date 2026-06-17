@@ -273,4 +273,79 @@ struct WipeoutEntityTests {
         #expect(w.frameVisible)   // a wipeout born without the flag is framed
         #expect(w.boundary.count == 3)   // the non-additive boundary survives intact
     }
+
+    // MARK: - DXF round-trip (write → reread via the bridge)
+
+    @Test("a DXF WIPEOUT round-trips its placement frame + masking polygon + clipMode")
+    func dxfWipeoutRoundTrips() async throws {
+        // A rotated, scaled placement frame (per-pixel u/v of 0.5 over a 100×80 pixel
+        // grid) with a 4-vertex pixel-space masking polygon and clipMode set — so the
+        // round-trip exercises every WIPEOUT field, not just an axis-aligned square.
+        let w = WipeoutData(
+            insertion: Vector(100, 50),
+            uVector: Vector(0.5, 0),
+            vVector: Vector(0, 0.5),
+            pixelWidth: 100,
+            pixelHeight: 80,
+            boundary: [Vector(0, 0), Vector(100, 0), Vector(100, 80), Vector(0, 80)],
+            clipMode: true,
+            frameVisible: true)
+        let rec = EntityRecord(id: EntityID(1), layer: LayerID("0"), kind: .wipeout(w))
+        let layers = LayerTable(layers: [Layer(name: "0")], activeLayerName: "0")
+
+        let outPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wipeout-roundtrip-\(UUID().uuidString).dxf").path
+        defer { try? FileManager.default.removeItem(atPath: outPath) }
+
+        let writeResult = try await CADEngine.shared.writeEntities(
+            [rec], layers: layers, toPath: outPath)
+        // The WIPEOUT is written (not skipped) at R2000.
+        #expect(writeResult.skipped == 0)
+
+        let back = try await CADEngine.shared.readEntities(dxfPath: outPath)
+        let wipeouts = back.records.compactMap { r -> WipeoutData? in
+            if case .wipeout(let d) = r.kind { return d } else { return nil }
+        }
+        #expect(wipeouts.count == 1)
+        let d = try #require(wipeouts.first)
+
+        // Placement frame survives.
+        #expect(approx(d.insertion, Vector(100, 50), 1e-6))
+        #expect(approx(d.uVector, Vector(0.5, 0), 1e-6))
+        #expect(approx(d.vVector, Vector(0, 0.5), 1e-6))
+        #expect(abs(d.pixelWidth - 100) < 1e-6)
+        #expect(abs(d.pixelHeight - 80) < 1e-6)
+        // The masking polygon (pixel space) survives.
+        #expect(d.boundary.count == 4)
+        #expect(approx(d.boundary[0], Vector(0, 0), 1e-6))
+        #expect(approx(d.boundary[2], Vector(100, 80), 1e-6))
+        // clipMode survives.
+        #expect(d.clipMode)
+        // The WORLD boundary reconstructs (insertion + u·bx + v·by).
+        let world = d.worldBoundary
+        #expect(approx(world[0], Vector(100, 50), 1e-6))
+        #expect(approx(world[2], Vector(150, 90), 1e-6))   // 100 + 0.5·100, 50 + 0.5·80
+    }
+
+    @Test("a degenerate (no-boundary) wipeout still writes + rereads without crashing")
+    func dxfDegenerateWipeoutRoundTrips() async throws {
+        // A wipeout with an empty boundary (internPoints → (nil, 0)) must not crash the
+        // bridge on write or read — it round-trips as a frame with no polygon.
+        let w = WipeoutData(
+            insertion: Vector(0, 0), uVector: Vector(1, 0), vVector: Vector(0, 1),
+            boundary: [])
+        let rec = EntityRecord(id: EntityID(1), layer: LayerID("0"), kind: .wipeout(w))
+        let layers = LayerTable(layers: [Layer(name: "0")], activeLayerName: "0")
+        let outPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wipeout-empty-\(UUID().uuidString).dxf").path
+        defer { try? FileManager.default.removeItem(atPath: outPath) }
+        _ = try await CADEngine.shared.writeEntities([rec], layers: layers, toPath: outPath)
+        let back = try await CADEngine.shared.readEntities(dxfPath: outPath)
+        let wipeouts = back.records.compactMap { r -> WipeoutData? in
+            if case .wipeout(let d) = r.kind { return d } else { return nil }
+        }
+        // It reads back as a wipeout with an empty boundary (no crash, no polygon).
+        #expect(wipeouts.count == 1)
+        #expect(wipeouts.first?.boundary.isEmpty == true)
+    }
 }
