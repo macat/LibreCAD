@@ -126,6 +126,29 @@ constexpr const char *kDynAttrTag = "LIBRECAD$DYN";
 // Whether an attribute tag is the reserved dynamic-block carrier tag.
 inline bool isDynamicAttrTag(const std::string &tag) { return tag == kDynAttrTag; }
 
+// ----- HATCH gradient kind <-> DRW gradient name (code 470) ------------------
+// AutoCAD gradient names: LINEAR / CYLINDER (and INV*) are directional ramps
+// (-> linear, 0); the SPHERICAL / HEMISPHERICAL / CURVED families (and their
+// INV* variants) are centered ramps (-> radial, 1). The match is case-insensitive
+// and substring-based so the INV* / *CYLINDER prefixes still classify. Returns
+// 0 (linear) for an empty/unknown name (the common LINEAR default).
+inline int32_t gradKindFromName(const std::string &name) {
+    std::string up;
+    up.reserve(name.size());
+    for (char c : name) up.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    if (up.find("SPHER") != std::string::npos ||   // SPHERICAL / HEMISPHERICAL / INV*
+        up.find("HEMI")  != std::string::npos ||
+        up.find("CURVED") != std::string::npos) {
+        return 1;  // radial
+    }
+    return 0;      // linear (LINEAR, CYLINDER, INVCYLINDER, unknown/empty)
+}
+
+// The canonical DRW gradient name (code 470) for a kind (0 linear, 1 radial).
+inline const char *gradNameFromKind(int32_t kind) {
+    return (kind == 1) ? "SPHERICAL" : "LINEAR";
+}
+
 /**
  * FlatteningReader implements every DRW_Interface pure-virtual. The geometric
  * add* callbacks flatten their payload into POD copies on `out`; tables collect
@@ -361,6 +384,12 @@ public:
         e.solidFill = 0;
         e.hatchScale = 1.0;
         e.hatchAngle = 0.0;
+        e.hatchGradient = 0;
+        e.hatchGradKind = 0;
+        e.hatchGradAngle = 0.0;
+        e.hatchGradStopCount = 0;
+        e.hatchGradColor0 = -1;
+        e.hatchGradColor1 = -1;
         e.mtextRectWidth = 0.0;
         e.mtextAttachment = 1;            // TopLeft default
         e.mtextLineSpacingStyle = 1;      // at-least
@@ -1040,6 +1069,34 @@ private:
         e.hatchScale = (data->scale != 0.0) ? data->scale : 1.0;
         e.hatchAngle = data->angle * M_PI / 180.0;
         e.textValue = intern(data->name);   // pattern name (e.g. "SOLID", "ANSI31")
+
+        // Gradient fill (DRW_Hatch gradient block, DXF codes 450..470 + 463/421/63
+        // per stop). Only carried when libdxfrw flagged a gradient (code 450 != 0).
+        // gradAngle (code 460) is ALREADY radians in libdxfrw (unlike the pattern
+        // angle code 52, which is DXF degrees) — copied verbatim, no conversion.
+        if (data->isGradient != 0) {
+            e.hatchGradient = 1;
+            e.hatchGradKind = gradKindFromName(data->gradName);
+            e.hatchGradAngle = data->gradAngle;   // radians (libdxfrw native)
+            // Up to two stops. Per stop, prefer the 24-bit true color (code 421);
+            // fall back to the ACI index (code 63) via the standard palette. -1 ==
+            // unset (the Swift reader then drops/ignores that stop).
+            int32_t packed[2] = { -1, -1 };
+            int n = 0;
+            for (const auto &stop : data->gradColors) {
+                if (n >= 2) break;
+                int32_t rgb = -1;
+                if (stop.rgb > 0) {
+                    rgb = stop.rgb & 0x00FFFFFF;
+                } else if (stop.aciColor > 0) {
+                    rgb = lc_aci_to_rgb(stop.aciColor);
+                }
+                packed[n++] = rgb;
+            }
+            e.hatchGradStopCount = n;
+            e.hatchGradColor0 = packed[0];
+            e.hatchGradColor1 = packed[1];
+        }
 
         // One flat vertex array for ALL loops; loops index into it via windows.
         m_out->vertexPool.emplace_back();
@@ -2530,6 +2587,27 @@ private:
         // PATTERN hatch (!solid); angle is emitted in DXF degrees, so convert back.
         h.scale = (e.hatchScale != 0.0) ? e.hatchScale : 1.0;
         h.angle = e.hatchAngle * 180.0 / M_PI;
+
+        // Gradient block (DRW_Hatch gradient members; DXF codes 450..470 + 463/421
+        // per stop). gradAngle (code 460) is RADIANS in libdxfrw — copied verbatim
+        // (NOT deg->rad like the pattern angle code 52). Each stop's color is
+        // written as the 24-bit true color (code 421); ACI (code 63) is left 0 so
+        // the RGB carries the exact color. Stop positions are evenly spread (0..1).
+        if (e.hatchGradient != 0) {
+            h.isGradient = 1;
+            h.gradName = std::string(gradNameFromKind(e.hatchGradKind));
+            h.gradAngle = e.hatchGradAngle;   // radians (libdxfrw native)
+            const int32_t packed[2] = { e.hatchGradColor0, e.hatchGradColor1 };
+            const int n = (e.hatchGradStopCount < 0) ? 0
+                        : (e.hatchGradStopCount > 2 ? 2 : e.hatchGradStopCount);
+            for (int i = 0; i < n; ++i) {
+                DRW_Hatch::GradientStop stop;
+                stop.value = (n > 1) ? (static_cast<double>(i) / (n - 1)) : 0.0;
+                stop.rgb = (packed[i] >= 0) ? (packed[i] & 0x00FFFFFF) : 0;
+                stop.aciColor = 0;
+                h.gradColors.push_back(stop);
+            }
+        }
 
         if (e.loopCount > 0 && e.loops != nullptr &&
             e.vertexCount > 0 && e.vertices != nullptr) {

@@ -485,7 +485,8 @@ extension CADEngine {
                 solidFill: e.solidFill != 0,
                 patternName: string(e.textValue),
                 patternScale: e.hatchScale > 0 ? e.hatchScale : 1,
-                patternAngle: e.hatchAngle      // radians (bridge converted code 52)
+                patternAngle: e.hatchAngle,     // radians (bridge converted code 52)
+                gradient: hatchGradient(e)
             ))
 
         case Int32(LC_ENT_SOLID.rawValue):
@@ -820,6 +821,28 @@ extension CADEngine {
                 PolylineVertex(point: Vector($0.x, $0.y), bulge: $0.bulge)
             }
         }
+    }
+
+    /// Builds a `HatchGradient` from a HATCH's gradient POD fields, or `nil` when
+    /// the entity carries no gradient (`hatchGradient == 0` — a plain solid/pattern
+    /// fill). The bridge classifies the DRW gradient name (code 470) into the
+    /// linear/radial kind; each stop color crosses as a packed 0x00RRGGBB int (the
+    /// same form as `color24`), -1 == unset. The angle (code 460) is already RADIANS
+    /// on the C side (libdxfrw stores it natively in radians), so it is copied
+    /// straight through — no degrees conversion (unlike the pattern angle code 52).
+    private static func hatchGradient(_ e: LCEntity) -> HatchGradient? {
+        guard e.hatchGradient != 0 else { return nil }
+        let kind: HatchGradient.Kind = (e.hatchGradKind == 1) ? .radial : .linear
+        let packed = [e.hatchGradColor0, e.hatchGradColor1]
+        let count = max(0, min(2, Int(e.hatchGradStopCount)))
+        var colors: [RGBAColor] = []
+        for i in 0..<count where packed[i] >= 0 {
+            colors.append(rgba(fromPacked: packed[i]))
+        }
+        // A gradient with no resolvable stop colors is meaningless to the model;
+        // drop it back to a flat fill rather than carry an empty ramp.
+        guard !colors.isEmpty else { return nil }
+        return HatchGradient(kind: kind, colors: colors, angle: e.hatchGradAngle)
     }
 
     /// Maps a SPLINE. A degenerate spline (fewer than `degree + 1` control
