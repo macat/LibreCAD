@@ -317,6 +317,71 @@ public enum SnapGeometry {
         return out
     }
 
+    // MARK: - Angle bisector (between two lines)
+
+    /// The UNIT direction of the angle bisector of the wedge between two infinite
+    /// lines, selected by a reference point on each line.
+    ///
+    /// Mirrors LibreCAD's `RS_ActionDrawLineBisector` / `RS_Creation::createBisector`
+    /// (librecad/src/lib/creation/rs_creation.cpp): the two lines meet at a CORNER
+    /// (their infinite intersection); the bisector emanates from that corner and
+    /// bisects the wedge the user picked — the one between the RAYS that point from
+    /// the corner TOWARD each reference point (`ref1` on line 1, `ref2` on line 2).
+    /// There are four bisector directions for two crossing lines; choosing the wedge
+    /// by the two picks selects the one the user means, exactly as the C++ action
+    /// orients each line toward its click and bisects `dir1 + dir2`.
+    ///
+    /// Returns `.invalid` for parallel/coincident lines (no finite corner) or when
+    /// the picked rays are anti-parallel (a straight angle — the bisector direction
+    /// is undefined, perpendicular to the line, so we report no result). The bisector
+    /// LINE is then `corner → corner + dir·L` for any `L` the caller chooses; use
+    /// ``bisectorCorner(...)`` to fetch the corner.
+    ///
+    /// - Parameters:
+    ///   - a0, a1: two distinct points on the FIRST line (its segment endpoints).
+    ///   - ref1:   a point on (or near) the first line selecting its ray from the corner.
+    ///   - b0, b1: two distinct points on the SECOND line.
+    ///   - ref2:   a point selecting the second line's ray from the corner.
+    public static func angleBisectorDirection(a0: Vector, a1: Vector, ref1: Vector,
+                                              b0: Vector, b1: Vector, ref2: Vector) -> Vector {
+        guard let corner = bisectorCorner(a0: a0, a1: a1, b0: b0, b1: b1) else { return .invalid }
+        // Each ray uses its OWN line's direction (so it lies exactly on the line),
+        // oriented from the corner toward the pick side.
+        let d1 = rayFromCorner(corner, lineStart: a0, lineEnd: a1, toward: ref1)
+        let d2 = rayFromCorner(corner, lineStart: b0, lineEnd: b1, toward: ref2)
+        guard d1.valid, d2.valid else { return .invalid }
+        let sum = d1 + d2
+        let len = sum.magnitude
+        // Anti-parallel rays (a straight 180° "corner"): bisector is undefined here
+        // (it would be perpendicular to the line, but the wedge is degenerate).
+        guard len > Tolerance.distance else { return .invalid }
+        return sum * (1.0 / len)
+    }
+
+    /// The CORNER of two infinite lines — their intersection point — or `.invalid`
+    /// when they are parallel/coincident (no finite crossing). The companion of
+    /// ``angleBisectorDirection(...)``: the bisector LINE is `corner → corner + dir·L`.
+    public static func bisectorCorner(a0: Vector, a1: Vector, b0: Vector, b1: Vector) -> Vector? {
+        let sols = Intersections.lineLine(a0, a1, b0, b1, segment: false)
+        guard let corner = sols.first, corner.valid else { return nil }
+        return corner
+    }
+
+    /// The UNIT direction from `corner` ALONG the line `(lineStart, lineEnd)`,
+    /// oriented to point toward the side of `toward`. Returns `.invalid` for a
+    /// degenerate (zero-length) line. (Shared by the bisector construction; mirrors
+    /// `FilletTool.directionAlongLine` but normalized and engine-shared.)
+    private static func rayFromCorner(_ corner: Vector,
+                                      lineStart: Vector, lineEnd: Vector,
+                                      toward: Vector) -> Vector {
+        let dir = lineEnd - lineStart
+        let len = dir.magnitude
+        guard len > Tolerance.distance else { return .invalid }
+        let unit = dir * (1.0 / len)
+        let sign = (toward - corner).dot(unit) >= 0 ? 1.0 : -1.0
+        return unit * sign
+    }
+
     // MARK: - Manual (two-pick) snap primitives
 
     /// The midpoint of two user-picked points (LibreCAD "Snap middle manual" —
