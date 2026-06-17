@@ -2589,6 +2589,163 @@ final class CanvasModel {
         }
     }
 
+    // MARK: - Smart command line dispatch (merged command + coordinate field, Wave 3)
+
+    /// The keyword chips the active tool offers at its current step — the tool's own
+    /// `keywordOptions` (`[Close]`/`[Undo]` for Polyline/Spline, construction-mode
+    /// keywords for Circle/Arc/Ellipse in their initial state), or `[]` when no tool is
+    /// active. The merged command line's chip row (Wave 4) renders from this, and a chip
+    /// tap routes back through `invokeToolKeyword(_:)` — the SAME entry a typed keyword
+    /// uses. A computed read-through of the live tool value (no stored mirror).
+    var activeToolKeywordOptions: [ToolKeyword] {
+        tool?.keywordOptions ?? []
+    }
+
+    /// The single dispatch entry for a tool command KEYWORD — used by BOTH a keyword the
+    /// user typed on the merged command line AND a chip tap (Wave 4). Matches `keyword`
+    /// case-insensitively against the active tool's CURRENTLY offered `keywordOptions`
+    /// (ignoring anything not offered right now), then routes through the EXISTING
+    /// `ToolInput` events — there is deliberately NO `ToolInput.keyword` case (that would
+    /// force an exhaustive-switch edit across every tool's `handle`):
+    ///
+    ///   - `Undo`  → `.backspace` (steps the last picked vertex/point back).
+    ///   - `Close` → `.click(tool.closeAnchor)` — re-feeds the first vertex/point so the
+    ///               tool's close-on-coincidence path commits the closed entity. No-op
+    ///               when `closeAnchor` is `nil` (closing not currently possible).
+    ///   - construction-MODE keywords (Circle/Arc/Ellipse, offered only in the initial
+    ///               state) → set the matching model config field, then
+    ///               `reapplyActiveToolConfig()` re-mints the tool in the chosen mode.
+    ///
+    /// A no-op when no tool is active or the keyword is not one the tool offers right now.
+    func invokeToolKeyword(_ keyword: String) {
+        guard let tool = self.tool else { return }
+        // Only act on a keyword the tool is OFFERING at its current step (case-insensitive).
+        guard tool.keywordOptions.contains(where: {
+            $0.keyword.caseInsensitiveCompare(keyword) == .orderedSame
+        }) else { return }
+
+        let key = keyword.lowercased()
+        switch key {
+        case "undo":
+            handleToolInput(.backspace)
+            return
+        case "close":
+            if let p = tool.closeAnchor { handleToolInput(.click(p)) }
+            return
+        default:
+            break
+        }
+
+        // Construction-MODE keywords — disambiguated by the active tool's kind (e.g. `3p`
+        // is Circle's three-point vs Arc's three-point). Set the config field then re-mint.
+        switch (activeToolKind, key) {
+        // Circle — construction mode.
+        case (.circle, "cen"):      circleConstructionMode = .centerRadius
+        case (.circle, "2p"):       circleConstructionMode = .twoPoint
+        case (.circle, "3p"):       circleConstructionMode = .threePoint
+        // Circle — size mode (labels the numeric entry).
+        case (.circle, "diameter"): circleSizeMode = .diameter
+        case (.circle, "radius"):   circleSizeMode = .radius
+        // Arc — construction mode.
+        case (.arc, "cse"):         arcMode = .centerStartEnd
+        case (.arc, "3p"):          arcMode = .threePoint
+        case (.arc, "tan"):         arcMode = .tangential
+        // Ellipse — construction mode (stored as a case index).
+        case (.ellipse, "axis"):     ellipseModeIndex = 0
+        case (.ellipse, "foci"):     ellipseModeIndex = 1
+        case (.ellipse, "4p"):       ellipseModeIndex = 2
+        case (.ellipse, "inscribe"): ellipseModeIndex = 3
+        case (.ellipse, "arc"):      ellipseModeIndex = 4
+        default:
+            // Offered keyword we don't have a config route for — nothing to do.
+            return
+        }
+        reapplyActiveToolConfig()
+    }
+
+    /// The outcome of interpreting one line of the merged smart command line — what the
+    /// VIEW (Wave 4) does after the user presses ⏎. The View activates tools itself (so it
+    /// can special-case `.image`'s `NSOpenPanel` modal, which must NEVER be reached from
+    /// the model — a modal on a headless test thread hangs forever), so a recognized
+    /// command name returns `.activateTool(kind)` rather than activating here.
+    enum CommandLineResult: Equatable {
+        /// The line was blank — nothing to do.
+        case empty
+        /// The model fully handled the line (a tool keyword fired, or a coordinate was
+        /// parsed + fed to the active tool). No further View action.
+        case handled
+        /// The line is a recognized tool command — the View should activate `kind`
+        /// (routing `.image` through its file-picker). The MRU was already recorded here.
+        case activateTool(ToolKind)
+        /// The line could not be interpreted; `lastCommandError` carries the message the
+        /// field echoes.
+        case error(String)
+    }
+
+    /// The unified ⏎ router the merged command line calls. Classifies the trimmed text and
+    /// routes it WITHOUT a new `ToolInput` case:
+    ///
+    ///   1. empty → `.empty`.
+    ///   2. a tool is active AND the text matches one of `activeToolKeywordOptions`
+    ///      (case-insensitive) → `invokeToolKeyword` → `.handled`.
+    ///   3. else the text looks like a coordinate (`CommandParser.looksLikeCoordinate`):
+    ///      with a tool active, parse it against `relativeZero`/`cursorWorld` and feed the
+    ///      point as `.value` (`.handled`, or `.error` on a parse failure); with NO tool
+    ///      active → `.error("Start a tool first")`.
+    ///   4. else `ToolSuggester.resolve` recognizes a command name → record the MRU and
+    ///      return `.activateTool(kind)` (the View activates — see the `.image` note).
+    ///   5. else → `.error("Unknown command: …")`.
+    ///
+    /// Keyword routing (step 2) is checked BEFORE the coordinate/command routes so a tool
+    /// keyword that happens to look like a word (`Close`, `Undo`, `axis`, …) is never
+    /// mis-read as a command name; coordinate-shaped keywords don't exist today.
+    @discardableResult
+    func interpretCommandLine(_ text: String) -> CommandLineResult {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+
+        // 1) Empty.
+        guard !trimmed.isEmpty else { return .empty }
+
+        // 2) An offered tool keyword (only when a tool is active).
+        if tool != nil,
+           activeToolKeywordOptions.contains(where: {
+               $0.keyword.caseInsensitiveCompare(trimmed) == .orderedSame
+           }) {
+            invokeToolKeyword(trimmed)
+            lastCommandError = nil
+            return .handled
+        }
+
+        // 3) A coordinate (x,y / @dx,dy / dist<angle / bare distance).
+        if CommandParser.looksLikeCoordinate(trimmed) {
+            guard isToolActive else {
+                lastCommandError = "Start a tool first"
+                return .error("Start a tool first")
+            }
+            switch CommandParser.parse(trimmed, reference: relativeZero, cursor: cursorWorld) {
+            case .point(let p):
+                lastCommandError = nil
+                handleToolInput(.value(p))
+                return .handled
+            case .error(let message):
+                lastCommandError = message
+                return .error(message)
+            }
+        }
+
+        // 4) A recognized tool command name — the View activates (handles `.image` modal).
+        if let kind = ToolSuggester.resolve(command: trimmed) {
+            recordCommandBarUse(kind)
+            lastCommandError = nil
+            return .activateTool(kind)
+        }
+
+        // 5) Unrecognized.
+        let message = "Unknown command: \(trimmed)"
+        lastCommandError = message
+        return .error(message)
+    }
+
     /// Builds the read-only `ToolContext` snapshot for one `handle` call: the
     /// current selection resolved to records, a lookup into the drawing, the
     /// last-seen grid step, and the boundary hooks (`nearbyEntities` / `allEntities`)

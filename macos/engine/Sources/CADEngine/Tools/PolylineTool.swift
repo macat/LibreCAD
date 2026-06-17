@@ -120,6 +120,17 @@ public struct PolylineTool: Tool {
         }
     }
 
+    /// The WORLD point the smart command line's `Close` keyword re-feeds to close the
+    /// loop: the FIRST committed vertex, returned EXACTLY when `keywordOptions` offers
+    /// `Close` (≥ 2 committed vertices), else `nil`. There is no standalone close input,
+    /// so Wave 3 dispatches `Close` as `.click(closeAnchor)`; `handleClick`'s
+    /// close-on-first-vertex path then commits the closed polyline. Reads the same private
+    /// `state.building.vertices` `keywordOptions`/`preview` read — no new stored field.
+    public var closeAnchor: Vector? {
+        guard case .building(let vertices) = state, vertices.count >= 2 else { return nil }
+        return vertices.first
+    }
+
     /// A draw tool: it IGNORES `context` (it needs only the snapped world points)
     /// and emits new geometry as a single `.add` edit on commit.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
