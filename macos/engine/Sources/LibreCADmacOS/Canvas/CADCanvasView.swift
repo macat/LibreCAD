@@ -265,7 +265,7 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
     }
 
     /// Right-click → the canvas context menu (U5). Over a selection: Cut/Copy/
-    /// Duplicate/Delete/Properties; over empty canvas: Paste / Select All / Zoom to
+    /// Duplicate/Delete/Inspector; over empty canvas: Paste / Select All / Zoom to
     /// Fit / toggle Grid / toggle Ortho / Document Settings. The menu items target
     /// THIS view (an NSObject, so ObjC action dispatch works) and forward to the
     /// controller. `nil` while a draw tool is active (no menu mid-draw).
@@ -318,7 +318,9 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
                 menu.addItem(item("Edit Attributes…", #selector(ctxEditAttributes(_:))))
             }
             menu.addItem(.separator())
-            menu.addItem(item("Properties…", #selector(ctxProperties(_:))))
+            // "Inspector" everywhere (the Mac idiom) — the panel ContentView / the command
+            // palette already call "Inspector"; this right-click verb matches (finding-M10).
+            menu.addItem(item("Inspector", #selector(ctxProperties(_:))))
             menu.addItem(.separator())
         }
         menu.addItem(item("Paste", #selector(ctxPaste(_:)), enabled: controller.canPaste))
@@ -585,7 +587,7 @@ final class CADCanvasController {
     /// tool is active, so Space is otherwise free.
     var requestCommandFocus: (() -> Void)?
 
-    /// A hook ContentView sets so the canvas context menu's "Properties" verb (U5)
+    /// A hook ContentView sets so the canvas context menu's "Inspector" verb (U5)
     /// can reveal + focus the Inspector pane (where entity properties are edited).
     /// `nil` until the view appears.
     var requestShowInspector: (() -> Void)?
@@ -1344,7 +1346,7 @@ final class CADCanvasController {
     }
 
     /// Whether the context menu's selection-dependent verbs (Cut/Copy/Duplicate/
-    /// Delete/Properties) should appear.
+    /// Delete/Inspector) should appear.
     var hasSelection: Bool { !model.selection.isEmpty }
     /// Whether the "Edit Attributes…" verb (§14) should appear: a SINGLE `.insert` is
     /// selected whose referenced block declares ATTDEF attribute definitions.
@@ -1856,6 +1858,10 @@ final class CADCanvasController {
         let isSpace = event.keyCode == 49
         let isF8 = event.keyCode == 100                            // F8 → toggle Ortho
         let isF7 = event.keyCode == 98                             // F7 → toggle Grid
+        let isF3 = event.keyCode == 99                             // F3 → toggle Object Snap
+        let isF9 = event.keyCode == 101                            // F9 → toggle Grid Snap
+        let isF10 = event.keyCode == 109                           // F10 → toggle Polar
+        let isF12 = event.keyCode == 111                           // F12 → toggle Dynamic Input
         let isTab = event.keyCode == 48                            // Tab → cycle dyn field
 
         // F8 toggles ortho (AutoCAD/LibreCAD convention), in any mode and regardless
@@ -1871,6 +1877,36 @@ final class CADCanvasController {
         // collides with a letter.
         if isF7 {
             contextToggleGrid()
+            return true
+        }
+
+        // F3 / F9 / F10 / F12 are the AutoCAD/LibreCAD drafting-aid toggles ADVERTISED on
+        // the status-bar OSNAP / SNAP / POLAR / DYN chips (StatusBar.swift help strings) —
+        // bound here next to F7/F8 so the chip tooltips become accurate. Each routes to the
+        // SAME model toggle its status chip drives, in any mode and regardless of modifiers
+        // (a draw run can flip them mid-operation), and is handled before the tool keys so
+        // it never collides with a letter. (F-keys are matched by keyCode, so the menu's
+        // macOS-reserved F10/F11 KeyEquivalent caveat does not apply here.)
+        if isF3 {                                  // OSNAP — master object snap
+            model.setObjectSnapEnabled(!model.objectSnapEnabled)
+            redraw()
+            return true
+        }
+        if isF9 {                                  // SNAP — grid snap (.grid bit)
+            model.toggleGridSnap()
+            redraw()
+            return true
+        }
+        if isF10 {                                 // POLAR — polar tracking
+            model.togglePolar()
+            redraw()
+            return true
+        }
+        if isF12 {                                 // DYN — dynamic input (live dimensions)
+            model.toggleDynamicInput()
+            // `redraw()` re-syncs the live-dimension overlay's `isEnabled` off the new
+            // `dynamicInputEnabled` (see its overlay-refresh block) and repaints.
+            redraw()
             return true
         }
 
@@ -1959,6 +1995,15 @@ final class CADCanvasController {
             if dynamicGrip?.isDragging == true {
                 dynamicGrip?.cancelActiveDrag()
                 redraw()
+                return true
+            }
+            // Esc during paper-space VIEWPORT placement cancels the in-progress 2-click
+            // drag via its dedicated `cancelViewportPlacement` — drop the rubber-band but
+            // STAY in viewport-placement mode (the next click starts a fresh placement),
+            // matching the marquee / zoom-window cancel-the-gesture convention. Placed
+            // before the tool ladder so Esc backs out the gesture, not the mode.
+            if model.isViewportPlacementActive {
+                if model.cancelViewportPlacement() { redraw() }
                 return true
             }
             // Esc in zoom-window mode cancels the box + exits the mode (the gesture

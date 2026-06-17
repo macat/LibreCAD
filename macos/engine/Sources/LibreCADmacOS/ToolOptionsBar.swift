@@ -98,6 +98,8 @@ struct ToolOptionsBar: View {
              // Wire-wave-4 configurable tools: Offset modes, Rotate/Mirror copy,
              // Line-construction method.
              .offset, .rotate, .mirror, .lineConstruction,
+             // Lane-M surfaced tool modes: Polyline-Edit action + XLine direction lock.
+             .polylineEdit, .xline,
              // Block INSERT placement options: scale / rotation / MINSERT array.
              .insert:
             return true
@@ -436,6 +438,45 @@ struct ToolOptionsBar: View {
             .fixedSize()
             .labelsHidden()
             .onChange(of: model.lineConstructionMode) { _, _ in apply() }
+
+        // MARK: Lane-M surfaced tool modes (Polyline-Edit / XLine)
+
+        case .polylineEdit:
+            // Vertex/segment edit action: Move / Add / Remove a vertex, or toggle a
+            // segment straight↔arc (case index 0/1/2/3 → PolylineEditTool.Mode in
+            // applyToolConfig). PolylineEditTool.Mode is Equatable-not-Hashable, so the
+            // picker binds the Int index. Applied IN PLACE (the tool keeps its picked
+            // polyline target across a mode switch).
+            Picker("Action", selection: $model.polylineEditModeIndex) {
+                Text("Move").tag(0)
+                Text("Add").tag(1)
+                Text("Remove").tag(2)
+                Text("Arc").tag(3)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .labelsHidden()
+            .onChange(of: model.polylineEditModeIndex) { _, _ in apply() }
+
+        case .xline:
+            // Construction-line direction lock: Free (two-point) / Horizontal / Vertical /
+            // fixed Angle (case index 0/1/2/3 → XLineTool.Mode in applyToolConfig). The
+            // angle field shows only for the Angle mode. XLineTool.Mode carries an
+            // associated value, so the picker binds the Int index; the tool is RE-MINTED on
+            // change (the mode is fixed at construction).
+            Picker("Direction", selection: $model.xlineModeIndex) {
+                Text("Free").tag(0)
+                Text("Horizontal").tag(1)
+                Text("Vertical").tag(2)
+                Text("Angle").tag(3)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .labelsHidden()
+            .onChange(of: model.xlineModeIndex) { _, _ in apply() }
+            if model.xlineModeIndex == 3 {
+                numberField("Angle°", value: degreesBinding($model.xlineAngle), width: DS.Field.narrow)
+            }
 
         // MARK: Block Insert — scale / rotation / MINSERT array
         case .insert:
