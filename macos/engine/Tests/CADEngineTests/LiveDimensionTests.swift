@@ -218,6 +218,15 @@ struct LiveDimensionTests {
         return t
     }
 
+    /// Asserts two vectors agree to a tight tolerance — for dim endpoints that round
+    /// through cos/sin (e.g. an on-circle point at a typed angle), where exact `==`
+    /// is brittle (`cos(π/2)` is `6.12e-16`, not `0`).
+    private func nearVec(_ a: Vector, _ b: Vector, _ tol: Double = 1e-9,
+                         sourceLocation: SourceLocation = #_sourceLocation) {
+        #expect(abs(a.x - b.x) <= tol, "x: \(a.x) vs \(b.x)", sourceLocation: sourceLocation)
+        #expect(abs(a.y - b.y) <= tol, "y: \(a.y) vs \(b.y)", sourceLocation: sourceLocation)
+    }
+
     // MARK: LineTool — length (.linear) + angle (.angle)
 
     @Test("LineTool emits length + angle while dragging the next segment")
@@ -478,6 +487,229 @@ struct LiveDimensionTests {
         #expect(drive(PolygonTool(), [.move(Vector(12, 0))]).liveDimensions(.default).isEmpty)
         // After committing (second click) the tool reset()s to .settingCenter.
         let after = drive(PolygonTool(), [.click(Vector(0, 0)), .click(Vector(12, 0))])
+        #expect(after.liveDimensions(.default).isEmpty)
+    }
+
+    // MARK: PolylineTool — current segment length (.linear) + angle (.angle)
+    //
+    // A polyline mid-draw is a chain of straight segments, so it reports the SAME
+    // per-segment length+angle readout LineTool does, measured from the LAST placed
+    // vertex to the cursor. Both fields editable; Tab order [length, angle].
+
+    @Test("PolylineTool emits length + angle for the current segment from the last vertex")
+    func polylineLiveDimensions() {
+        // Place two vertices, then drag the third toward (10, 0) from (5, 5).
+        let tool = drive(PolylineTool(),
+                         [.click(Vector(0, 0)), .click(Vector(5, 5)), .move(Vector(15, 5))])
+        let dims = tool.liveDimensions(.default)
+        #expect(dims.count == 2)
+
+        // Length: last vertex (5,5) → cursor (15,5) = 10 along +X.
+        #expect(dims[0].kind == .linear(10))
+        #expect(dims[0].from == Vector(5, 5))                // last placed vertex
+        #expect(dims[0].to == Vector(15, 5))                 // cursor
+        #expect(dims[0].label == "10")
+        #expect(dims[0].labelAnchor == Vector(10, 5))        // segment midpoint
+        #expect(dims[0].field == .length)
+        #expect(dims[0].isEditable)
+
+        // Angle: 0° along +X, labeled near the cursor end.
+        #expect(dims[1].kind == .angle(0))
+        #expect(dims[1].from == Vector(5, 5))
+        #expect(dims[1].to == Vector(15, 5))
+        #expect(dims[1].label == "0°")
+        #expect(dims[1].labelAnchor == Vector(15, 5))
+        #expect(dims[1].field == .angle)
+        #expect(dims[1].isEditable)
+    }
+
+    @Test("PolylineTool length label honors an architectural context")
+    func polylineLiveDimensionArchitecturalLabel() {
+        let ctx = LiveDimensionContext(linearFormat: .architectural, linearPrecision: 4,
+                                       unit: .inch)
+        // First segment from origin, drag to (30, 0) → 2'-6".
+        let tool = drive(PolylineTool(), [.click(Vector(0, 0)), .move(Vector(30, 0))])
+        let dims = tool.liveDimensions(ctx)
+        #expect(dims.first?.kind == .linear(30))
+        #expect(dims.first?.label == "2'-6\"")
+    }
+
+    @Test("PolylineTool emits nothing before the first vertex and after commit")
+    func polylineLiveDimensionsEmptyOutsideDrag() {
+        // Before the first vertex: fresh tool / a bare move with no fixed vertex.
+        #expect(PolylineTool().liveDimensions(.default).isEmpty)
+        #expect(drive(PolylineTool(), [.move(Vector(10, 0))]).liveDimensions(.default).isEmpty)
+        // A degenerate (cursor on the last vertex) drag → empty.
+        let degenerate = drive(PolylineTool(), [.click(Vector(0, 0)), .move(Vector(0, 0))])
+        #expect(degenerate.liveDimensions(.default).isEmpty)
+        // After commit (Return with ≥2 vertices) the tool reset()s to .empty.
+        let after = drive(PolylineTool(),
+                          [.click(Vector(0, 0)), .click(Vector(5, 0)), .commit])
+        #expect(after.liveDimensions(.default).isEmpty)
+        // A cancelled run is back to the empty state too.
+        let cancelled = drive(PolylineTool(),
+                              [.click(Vector(0, 0)), .move(Vector(5, 0)), .cancel])
+        #expect(cancelled.liveDimensions(.default).isEmpty)
+    }
+
+    // MARK: ArcTool — center→start→end mode only (conservative coverage)
+
+    @Test("ArcTool settingStart emits an editable radius (center→cursor)")
+    func arcLiveDimensionsSettingStart() {
+        // Fix the center at the origin, drag the start point toward (8, 0).
+        let tool = drive(ArcTool(), [.click(Vector(0, 0)), .move(Vector(8, 0))])
+        let dims = tool.liveDimensions(.default)
+        #expect(dims.count == 1)
+        #expect(dims[0].kind == .radius(8))
+        #expect(dims[0].from == Vector(0, 0))                // center
+        #expect(dims[0].to == Vector(8, 0))                  // cursor
+        #expect(dims[0].label == "8")
+        #expect(dims[0].labelAnchor == Vector(4, 0))         // center→cursor midpoint
+        #expect(dims[0].field == .radius)
+        #expect(dims[0].isEditable)
+    }
+
+    @Test("ArcTool settingEnd emits a read-only radius + an editable end angle")
+    func arcLiveDimensionsSettingEnd() {
+        // Center (0,0), start (10,0) → radius 10, startAngle 0. Drag end toward +Y.
+        let tool = drive(ArcTool(),
+                         [.click(Vector(0, 0)), .click(Vector(10, 0)), .move(Vector(0, 5))])
+        let dims = tool.liveDimensions(.default)
+        #expect(dims.count == 2)
+
+        // Radius: locked at 10, drawn to the on-circle point at the cursor angle (90°)
+        // → (0, 10). NON-editable. (The endpoint rounds through cos/sin, so `nearVec`.)
+        #expect(dims[0].kind == .radius(10))
+        #expect(dims[0].from == Vector(0, 0))
+        nearVec(dims[0].to, Vector(0, 10))                   // on-circle at 90°
+        #expect(dims[0].label == "10")
+        #expect(dims[0].field == nil)
+        #expect(dims[0].isEditable == false)
+
+        // End angle: 90° → editable.
+        #expect(dims[1].kind == .angle(.pi / 2))
+        #expect(dims[1].from == Vector(0, 0))
+        nearVec(dims[1].to, Vector(0, 10))
+        #expect(dims[1].label == "90°")
+        #expect(dims[1].field == .angle)
+        #expect(dims[1].isEditable)
+    }
+
+    @Test("ArcTool settingStart radius label honors an architectural context")
+    func arcLiveDimensionArchitecturalLabel() {
+        let ctx = LiveDimensionContext(linearFormat: .architectural, linearPrecision: 4,
+                                       unit: .inch)
+        let tool = drive(ArcTool(), [.click(Vector(0, 0)), .move(Vector(30, 0))])  // 30" → 2'-6"
+        let dims = tool.liveDimensions(ctx)
+        #expect(dims.first?.kind == .radius(30))
+        #expect(dims.first?.label == "2'-6\"")
+    }
+
+    @Test("ArcTool emits nothing in the 3-point and tangential modes")
+    func arcLiveDimensionsOtherModesEmpty() {
+        // 3-point: drive through start + mid, dragging the end.
+        let threeP = drive(ArcTool(mode: .threePoint),
+                           [.click(Vector(0, 0)), .click(Vector(10, 0)), .move(Vector(5, 5))])
+        #expect(threeP.liveDimensions(.default).isEmpty)
+        // Tangential: start + tangent direction, dragging the end.
+        let tan = drive(ArcTool(mode: .tangential),
+                        [.click(Vector(0, 0)), .click(Vector(1, 0)), .move(Vector(5, 5))])
+        #expect(tan.liveDimensions(.default).isEmpty)
+    }
+
+    @Test("ArcTool emits nothing before the center and after commit")
+    func arcLiveDimensionsEmptyOutsideDrag() {
+        #expect(ArcTool().liveDimensions(.default).isEmpty)
+        #expect(drive(ArcTool(), [.move(Vector(8, 0))]).liveDimensions(.default).isEmpty)
+        // After committing (third click) the tool reset()s to .settingCenter.
+        let after = drive(ArcTool(),
+                          [.click(Vector(0, 0)), .click(Vector(10, 0)), .click(Vector(0, 10))])
+        #expect(after.liveDimensions(.default).isEmpty)
+    }
+
+    // MARK: EllipseTool — axis-style modes only (conservative coverage)
+
+    @Test("EllipseTool settingMajor emits an editable major-axis length (center→cursor)")
+    func ellipseLiveDimensionsSettingMajor() {
+        // Fix the center at the origin, drag the major endpoint toward (12, 0).
+        let tool = drive(EllipseTool(), [.click(Vector(0, 0)), .move(Vector(12, 0))])
+        let dims = tool.liveDimensions(.default)
+        #expect(dims.count == 1)
+        #expect(dims[0].kind == .linear(12))
+        #expect(dims[0].from == Vector(0, 0))                // center
+        #expect(dims[0].to == Vector(12, 0))                 // cursor
+        #expect(dims[0].label == "12")
+        #expect(dims[0].labelAnchor == Vector(6, 0))         // center→cursor midpoint
+        #expect(dims[0].field == .radius)
+        #expect(dims[0].isEditable)
+    }
+
+    @Test("EllipseTool settingRatio emits the editable minor (perpendicular) distance")
+    func ellipseLiveDimensionsSettingRatio() {
+        // Center (0,0), major endpoint (10,0) → majorP (10,0). Drag the minor point to
+        // (3, 4): along the major = 3, perpendicular leg = 4 (the minor distance).
+        let tool = drive(EllipseTool(),
+                         [.click(Vector(0, 0)), .click(Vector(10, 0)), .move(Vector(3, 4))])
+        let dims = tool.liveDimensions(.default)
+        #expect(dims.count == 1)
+        #expect(dims[0].kind == .linear(4))                  // perpendicular distance
+        #expect(dims[0].from == Vector(3, 0))                // foot of the perpendicular
+        #expect(dims[0].to == Vector(3, 4))                  // cursor
+        #expect(dims[0].label == "4")
+        #expect(dims[0].labelAnchor == Vector(3, 2))         // foot→cursor midpoint
+        #expect(dims[0].field == .length)
+        #expect(dims[0].isEditable)
+    }
+
+    @Test("EllipseTool major-axis label honors an architectural context")
+    func ellipseLiveDimensionArchitecturalLabel() {
+        let ctx = LiveDimensionContext(linearFormat: .architectural, linearPrecision: 4,
+                                       unit: .inch)
+        let tool = drive(EllipseTool(), [.click(Vector(0, 0)), .move(Vector(30, 0))])  // 30" → 2'-6"
+        let dims = tool.liveDimensions(ctx)
+        #expect(dims.first?.kind == .linear(30))
+        #expect(dims.first?.label == "2'-6\"")
+    }
+
+    @Test("EllipseTool emits nothing in the foci / 4-point / inscribe modes")
+    func ellipseLiveDimensionsOtherModesEmpty() {
+        // Foci + point: two foci placed, dragging the on-ellipse point.
+        let foci = drive(EllipseTool(mode: .fociPoint),
+                         [.click(Vector(-3, 0)), .click(Vector(3, 0)), .move(Vector(0, 4))])
+        #expect(foci.liveDimensions(.default).isEmpty)
+        // 4-point: three points placed, dragging the fourth.
+        let fourP = drive(EllipseTool(mode: .fourPoint),
+                          [.click(Vector(5, 0)), .click(Vector(0, 3)),
+                           .click(Vector(-5, 0)), .move(Vector(0, -3))])
+        #expect(fourP.liveDimensions(.default).isEmpty)
+        // Inscribe: three corners placed, dragging the fourth.
+        let inscribe = drive(EllipseTool(mode: .inscribeQuad),
+                             [.click(Vector(0, 0)), .click(Vector(10, 0)),
+                              .click(Vector(10, 6)), .move(Vector(0, 6))])
+        #expect(inscribe.liveDimensions(.default).isEmpty)
+    }
+
+    @Test("EllipseTool .arc mode: empty during the start/end angle steps")
+    func ellipseLiveDimensionsArcAngleStepsEmpty() {
+        // .arc shares the axis spine; once the ratio is fixed it advances to the
+        // start-angle step (settingArcStart), which carries no clean editable scalar.
+        let arcStart = drive(EllipseTool(mode: .arc),
+                             [.click(Vector(0, 0)), .click(Vector(10, 0)),
+                              .click(Vector(0, 5)), .move(Vector(10, 0))])
+        #expect(arcStart.liveDimensions(.default).isEmpty)
+        // But the major/ratio steps of .arc DO emit (it shares the axis spine).
+        let arcMajor = drive(EllipseTool(mode: .arc),
+                             [.click(Vector(0, 0)), .move(Vector(12, 0))])
+        #expect(arcMajor.liveDimensions(.default).count == 1)
+    }
+
+    @Test("EllipseTool emits nothing before the center and after commit")
+    func ellipseLiveDimensionsEmptyOutsideDrag() {
+        #expect(EllipseTool().liveDimensions(.default).isEmpty)
+        #expect(drive(EllipseTool(), [.move(Vector(12, 0))]).liveDimensions(.default).isEmpty)
+        // After committing (third click) the tool reset()s to .settingCenter.
+        let after = drive(EllipseTool(),
+                          [.click(Vector(0, 0)), .click(Vector(10, 0)), .click(Vector(0, 4))])
         #expect(after.liveDimensions(.default).isEmpty)
     }
 }

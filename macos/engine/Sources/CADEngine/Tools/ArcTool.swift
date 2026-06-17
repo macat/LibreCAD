@@ -193,6 +193,106 @@ public struct ArcTool: Tool {
         }
     }
 
+    // MARK: - Live dimensional feedback (center→start→end mode only)
+
+    /// AutoCAD-style live feedback while a `.centerStartEnd` arc is being dragged.
+    /// Coverage is deliberately CONSERVATIVE — only the two states where a single
+    /// scalar maps cleanly to a typed value carry an editable dim:
+    ///
+    /// - `.settingStart(center:)` — the cursor fixes the radius + start angle, so the
+    ///   center→cursor distance IS the radius the next click chooses: an EDITABLE
+    ///   `.radius` dim (`field: .radius`), reference = center. A typed radius commits
+    ///   the start point at that reach in the cursor direction.
+    /// - `.settingEnd(center, radius, startAngle)` — the radius is already locked, so
+    ///   the remaining degree of freedom is the END ANGLE the cursor sweeps to. Emit a
+    ///   NON-editable `.radius` readout (the fixed radius, drawn to the on-circle point
+    ///   under the cursor) PLUS an EDITABLE `.angle` dim (`field: .angle`) for the end
+    ///   angle. A typed angle commits the end point on the fixed-radius circle.
+    ///
+    /// Every OTHER mode/state returns `[]`: the `.threePoint` / `.tangential` modes
+    /// derive the arc from picked points with no single clean editable scalar
+    /// mid-construction, and the initial waiting states have no live arc. Empty before
+    /// the first pick and after commit (the tool `reset()`s), and for any degenerate
+    /// drag — so it never leaks. Labels are formatted IN-ENGINE via `CoordinateFormatter`
+    /// from `ctx` (no UI dependency).
+    public func liveDimensions(_ ctx: LiveDimensionContext) -> [LiveDimension] {
+        guard cursor.valid else { return [] }
+        switch state {
+        case .settingStart(let center):
+            guard center.valid else { return [] }
+            let radius = (cursor - center).magnitude
+            guard radius > Tolerance.distance else { return [] }
+            let label = CoordinateFormatter.length(
+                radius, format: ctx.linearFormat, precision: ctx.linearPrecision, unit: ctx.unit
+            )
+            let midpoint = (center + cursor) * 0.5
+            return [
+                LiveDimension(kind: .radius(radius), from: center, to: cursor,
+                              label: label, labelAnchor: midpoint,
+                              field: .radius, isEditable: true),
+            ]
+
+        case .settingEnd(let center, let radius, _):
+            guard center.valid, radius > Tolerance.distance else { return [] }
+            // The on-circle point under the cursor (the end point a click would fix).
+            let endAngle = (cursor - center).angle
+            let onCircle = center + Vector(angle: endAngle) * radius
+            let radiusLabel = CoordinateFormatter.length(
+                radius, format: ctx.linearFormat, precision: ctx.linearPrecision, unit: ctx.unit
+            )
+            let angleLabel = CoordinateFormatter.angle(
+                endAngle, format: ctx.angleFormat, precision: ctx.anglePrecision
+            )
+            let midpoint = (center + onCircle) * 0.5
+            return [
+                // Radius is locked by the start pick → a read-only readout.
+                LiveDimension(kind: .radius(radius), from: center, to: onCircle,
+                              label: radiusLabel, labelAnchor: midpoint),
+                // End angle is the live degree of freedom → editable.
+                LiveDimension(kind: .angle(endAngle), from: center, to: onCircle,
+                              label: angleLabel, labelAnchor: onCircle,
+                              field: .angle, isEditable: true),
+            ]
+
+        default:
+            // .settingCenter, .threeStart/.threeMid/.threeEnd, .tanStart/.tanDir/.tanEnd
+            // — no single clean editable scalar maps mid-construction.
+            return []
+        }
+    }
+
+    // MARK: - Dynamic input (typed radius / end-angle → the next point)
+
+    /// Resolves a typed dimension into the next pick, ONLY in the two `.centerStartEnd`
+    /// states `liveDimensions` marks editable (returns `nil` everywhere else — the
+    /// initial/center states, and the `.threePoint` / `.tangential` modes, where a
+    /// typed scalar has no well-defined point):
+    ///
+    /// - `.settingStart(center:)` — a typed `.radius` (else the live reach) along the
+    ///   live center→cursor direction, fixing the start point. A degenerate
+    ///   cursor==center falls back to +X so a typed radius still yields a valid point.
+    /// - `.settingEnd(center, radius, …)` — a typed `.angle` (else the live cursor
+    ///   angle) placed on the FIXED-radius circle, fixing the end point.
+    ///
+    /// `reference` is the arc's center in both editable states.
+    public func applyDynamicInput(_ values: [LiveDimensionField: Double],
+                                  cursor: Vector, reference: Vector) -> Vector? {
+        switch state {
+        case .settingStart:
+            let r = values[.radius] ?? (cursor - reference).magnitude
+            let d = cursor - reference
+            let u = d.magnitude > Tolerance.distance ? d / d.magnitude : Vector(angle: 0)
+            return reference + u * r
+
+        case .settingEnd(_, let radius, _):
+            let ang = values[.angle] ?? (cursor - reference).angle
+            return reference + Vector(angle: ang) * radius
+
+        default:
+            return nil
+        }
+    }
+
     // MARK: - Construction-mode command keywords (W2B)
 
     /// Whether the tool is still in its INITIAL waiting state (no point placed yet)
