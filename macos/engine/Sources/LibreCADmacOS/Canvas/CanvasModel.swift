@@ -438,6 +438,84 @@ final class CanvasModel {
     /// Divide tool: number of equal pieces (drops `count − 1` division points).
     var divideCount: Int = 2
 
+    // MARK: Wave-3B parameterized-tool options (Divide / Spline / Scale / Hatch)
+    //
+    // These mirror the existing circle/arc construction-mode pattern: the live engine
+    // tool fixes the mode at construction (or carries it as a public `var`), so
+    // `applyToolConfig` re-mints / re-applies it from the model state the Tool Options
+    // bar (Wave 3F) binds to. Defaults reproduce each tool's original behavior, so an
+    // un-touched bar is byte-for-byte the pre-Wave-3 flow.
+
+    /// Divide tool: whether the DivideTool runs in DIVIDE-by-COUNT (`.count`, the
+    /// default — drop `n−1` interior points) or MEASURE-by-LENGTH (`.length` — drop a
+    /// node every `divideSpacing` units along the curve). The options bar (3F) toggles
+    /// this; `applyToolConfig` re-mints the DivideTool with the assembled `DivideMode`.
+    /// `0` selects count; `1` selects length. Stored as an INDEX (the engine
+    /// `DivideTool.DivideMode` carries an associated value, so it can't be a Picker tag
+    /// — the same UI-simple split the Polygon/Rectangle/Ellipse pickers use).
+    var divideModeStyle: Int = 0
+
+    /// The MEASURE spacing (world units along the curve) used when `divideModeStyle ==
+    /// 1` (`.length`). A non-positive spacing yields no nodes (the tool's own guard), so
+    /// the bar should keep it > 0. Ignored in count mode.
+    var divideSpacing: Double = 10.0
+
+    /// The `DivideTool.DivideMode` assembled from the split UI state (`divideModeStyle`
+    /// + `divideCount` / `divideSpacing`). The single mapping `applyToolConfig` and the
+    /// wiring test share, so the options bar and the re-mint never drift. Mode `1`
+    /// (length) clamps the spacing finite-and-positive; otherwise count (clamped ≥ 2).
+    var divideMode: DivideTool.DivideMode {
+        if divideModeStyle == 1 {
+            let s = (divideSpacing.isFinite && divideSpacing > 0) ? divideSpacing : 10.0
+            return .length(s)
+        }
+        return .count(Swift.max(2, divideCount))
+    }
+
+    /// Spline tool: how the picked points are interpreted on commit — FIT points
+    /// (`.fit`, the default `.splinePoints` interpolation curve) vs NURBS CONTROL
+    /// points (`.controlPoints`, a `.spline` B-spline whose control polygon IS the
+    /// picks). `SplineTool.mode` is a `let` fixed at construction, so `applyToolConfig`
+    /// RE-MINTS the tool with this (the DivideTool/ArcTool re-mint pattern).
+    var splineMode: SplineMode = .fit
+
+    /// Scale tool: the construction MODE — `.factor` (the original three-pick
+    /// distance-ratio scale, the default), `.reference` (scale-by-reference-length), or
+    /// `.nonUniform` (independent per-axis `(sx, sy)` about a single base). `ScaleTool`
+    /// carries `mode` + `nonUniformFactors` as public `var`s (no-arg `init()`), so
+    /// `applyToolConfig` sets them IN PLACE on the live tool. The non-uniform factors
+    /// come from `scaleX` / `scaleY`.
+    var scaleMode: ScaleTool.ScaleMode = .factor
+    /// Scale tool: the per-axis X factor used by `.nonUniform` mode (default 1 ⇒ no-op).
+    var scaleX: Double = 1
+    /// Scale tool: the per-axis Y factor used by `.nonUniform` mode (default 1 ⇒ no-op).
+    var scaleY: Double = 1
+
+    /// Hatch tool: the chosen pattern NAME (case-insensitive; resolved against the
+    /// bundled `HatchPatternLibrary` at draw time), or `nil` ⇒ a SOLID fill (the
+    /// back-compatible default). The options bar (3F) picks a name from
+    /// `HatchPatternLibrary.patterns`; `applyToolConfig` assembles it into the
+    /// `HatchTool.Fill` (`.solid` for `nil`/"SOLID", else `.pattern`).
+    var currentHatchPattern: String?
+    /// Hatch tool: the per-hatch pattern SCALE (DXF code 41) applied to a named
+    /// pattern. `<= 0`/non-finite is normalized to 1 by the tool. Ignored for solid.
+    var hatchPatternScale: Double = 1
+    /// Hatch tool: an EXTRA pattern rotation (DXF code 52, RADIANS). The options bar
+    /// may edit a friendlier degrees value over this. Ignored for solid.
+    var hatchPatternAngle: Double = 0
+
+    /// The `HatchTool.Fill` assembled from the split UI state (`currentHatchPattern` +
+    /// scale/angle). The single mapping `applyToolConfig` and the wiring test share. A
+    /// `nil`/empty/"SOLID" name (case-insensitive) is a solid fill; any other name is a
+    /// named pattern carrying the scale + angle.
+    var hatchFillValue: HatchTool.Fill {
+        guard let name = currentHatchPattern,
+              !name.trimmingCharacters(in: .whitespaces).isEmpty,
+              name.uppercased() != "SOLID" else { return .solid }
+        let s = (hatchPatternScale.isFinite && hatchPatternScale > 0) ? hatchPatternScale : 1
+        return .pattern(name: name, scale: s, angle: hatchPatternAngle)
+    }
+
     // MARK: Draw-tool options (NEW — UX-plan U2, surfaced by the Tool Options bar)
 
     /// Polygon tool: number of sides (clamped ≥ 3 by the tool) and whether the
@@ -697,6 +775,56 @@ final class CanvasModel {
         self.viewport = Viewport(size: viewSize)
         drawing.undoManager = undoManager
         rebuildIndex()
+    }
+
+    // MARK: - App-settings snap seed (Wave 3B — NEW-window default drafting prefs)
+    //
+    // A NEW document/window should adopt the user's saved drafting PREFERENCES
+    // (Preferences ▸ Snapping): the default snap mask, pick aperture, and polar
+    // increment. The pure read-site is `AppSettingsModel` (every field already
+    // normalized/clamped via `AppSettings.snapMode(fromMask:)` / `clampAperture` /
+    // `polarIncrementRadians(fromDegrees:)`). This is OPT-IN — the plain `init` keeps the
+    // built-in interactive defaults (so the 2800+ existing tests / a loaded document are
+    // untouched); the Wave-3D window-creation path calls `seedSnapSettingsFromAppSettings()`.
+
+    /// Applies a resolved `AppSettingsModel` snapshot's drafting prefs onto this window's
+    /// LIVE snap state: `snapModes` (the saved default mask), `pickAperturePoints` (the
+    /// clamped aperture), and `polarAngleIncrement` (radians). PURE w.r.t. the snapshot
+    /// (no `UserDefaults` read here), so it is unit-testable headlessly with a synthetic
+    /// snapshot. Does NOT touch `gridVisible`/`preferredGridSpacing` (those are document
+    /// header vars, loaded via `loadSettingsFromDrawing`); this is the new-window default
+    /// for the three SNAP prefs only. Bumps `modelVersion` so chrome reflecting these
+    /// (snap chips) refreshes. A live policy — not document content, not undoable.
+    func applySnapSeed(_ settings: AppSettingsModel) {
+        snapModes = settings.defaultSnap
+        pickAperturePoints = AppSettings.clampAperture(settings.snapAperturePx)
+        polarAngleIncrement = settings.polarIncrementRadians
+        modelVersion &+= 1
+    }
+
+    /// Seeds this window's snap prefs from the user's SAVED preferences. The Wave-3D
+    /// new-window path calls this once after creating the model so a fresh window opens
+    /// with the user's chosen default snap mask / aperture / polar increment. Reads the
+    /// three `AppSettings.Key` snap keys off `UserDefaults` and runs each through the
+    /// documented `AppSettings` normalizer (`snapMode(fromMask:)` / `clampAperture` /
+    /// `polarIncrementRadians(fromDegrees:)`) so an absent/corrupt key falls back to the
+    /// documented default — the seed is always valid. Delegates to the pure
+    /// `applySnapSeed(_:)` (the unit-testable seam) with a snapshot built off the
+    /// all-defaults `AppSettingsModel.standard` with only the three snap fields overridden.
+    /// Reads `UserDefaults.standard` — keep it OUT of unit tests.
+    func seedSnapSettingsFromAppSettings(defaults: UserDefaults = .standard) {
+        let maskKey = AppSettings.Key.defaultSnapMask
+        let mask = (defaults.object(forKey: maskKey) as? Int) ?? AppSettings.Default.snapMask
+        let aperture = (defaults.object(forKey: AppSettings.Key.snapAperturePx) as? Double)
+            ?? AppSettings.Default.snapAperturePx
+        let polarDeg = (defaults.object(forKey: AppSettings.Key.polarIncrementDegrees) as? Double)
+            ?? AppSettings.Default.polarIncrementDegrees
+
+        var snapshot = AppSettingsModel.standard
+        snapshot.defaultSnap = AppSettings.snapMode(fromMask: mask)
+        snapshot.snapAperturePx = AppSettings.clampAperture(aperture)
+        snapshot.polarIncrementRadians = AppSettings.polarIncrementRadians(fromDegrees: polarDeg)
+        applySnapSeed(snapshot)
     }
 
     // MARK: - Model lifecycle
@@ -1715,8 +1843,18 @@ final class CanvasModel {
     /// The pick/snap aperture in GUI points (LibreCAD `m_catchEntityGuiRange`).
     static let catchPoints: Double = 8
 
-    /// Snap tolerance in world units for the current zoom.
-    var worldTolerance: Double { Self.catchPoints * viewport.worldPerPixel }
+    /// The LIVE pick/snap aperture in GUI points for THIS window. Defaults to the
+    /// historical `catchPoints` (8) so existing behavior + tests are unchanged; a NEW
+    /// window seeds it from `AppSettings.snapAperturePx` (clamped) via
+    /// `seedSnapSettingsFromAppSettings()` / `applySnapSeed(_:)` (Wave-3D wires the call
+    /// at window creation). `worldTolerance` reads THIS, so the seed actually changes the
+    /// catch range. A live interaction policy (not persisted to the document).
+    var pickAperturePoints: Double = CanvasModel.catchPoints
+
+    /// Snap tolerance in world units for the current zoom (the live aperture × the
+    /// current world-per-pixel). Reads `pickAperturePoints` so a seeded/edited aperture
+    /// takes effect immediately.
+    var worldTolerance: Double { pickAperturePoints * viewport.worldPerPixel }
 
     /// Runs snapping for a cursor screen point, updating `cursorWorld` + `snap`.
     /// Returns whether the snap result changed (so the caller can skip a redraw).
@@ -1933,10 +2071,35 @@ final class CanvasModel {
             )
             tool = t
         case is DivideTool:
-            // DivideTool's `divisions` is set at construction, so re-mint with the
-            // configured count (its public `var divisions` is settable too, but the
-            // init carries the clamp/validation, so prefer the init).
-            tool = DivideTool(divisions: Swift.max(2, divideCount))
+            // DivideTool's `mode` is set at construction, so re-mint with the assembled
+            // `DivideMode` (DIVIDE-by-count or MEASURE-by-length — the split UI state in
+            // `divideMode`). The `init(mode:)` carries the clamp/validation. The default
+            // (`divideModeStyle == 0`) reproduces the historical count-based DIVIDE.
+            tool = DivideTool(mode: divideMode)
+
+        // MARK: Wave-3B parameterized tools (Spline / Scale / Hatch)
+
+        case is SplineTool:
+            // SplineTool's `mode` is a `let` fixed at construction (it seeds how the
+            // picks are interpreted on commit — fit points vs NURBS control points), so
+            // RE-MINT with the chosen mode (the DivideTool/ArcTool re-mint pattern). The
+            // default `.fit` keeps the original fit-point interpolation behavior.
+            tool = SplineTool(mode: splineMode)
+        case var t as ScaleTool:
+            // ScaleTool carries `mode` + `nonUniformFactors` as settable `var`s (no-arg
+            // init), so apply them IN PLACE on the live tool (the FilletTool/ArrayTool
+            // pattern). `.factor` (the default) leaves the original three-pick distance
+            // ratio behavior untouched; `.nonUniform` reads the typed X/Y factors.
+            t.mode = scaleMode
+            t.nonUniformFactors = (sx: scaleX, sy: scaleY)
+            tool = t
+        case var t as HatchTool:
+            // HatchTool's `fill` is a settable `var`, so apply the assembled fill IN
+            // PLACE (solid for no/blank/"SOLID" pattern, else a named `.pat` pattern
+            // carrying the scale + angle). The default (no pattern) keeps a solid fill —
+            // the original behavior — so an un-configured Hatch is byte-for-byte unchanged.
+            t.fill = hatchFillValue
+            tool = t
 
         // MARK: NEW draw-tool options (UX-plan U2)
 
@@ -2108,7 +2271,7 @@ final class CanvasModel {
         // state, per the review NIT.)
         if tool is DivideTool || tool is CircleTool || tool is ArcTool || tool is LineTool
             || tool is EllipseTool || tool is BaselineDimTool || tool is ImageTool
-            || tool is InsertTool {
+            || tool is InsertTool || tool is SplineTool {
             toolStatus = tool?.status ?? ""
         } else {
             toolStatus = savedStatus
@@ -3560,18 +3723,136 @@ final class CanvasModel {
         return true
     }
 
-    /// "Hide other layers" — freezes every layer EXCEPT the named one, in one
-    /// undoable step (a focus affordance: isolate a layer). The named layer is
-    /// thawed so it is definitely visible. No-op if `layer` is unknown.
-    func isolateLayer(_ layer: String) {
-        guard drawing.layers.contains(layer) else { return }
-        drawing.mutateLayers { table in
-            for l in table.layers {
-                table.setVisible(l.name, l.name == layer)
-            }
+    // MARK: - Layer ISOLATE / UNISOLATE (Wave 3B — via the pure `LayerIsolation`)
+    //
+    // The daily "focus on these layers, hide the rest, then restore EXACTLY" op
+    // (AutoCAD LAYISO / LAYUNISO). The semantics live in the pure engine
+    // `LayerIsolation` (keep-set → freeze/thaw plan + an exact restore snapshot);
+    // this side only APPLIES the plan through the existing undoable `mutateLayers`
+    // funnel and STASHES the restore snapshot so `unisolateLayers()` reverts to the
+    // precise prior flags (a frozen-before / locked / printable layer returns to that).
+
+    /// The exact-restore snapshot captured by the last isolate, applied by
+    /// `unisolateLayers()`. `nil` when nothing is isolated. Transient view state (not
+    /// persisted, not a document mutation) — the undo of the isolate itself is the
+    /// `mutateLayers` value-snapshot; this is the explicit LAYUNISO inverse.
+    @ObservationIgnored
+    private var isolationRestore: LayerState?
+
+    /// Whether a layer isolation is currently in effect (a restore snapshot is stashed)
+    /// — drives the "Unisolate Layers" menu item's enabled state.
+    var hasIsolatedLayers: Bool { isolationRestore != nil }
+
+    /// Isolates the given `keep` layers: freezes every OTHER layer and thaws any kept
+    /// layer that was hidden, in ONE undoable `mutateLayers` step (via the pure
+    /// `LayerIsolation.isolate`), and STASHES the exact-restore snapshot so
+    /// `unisolateLayers()` can revert. No-op (no undo step, restore left untouched) when
+    /// the keep-set is empty of real layers or the plan changes nothing. The shared core
+    /// behind the public isolate entry points.
+    @discardableResult
+    private func applyIsolation(keep: Set<String>) -> Bool {
+        let existing = keep.filter { drawing.layers.contains($0) }
+        guard !existing.isEmpty else { return false }
+        let result = LayerIsolation.isolate(keep: existing, in: drawing.layers)
+        guard !result.isNoOp else {
+            // Already isolated to exactly this set: keep any prior restore so a later
+            // unisolate still works (the no-op didn't change the table).
+            return false
         }
+        // One undo step (same grouping rationale as `applyCommit`/`applyInspectorEdits`:
+        // groups-by-event in the live app, explicit group when a test drives this with
+        // grouping-by-event off + no run loop).
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        drawing.mutateLayers { result.isolated.apply(to: &$0) }   // one undo step
+        isolationRestore = result.restore
         modelDirty = true
         modelVersion &+= 1
+        return true
+    }
+
+    /// "Hide other layers" — isolates the single named `layer` (freezes every other,
+    /// thaws this one), undoable, and stashes the exact-restore snapshot. No-op if
+    /// `layer` is unknown. Rewired onto the pure `LayerIsolation` (was a manual
+    /// visibility loop) so an `unisolateLayers()` returns layers to their PRECISE prior
+    /// flags rather than blanket-showing everything.
+    func isolateLayer(_ layer: String) {
+        _ = applyIsolation(keep: [layer])
+    }
+
+    /// Isolates the layers of the CURRENT SELECTION (LAYISO from a selection): the kept
+    /// set is every distinct layer the selected entities live on. Freezes all others,
+    /// undoable, and stashes the restore snapshot. No-op for an empty selection / when
+    /// the selection's layers are already the only visible ones. Returns whether the
+    /// visibility changed.
+    @discardableResult
+    func isolateSelectionLayers() -> Bool {
+        let layers = Set(selection.ids.compactMap { drawing.entity($0)?.layer.name })
+        return applyIsolation(keep: layers)
+    }
+
+    /// Reverses the last isolate (LAYUNISO): applies the stashed exact-restore snapshot
+    /// through the undoable `mutateLayers` funnel so every layer returns to its prior
+    /// frozen/visible state, then clears the stash. No-op (returns `false`) when nothing
+    /// is isolated. Returns whether anything was restored.
+    @discardableResult
+    func unisolateLayers() -> Bool {
+        guard let restore = isolationRestore else { return false }
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        drawing.mutateLayers { restore.apply(to: &$0) }   // one undo step
+        isolationRestore = nil
+        modelDirty = true
+        modelVersion &+= 1
+        return true
+    }
+
+    /// "Turn off other layers" — freezes every layer EXCEPT those in `keep`, WITHOUT
+    /// thawing any kept-but-hidden layer and WITHOUT stashing a restore (the plain
+    /// LibreCAD "freeze others" affordance, distinct from LAYISO's isolate-with-restore).
+    /// Undoable via `mutateLayers`. No-op when the keep-set has no real layers / nothing
+    /// to freeze. Returns whether the visibility changed.
+    @discardableResult
+    func turnOffOtherLayers(keep: Set<String>) -> Bool {
+        let existing = keep.filter { drawing.layers.contains($0) }
+        guard !existing.isEmpty else { return false }
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        var changed = false
+        drawing.mutateLayers { table in
+            for l in table.layers where !existing.contains(l.name) && !l.isFrozen {
+                table.setFrozen(l.name, true)
+                changed = true
+            }
+        }
+        guard changed else { return false }
+        modelDirty = true
+        modelVersion &+= 1
+        return true
+    }
+
+    /// Convenience: turn off every layer except the single named one.
+    @discardableResult
+    func turnOffOtherLayers(except layer: String) -> Bool {
+        turnOffOtherLayers(keep: [layer])
+    }
+
+    /// Makes `layer` the CURRENT (active) layer — where new geometry lands (AutoCAD
+    /// CLAYER). Undoable via the existing `setActiveLayer` funnel. No-op (returns
+    /// `false`) when `layer` is unknown or already current. Returns whether it changed.
+    @discardableResult
+    func makeLayerCurrent(_ layer: String) -> Bool {
+        guard drawing.layers.contains(layer),
+              drawing.layers.activeLayerName != layer else { return false }
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        drawing.setActiveLayer(layer)   // undoable
+        modelVersion &+= 1
+        return true
     }
 
     /// Saves the current layer flags as a named state (undoable). Returns the name
@@ -3877,6 +4158,77 @@ final class CanvasModel {
         }
         guard !records.isEmpty else { return false }
         applyInspectorEdits(records)
+        return true
+    }
+
+    // MARK: - Per-entity GRIP editing mount (Wave 3B — EntityGripOverlay backing)
+    //
+    // The `EntityGripOverlay` (mounted by 3B') is SELF-CONTAINED + INJECTED: it owns
+    // no model and carries no geometry math (that is `EntityGrips`). The mount supplies
+    // it five closures — `selectionProvider` / `contextProvider` / `viewportProvider` /
+    // `onGripCommit` / `requestRedraw` — plus toggles `isEnabled`. These accessors are
+    // the contract 3B' wires those closures to; the GRIP MATH already lives in the pure
+    // engine `EntityGrips` (queried + applied by the overlay), so this side only routes
+    // the moved record through the EXISTING undoable commit funnel (no new undo path).
+
+    /// The records the grip overlay draws handles for — the SELECTION resolved to live
+    /// `EntityRecord`s. The overlay further filters to those that actually expose grips
+    /// (`EntityGrips.grips(for:)` non-empty), so this returns the whole selection; the
+    /// 3B' mount wires this as the overlay's `selectionProvider`.
+    var gripSelectionRecords: [EntityRecord] {
+        selection.ids.compactMap { drawing.entity($0) }
+    }
+
+    /// The `ResolveContext` the grip overlay passes to `EntityGrips.grips`/`moveGrip`
+    /// (font/tessellation/block resolution for the live drawing). The 3B' mount wires
+    /// this as the overlay's `contextProvider`. A thin pass-through over the drawing's
+    /// resolve context so the overlay never reaches into `drawing` directly.
+    func gripResolveContext() -> ResolveContext { drawing.makeResolveContext() }
+
+    /// The live `Viewport` the grip overlay uses for world↔screen projection (handle
+    /// placement + nearest-grip hit-testing). The 3B' mount wires this as the overlay's
+    /// `viewportProvider`. (A method, not just the `viewport` property, so the mount can
+    /// pass it as an `@escaping () -> Viewport` closure that always reads the latest.)
+    func gripViewport() -> Viewport { viewport }
+
+    /// Whether the grip overlay should currently participate (the mount drives the
+    /// overlay's `isEnabled` from this). Grips are active ONLY in SELECT mode, with a
+    /// selection that has at least one grip-editable entity, and NOT while a gizmo drag
+    /// is in progress (so the two transparent overlays never fight over an ambiguous
+    /// hit-test — the same dual-overlay arbitration the dynamic grip uses). Block-edit
+    /// sessions are fine (the selection is scoped to the block's members there).
+    var gripsEnabled: Bool {
+        guard activeToolKind == .select else { return false }
+        guard gizmoPreviewTransform == nil else { return false }   // gizmo owns the gesture
+        return hasGripEditableSelection
+    }
+
+    /// Whether the current selection contains at least one grip-editable entity (a line/
+    /// circle/arc/polyline/ellipse/spline/point/text — anything `EntityGrips.grips(for:)`
+    /// returns handles for). Drives `gripsEnabled` + lets the mount skip mounting the
+    /// overlay for a selection of only en-bloc kinds (insert/hatch/dimension/…).
+    var hasGripEditableSelection: Bool {
+        let ctx = drawing.makeResolveContext()
+        return selection.ids.contains { id in
+            guard let r = drawing.entity(id) else { return false }
+            return !EntityGrips.grips(for: r, ctx: ctx).isEmpty
+        }
+    }
+
+    /// Commits a grip-edited record (the overlay's `onGripCommit`): applies the moved
+    /// `EntityRecord` as ONE undoable `.replace` of that id through the EXISTING
+    /// inspector-edit funnel (`applyInspectorEdits` — the same path the gizmo + Inspector
+    /// use), so a single ⌘Z reverts the grip drag, the quadtree stays in sync, and the
+    /// GPU buffer is marked dirty. The overlay already produced the new geometry via the
+    /// pure `EntityGrips.moveGrip`, so this side carries NO geometry math. No-op (returns
+    /// `false`) if the record's id is no longer in the drawing or the edit is a no-op
+    /// (the moved record is byte-for-byte the current one — a zero-effect drag never
+    /// pushes an undo step, mirroring `commitGizmoTransform`). Returns whether anything
+    /// changed.
+    @discardableResult
+    func commitMovedGrip(_ record: EntityRecord) -> Bool {
+        guard let current = drawing.entity(record.id), current != record else { return false }
+        applyInspectorEdits([record])   // undoable .replace; index-synced; GPU dirty
         return true
     }
 
@@ -4530,6 +4882,71 @@ final class CanvasModel {
         modelDirty = true
         modelVersion &+= 1
         return true
+    }
+
+    // MARK: - Paste as Block (Wave 3B — Edit ▸ Paste as Block)
+
+    /// Pastes the current clipboard as a NEW BLOCK + an INSERT of it at `target` (a
+    /// WORLD point), as ONE undoable group. It re-mints the clipboard records (ids +
+    /// the cursor-anchored offset, via the pure `EntityClipboard.pasteRecords(at:)`),
+    /// ADDS them to mint real ids, then wraps those ids into a block + drops one
+    /// `.insert` via the undoable engine op `CADDrawing.makeBlockFromEntities` (which
+    /// removes the just-added loose copies, re-authors them as members, registers the
+    /// block, and adds the INSERT) — all inside the SAME undo group, so a single ⌘Z
+    /// reverts the whole paste-as-block. The new INSERT becomes the selection. The block
+    /// name de-duplicates on a clash (the engine op picks a free name from the
+    /// suggestion), so a `nil`/blank name falls back to "Block". No-op (returns `false`)
+    /// for an empty clipboard. Returns whether a block was created.
+    ///
+    /// Plain Cut/Copy/Paste (`cutSelection`/`copySelection`/`paste`) are unchanged; this
+    /// is the additive "wrap the paste into a block" verb the Edit menu (Wave 3D) wires.
+    @discardableResult
+    func pasteAsBlock(name: String? = nil, at target: Vector) -> Bool {
+        let records = clipboard.pasteRecords(at: target)
+        guard !records.isEmpty else { return false }
+
+        // One undo group for the whole op: add the loose copies (capturing their ids),
+        // then makeBlockFromEntities removes them + creates the block + insert. The
+        // explicit group keeps it a single ⌘Z under a manual-grouping undo manager
+        // (tests); the live app's groupsByEvent coalesces it in one run-loop event.
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+
+        var ids: [EntityID] = []
+        ids.reserveCapacity(records.count)
+        for record in records {
+            var added = record
+            added.id = EntityID(0)                  // ensure a fresh mint
+            added.flags.remove(.selected)
+            ids.append(drawing.add(added))          // undoable; mints a real id
+        }
+
+        let blockName = (name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            ? name! : "Block"
+        let creation = drawing.makeBlockFromEntities(
+            name: blockName, basePoint: target, ids: ids)
+
+        // The engine op mutated `entities` directly (removed the loose copies, added the
+        // members + the insert), bypassing the quadtree-aware add path above — rebuild
+        // the index so the result is immediately snappable/selectable.
+        rebuildIndex()
+        if let insertID = creation?.insertID {
+            selection = Selection(ids: [insertID])   // select the placed INSERT
+        } else {
+            selection.clear()
+        }
+        modelDirty = true
+        modelVersion &+= 1
+        return creation != nil
+    }
+
+    /// Pastes the clipboard as a block at the current VIEW CENTER (world) — the menu /
+    /// keyboard Paste-as-Block default when there is no cursor anchor.
+    @discardableResult
+    func pasteAsBlock(name: String? = nil) -> Bool {
+        let centerScreen = CGPoint(x: viewport.size.width / 2, y: viewport.size.height / 2)
+        return pasteAsBlock(name: name, at: viewport.screenToWorld(centerScreen))
     }
 
     // MARK: - Ortho restriction (LibreCAD Ortho / AutoCAD F8)
