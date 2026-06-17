@@ -3663,18 +3663,136 @@ final class CanvasModel {
         return true
     }
 
-    /// "Hide other layers" — freezes every layer EXCEPT the named one, in one
-    /// undoable step (a focus affordance: isolate a layer). The named layer is
-    /// thawed so it is definitely visible. No-op if `layer` is unknown.
-    func isolateLayer(_ layer: String) {
-        guard drawing.layers.contains(layer) else { return }
-        drawing.mutateLayers { table in
-            for l in table.layers {
-                table.setVisible(l.name, l.name == layer)
-            }
+    // MARK: - Layer ISOLATE / UNISOLATE (Wave 3B — via the pure `LayerIsolation`)
+    //
+    // The daily "focus on these layers, hide the rest, then restore EXACTLY" op
+    // (AutoCAD LAYISO / LAYUNISO). The semantics live in the pure engine
+    // `LayerIsolation` (keep-set → freeze/thaw plan + an exact restore snapshot);
+    // this side only APPLIES the plan through the existing undoable `mutateLayers`
+    // funnel and STASHES the restore snapshot so `unisolateLayers()` reverts to the
+    // precise prior flags (a frozen-before / locked / printable layer returns to that).
+
+    /// The exact-restore snapshot captured by the last isolate, applied by
+    /// `unisolateLayers()`. `nil` when nothing is isolated. Transient view state (not
+    /// persisted, not a document mutation) — the undo of the isolate itself is the
+    /// `mutateLayers` value-snapshot; this is the explicit LAYUNISO inverse.
+    @ObservationIgnored
+    private var isolationRestore: LayerState?
+
+    /// Whether a layer isolation is currently in effect (a restore snapshot is stashed)
+    /// — drives the "Unisolate Layers" menu item's enabled state.
+    var hasIsolatedLayers: Bool { isolationRestore != nil }
+
+    /// Isolates the given `keep` layers: freezes every OTHER layer and thaws any kept
+    /// layer that was hidden, in ONE undoable `mutateLayers` step (via the pure
+    /// `LayerIsolation.isolate`), and STASHES the exact-restore snapshot so
+    /// `unisolateLayers()` can revert. No-op (no undo step, restore left untouched) when
+    /// the keep-set is empty of real layers or the plan changes nothing. The shared core
+    /// behind the public isolate entry points.
+    @discardableResult
+    private func applyIsolation(keep: Set<String>) -> Bool {
+        let existing = keep.filter { drawing.layers.contains($0) }
+        guard !existing.isEmpty else { return false }
+        let result = LayerIsolation.isolate(keep: existing, in: drawing.layers)
+        guard !result.isNoOp else {
+            // Already isolated to exactly this set: keep any prior restore so a later
+            // unisolate still works (the no-op didn't change the table).
+            return false
         }
+        // One undo step (same grouping rationale as `applyCommit`/`applyInspectorEdits`:
+        // groups-by-event in the live app, explicit group when a test drives this with
+        // grouping-by-event off + no run loop).
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        drawing.mutateLayers { result.isolated.apply(to: &$0) }   // one undo step
+        isolationRestore = result.restore
         modelDirty = true
         modelVersion &+= 1
+        return true
+    }
+
+    /// "Hide other layers" — isolates the single named `layer` (freezes every other,
+    /// thaws this one), undoable, and stashes the exact-restore snapshot. No-op if
+    /// `layer` is unknown. Rewired onto the pure `LayerIsolation` (was a manual
+    /// visibility loop) so an `unisolateLayers()` returns layers to their PRECISE prior
+    /// flags rather than blanket-showing everything.
+    func isolateLayer(_ layer: String) {
+        _ = applyIsolation(keep: [layer])
+    }
+
+    /// Isolates the layers of the CURRENT SELECTION (LAYISO from a selection): the kept
+    /// set is every distinct layer the selected entities live on. Freezes all others,
+    /// undoable, and stashes the restore snapshot. No-op for an empty selection / when
+    /// the selection's layers are already the only visible ones. Returns whether the
+    /// visibility changed.
+    @discardableResult
+    func isolateSelectionLayers() -> Bool {
+        let layers = Set(selection.ids.compactMap { drawing.entity($0)?.layer.name })
+        return applyIsolation(keep: layers)
+    }
+
+    /// Reverses the last isolate (LAYUNISO): applies the stashed exact-restore snapshot
+    /// through the undoable `mutateLayers` funnel so every layer returns to its prior
+    /// frozen/visible state, then clears the stash. No-op (returns `false`) when nothing
+    /// is isolated. Returns whether anything was restored.
+    @discardableResult
+    func unisolateLayers() -> Bool {
+        guard let restore = isolationRestore else { return false }
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        drawing.mutateLayers { restore.apply(to: &$0) }   // one undo step
+        isolationRestore = nil
+        modelDirty = true
+        modelVersion &+= 1
+        return true
+    }
+
+    /// "Turn off other layers" — freezes every layer EXCEPT those in `keep`, WITHOUT
+    /// thawing any kept-but-hidden layer and WITHOUT stashing a restore (the plain
+    /// LibreCAD "freeze others" affordance, distinct from LAYISO's isolate-with-restore).
+    /// Undoable via `mutateLayers`. No-op when the keep-set has no real layers / nothing
+    /// to freeze. Returns whether the visibility changed.
+    @discardableResult
+    func turnOffOtherLayers(keep: Set<String>) -> Bool {
+        let existing = keep.filter { drawing.layers.contains($0) }
+        guard !existing.isEmpty else { return false }
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        var changed = false
+        drawing.mutateLayers { table in
+            for l in table.layers where !existing.contains(l.name) && !l.isFrozen {
+                table.setFrozen(l.name, true)
+                changed = true
+            }
+        }
+        guard changed else { return false }
+        modelDirty = true
+        modelVersion &+= 1
+        return true
+    }
+
+    /// Convenience: turn off every layer except the single named one.
+    @discardableResult
+    func turnOffOtherLayers(except layer: String) -> Bool {
+        turnOffOtherLayers(keep: [layer])
+    }
+
+    /// Makes `layer` the CURRENT (active) layer — where new geometry lands (AutoCAD
+    /// CLAYER). Undoable via the existing `setActiveLayer` funnel. No-op (returns
+    /// `false`) when `layer` is unknown or already current. Returns whether it changed.
+    @discardableResult
+    func makeLayerCurrent(_ layer: String) -> Bool {
+        guard drawing.layers.contains(layer),
+              drawing.layers.activeLayerName != layer else { return false }
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        drawing.setActiveLayer(layer)   // undoable
+        modelVersion &+= 1
+        return true
     }
 
     /// Saves the current layer flags as a named state (undoable). Returns the name
@@ -3980,6 +4098,77 @@ final class CanvasModel {
         }
         guard !records.isEmpty else { return false }
         applyInspectorEdits(records)
+        return true
+    }
+
+    // MARK: - Per-entity GRIP editing mount (Wave 3B — EntityGripOverlay backing)
+    //
+    // The `EntityGripOverlay` (mounted by 3B') is SELF-CONTAINED + INJECTED: it owns
+    // no model and carries no geometry math (that is `EntityGrips`). The mount supplies
+    // it five closures — `selectionProvider` / `contextProvider` / `viewportProvider` /
+    // `onGripCommit` / `requestRedraw` — plus toggles `isEnabled`. These accessors are
+    // the contract 3B' wires those closures to; the GRIP MATH already lives in the pure
+    // engine `EntityGrips` (queried + applied by the overlay), so this side only routes
+    // the moved record through the EXISTING undoable commit funnel (no new undo path).
+
+    /// The records the grip overlay draws handles for — the SELECTION resolved to live
+    /// `EntityRecord`s. The overlay further filters to those that actually expose grips
+    /// (`EntityGrips.grips(for:)` non-empty), so this returns the whole selection; the
+    /// 3B' mount wires this as the overlay's `selectionProvider`.
+    var gripSelectionRecords: [EntityRecord] {
+        selection.ids.compactMap { drawing.entity($0) }
+    }
+
+    /// The `ResolveContext` the grip overlay passes to `EntityGrips.grips`/`moveGrip`
+    /// (font/tessellation/block resolution for the live drawing). The 3B' mount wires
+    /// this as the overlay's `contextProvider`. A thin pass-through over the drawing's
+    /// resolve context so the overlay never reaches into `drawing` directly.
+    func gripResolveContext() -> ResolveContext { drawing.makeResolveContext() }
+
+    /// The live `Viewport` the grip overlay uses for world↔screen projection (handle
+    /// placement + nearest-grip hit-testing). The 3B' mount wires this as the overlay's
+    /// `viewportProvider`. (A method, not just the `viewport` property, so the mount can
+    /// pass it as an `@escaping () -> Viewport` closure that always reads the latest.)
+    func gripViewport() -> Viewport { viewport }
+
+    /// Whether the grip overlay should currently participate (the mount drives the
+    /// overlay's `isEnabled` from this). Grips are active ONLY in SELECT mode, with a
+    /// selection that has at least one grip-editable entity, and NOT while a gizmo drag
+    /// is in progress (so the two transparent overlays never fight over an ambiguous
+    /// hit-test — the same dual-overlay arbitration the dynamic grip uses). Block-edit
+    /// sessions are fine (the selection is scoped to the block's members there).
+    var gripsEnabled: Bool {
+        guard activeToolKind == .select else { return false }
+        guard gizmoPreviewTransform == nil else { return false }   // gizmo owns the gesture
+        return hasGripEditableSelection
+    }
+
+    /// Whether the current selection contains at least one grip-editable entity (a line/
+    /// circle/arc/polyline/ellipse/spline/point/text — anything `EntityGrips.grips(for:)`
+    /// returns handles for). Drives `gripsEnabled` + lets the mount skip mounting the
+    /// overlay for a selection of only en-bloc kinds (insert/hatch/dimension/…).
+    var hasGripEditableSelection: Bool {
+        let ctx = drawing.makeResolveContext()
+        return selection.ids.contains { id in
+            guard let r = drawing.entity(id) else { return false }
+            return !EntityGrips.grips(for: r, ctx: ctx).isEmpty
+        }
+    }
+
+    /// Commits a grip-edited record (the overlay's `onGripCommit`): applies the moved
+    /// `EntityRecord` as ONE undoable `.replace` of that id through the EXISTING
+    /// inspector-edit funnel (`applyInspectorEdits` — the same path the gizmo + Inspector
+    /// use), so a single ⌘Z reverts the grip drag, the quadtree stays in sync, and the
+    /// GPU buffer is marked dirty. The overlay already produced the new geometry via the
+    /// pure `EntityGrips.moveGrip`, so this side carries NO geometry math. No-op (returns
+    /// `false`) if the record's id is no longer in the drawing or the edit is a no-op
+    /// (the moved record is byte-for-byte the current one — a zero-effect drag never
+    /// pushes an undo step, mirroring `commitGizmoTransform`). Returns whether anything
+    /// changed.
+    @discardableResult
+    func commitMovedGrip(_ record: EntityRecord) -> Bool {
+        guard let current = drawing.entity(record.id), current != record else { return false }
+        applyInspectorEdits([record])   // undoable .replace; index-synced; GPU dirty
         return true
     }
 

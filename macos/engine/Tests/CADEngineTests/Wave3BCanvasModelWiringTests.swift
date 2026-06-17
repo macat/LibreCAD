@@ -144,3 +144,172 @@ struct Wave3BToolConfigTests {
         #expect(m.hatchFillValue == .solid)
     }
 }
+
+// MARK: - Stage 2 — grip-commit hook + layer ops
+
+@MainActor
+@Suite("Wave-3B CanvasModel wiring — grips + layers")
+struct Wave3BGripsAndLayersTests {
+
+    private func line(_ a: Vector, _ b: Vector, id: UInt64 = 0,
+                      layer: String = "0") -> EntityRecord {
+        EntityRecord(id: EntityID(id), layer: LayerID(layer),
+                     kind: .line(LineData(start: a, end: b)))
+    }
+
+    /// A model with one line on layer "0", a clean manual-grouping undo stack.
+    private func lineModel() -> (model: CanvasModel, id: EntityID) {
+        let drawing = CADDrawing()
+        let id = drawing.add(line(Vector(0, 0), Vector(10, 0)))
+        let m = CanvasModel(drawing: drawing, viewSize: CGSize(width: 800, height: 600))
+        m.undoManager.groupsByEvent = false
+        m.undoManager.removeAllActions()
+        return (m, id)
+    }
+
+    // MARK: Grip commit
+
+    @Test("commitMovedGrip applies an undoable .replace of the moved record")
+    func gripCommitUndoable() throws {
+        let (m, id) = lineModel()
+        m.selection = Selection(ids: [id])
+
+        // Compute the moved record exactly as the overlay would: move grip 1 (the line
+        // end) via the pure EntityGrips.moveGrip.
+        let ctx = m.gripResolveContext()
+        let original = try #require(m.drawing.entity(id))
+        let moved = try #require(EntityGrips.moveGrip(1, of: original, to: Vector(10, 5), ctx: ctx))
+
+        #expect(m.commitMovedGrip(moved))
+        let after = try #require(m.drawing.entity(id))
+        guard case .line(let l) = after.kind else { Issue.record("not a line"); return }
+        #expect(l.end == Vector(10, 5))
+        #expect(l.start == Vector(0, 0))   // the other end stayed put
+        #expect(after.layer.name == "0")   // attributes preserved
+
+        m.undo()
+        let reverted = try #require(m.drawing.entity(id))
+        guard case .line(let l2) = reverted.kind else { Issue.record("not a line"); return }
+        #expect(l2.end == Vector(10, 0))   // one ⌘Z restores the original geometry
+    }
+
+    @Test("commitMovedGrip is a no-op for an unchanged record / missing id")
+    func gripCommitNoOp() throws {
+        let (m, id) = lineModel()
+        let original = try #require(m.drawing.entity(id))
+        #expect(!m.commitMovedGrip(original))                 // identical → no edit
+        var ghost = original
+        ghost.id = EntityID(999)
+        #expect(!m.commitMovedGrip(ghost))                   // unknown id → no edit
+        #expect(!m.undoManager.canUndo)                      // never pushed an undo step
+    }
+
+    // MARK: Grip-mount accessors
+
+    @Test("gripsEnabled gates on select mode + a grip-editable selection + no gizmo drag")
+    func gripsEnabledGate() {
+        let (m, id) = lineModel()
+        #expect(!m.gripsEnabled)                  // nothing selected
+        m.selection = Selection(ids: [id])
+        #expect(m.hasGripEditableSelection)
+        #expect(m.gripsEnabled)                   // select mode + grip-editable selection
+        #expect(m.gripSelectionRecords.count == 1)
+
+        m.setGizmoPreview(.identity)              // gizmo owns the gesture
+        #expect(!m.gripsEnabled)
+        m.clearGizmoPreview()
+        #expect(m.gripsEnabled)
+
+        m.activateTool(.line)                     // a draw tool is active → no grips
+        #expect(!m.gripsEnabled)
+    }
+
+    // MARK: Layer ops
+
+    /// A model with layers A/B/C (all visible) + the default "0", and entities on A & B.
+    private func layeredModel() -> (model: CanvasModel, a: EntityID, b: EntityID) {
+        let drawing = CADDrawing()
+        for n in ["A", "B", "C"] { _ = drawing.addLayer(Layer(name: n)) }
+        let a = drawing.add(line(Vector(0, 0), Vector(1, 0), id: 0, layer: "A"))
+        let b = drawing.add(line(Vector(0, 1), Vector(1, 1), id: 0, layer: "B"))
+        let m = CanvasModel(drawing: drawing, viewSize: CGSize(width: 800, height: 600))
+        m.undoManager.groupsByEvent = false
+        m.undoManager.removeAllActions()
+        return (m, a, b)
+    }
+
+    private func frozen(_ m: CanvasModel, _ name: String) -> Bool {
+        m.drawing.layers.layer(named: name)?.isFrozen ?? false
+    }
+
+    @Test("isolateLayer freezes others, thaws the kept layer, and unisolate restores exactly")
+    func isolateAndUnisolate() {
+        let (m, _, _) = layeredModel()
+        // Pre-freeze C so we can prove unisolate returns it to FROZEN (not blanket-shown).
+        // The drawing mutation registers undo; the test's manual-grouping manager needs an
+        // open group around it (the live app's groupsByEvent does this implicitly).
+        m.undoManager.beginUndoGrouping()
+        m.drawing.setLayerVisible("C", false)
+        m.undoManager.endUndoGrouping()
+        m.undoManager.removeAllActions()
+        #expect(frozen(m, "C"))
+
+        m.isolateLayer("A")
+        #expect(!frozen(m, "A"))                  // kept visible
+        #expect(frozen(m, "B"))                   // hidden
+        #expect(frozen(m, "C"))                   // already hidden, stays hidden
+        #expect(frozen(m, "0"))                   // default layer hidden too
+        #expect(m.hasIsolatedLayers)
+
+        #expect(m.unisolateLayers())
+        #expect(!frozen(m, "A"))                  // restored visible
+        #expect(!frozen(m, "B"))                  // restored visible
+        #expect(frozen(m, "C"))                   // restored to its PRIOR frozen state
+        #expect(!frozen(m, "0"))
+        #expect(!m.hasIsolatedLayers)
+    }
+
+    @Test("isolateSelectionLayers isolates the selection's distinct layers")
+    func isolateSelectionLayers() {
+        let (m, a, _) = layeredModel()
+        m.selection = Selection(ids: [a])
+        #expect(m.isolateSelectionLayers())
+        #expect(!frozen(m, "A"))                  // selection's layer kept
+        #expect(frozen(m, "B"))
+        #expect(frozen(m, "C"))
+    }
+
+    @Test("isolate is undoable via the layer mutation funnel")
+    func isolateUndo() {
+        let (m, _, _) = layeredModel()
+        m.isolateLayer("A")
+        #expect(frozen(m, "B"))
+        m.undo()                                  // the mutateLayers value-snapshot reverts
+        #expect(!frozen(m, "B"))
+        #expect(!frozen(m, "A"))
+    }
+
+    @Test("turnOffOtherLayers freezes others without stashing a restore")
+    func turnOffOthers() {
+        let (m, _, _) = layeredModel()
+        #expect(m.turnOffOtherLayers(except: "A"))
+        #expect(!frozen(m, "A"))
+        #expect(frozen(m, "B"))
+        #expect(frozen(m, "C"))
+        #expect(!m.hasIsolatedLayers)             // distinct from isolate — no restore stash
+        m.undo()
+        #expect(!frozen(m, "B"))                  // undoable
+    }
+
+    @Test("makeLayerCurrent sets the active layer (undoable) and rejects unknown / same")
+    func makeCurrent() {
+        let (m, _, _) = layeredModel()
+        #expect(m.drawing.layers.activeLayerName == "0")
+        #expect(m.makeLayerCurrent("B"))
+        #expect(m.drawing.layers.activeLayerName == "B")
+        #expect(!m.makeLayerCurrent("B"))         // already current → no-op
+        #expect(!m.makeLayerCurrent("NOPE"))      // unknown → no-op
+        m.undo()
+        #expect(m.drawing.layers.activeLayerName == "0")
+    }
+}
