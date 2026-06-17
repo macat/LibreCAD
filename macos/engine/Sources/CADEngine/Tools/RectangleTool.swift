@@ -154,36 +154,73 @@ public struct RectangleTool: Tool {
 
     // MARK: - Live dimensional feedback (W1b)
 
-    /// AutoCAD-style live feedback while the rectangle is being dragged: the running
-    /// WIDTH × HEIGHT spanned by the fixed first corner and the cursor. Reuses the
-    /// SAME first-corner↔cursor span the `preview` rubber-band shows (absolute
-    /// extents, so the readout is unsigned regardless of drag direction), so the
-    /// numbers match what will be drawn.
+    /// AutoCAD-style live feedback while the rectangle is being dragged: TWO editable
+    /// edge dimensions — the WIDTH along the bottom edge and the HEIGHT along the right
+    /// edge — spanned by the fixed first corner and the cursor. (This replaced the old
+    /// single diagonal `.size` readout: a rectangle has two independent dimensions, so
+    /// it shows two dim lines the user can Tab between and type into.) Each is built
+    /// from the SAME first-corner↔cursor span the `preview` rubber-band shows, with
+    /// absolute (unsigned) extents so the readout matches regardless of drag direction.
     ///
     /// Empty before the first corner is fixed (`.settingFirst`) and after commit
     /// (every commit `reset()`s to `.settingFirst`), and for a degenerate (zero-area)
     /// span — the same invariant `referenceSegments` enforces, so it never leaks into
-    /// exports. The label (`"W × H"`) is formatted IN-ENGINE via `CoordinateFormatter`
-    /// from `ctx` (no UI dependency).
+    /// exports. Each label is formatted IN-ENGINE via `CoordinateFormatter` from `ctx`
+    /// (no UI dependency). Tab order is the array order: `[width, height]`.
     public func liveDimensions(_ ctx: LiveDimensionContext) -> [LiveDimension] {
         guard case .settingSecond(let first) = state, cursor.valid, first.valid else {
             return []
         }
-        guard !Self.isDegenerate(first, cursor) else { return [] }
-        let w = abs(cursor.x - first.x)
-        let h = abs(cursor.y - first.y)
+        let c = cursor
+        guard !Self.isDegenerate(first, c) else { return [] }
+        let w = abs(c.x - first.x)
+        let h = abs(c.y - first.y)
         let wStr = CoordinateFormatter.length(
             w, format: ctx.linearFormat, precision: ctx.linearPrecision, unit: ctx.unit
         )
         let hStr = CoordinateFormatter.length(
             h, format: ctx.linearFormat, precision: ctx.linearPrecision, unit: ctx.unit
         )
-        // Label sits near the cursor corner; the dim line spans the diagonal so the
-        // overlay has the full extent to place the "W × H" readout against.
-        return [
-            LiveDimension(kind: .size(w: w, h: h), from: first, to: cursor,
-                          label: "\(wStr) × \(hStr)", labelAnchor: cursor),
-        ]
+        // WIDTH: the bottom edge, first → (c.x, first.y), labeled at its midpoint.
+        let widthDim = LiveDimension(
+            kind: .linear(w),
+            from: first,
+            to: Vector(c.x, first.y),
+            label: wStr,
+            labelAnchor: Vector((first.x + c.x) / 2, first.y),
+            field: .width,
+            isEditable: true
+        )
+        // HEIGHT: the right edge, (c.x, first.y) → cursor, labeled at its midpoint.
+        let heightDim = LiveDimension(
+            kind: .linear(h),
+            from: Vector(c.x, first.y),
+            to: Vector(c.x, c.y),
+            label: hStr,
+            labelAnchor: Vector(c.x, (first.y + c.y) / 2),
+            field: .height,
+            isEditable: true
+        )
+        return [widthDim, heightDim]
+    }
+
+    // MARK: - Dynamic input (typed width / height → the opposite corner)
+
+    /// Resolves typed WIDTH / HEIGHT values into the rectangle's OPPOSITE (second)
+    /// corner. The reference is the fixed first corner; the cursor quadrant is
+    /// preserved (the corners are NOT min/max-reordered — `corners(_:_:)` follows the
+    /// picked corners directly), so a typed width/height extends in whatever direction
+    /// the cursor currently is from the first corner. A field the user did not type
+    /// falls back to the live extent the cursor implies. Returns `nil` until the first
+    /// corner is fixed (no anchor to measure from).
+    public func applyDynamicInput(_ values: [LiveDimensionField: Double],
+                                  cursor: Vector, reference: Vector) -> Vector? {
+        guard case .settingSecond = state else { return nil }
+        let signX = cursor.x >= reference.x ? 1.0 : -1.0
+        let signY = cursor.y >= reference.y ? 1.0 : -1.0
+        let w = values[.width]  ?? abs(cursor.x - reference.x)
+        let h = values[.height] ?? abs(cursor.y - reference.y)
+        return Vector(reference.x + signX * w, reference.y + signY * h)
     }
 
     /// A draw tool: it IGNORES `context` (it needs only the snapped world points)

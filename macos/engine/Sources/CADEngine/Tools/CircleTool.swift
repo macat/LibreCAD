@@ -214,7 +214,11 @@ public struct CircleTool: Tool {
             guard center.valid else { return [] }
             let radius = (cursor - center).magnitude
             guard radius > Tolerance.distance else { return [] }
-            return [radiusDimension(center: center, to: cursor, radius: radius, ctx: ctx)]
+            // ONLY the center+radius interactive state exposes an editable radius/
+            // diameter (the 2P/3P modes derive the radius from picked points, so a typed
+            // radius has no well-defined direction — they stay read-only).
+            return [radiusDimension(center: center, to: cursor, radius: radius, ctx: ctx,
+                                    editable: true)]
 
         case .twoSecond(let first):
             guard first.valid, let c = Self.circleFromDiameter(first, cursor) else { return [] }
@@ -234,8 +238,14 @@ public struct CircleTool: Tool {
     /// `.diameter` kind; otherwise the radius as a `.radius` kind. The label is the
     /// formatted measured length; the dim line runs center→`to` and the label sits
     /// at its midpoint.
+    ///
+    /// `editable` stamps the dim's `field` + `isEditable` (dynamic input). Defaults to
+    /// `false` so the shared 2P/3P call sites stay read-only; only the `.settingRadius`
+    /// interactive state passes `editable: true`, where a typed radius/diameter has a
+    /// well-defined direction (center → cursor).
     private func radiusDimension(center: Vector, to: Vector, radius: Double,
-                                 ctx: LiveDimensionContext) -> LiveDimension {
+                                 ctx: LiveDimensionContext,
+                                 editable: Bool = false) -> LiveDimension {
         let midpoint = (center + to) * 0.5
         switch sizeMode {
         case .diameter:
@@ -244,14 +254,34 @@ public struct CircleTool: Tool {
                 diameter, format: ctx.linearFormat, precision: ctx.linearPrecision, unit: ctx.unit
             )
             return LiveDimension(kind: .diameter(diameter), from: center, to: to,
-                                 label: label, labelAnchor: midpoint)
+                                 label: label, labelAnchor: midpoint,
+                                 field: editable ? .diameter : nil, isEditable: editable)
         case .radius:
             let label = CoordinateFormatter.length(
                 radius, format: ctx.linearFormat, precision: ctx.linearPrecision, unit: ctx.unit
             )
             return LiveDimension(kind: .radius(radius), from: center, to: to,
-                                 label: label, labelAnchor: midpoint)
+                                 label: label, labelAnchor: midpoint,
+                                 field: editable ? .radius : nil, isEditable: editable)
         }
+    }
+
+    // MARK: - Dynamic input (typed radius / diameter → the on-circle point)
+
+    /// Resolves a typed RADIUS (or DIAMETER, halved) into the on-circle point that fixes
+    /// the radius, measured from the center (`reference`). Meaningful ONLY in the
+    /// `.settingRadius(center:)` interactive state (the 2P/3P modes derive the radius
+    /// from picks, so a typed radius has no direction) — returns `nil` otherwise. The
+    /// direction is the live center→cursor unit vector; a degenerate cursor==center
+    /// falls back to +X so a typed radius still yields a valid point. A field the user
+    /// did not type falls back to the live radius the cursor implies.
+    public func applyDynamicInput(_ values: [LiveDimensionField: Double],
+                                  cursor: Vector, reference: Vector) -> Vector? {
+        guard case .settingRadius = state else { return nil }
+        let r = values[.radius] ?? values[.diameter].map { $0 / 2 } ?? (cursor - reference).magnitude
+        let d = cursor - reference
+        let u = d.magnitude > Tolerance.distance ? d / d.magnitude : Vector(angle: 0)
+        return reference + u * r
     }
 
     // MARK: - Construction-mode command keywords (W2B)

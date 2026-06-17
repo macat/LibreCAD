@@ -186,10 +186,32 @@ public struct PolygonTool: Tool {
             radius, format: ctx.linearFormat, precision: ctx.linearPrecision, unit: ctx.unit
         )
         let midpoint = (center + cursor) * 0.5
+        // The center-based modes (`.centerCorner` / `.star`) expose an editable radius
+        // (dynamic input): a typed radius has a well-defined direction (center →
+        // cursor). `.edge` already returned `[]` above (no center → radius semantics).
         return [
             LiveDimension(kind: .radius(radius), from: center, to: cursor,
-                          label: "r=\(radiusStr)  N=\(_sides)", labelAnchor: midpoint),
+                          label: "r=\(radiusStr)  N=\(_sides)", labelAnchor: midpoint,
+                          field: .radius, isEditable: true),
         ]
+    }
+
+    // MARK: - Dynamic input (typed radius → the vertex point)
+
+    /// Resolves a typed RADIUS into the reference vertex point that fixes the polygon's
+    /// size, measured from the center (`reference`). Meaningful ONLY in the center-based
+    /// modes' `.settingVertex(center:)` state (`.edge` has no center → radius semantics)
+    /// — returns `nil` otherwise. The direction is the live center→cursor unit vector; a
+    /// degenerate cursor==center falls back to +X. A missing `.radius` falls back to the
+    /// live radius the cursor implies.
+    public func applyDynamicInput(_ values: [LiveDimensionField: Double],
+                                  cursor: Vector, reference: Vector) -> Vector? {
+        guard case .settingVertex = state else { return nil }
+        if case .edge = mode { return nil }
+        let r = values[.radius] ?? (cursor - reference).magnitude
+        let d = cursor - reference
+        let u = d.magnitude > Tolerance.distance ? d / d.magnitude : Vector(angle: 0)
+        return reference + u * r
     }
 
     /// A draw tool: it IGNORES `context` (it needs only the snapped world points)
