@@ -366,4 +366,177 @@ struct OffsetToolTests {
         _ = tool.handle(.move(Vector(0, 3)), context: ctx)
         #expect(tool.handle(.backspace, context: ctx) == .none)
     }
+
+    // MARK: - bothSides + eraseSource (W2-2A)
+
+    /// Splits a `.commit` outcome into its `.add` records and `.remove` ids, or
+    /// `nil` when the outcome isn't a commit / a `.replace` slips in (Offset never
+    /// replaces). Lets the both-sides / erase-source tests assert adds and removes
+    /// independently without over-constraining their interleave order.
+    private func addsAndRemoves(_ outcome: ToolOutcome) -> (adds: [EntityRecord], removes: [EntityID])? {
+        guard case .commit(let edits) = outcome else { return nil }
+        var adds: [EntityRecord] = []
+        var removes: [EntityID] = []
+        for edit in edits {
+            switch edit {
+            case .add(let r): adds.append(r)
+            case .remove(let id): removes.append(id)
+            case .replace: return nil
+            }
+        }
+        return (adds, removes)
+    }
+
+    // MARK: bothSides
+
+    @Test("bothSides on a line emits BOTH the toward-point copy and its mirror")
+    func bothSidesLine() {
+        var tool = OffsetTool()
+        tool.bothSides = true
+        let ctx = context([Self.selectedLine])
+        // Through (0,3): primary copy at y=+3, mirror at y=−3.
+        let records = addedRecords(tool.handle(.click(Vector(0, 3)), context: ctx))
+        #expect(records?.count == 2)
+        var lines: [LineData] = []
+        for r in records ?? [] {
+            guard case .line(let l) = r.kind else {
+                Issue.record("expected line offset copies"); return
+            }
+            lines.append(l)
+        }
+        let ys = Set(lines.map(\.start.y)).union(lines.map(\.end.y))
+        #expect(ys == Set([3.0, -3.0]))
+        // Mirror preserves the X span; only Y flips sign.
+        for l in lines {
+            #expect(l.start.x == 0)
+            #expect(l.end.x == 10)
+        }
+    }
+
+    @Test("bothSides on a circle emits concentric copies at r+d AND r−d")
+    func bothSidesCircleBothValid() {
+        var tool = OffsetTool()
+        tool.bothSides = true
+        let ctx = context([Self.selectedCircle])
+        // r=5, through (0,8): primary r=8 (d=+3), mirror r=2 (r−d). Both > 0.
+        let records = addedRecords(tool.handle(.click(Vector(0, 8)), context: ctx))
+        #expect(records?.count == 2)
+        var radii: [Double] = []
+        for r in records ?? [] {
+            guard case .circle(let c) = r.kind else {
+                Issue.record("expected circle offset copies"); return
+            }
+            #expect(c.center == Vector(0, 0))
+            radii.append(c.radius)
+        }
+        radii.sort()
+        #expect(abs(radii[0] - 2) < 1e-9)
+        #expect(abs(radii[1] - 8) < 1e-9)
+    }
+
+    @Test("bothSides drops a DEGENERATE mirror (circle r−d ≤ 0) — only the valid copy remains")
+    func bothSidesCircleDegenerateDropped() {
+        var tool = OffsetTool()
+        tool.bothSides = true
+        let ctx = context([Self.selectedCircle])
+        // r=5, through (0,12): primary r=12 (d=+7), mirror r = 2·5−12 = −2 ≤ 0 → drop.
+        let records = addedRecords(tool.handle(.click(Vector(0, 12)), context: ctx))
+        #expect(records?.count == 1)
+        guard case .circle(let c)? = records?.first?.kind else {
+            Issue.record("expected a single valid circle copy"); return
+        }
+        #expect(abs(c.radius - 12) < 1e-9)
+    }
+
+    @Test("bothSides on an arc emits two concentric copies preserving angles + reversed")
+    func bothSidesArc() {
+        var tool = OffsetTool()
+        tool.bothSides = true
+        let ctx = context([Self.selectedArc])
+        // r=5, through (0,8): primary r=8, mirror r=2.
+        let records = addedRecords(tool.handle(.click(Vector(0, 8)), context: ctx))
+        #expect(records?.count == 2)
+        var radii: [Double] = []
+        for r in records ?? [] {
+            guard case .arc(let a) = r.kind else {
+                Issue.record("expected arc offset copies"); return
+            }
+            #expect(a.center == Vector(0, 0))
+            #expect(a.startAngle == 0)
+            #expect(abs(a.endAngle - .pi / 2) < 1e-12)
+            #expect(a.reversed == false)
+            radii.append(a.radius)
+        }
+        radii.sort()
+        #expect(abs(radii[0] - 2) < 1e-9)
+        #expect(abs(radii[1] - 8) < 1e-9)
+    }
+
+    @Test("bothSides on an unsupported kind (point) still emits nothing")
+    func bothSidesUnsupportedNoop() {
+        var tool = OffsetTool()
+        tool.bothSides = true
+        let ctx = context([Self.selectedPoint])
+        #expect(tool.handle(.click(Vector(0, 3)), context: ctx) == .none)
+    }
+
+    // MARK: eraseSource
+
+    @Test("eraseSource emits a MIXED commit: the offset .add plus a .remove of the source")
+    func eraseSourceMixedAddRemove() {
+        var tool = OffsetTool()
+        tool.eraseSource = true
+        let ctx = context([Self.selectedLine])
+        let split = addsAndRemoves(tool.handle(.click(Vector(0, 3)), context: ctx))
+        #expect(split?.adds.count == 1)
+        #expect(split?.removes == [Self.selectedLine.id])
+        // The lone add is the line offset copy (placeholder id, original attrs).
+        guard case .line? = split?.adds.first?.kind else {
+            Issue.record("expected the add to be the line offset copy"); return
+        }
+        #expect(split?.adds.first?.id == .placeholder)
+    }
+
+    @Test("eraseSource removes a source exactly ONCE even when bothSides emits two copies")
+    func eraseSourceRemovesOnceWithBothSides() {
+        var tool = OffsetTool()
+        tool.bothSides = true
+        tool.eraseSource = true
+        let ctx = context([Self.selectedCircle])
+        // r=5, through (0,8): two adds (r=8, r=2) + a SINGLE remove of the source.
+        let split = addsAndRemoves(tool.handle(.click(Vector(0, 8)), context: ctx))
+        #expect(split?.adds.count == 2)
+        #expect(split?.removes == [Self.selectedCircle.id])
+    }
+
+    @Test("eraseSource does NOT remove a source that produced no copy (unsupported point)")
+    func eraseSourceSkipsUnproductiveSource() {
+        var tool = OffsetTool()
+        tool.eraseSource = true
+        // line (productive) + point (unsupported): only the line is added AND removed.
+        let ctx = context([Self.selectedLine, Self.selectedPoint])
+        let split = addsAndRemoves(tool.handle(.click(Vector(0, 3)), context: ctx))
+        #expect(split?.adds.count == 1)
+        #expect(split?.removes == [Self.selectedLine.id])   // point id absent
+    }
+
+    @Test("eraseSource on an all-unsupported selection is a no-op (no add, no remove)")
+    func eraseSourceAllUnsupportedNoop() {
+        var tool = OffsetTool()
+        tool.bothSides = true
+        tool.eraseSource = true
+        let ctx = context([Self.selectedPoint])
+        #expect(tool.handle(.click(Vector(0, 3)), context: ctx) == .none)
+    }
+
+    // MARK: default-false regression
+
+    @Test("defaults (bothSides=false, eraseSource=false) → a single .add, no .remove")
+    func defaultsSingleAddNoRemove() {
+        var tool = OffsetTool()   // both flags default false
+        let ctx = context([Self.selectedLine, Self.selectedCircle, Self.selectedArc])
+        let split = addsAndRemoves(tool.handle(.click(Vector(0, 9)), context: ctx))
+        #expect(split?.adds.count == 3)   // one copy per supported source
+        #expect(split?.removes.isEmpty == true)
+    }
 }
