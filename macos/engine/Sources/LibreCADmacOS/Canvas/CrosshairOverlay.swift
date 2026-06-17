@@ -143,7 +143,8 @@ final class CrosshairOverlayView: NSView {
     }
 
     /// Resolve the user's crosshair-style preference from UserDefaults, falling back
-    /// to the app default (`.small`) when unset or holding a legacy/unknown value.
+    /// to the app default (`.full` — the full-window "spider" crosshair;
+    /// `AppSettings.Default.crosshairStyle`) when unset or holding a legacy/unknown value.
     /// Read straight from `UserDefaults` (not `@AppStorage`) since this is a plain
     /// `NSView`, not a SwiftUI view; the Preferences picker writes the same key.
     private var currentStyle: CrosshairStyle {

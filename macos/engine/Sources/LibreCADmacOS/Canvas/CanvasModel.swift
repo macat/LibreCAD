@@ -995,6 +995,47 @@ final class CanvasModel {
     /// Defaults to `.perpendicularFoot` (the tool's own default).
     var lineConstructionMode: LineConstructionTool.Mode = .perpendicularFoot
 
+    /// Polyline-Edit tool: which vertex/segment EDIT the next pick performs, stored as a
+    /// case INDEX (`PolylineEditTool.Mode` is `Equatable`-not-`Hashable`, so it can't be a
+    /// Picker tag — the Trim/Ellipse index-bound pattern). 0 = move a vertex (default),
+    /// 1 = add a vertex on a segment, 2 = remove a vertex, 3 = toggle a segment straight↔arc.
+    /// `PolylineEditTool.mode` is a settable `var`, so `applyToolConfig` sets it IN PLACE
+    /// (no re-mint — the tool keeps its picked target across a mode change).
+    var polylineEditModeIndex: Int = 0
+
+    /// The `PolylineEditTool.Mode` for the current `polylineEditModeIndex` (assembled here
+    /// so `applyToolConfig` and the wiring test share one mapping).
+    var polylineEditModeValue: PolylineEditTool.Mode {
+        switch polylineEditModeIndex {
+        case 1:  return .add
+        case 2:  return .remove
+        case 3:  return .arc
+        default: return .move
+        }
+    }
+
+    /// Construction-line (XLINE) tool: the direction-CONSTRAINT mode, stored as a case
+    /// INDEX (`XLineTool.Mode` carries an associated `.angle(Double)`, so it isn't a Picker
+    /// tag — the index-bound pattern). 0 = free / two-point (default), 1 = horizontal,
+    /// 2 = vertical, 3 = fixed angle (`xlineAngle`). `XLineTool.mode` is fixed at
+    /// construction (it seeds the direction lock), so `applyToolConfig` RE-MINTS the tool
+    /// with `xlineModeValue` (the DivideTool/ArcTool pattern).
+    var xlineModeIndex: Int = 0
+    /// Construction-line tool: the fixed direction angle (RADIANS, CCW from +X) used by the
+    /// `.angle` mode. The options bar edits a friendlier degrees value over this.
+    var xlineAngle: Double = 0
+
+    /// The `XLineTool.Mode` for the current `xlineModeIndex` + `xlineAngle` (assembled here
+    /// so `applyToolConfig` and the wiring test share one mapping).
+    var xlineModeValue: XLineTool.Mode {
+        switch xlineModeIndex {
+        case 1:  return .horizontal
+        case 2:  return .vertical
+        case 3:  return .angle(xlineAngle)
+        default: return .free
+        }
+    }
+
     // MARK: Layer defaults (Document Settings — app policy for new layers)
 
     /// The default color a NEW layer is born with (Document Settings ▸ Layers).
@@ -1126,7 +1167,25 @@ final class CanvasModel {
         let box = drawing.boundingBox()
         renderOrigin = RendererGeometry.renderOrigin(for: box)
         selection.clear()
+        // Drop ALL transient interaction state the prior document left behind — the same
+        // reset a context switch (`activateTool` / `setActiveSpace`) does (finding-M3). A
+        // New-from-Template onto an OPEN window reuses this `CanvasModel`, so a half-drawn
+        // tool run, a stale relative-zero datum, acquired OTRACK points, an in-flight dyn
+        // entry, and the snap/hover overlays must NOT carry into the fresh drawing.
         snap = nil
+        hoverID = nil
+        // Re-mint the active tool against the fresh (empty) drawing so no in-progress
+        // preview / picked points survive (drops to `.select` when none is active).
+        tool = activeToolKind.makeTool()
+        applyToolConfig()
+        toolStatus = tool?.status ?? ""
+        // The relative-zero FAMILY is per-document drafting state — a new document starts
+        // with no datum, even if the prior one had a LOCKED datum (it referenced the prior
+        // drawing's coordinates).
+        relativeZero = nil
+        relativeZeroLocked = false
+        clearTrackingPoints()
+        resetDynInput()
         // Frame the content on first paint (Viewport.fit handles empty/degenerate).
         viewport = Viewport.fit(box, in: viewSize)
         modelDirty = true
@@ -1266,6 +1325,10 @@ final class CanvasModel {
         selection.clear()
         snap = nil
         hoverID = nil
+        // Abandon any in-progress tool run + unlocked relative-zero — its picked points
+        // live in the PRIOR space's coordinates, so a leftover run would draw a stray
+        // cross-space segment (finding-M4).
+        abandonInProgressTool()
         modelDirty = true
         modelVersion &+= 1
     }
@@ -1615,6 +1678,10 @@ final class CanvasModel {
         selection.clear()
         snap = nil
         hoverID = nil
+        // Abandon any in-progress tool run + unlocked relative-zero — entering the block
+        // editor re-scopes the canvas to the block's members, so a leftover run's picked
+        // points (in the document's coordinates) would draw a stray segment (finding-M4).
+        abandonInProgressTool()
         modelDirty = true
         modelVersion &+= 1
         // Capture the post-bump version on the pushed level: any later change is a
@@ -1731,6 +1798,10 @@ final class CanvasModel {
         selection.clear()
         snap = nil
         hoverID = nil
+        // Abandon any in-progress tool run + unlocked relative-zero — exiting the block
+        // editor re-scopes back to the prior space, so a leftover run's picked points (in
+        // the block's member coordinates) would draw a stray segment (finding-M4).
+        abandonInProgressTool()
         modelDirty = true
         modelVersion &+= 1
         return true
@@ -2331,6 +2402,27 @@ final class CanvasModel {
         lastCommandError = nil
     }
 
+    /// Abandons any IN-PROGRESS tool run at a SPACE/BLOCK-EDIT transition (finding-M4),
+    /// without changing which tool is active. A space switch or a block-edit enter/exit
+    /// re-scopes the canvas to a DIFFERENT set of entities; a tool mid-run (a Line with one
+    /// point placed, an Offset with a picked source, …) holds picked points in the OLD
+    /// space's coordinates, so the next click would draw a stray segment that crosses
+    /// spaces. Re-minting the same-kind tool drops that in-progress state (the run-finish /
+    /// `activateTool` pattern) so the same tool stays selected but starts a CLEAN run in the
+    /// new scope; in `.select` mode the re-mint yields `nil` (a harmless no-op). The
+    /// transient drafting aids (the UNLOCKED relative-zero datum, OTRACK points, any
+    /// in-flight dyn entry) are dropped too — they all referenced the prior scope. A LOCKED
+    /// relative-zero is a deliberate persistent datum, so it survives (matching
+    /// `activateTool` / run-finish).
+    private func abandonInProgressTool() {
+        tool = activeToolKind.makeTool()
+        applyToolConfig()
+        toolStatus = tool?.status ?? viewportTool?.status ?? ""
+        if !relativeZeroLocked { relativeZero = nil }
+        clearTrackingPoints()
+        resetDynInput()
+    }
+
     /// Sets the Image tool's source (file path + the source pixel size the picker read
     /// from the file) and activates the Image tool, so the user can then click the two
     /// placement corners. The path + pixel size flow onto the freshly-minted `ImageTool`
@@ -2381,10 +2473,13 @@ final class CanvasModel {
             )
             tool = t
         case is DivideTool:
-            // DivideTool's `mode` is set at construction, so re-mint with the assembled
-            // `DivideMode` (DIVIDE-by-count or MEASURE-by-length — the split UI state in
-            // `divideMode`). The `init(mode:)` carries the clamp/validation. The default
-            // (`divideModeStyle == 0`) reproduces the historical count-based DIVIDE.
+            // DivideTool's `mode` is taken only via `init(mode:)`, so RE-MINT it from the
+            // LIVE options-bar state (`divideMode`, read fresh on every (re-)mint —
+            // activate / post-commit / `reapplyActiveToolConfig`), NOT a value frozen when
+            // the tool was first made. The assembled `DivideMode` is DIVIDE-by-count or
+            // MEASURE-by-length (the split UI state); `init(mode:)` carries the
+            // clamp/validation. The default (`divideModeStyle == 0`) reproduces the
+            // historical count-based DIVIDE.
             tool = DivideTool(mode: divideMode)
 
         // MARK: Wave-3B parameterized tools (Spline / Scale / Hatch)
@@ -2587,9 +2682,27 @@ final class CanvasModel {
             t.keepOriginal = mirrorKeepOriginal
             tool = t
         case is LineConstructionTool:
-            // LineConstructionTool's `mode` seeds the start state at construction, so
-            // RE-MINT with the chosen mode (the DivideTool/ArcTool re-mint pattern).
+            // LineConstructionTool's `mode` is read live (a settable `var` re-minted from
+            // the options-bar `lineConstructionMode`), so RE-MINT with the chosen mode (the
+            // DivideTool/ArcTool re-mint pattern). The construction-MODE picker is now
+            // surfaced in the options bar.
             tool = LineConstructionTool(mode: lineConstructionMode)
+
+        // MARK: Lane-M surfaced tool modes (PolylineEdit / XLine)
+
+        case var t as PolylineEditTool:
+            // PolylineEditTool's `mode` is a settable `var` (move / add / remove / arc), so
+            // apply it IN PLACE on the live tool (the FilletTool/ScaleTool pattern) — the
+            // tool keeps its picked polyline target across a mid-run mode switch. The
+            // default `.move` reproduces the original vertex-drag behavior.
+            t.mode = polylineEditModeValue
+            tool = t
+        case is XLineTool:
+            // XLineTool's `mode` is fixed at construction (it seeds the direction lock), so
+            // RE-MINT with the assembled mode (free / horizontal / vertical / fixed-angle —
+            // the DivideTool/ArcTool re-mint pattern). The default `.free` keeps the
+            // original two-point construction-line behavior.
+            tool = XLineTool(mode: xlineModeValue)
 
         default:
             break
@@ -2607,15 +2720,17 @@ final class CanvasModel {
         // Some tools are RE-MINTED by `applyToolConfig` (DivideTool's count, Circle's
         // construction mode, ArcTool's mode, Line's angle mode, EllipseTool's mode,
         // BaselineDimTool's spacing, ImageTool's file, InsertTool's block + placement
-        // options are fixed at construction), which resets their state/status to the
-        // initial prompt. For those, take the fresh tool's status; for the in-place tools
-        // (which keep their state) restore the prior prompt text. (InsertTool's status is
-        // a pure function of its block name — preserved across the re-mint — so this is a
-        // no-op for it today, but listing it keeps the set correct if it gains mid-run
-        // state, per the review NIT.)
+        // options, LineConstruction's method, XLine's direction-lock are taken only via an
+        // `init(…)`), which resets their state/status to the initial prompt. For those,
+        // take the fresh tool's status; for the IN-PLACE tools (which keep their state —
+        // e.g. PolylineEdit keeps its picked target across a mode switch) restore the prior
+        // prompt text. (InsertTool's status is a pure function of its block name —
+        // preserved across the re-mint — so this is a no-op for it today, but listing it
+        // keeps the set correct if it gains mid-run state, per the review NIT.)
         if tool is DivideTool || tool is CircleTool || tool is ArcTool || tool is LineTool
             || tool is EllipseTool || tool is BaselineDimTool || tool is ImageTool
-            || tool is InsertTool || tool is SplineTool || tool is LineConstructionTool {
+            || tool is InsertTool || tool is SplineTool || tool is LineConstructionTool
+            || tool is XLineTool {
             toolStatus = tool?.status ?? ""
         } else {
             toolStatus = savedStatus
@@ -3099,8 +3214,18 @@ final class CanvasModel {
             let cursor = world ? cursorWorld : cursorWorld.map(currentUCS.toUCS)
             switch CommandParser.parse(trimmed, reference: reference, cursor: cursor) {
             case .point(let p):
-                lastCommandError = nil
                 let worldPoint = world ? p : currentUCS.toWorld(p)
+                // An ENTITY-pick tool (Trim / Join / …) IGNORES a typed coordinate — its
+                // `.value` arm returns `.none` and changes nothing. Don't echo a success
+                // "→ x, y" for an input the active tool dropped on the floor (finding-M7);
+                // report it as not applicable so the transcript stays truthful.
+                if toolIgnoresTypedValue(activeToolKind) {
+                    let message = "A typed coordinate doesn't apply to \(activeToolKind.title) — pick an entity"
+                    lastCommandError = message
+                    appendTranscript(.error, message)
+                    return .error(message)
+                }
+                lastCommandError = nil
                 handleToolInput(.value(worldPoint))
                 // Echo the resolved WORLD point as an output readout (kept simple — a
                 // 4-dp `x, y`, e.g. "→ 10, 20"); the tool itself owns any further prompt.
@@ -3221,6 +3346,35 @@ final class CanvasModel {
         .trim, .extend, .fillet, .chamfer, .lengthen, .break, .polylineEdit,
         .hatch,
     ]
+
+    /// The tool kinds whose `Tool.handle` IGNORES a typed `.value` coordinate (it returns
+    /// `.none` and changes nothing) — the ENTITY-pick edit/modify tools whose picks name an
+    /// entity under the cursor, which a coordinate cannot identify (the documented `.value`
+    /// exceptions on `ToolInput.value`). Keyed off the active `ToolKind` so the echo gate
+    /// (`interpretCommandLine`) is deterministic without a new engine flag.
+    ///
+    /// Mirrors each tool's own `case .value: … return .none` arm (TrimTool, ExtendTool,
+    /// FilletTool, ChamferTool, BreakTool, JoinTool, DivideTool, ExplodeTool,
+    /// ExplodeTextTool, ExplodeInsertTool, ArrayTool, ArrayPathTool, HatchTool). Tools that
+    /// CONSUME `.value` are NOT here: every draw/dimension tool, the point-picking modify
+    /// tools (Move/Copy/Rotate/Mirror/Align/Scale/Offset), Stretch (delta) and Lengthen
+    /// (signed delta), and the partially-consuming `.lineConstruction` / `.polylineEdit`
+    /// (whose point-pick steps DO consume — echoing then is correct). `.select`/`.viewport`
+    /// have no `Tool`, so a typed coordinate is rejected upstream ("Start a tool first")
+    /// before the echo ever runs; their absence here is immaterial.
+    private static let ignoresTypedValueKinds: Set<ToolKind> = [
+        .trim, .extend, .fillet, .chamfer, .break, .join,
+        .divide, .explode, .explodeText, .explodeInsert,
+        .array, .arrayPath, .hatch,
+    ]
+
+    /// Whether the active tool `kind` IGNORES a typed `.value` coordinate (an entity-pick
+    /// tool). The command line uses this to gate the "→ x, y" success echo: a coordinate an
+    /// entity-pick tool dropped on the floor must NOT read as if it placed a point
+    /// (finding-M7).
+    private func toolIgnoresTypedValue(_ kind: ToolKind) -> Bool {
+        Self.ignoresTypedValueKinds.contains(kind)
+    }
 
     /// Whether geometry committed by tool `kind` should adopt the CURRENT properties
     /// (active layer + `currentPen`). True for genuine geometry-from-scratch DRAW
@@ -5095,8 +5249,10 @@ final class CanvasModel {
     func undo() {
         guard undoManager.canUndo else { return }
         undoManager.undo()
+        rehomeActiveSpaceAfterTableChange()
         rebuildIndex()
         selection.clear()
+        clearTransientInteractionState()
         modelDirty = true
         modelVersion &+= 1
     }
@@ -5105,10 +5261,41 @@ final class CanvasModel {
     func redo() {
         guard undoManager.canRedo else { return }
         undoManager.redo()
+        rehomeActiveSpaceAfterTableChange()
         rebuildIndex()
         selection.clear()
+        clearTransientInteractionState()
         modelDirty = true
         modelVersion &+= 1
+    }
+
+    /// Re-homes the active-space tab pointer after the undo/redo value-snapshot restored
+    /// the layout table (finding-M1). An undo/redo can ADD or REMOVE the active paper-space
+    /// LAYOUT (a New/Delete-layout step is undoable), so the `activeSpace`/`activeLayout`
+    /// pair the canvas is showing can dangle — pointing at a layout that no longer exists,
+    /// which blanks the canvas. Re-issuing the SAME `setActiveSpace` request is the fix:
+    /// it re-resolves the request against the restored table and FALLS BACK to model space
+    /// when the named layout is gone (its own guard), so the tab pointer is always valid.
+    /// A no-op when the active space still resolves (`setActiveSpace`'s already-active
+    /// guard short-circuits) — the common case (an entity-only edit) costs nothing.
+    private func rehomeActiveSpaceAfterTableChange() {
+        // The current active layout no longer resolves ⇒ the request would fall back to
+        // model space. `setActiveSpace` re-frames + re-indexes on the change; when the
+        // layout still exists the request is the no-op identity, so this is safe to call
+        // unconditionally. We pass the CURRENT pair so an unchanged table is the no-op.
+        setActiveSpace(activeSpace, layoutName: activeLayout)
+    }
+
+    /// Clears the transient interaction overlays that an undo/redo would otherwise leave
+    /// pointing at PRE-undo geometry (finding-M2): the snap marker (`CrosshairOverlay`
+    /// reads `snap?.point`) and the hover highlight (`MarqueeHoverOverlay` reads `hoverID`),
+    /// plus any acquired OTRACK points — the SAME clear-triple `setActiveSpace` /
+    /// block-edit transitions drop, since the restored entities may have moved, changed,
+    /// or vanished. The selection is cleared separately by the caller.
+    private func clearTransientInteractionState() {
+        snap = nil
+        hoverID = nil
+        clearTrackingPoints()
     }
 
     // MARK: - Delete selection (Edit ▸ Delete / ⌫)

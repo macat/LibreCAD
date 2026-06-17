@@ -52,8 +52,9 @@
 //  app applies the single `.replace(id, .polyline(newData))` (preserving the
 //  entity's id / layer / pen / flags) as one undoable group.
 //
-//  UNWIRED: this tool conforms to `Tool` but is NOT yet registered in `ToolKind`
-//  nor surfaced in the UI (that is a later wire-wave owned by the canvas/UI agent).
+//  WIRED: registered as `ToolKind.polylineEdit` and surfaced in the UI. The edit
+//  `mode` (move / add / remove / arc) is exposed in the Tool Options bar and pushed
+//  onto the live tool IN PLACE via `CanvasModel.applyToolConfig` (Lane M).
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //

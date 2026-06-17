@@ -16,7 +16,9 @@
 //
 //  PURE: it never touches CADDrawing/Quadtree/GUI. It receives already-snapped
 //  world points and returns outcomes/preview; the app re-mints ids on commit.
-//  UNWIRED — registered into `ToolKind` + the toolbar/menu in wire-wave-3.
+//  WIRED: registered as `ToolKind.xline`; the direction-constraint `mode` (free /
+//  horizontal / vertical / fixed-angle) is surfaced in the Tool Options bar and
+//  RE-MINTED via `CanvasModel.applyToolConfig` (Lane M).
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //
@@ -58,8 +60,8 @@ public struct XLineTool: Tool {
     private var cursor: Vector = .invalid
 
     /// The active direction-constraint mode. `.free` (the default) is the
-    /// two-point form; the others lock the direction. The wire-wave funnels the
-    /// options-bar selection into this via `CanvasModel.activateTool`.
+    /// two-point form; the others lock the direction. `CanvasModel.applyToolConfig`
+    /// RE-MINTS the tool with the options-bar selection (`xlineModeValue`).
     public var mode: Mode
 
     public init(mode: Mode = .free) { self.mode = mode }
