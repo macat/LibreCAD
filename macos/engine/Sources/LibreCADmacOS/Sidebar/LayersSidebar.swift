@@ -155,6 +155,18 @@ struct LayersSidebar: View {
             Divider()
             Button { lockAll(true) } label: { Label("Lock All Layers", systemImage: "lock") }
             Button { lockAll(false) } label: { Label("Unlock All Layers", systemImage: "lock.open") }
+            Divider()
+            // Selection-wide isolate / unisolate live in the PANEL header (they act on the
+            // current selection / the whole drawing, not one row) — the W3B LAYISO-from-
+            // selection + LAYUNISO funnels.
+            Button {
+                if model.isolateSelectionLayers() { syncRenderAfterLayerEdit() }
+            } label: { Label("Isolate Selection's Layers", systemImage: "eye") }
+                .disabled(model.selection.isEmpty)
+            Button {
+                if model.unisolateLayers() { syncRenderAfterLayerEdit() }
+            } label: { Label("Unisolate Layers", systemImage: "eye.circle") }
+                .disabled(!model.hasIsolatedLayers)
         } label: {
             Image(systemName: "ellipsis.circle")
         }
@@ -190,8 +202,9 @@ struct LayersSidebar: View {
 
     /// The right-click menu on a layer row: the less-common per-layer FLAGS (printable /
     /// construction — demoted here from the row so the layer NAME gets its width back,
-    /// AutoCAD-style; eye + lock stay inline), then activate / move-selection / isolate.
-    /// Per-entity layer ops (F17).
+    /// AutoCAD-style; eye + lock stay inline), then the Wave-3B layer OPERATIONS that act
+    /// on this row's layer — make-current / move-selection / isolate / turn-off-others /
+    /// select-on-layer (LAYISO / LAYOFF / CLAYER family). Per-entity layer ops (F17 + W3B).
     @ViewBuilder
     private func layerRowMenu(_ layer: Layer) -> some View {
         // Printable (was an inline row button). A non-printable layer draws on screen but
@@ -204,20 +217,52 @@ struct LayersSidebar: View {
             Label("Construction Layer", systemImage: layer.isConstruction ? "ruler.fill" : "ruler")
         }
         Divider()
-        Button("Set Active") {
-            model.drawing.setActiveLayer(layer.name)
-            selectedLayer = layer.name
-            syncRenderAfterLayerEdit()
+        // Make Current (AutoCAD CLAYER) — route through the W3B undoable funnel so undo
+        // reverts the active-layer change; keep the selection mirror in step.
+        Button {
+            if model.makeLayerCurrent(layer.name) {
+                selectedLayer = layer.name
+                syncRenderAfterLayerEdit()
+            }
+        } label: {
+            Label("Make Current", systemImage: "checkmark.circle")
         }
         Button("Move Selection Here") {
             if model.moveSelectionToLayer(layer.name) { syncRenderAfterLayerEdit() }
         }
         .disabled(model.selection.isEmpty)
+        // Select every entity on this layer: REPLACE the selection with the layer's
+        // entities. Built by funneling a layer-only `QuickSelectFilter` through the
+        // existing `applyQuickSelect` select-by-predicate path (no new CanvasModel method;
+        // it also applies the Select-All selectability gate + repaints the highlight).
+        Button {
+            selectEntities(onLayer: layer.name)
+        } label: {
+            Label("Select Entities on Layer", systemImage: "cursorarrow.rays")
+        }
         Divider()
-        Button("Isolate (Hide Others)") {
+        // Isolate this layer (LAYISO — hide every other, restorable via Unisolate).
+        Button {
             model.isolateLayer(layer.name)
             syncRenderAfterLayerEdit()
+        } label: {
+            Label("Isolate (Hide Others)", systemImage: "eye")
         }
+        // Turn off every OTHER layer (LAYOFF — freeze others WITHOUT a restore stash;
+        // distinct from Isolate). The W3B `(except:)` convenience.
+        Button {
+            if model.turnOffOtherLayers(except: layer.name) { syncRenderAfterLayerEdit() }
+        } label: {
+            Label("Turn Off Other Layers", systemImage: "eye.slash")
+        }
+        // Unisolate (LAYUNISO) — reverse the last isolate; only meaningful while an
+        // isolation is in effect.
+        Button {
+            if model.unisolateLayers() { syncRenderAfterLayerEdit() }
+        } label: {
+            Label("Unisolate Layers", systemImage: "eye.circle")
+        }
+        .disabled(!model.hasIsolatedLayers)
     }
 
     /// A two-way binding for a layer's PRINTABLE flag, routed through the undoable funnel
@@ -365,6 +410,20 @@ struct LayersSidebar: View {
         selectedLayer = name
         guard name != model.drawing.layers.activeLayerName else { return }
         model.drawing.setActiveLayer(name)
+    }
+
+    /// Selects every entity on `name`: REPLACES the live selection with the layer's
+    /// entities by funneling a layer-only `QuickSelectFilter` through the existing
+    /// `applyQuickSelect` select-by-predicate path. This deliberately reuses the model's
+    /// select-by-filter funnel (no new CanvasModel method) — it also applies the Select-All
+    /// selectability gate (skips locked/frozen) and bumps the version; we still nudge the
+    /// on-demand canvas to repaint the highlight overlay. (A selection change is view-side
+    /// state, so this registers no undo — like every other Select verb.)
+    private func selectEntities(onLayer name: String) {
+        let filter = QuickSelectFilter(layer: name)
+        if model.applyQuickSelect(filter, mode: .replace) {
+            controllerBox.controller?.requestRedraw()
+        }
     }
 
     /// "0" and the active layer are guarded by the model (`removeLayer` refuses
