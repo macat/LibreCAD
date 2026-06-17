@@ -654,6 +654,17 @@ final class CADCanvasController {
     /// every cursor move / pan / zoom.
     private(set) var liveDimOverlay: LiveDimensionOverlayView?
 
+    /// The SNAP-TRACKING overlay (snap-tracking Wave 3, a subview of the MTKView). While a
+    /// tool runs with POLAR TRACKING engaged it draws the dotted polar ray + a pre-formatted
+    /// `dist<angle` readout chip; the OTRACK guides/markers (later waves) render here too.
+    /// SELF-CONTAINED + INJECTED (owns no model): the mount supplies its `displayProvider`
+    /// (`model.trackingDisplay()`) and `viewportProvider` (for world→screen). Always
+    /// click-through (`hitTest` returns nil). Mounted JUST BELOW `liveDimOverlay` so the
+    /// live-dim value chip still paints on top. `isEnabled` is driven in `redraw()` from
+    /// `model.isToolActive && model.polarEnabled`; `refresh()` re-anchors it on every cursor
+    /// move / pan / zoom.
+    private(set) var trackingOverlay: TrackingOverlayView?
+
     func attach(view: FlippedMTKView, renderer: LineRenderer) {
         self.view = view
         self.renderer = renderer
@@ -726,6 +737,26 @@ final class CADCanvasController {
         entityGripView.autoresizingMask = [.width, .height]
         view.addSubview(entityGripView)
         entityGrip = entityGripView
+
+        // Float the SNAP-TRACKING overlay (snap-tracking Wave 3) JUST BELOW the live-dim
+        // overlay (added BEFORE it), so its dotted polar ray + guides sit above the grid /
+        // grips but UNDER the live-dim value chip (the foreground field the user types
+        // into). It is ALWAYS click-through (its `hitTest` returns nil), so drawing /
+        // select / pan fall straight through — it never owns a gesture. Its providers read
+        // the model weakly: `trackingDisplay()` (empty unless polar tracking is engaged)
+        // and the live `viewport` (default `Viewport(size: .zero)` when the model is gone,
+        // matching the sibling overlays). `isEnabled` / `refresh()` are driven from
+        // `redraw()`.
+        let trackingView = TrackingOverlayView(
+            displayProvider: { [weak self] in
+                self?.model.trackingDisplay() ?? CanvasModel.TrackingDisplay()
+            },
+            viewportProvider: { [weak self] in self?.model.viewport ?? Viewport(size: .zero) })
+        trackingView.frame = view.bounds
+        trackingView.autoresizingMask = [.width, .height]
+        trackingView.isEnabled = model.isToolActive && model.polarEnabled
+        view.addSubview(trackingView)
+        trackingOverlay = trackingView
 
         // Float the LIVE DIMENSION overlay (live-dim Wave 3) at the TOP (added last) so its
         // dotted dim line + value chip paint over every other overlay. It is ALWAYS
@@ -871,6 +902,16 @@ final class CADCanvasController {
             liveDimOverlay.isEnabled = model.dynamicInputEnabled && model.isToolActive
             liveDimOverlay.refresh()
         }
+        // Snap-tracking feedback: show ONLY while a tool is active AND polar tracking is on
+        // (the overlay's display provider also blanks itself when polar isn't engaged /
+        // within the draw aperture), then re-anchor the polar ray + readout to the
+        // (panned/zoomed) cursor + datum on every repaint. Setting `isEnabled` keeps
+        // `isHidden` in sync. (When OTRACK lands in W5, OR in `model.objectTrackingEnabled`
+        // here so the OTRACK guides show with polar off.)
+        if let trackingOverlay {
+            trackingOverlay.isEnabled = model.isToolActive && model.polarEnabled
+            trackingOverlay.refresh()
+        }
         view?.setNeedsDisplay(view?.bounds ?? .zero)
     }
 
@@ -974,6 +1015,13 @@ final class CADCanvasController {
     func mouseMoved(to point: CGPoint) {
         syncViewSizeFromView()
         let spacing = renderer?.lastGridSpacing
+        // Push the live ⇧ state into the model BEFORE `updateSnap` recomputes the polar
+        // tracking ray (its `refreshPolarTracking` gates on `polarTrackingShiftHeld`).
+        // Use the SAME shift source the `polarConstrained` point-input path reads
+        // (`Self.shiftHeld` = the global `NSEvent.modifierFlags` ⇧) so the SHOWN dotted ray
+        // hides exactly when the angle LOCK releases — hold-⇧ frees movement AND clears the
+        // ray, never a silent 15° lock with a visible ray.
+        model.polarTrackingShiftHeld = Self.shiftHeld
         model.updateSnap(atScreenPoint: point, gridSpacing: spacing)
         // When a draw tool is active, feed it the SNAPPED world point so its
         // rubber-band preview tracks the cursor. Otherwise this is select mode and
