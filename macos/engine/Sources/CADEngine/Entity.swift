@@ -277,25 +277,53 @@ public struct EllipseData: Sendable, Hashable, Codable {
 /// - `weights`:       rational weights, one per control point. If empty, the
 ///                    spline is treated as non-rational (all weights == 1).
 /// - `closed`:        periodic/closed flag (`SplineType::WrappedClosed`).
+/// - `splineFlags`:   the RAW DXF code-70 bit flags as read from the file
+///                    (1 closed, 2 periodic, 4 rational, 8 planar, 16 linear),
+///                    or `0` when unknown (an engine-authored spline). Carried so
+///                    the periodic / linear bits survive a DXF round-trip instead
+///                    of being re-synthesized on write from `closed`/`weights`
+///                    alone. NOT used by geometry resolve — purely a write-fidelity
+///                    field (the DXF writer prefers it when non-zero).
 public struct SplineData: Sendable, Hashable, Codable {
     public var degree: Int
     public var controlPoints: [Vector]
     public var knots: [Double]
     public var weights: [Double]
     public var closed: Bool
+    /// Raw DXF code-70 flags from the source file; `0` ⇒ unknown (engine-authored).
+    public var splineFlags: Int
 
     public init(
         degree: Int,
         controlPoints: [Vector],
         knots: [Double] = [],
         weights: [Double] = [],
-        closed: Bool = false
+        closed: Bool = false,
+        splineFlags: Int = 0
     ) {
         self.degree = degree
         self.controlPoints = controlPoints
         self.knots = knots
         self.weights = weights
         self.closed = closed
+        self.splineFlags = splineFlags
+    }
+
+    // Custom decoder so payloads written before `splineFlags` existed still load
+    // (the field decodes to its `0` "unknown" default — the writer then falls back
+    // to synthesizing the flags from `closed`/`weights`, the prior behavior).
+    private enum CodingKeys: String, CodingKey {
+        case degree, controlPoints, knots, weights, closed, splineFlags
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        degree = try c.decode(Int.self, forKey: .degree)
+        controlPoints = try c.decode([Vector].self, forKey: .controlPoints)
+        knots = try c.decodeIfPresent([Double].self, forKey: .knots) ?? []
+        weights = try c.decodeIfPresent([Double].self, forKey: .weights) ?? []
+        closed = try c.decodeIfPresent(Bool.self, forKey: .closed) ?? false
+        splineFlags = try c.decodeIfPresent(Int.self, forKey: .splineFlags) ?? 0
     }
 }
 

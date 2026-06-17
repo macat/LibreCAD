@@ -625,21 +625,27 @@ private final class PODBuilder {
         case .spline(let d):
             // Control-point (rational) B-spline / NURBS -> DXF SPLINE. The degree,
             // control polygon, knots and rational weights map straight onto the
-            // POD's spline fields; `closed` carries via the closed flag, and we
-            // synthesize the code-70 flags (planar + closed/periodic) since
-            // SplineData doesn't preserve the raw DXF flags. The C side sets
-            // nknots/ncontrol from these and writes DRW_Spline. Mirrors
+            // POD's spline fields; `closed` carries via the closed flag. The C side
+            // sets nknots/ncontrol from these and writes DRW_Spline. Mirrors
             // rs_filterdxfrw.cpp::writeSpline.
             e.kind = Int32(LC_ENT_SPLINE.rawValue)
             e.degree = Int32(d.degree)
             e.closed = d.closed ? 1 : 0
-            // code 70: 1 closed, 2 periodic, 4 rational, 8 planar. Planar always;
-            // a rational spline (per-control weights) sets bit 2; a closed spline
-            // is also periodic (bits 0|1), matching the reference writer.
-            var flags: Int32 = 0b1000
-            if d.closed { flags |= 0b0011 }
-            if d.weights.count == d.controlPoints.count, !d.weights.isEmpty {
-                flags |= 0b0100
+            // code 70: 1 closed, 2 periodic, 4 rational, 8 planar, 16 linear.
+            // Prefer the RAW flags read from the source file (a faithful re-write
+            // that preserves the periodic / linear bits); only synthesize a default
+            // (planar always; closed ⇒ +closed|periodic; per-control weights ⇒
+            // +rational) when the spline carries no raw flags (engine-authored).
+            let flags: Int32
+            if d.splineFlags != 0 {
+                flags = Int32(d.splineFlags)
+            } else {
+                var f: Int32 = 0b1000
+                if d.closed { f |= 0b0011 }
+                if d.weights.count == d.controlPoints.count, !d.weights.isEmpty {
+                    f |= 0b0100
+                }
+                flags = f
             }
             e.splineFlags = flags
             let (cptr, ccount) = internPoints(d.controlPoints)
@@ -1401,6 +1407,27 @@ private final class PODBuilder {
             e.dimHasTextRotation = 1
         } else {
             e.dimHasTextRotation = 0
+        }
+
+        // Per-entity text-height / arrow-size override (the inverse of the reader's
+        // ACAD:DSTYLE xdata parse, DXFReader.mapDimension). The reader treats `0`
+        // as the "inherit the document/style default" sentinel, so a `DimData`
+        // value `> 0` is a genuine per-entity override worth re-emitting — set the
+        // POD's override field + its `has*` flag. `<= 0` ⇒ leave the flag clear so
+        // the bridge omits the DSTYLE group and the dimension inherits on re-read.
+        // The C bridge's writeDimension turns these into the `ACAD:DSTYLE` xdata
+        // (dim-var 140 = text height, 41 = arrow size).
+        if d.textHeight > 0 {
+            e.dimTextHeightOverride = d.textHeight
+            e.dimHasTextHeightOverride = 1
+        } else {
+            e.dimHasTextHeightOverride = 0
+        }
+        if d.arrowSize > 0 {
+            e.dimArrowSizeOverride = d.arrowSize
+            e.dimHasArrowSizeOverride = 1
+        } else {
+            e.dimHasArrowSizeOverride = 0
         }
     }
 
