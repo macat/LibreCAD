@@ -177,6 +177,7 @@ struct LibreCADApp: App {
     /// Toggle the trailing Inspector pane on the focused window (#03 — View ▸ Show
     /// Inspector, ⌃⌘I). `nil` ⇒ no canvas focused ⇒ the menu item is disabled.
     @FocusedValue(\.toggleInspector) private var toggleInspector
+    @FocusedValue(\.toggleCurrentPropertiesBar) private var toggleCurrentPropertiesBar
     /// Layout-menu actions on the focused window (#00). `newLayout` is published whenever
     /// a canvas is focused; `deleteActiveLayout` / `duplicateActiveLayout` are published
     /// only when a layout TAB is active (paper space) and `nil` in model space, so the
@@ -437,6 +438,13 @@ struct LibreCADApp: App {
                 Button("Show Inspector") { toggleInspector?() }
                     .keyboardShortcut("i", modifiers: [.control, .command])
                     .disabled(toggleInspector == nil)
+                // View ▸ Show Current Properties Bar. The "Current properties" strip
+                // (active layer + current pen color/type/width for NEW geometry) is OPT-IN
+                // — hidden by default (new geometry draws "By Layer", so the bar is noise
+                // for most users) and brought back from here. Fires the same persisted
+                // `showCurrentPropertiesBar.toggle()` via the focused value.
+                Button("Show Current Properties Bar") { toggleCurrentPropertiesBar?() }
+                    .disabled(toggleCurrentPropertiesBar == nil)
                 // View ▸ Zoom Window (⇧⌘Z is taken by Redo; use ⌥⌘Z) — arm the
                 // transient drag-box zoom: the next drag draws a box, releasing zooms
                 // to fit it (F23). Routed through the responder chain to the focused

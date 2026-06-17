@@ -128,6 +128,12 @@ struct ContentView: View {
     /// disclosure chevron next to the command line (and the View ▸ menu item).
     @AppStorage("commandTranscript.show") private var showCommandTranscript: Bool = false
 
+    /// Whether the always-on "Current properties" bar (active layer + current pen
+    /// color / type / width for NEW geometry) is shown under the toolbar. Default OFF —
+    /// new geometry draws "By Layer" out of the box, so the bar is hidden until the user
+    /// opts in via View ▸ Show Current Properties Bar (persisted across launches).
+    @AppStorage("currentPropertiesBar.show") private var showCurrentPropertiesBar: Bool = false
+
     // MARK: App-wide preference reads (Preferences ▸ General / Text)
     //
     // These back the new-document seeding (General tab) and the Text tool defaults
@@ -298,7 +304,12 @@ struct ContentView: View {
             // to every draw tool. New geometry adopts these via Stage 1's applyCommit
             // stamp.
             .safeAreaInset(edge: .top, spacing: 0) {
-                CurrentPropertiesBar(model: model, controllerBox: controllerBox)
+                // The "Current properties" bar (CLAYER + current pen) is OPT-IN — hidden by
+                // default and toggled from View ▸ Show Current Properties Bar. An empty inset
+                // content collapses to zero height, so when hidden it adds no chrome.
+                if showCurrentPropertiesBar {
+                    CurrentPropertiesBar(model: model, controllerBox: controllerBox)
+                }
             }
             // WAVE BW (Ask #2): the contextual Block-Editor bar, pinned at the very top
             // of the canvas while an in-place block-edit session is active. Shows
@@ -629,6 +640,7 @@ struct ContentView: View {
         let active = model.activeLayout   // the active sheet's name in paper space, else nil
         return ShellMenuHandlersModifier(
             toggleInspector: { showInspector.toggle() },
+            toggleCurrentPropertiesBar: { showCurrentPropertiesBar.toggle() },
             newLayout: { _ = model.newLayout() },
             deleteActiveLayout: active.map { name in { _ = model.deleteLayout(name) } },
             duplicateActiveLayout: active.map { name in { _ = model.duplicateLayout(name) } }
@@ -2124,6 +2136,13 @@ extension FocusedValues {
         set { self[ToggleInspectorKey.self] = newValue }
     }
 
+    /// Toggle the opt-in "Current properties" bar on the focused window (View ▸ Show
+    /// Current Properties Bar). `nil` when no canvas is focused.
+    var toggleCurrentPropertiesBar: (() -> Void)? {
+        get { self[ToggleCurrentPropertiesBarKey.self] }
+        set { self[ToggleCurrentPropertiesBarKey.self] = newValue }
+    }
+
     /// Create a NEW paper-space layout on the focused window and switch to it (#00 —
     /// Layout ▸ New Layout). Always available when a canvas is focused (`CanvasModel.
     /// newLayout`). `nil` when no canvas is focused (disables the item).
@@ -2288,6 +2307,7 @@ private struct MatchPropHandlersModifier: ViewModifier {
 /// closures are `nil` in model space, which disables the matching Layout-menu items.
 private struct ShellMenuHandlersModifier: ViewModifier {
     let toggleInspector: () -> Void
+    let toggleCurrentPropertiesBar: () -> Void
     let newLayout: () -> Void
     let deleteActiveLayout: (() -> Void)?
     let duplicateActiveLayout: (() -> Void)?
@@ -2295,6 +2315,7 @@ private struct ShellMenuHandlersModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .focusedSceneValue(\.toggleInspector) { toggleInspector() }
+            .focusedSceneValue(\.toggleCurrentPropertiesBar) { toggleCurrentPropertiesBar() }
             .focusedSceneValue(\.newLayout) { newLayout() }
             .focusedSceneValue(\.deleteActiveLayout, deleteActiveLayout)
             .focusedSceneValue(\.duplicateActiveLayout, duplicateActiveLayout)
@@ -2334,6 +2355,10 @@ private struct IsToolActiveKey: FocusedValueKey {
 }
 
 private struct ToggleInspectorKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct ToggleCurrentPropertiesBarKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 
