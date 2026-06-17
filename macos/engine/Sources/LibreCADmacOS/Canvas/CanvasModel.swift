@@ -1037,16 +1037,58 @@ final class CanvasModel {
     }
 
     // MARK: Layer defaults (Document Settings — app policy for new layers)
+    //
+    // These three are APP POLICY (not document content): the color / line width / line
+    // type a NEW layer is born with, edited in Document Settings ▸ Layers and consumed
+    // by `LayersSidebar.addLayer`. App-WIDE (not per-document), so they live in
+    // `UserDefaults` like the other AppSettings — finding #32: before this they were
+    // plain per-window vars that reset every launch/window despite the "app policy"
+    // intent. Each is SEEDED at init from the persisted value (via the
+    // `AppSettings.newLayer*` keys/encoders below) and PERSISTED on change through a
+    // `didSet` that writes `UserDefaults.standard` — exactly the dynamic-input /
+    // object-tracking pattern. `@ObservationIgnored` only on the seed default value is
+    // not needed (these are observed so the Document-Settings pickers track them live).
+
+    /// When true, the three new-layer-default `didSet` persistence writes are suppressed.
+    /// Set ONLY for the duration of `seedNewLayerDefaultsFromAppSettings(defaults:)` so
+    /// seeding from a store does NOT immediately echo the value back (and so a test can
+    /// seed from an isolated suite without writing to `.standard`). `@ObservationIgnored`:
+    /// pure internal bookkeeping, never observed.
+    @ObservationIgnored
+    private var suppressNewLayerDefaultPersist = false
 
     /// The default color a NEW layer is born with (Document Settings ▸ Layers).
     /// `LayersSidebar.addLayer` seeds a new `Layer` with this. App policy (not a DXF
-    /// header var) — new layers are local creation choices, not document round-trip
-    /// state. Defaults to LibreCAD green.
-    var defaultLayerColor: RGBAColor = .librecadGreen
-    /// The default line width a new layer is born with.
-    var defaultLineWidth: PenLineWidth = .default
-    /// The default line type a new layer is born with.
-    var defaultLineType: PenLineType = .solid
+    /// header var). Seeded from `AppSettings.Key.newLayerColorHex` (default LibreCAD
+    /// green); persisted on change.
+    var defaultLayerColor: RGBAColor = AppSettings.newLayerColor() {
+        didSet { if !suppressNewLayerDefaultPersist { AppSettings.setNewLayerColor(defaultLayerColor) } }
+    }
+    /// The default line width a new layer is born with. Seeded from
+    /// `AppSettings.Key.newLayerLineWidthMM` (default "by default"); persisted on change.
+    var defaultLineWidth: PenLineWidth = AppSettings.newLayerLineWidth() {
+        didSet { if !suppressNewLayerDefaultPersist { AppSettings.setNewLayerLineWidth(defaultLineWidth) } }
+    }
+    /// The default line type a new layer is born with. Seeded from
+    /// `AppSettings.Key.newLayerLineType` (default solid); persisted on change.
+    var defaultLineType: PenLineType = AppSettings.newLayerLineType() {
+        didSet { if !suppressNewLayerDefaultPersist { AppSettings.setNewLayerLineType(defaultLineType) } }
+    }
+
+    /// Re-seeds the three NEW-LAYER defaults (color / line width / line type) from the
+    /// persisted `AppSettings` keys. The plain property initializers already seed from
+    /// `UserDefaults.standard` at `init`, so production never needs this; it exists as
+    /// the injectable, hermetic seam (mirroring `seedSnapSettingsFromAppSettings(defaults:)`)
+    /// so a test can seed a fresh model from an ISOLATED `UserDefaults` suite. The
+    /// persistence `didSet` is suppressed for the duration so seeding does not echo back
+    /// to the store (and never pollutes `.standard` in a test).
+    func seedNewLayerDefaultsFromAppSettings(defaults: UserDefaults = .standard) {
+        suppressNewLayerDefaultPersist = true
+        defer { suppressNewLayerDefaultPersist = false }
+        defaultLayerColor = AppSettings.newLayerColor(defaults: defaults)
+        defaultLineWidth = AppSettings.newLayerLineWidth(defaults: defaults)
+        defaultLineType = AppSettings.newLayerLineType(defaults: defaults)
+    }
 
     // MARK: Paper defaults (Document Settings — pre-fill Print/Export)
 
@@ -6395,5 +6437,163 @@ final class CanvasModel {
             format: gv.angleFormat,
             precision: gv.anglePrecision)
         return "\(distStr)<\(angStr)"
+    }
+}
+
+// MARK: - AppSettings: new-layer defaults (finding #32 — APP-WIDE, persisted)
+//
+// The three "new-layer defaults" (color / line width / line type a fresh layer is
+// born with, edited in Document Settings ▸ Layers and consumed by
+// `LayersSidebar.addLayer`) are APP POLICY — app-wide preferences, NOT per-document
+// round-trip state. They belong in `UserDefaults` alongside the other `AppSettings`,
+// so a new window seeds from them and a change in Document Settings sticks across
+// relaunch. Defined here (not in `AppSettingsView.swift`) because `CanvasModel` owns
+// the seed/persist; the keys/encoders follow the established `AppSettings.Key` /
+// `AppSettings.Default` naming + the `#RRGGBB` hex / mm-Double / String-token
+// encodings already used by `canvasBackgroundHex` / `defaultLineWidthMM` / the enum
+// rawValue keys. Encoders are PURE (no `UserDefaults`), so `AppSettingsTests` can
+// round-trip them without touching the real domain.
+
+extension AppSettings.Key {
+    /// New-layer default COLOR, packed `#RRGGBB` (same shape as `canvasBackgroundHex`).
+    static let newLayerColorHex = "app.layers.newLayerColorHex"
+    /// New-layer default LINE WIDTH in millimeters (Double). `0` is the "by default"
+    /// sentinel (resolve to the drawing/global default lineweight) — mirrors
+    /// `defaultLineWidthMM`.
+    static let newLayerLineWidthMM = "app.layers.newLayerLineWidthMM"
+    /// New-layer default LINE TYPE, stored as a stable String token (see
+    /// `AppSettings.lineTypeToken(_:)`).
+    static let newLayerLineType = "app.layers.newLayerLineType"
+}
+
+extension AppSettings.Default {
+    /// LibreCAD's signature green — matches the historical `defaultLayerColor` default.
+    static let newLayerColor: RGBAColor = .librecadGreen
+    /// `0` mm = "by default" (the historical `defaultLineWidth = .default`).
+    static let newLayerLineWidthMM: Double = 0
+    /// Solid — the historical `defaultLineType = .solid`.
+    static let newLayerLineType: PenLineType = .solid
+}
+
+extension AppSettings {
+
+    // MARK: New-layer color (RGBAColor ⇆ #RRGGBB hex) — PURE encoders
+
+    /// Pack an `RGBAColor`'s RGB into an opaque `#RRGGBB` hex string (alpha dropped —
+    /// a layer color is opaque). The same shape `CanvasTheme.rgba(fromAppHex:)` parses,
+    /// so the new-layer color encodes consistently with the Appearance color overrides.
+    static func newLayerColorHex(from color: RGBAColor) -> String {
+        func byte(_ v: Float) -> Int { Int((min(max(v, 0), 1) * 255).rounded()) }
+        return String(format: "#%02X%02X%02X", byte(color.r), byte(color.g), byte(color.b))
+    }
+
+    /// Parse a `#RRGGBB` / `RRGGBB` hex string back to an opaque `RGBAColor`, falling
+    /// back to the `newLayerColor` default for an empty / malformed value (so a corrupt
+    /// key never yields an unusable color). Forgiving, matching the rest of AppSettings.
+    static func newLayerColor(fromHex hex: String) -> RGBAColor {
+        var s = hex.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let v = UInt32(s, radix: 16) else { return Default.newLayerColor }
+        return RGBAColor(Float((v >> 16) & 0xFF) / 255,
+                         Float((v >> 8) & 0xFF) / 255,
+                         Float(v & 0xFF) / 255)
+    }
+
+    // MARK: New-layer line width (PenLineWidth ⇆ mm Double) — PURE encoders
+
+    /// Encode a `PenLineWidth` to the stored mm Double. Only `.millimeters(v)` (with a
+    /// finite, positive `v`) stores a width; every other case — including the
+    /// `.default` the Document-Settings picker emits for "Default" — encodes as `0`,
+    /// the "by default" sentinel (mirroring `defaultLineWidthMM`).
+    static func newLayerLineWidthMM(from width: PenLineWidth) -> Double {
+        if case .millimeters(let v) = width, v.isFinite, v > 0 { return v }
+        return 0
+    }
+
+    /// Decode a stored mm Double back to a `PenLineWidth`: a finite, positive value is
+    /// `.millimeters(v)`; `0` / non-positive / non-finite is the "by default" sentinel
+    /// `.default` (the historical `defaultLineWidth`).
+    static func newLayerLineWidth(fromMM mm: Double) -> PenLineWidth {
+        (mm.isFinite && mm > 0) ? .millimeters(mm) : .default
+    }
+
+    // MARK: New-layer line type (PenLineType ⇆ String token) — PURE encoders
+
+    /// A stable String token for a `PenLineType` (decoupled from `EntityKind`-style
+    /// rawValue switches). The Document-Settings picker only offers the concrete dash
+    /// patterns; `.byLayer` / `.byBlock` are never chosen for a layer default but are
+    /// mapped for completeness so the encode is total.
+    static func lineTypeToken(_ t: PenLineType) -> String {
+        switch t {
+        case .byLayer:  return "byLayer"
+        case .byBlock:  return "byBlock"
+        case .solid:    return "solid"
+        case .dashed:   return "dashed"
+        case .dotted:   return "dotted"
+        case .dashDot:  return "dashDot"
+        case .center:   return "center"
+        case .border:   return "border"
+        case .divide:   return "divide"
+        }
+    }
+
+    /// Decode a `PenLineType` token, falling back to the `newLayerLineType` default
+    /// (`.solid`) for an unknown / blank token.
+    static func lineType(fromToken token: String) -> PenLineType {
+        switch token {
+        case "byLayer":  return .byLayer
+        case "byBlock":  return .byBlock
+        case "solid":    return .solid
+        case "dashed":   return .dashed
+        case "dotted":   return .dotted
+        case "dashDot":  return .dashDot
+        case "center":   return .center
+        case "border":   return .border
+        case "divide":   return .divide
+        default:         return Default.newLayerLineType
+        }
+    }
+
+    // MARK: Read / write (injectable `defaults` for tests; default `.standard`)
+
+    /// The persisted new-layer default COLOR (seeded into `CanvasModel.defaultLayerColor`
+    /// at init). A missing key yields the `newLayerColor` default.
+    static func newLayerColor(defaults: UserDefaults = .standard) -> RGBAColor {
+        guard let hex = defaults.string(forKey: Key.newLayerColorHex) else {
+            return Default.newLayerColor
+        }
+        return newLayerColor(fromHex: hex)
+    }
+
+    /// Persist the new-layer default COLOR (called from `CanvasModel.defaultLayerColor.didSet`).
+    static func setNewLayerColor(_ color: RGBAColor, defaults: UserDefaults = .standard) {
+        defaults.set(newLayerColorHex(from: color), forKey: Key.newLayerColorHex)
+    }
+
+    /// The persisted new-layer default LINE WIDTH. A missing key yields the
+    /// `newLayerLineWidthMM` default (`0` → `.default`).
+    static func newLayerLineWidth(defaults: UserDefaults = .standard) -> PenLineWidth {
+        let mm = (defaults.object(forKey: Key.newLayerLineWidthMM) as? Double)
+            ?? Default.newLayerLineWidthMM
+        return newLayerLineWidth(fromMM: mm)
+    }
+
+    /// Persist the new-layer default LINE WIDTH.
+    static func setNewLayerLineWidth(_ width: PenLineWidth, defaults: UserDefaults = .standard) {
+        defaults.set(newLayerLineWidthMM(from: width), forKey: Key.newLayerLineWidthMM)
+    }
+
+    /// The persisted new-layer default LINE TYPE. A missing/unknown token yields the
+    /// `newLayerLineType` default (`.solid`).
+    static func newLayerLineType(defaults: UserDefaults = .standard) -> PenLineType {
+        guard let token = defaults.string(forKey: Key.newLayerLineType) else {
+            return Default.newLayerLineType
+        }
+        return lineType(fromToken: token)
+    }
+
+    /// Persist the new-layer default LINE TYPE.
+    static func setNewLayerLineType(_ t: PenLineType, defaults: UserDefaults = .standard) {
+        defaults.set(lineTypeToken(t), forKey: Key.newLayerLineType)
     }
 }
