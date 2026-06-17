@@ -392,4 +392,32 @@ struct MirrorToolTests {
         // And definitively contains no `.add` edits.
         #expect(addedRecords(outcome) == nil)
     }
+
+    // MARK: - Typed coordinate (.value) parity with .click
+
+    @Test(".value(p) is treated exactly like .click(p): typed axis points mirror the same")
+    func typedValueMatchesClick() {
+        var typed = MirrorTool()
+        let ctxA = context([lineRecord()])
+        let typedFirst = typed.handle(.value(Self.axisP1), context: ctxA)
+        #expect(typedFirst == .none)   // a typed first axis point only fixes p1
+        #expect(typed.status == "Specify second point of mirror line")
+        let typedOutcome = typed.handle(.value(Self.axisP2), context: ctxA)
+
+        var clicked = MirrorTool()
+        let ctxB = context([lineRecord()])
+        _ = clicked.handle(.click(Self.axisP1), context: ctxB)
+        let clickedOutcome = clicked.handle(.click(Self.axisP2), context: ctxB)
+
+        #expect(typedOutcome == clickedOutcome)
+        #expect(replacedKinds(typedOutcome)?.count == 1)
+    }
+
+    @Test(".value with an empty selection is still a no-op (nothing to mirror)")
+    func typedValueEmptySelectionNoOp() {
+        var tool = MirrorTool()
+        let outcome = tool.handle(.value(Vector(5, 5)), context: .empty)
+        #expect(outcome == .none)
+        #expect(tool.status == "Select objects to mirror first")
+    }
 }

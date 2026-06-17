@@ -77,7 +77,12 @@ public struct DivideTool: Tool {
     }
 
     /// The active mode/config. Defaults to `.count(2)` so the historical DIVIDE
-    /// behavior is unchanged. Surfaced later via applyToolConfig + ToolOptionsBar.
+    /// behavior is unchanged. It is read LIVE on every `status`/`preview`/`fire` —
+    /// nothing is seeded from `mode` at construction (the only state is the captured
+    /// selection). The app's options-bar (a later wave) doesn't mutate this in place:
+    /// `applyToolConfig` RE-MINTS the tool via `init(mode:)` with the assembled mode
+    /// (the ArcTool/LineConstructionTool re-mint pattern). `var` because the
+    /// `init(mode:)` convenience and the `divisions` facade setter assign it.
     public var mode: DivideMode
 
     /// The number of equal pieces to divide into (LibreCAD's division count) — a

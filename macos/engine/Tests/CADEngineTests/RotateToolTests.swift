@@ -450,4 +450,31 @@ struct RotateToolTests {
         // differing only in WHICH edit (.add vs .replace) carries it.
         #expect(Set(added.map { $0.kind }) == Set(replacedKinds.values))
     }
+
+    // MARK: - Typed coordinate (.value) parity with .click
+
+    @Test(".value(p) is treated exactly like .click(p): typed center/reference/target rotates the same")
+    func typedValueMatchesClick() {
+        // Drive one run with typed values, another with clicks — identical picks.
+        var typed = RotateTool()
+        let ctxA = selectionContext()
+        _ = typed.handle(.value(Self.center), context: ctxA)
+        _ = typed.handle(.value(Self.reference), context: ctxA)
+        let typedOutcome = typed.handle(.value(Self.target), context: ctxA)
+
+        var clicked = RotateTool()
+        let typedClick = rotate(&clicked, ctx: selectionContext(),
+                                center: Self.center, reference: Self.reference, target: Self.target)
+
+        #expect(typedOutcome == typedClick)
+        #expect(replacedKinds(typedOutcome)?.count == 2)
+    }
+
+    @Test(".value with an empty selection is still a no-op (nothing to rotate)")
+    func typedValueEmptySelectionNoOp() {
+        var tool = RotateTool()
+        let outcome = tool.handle(.value(Vector(5, 5)), context: emptyContext())
+        #expect(outcome == .none)
+        #expect(tool.status == "Select objects to rotate first")
+    }
 }

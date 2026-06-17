@@ -158,9 +158,14 @@ public struct AlignTool: Tool {
     /// emits `.replace(id, newKind)` edits — never `.add`.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
         switch input {
-        case .value:
-            // A typed coordinate doesn't apply to this selection-based MODIFY tool — ignore.
-            return .none
+        case .value(let p):
+            // A TYPED point (U1 coordinate line) is a "pick a point" event just like
+            // `.click`, landing at the EXACT typed coordinate (no snap drift): route it
+            // through the same source/destination pick path so the user can type any of
+            // the four alignment points instead of clicking. Unified with `.click` (the
+            // ScaleTool/OffsetTool precedent) — an empty selection still no-ops via the
+            // `.pickingSrc1` guard inside `handleClick`.
+            return handleClick(p, context: context)
 
         case .move(let p):
             cursor = p
