@@ -602,6 +602,114 @@ enum RendererGeometry {
         }
     }
 
+    // MARK: - Gradient fill ramp (GH-W2)
+
+    /// The GPU-free per-vertex GRADIENT ramp (GH-W2). Maps a world-space point to
+    /// an `RGBAColor` by sampling a `ResolvedGradient` across a fill's bounding box.
+    /// Pure color math (no GPU / no `FlatVertex` / no shader change) so it unit-
+    /// tests directly via the `_SharedRendererGeometry` symlink.
+    ///
+    /// The ramp parameter `t ∈ [0, 1]` is derived from `bounds` (the fill's
+    /// triangulated bounding box, in world coords):
+    ///
+    /// - **`.linear`** — project `(worldPoint − bboxCenter)` onto the unit axis
+    ///   `(cos angle, sin angle)` to get a signed distance `d`. The bbox half-
+    ///   extent along that same axis is `e = |Δx·cos| + |Δy·sin|` (half the AABB's
+    ///   width projected onto the axis), so the gradient spans the full box corner-
+    ///   to-corner. `t = (d + e) / (2e)`, clamped to `[0, 1]` (so `t = 0.5` at the
+    ///   center, `0`/`1` at the box's extremes along the axis). A `0°` gradient
+    ///   ramps horizontally; `90°` ramps vertically.
+    /// - **`.radial`** — `t = distance(worldPoint, bboxCenter) / maxRadius`, where
+    ///   `maxRadius` is the half-diagonal of the bbox (so the corners reach `t ≈ 1`).
+    ///   `t = 0` at the center, clamped to `[0, 1]`.
+    ///
+    /// Stops:
+    /// - **2 colors** → lerp `colors[0] → colors[1]`.
+    /// - **1 color** → lerp `colors[0] → a 50% lightened tint of colors[0]`
+    ///   (each RGB channel toward white: `c + (1 − c)·0.5`; alpha preserved) so a
+    ///   single-color gradient still visibly SHADES instead of painting flat. The
+    ///   "lighten toward white" choice mirrors AutoCAD's one-color gradient (which
+    ///   shades a single tint rather than fading to a second hue).
+    /// - **0 colors / empty** → returns `fallback` (the fill's solid color) at every
+    ///   point (defensive; the resolver never emits an empty gradient).
+    ///
+    /// Lerp is in STRAIGHT (non-premultiplied) RGBA — the flat pipeline does its own
+    /// sRGB/alpha handling downstream, matching the existing solid-fill path.
+    static func gradientColor(
+        at worldPoint: Vector,
+        gradient: ResolvedGradient,
+        bounds: AABB,
+        fallback: RGBAColor
+    ) -> RGBAColor {
+        // Resolve the two ramp endpoints (c0 → c1) from the stop list.
+        let c0: RGBAColor
+        let c1: RGBAColor
+        switch gradient.colors.count {
+        case 0:
+            return fallback
+        case 1:
+            c0 = gradient.colors[0]
+            c1 = lightenedTint(c0)
+        default:
+            c0 = gradient.colors[0]
+            c1 = gradient.colors[1]
+        }
+
+        let center = bounds.center
+        // A degenerate (empty/zero-size) box can't define a ramp axis → flat c0.
+        guard !bounds.isEmpty, center.valid else { return c0 }
+
+        let t: Double
+        switch gradient.kind {
+        case .linear:
+            // Axis unit vector; signed projection of (point − center) onto it.
+            let ax = cos(gradient.angle)
+            let ay = sin(gradient.angle)
+            let dx = worldPoint.x - center.x
+            let dy = worldPoint.y - center.y
+            let d = dx * ax + dy * ay
+            // Half-extent of the AABB projected onto the axis (full corner span).
+            let halfW = (bounds.max.x - bounds.min.x) * 0.5
+            let halfH = (bounds.max.y - bounds.min.y) * 0.5
+            let e = abs(halfW * ax) + abs(halfH * ay)
+            t = e > 0 ? (d + e) / (2 * e) : 0.5
+        case .radial:
+            let halfW = (bounds.max.x - bounds.min.x) * 0.5
+            let halfH = (bounds.max.y - bounds.min.y) * 0.5
+            let maxRadius = (halfW * halfW + halfH * halfH).squareRoot()
+            let dist = worldPoint.distance(to: center)
+            t = maxRadius > 0 ? dist / maxRadius : 0
+        }
+        return lerp(c0, c1, clamp01(t))
+    }
+
+    /// Straight (non-premultiplied) per-channel RGBA lerp, `t ∈ [0, 1]`.
+    @inline(__always)
+    static func lerp(_ a: RGBAColor, _ b: RGBAColor, _ t: Double) -> RGBAColor {
+        let f = Float(t)
+        return RGBAColor(
+            a.r + (b.r - a.r) * f,
+            a.g + (b.g - a.g) * f,
+            a.b + (b.b - a.b) * f,
+            a.a + (b.a - a.a) * f
+        )
+    }
+
+    /// A 50%-toward-white lightened tint of `c` (alpha preserved) — the synthetic
+    /// second endpoint for a single-color gradient so it still shades.
+    @inline(__always)
+    static func lightenedTint(_ c: RGBAColor) -> RGBAColor {
+        RGBAColor(
+            c.r + (1 - c.r) * 0.5,
+            c.g + (1 - c.g) * 0.5,
+            c.b + (1 - c.b) * 0.5,
+            c.a
+        )
+    }
+
+    @inline(__always)
+    static func clamp01(_ t: Double) -> Double { Swift.max(0, Swift.min(1, t)) }
+
     /// Triangulates one `ResolvedFill` (outer boundary `loops[0]` + holes
     /// `loops[1...]`) into flat triangle vertices (`FlatVertex`, render-space f32
     /// offsets + the fill color) and appends them to `verts` for the shared flat/
@@ -612,6 +720,11 @@ enum RendererGeometry {
     /// - Output is appended (3 vertices per triangle) so many fills pack into one
     ///   contiguous buffer with no intermediate allocation.
     /// - A degenerate boundary (< 3 effective points) appends nothing.
+    /// - **Gradient fills (GH-W2):** when `fill.gradient != nil` each emitted
+    ///   triangle vertex gets a per-vertex `gradientColor(...)` sampled across the
+    ///   triangulated bounding box (a CPU color ramp — no shader/vertex-format
+    ///   change). When `fill.gradient == nil` the path is BYTE-IDENTICAL to before:
+    ///   every vertex carries the single flat `fill.color`.
     static func appendFillVertices(
         for fill: ResolvedFill,
         renderOrigin: Vector,
@@ -622,10 +735,22 @@ enum RendererGeometry {
             ? FillTriangulation.triangulateLoops(fill.loops)
             : FillTriangulation.triangulate(outer)
         guard !tris.isEmpty else { return }
-        let color = SIMD4<Float>(fill.color.r, fill.color.g, fill.color.b, fill.color.a)
         verts.reserveCapacity(verts.count + tris.count)
-        for p in tris {
-            verts.append(FlatVertex(position: offset(p, from: renderOrigin), color: color))
+        if let gradient = fill.gradient {
+            // Per-vertex CPU color ramp across the triangulated fill's bbox.
+            let bounds = AABB(points: tris)
+            for p in tris {
+                let rgba = gradientColor(at: p, gradient: gradient,
+                                         bounds: bounds, fallback: fill.color)
+                let color = SIMD4<Float>(rgba.r, rgba.g, rgba.b, rgba.a)
+                verts.append(FlatVertex(position: offset(p, from: renderOrigin), color: color))
+            }
+        } else {
+            // Flat solid/pattern fill — unchanged.
+            let color = SIMD4<Float>(fill.color.r, fill.color.g, fill.color.b, fill.color.a)
+            for p in tris {
+                verts.append(FlatVertex(position: offset(p, from: renderOrigin), color: color))
+            }
         }
     }
 
