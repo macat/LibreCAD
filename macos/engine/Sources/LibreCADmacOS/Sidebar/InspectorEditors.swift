@@ -361,6 +361,11 @@ struct GeometryEditor: View {
         ScalarField(label: "Pattern angle (°)", value: d.patternAngle * 180 / .pi) {
             onCommit([replacing(InspectorEdits.setHatchPatternAngle(record.kind, $0 * .pi / 180))])
         }
+        // Gradient fill (DXF gradient hatch). A non-nil gradient supersedes the
+        // solid/pattern fill above (matching resolveHatch); clearing it restores them.
+        HatchGradientEditor(gradient: d.gradient) { newGradient in
+            onCommit([replacing(InspectorEdits.setHatchGradient(record.kind, newGradient))])
+        }
     }
 
     // MARK: Solid (its corner points)
@@ -1203,5 +1208,131 @@ struct HatchSwatch: View {
             p.addLine(to: CGPoint(x: px + dir.dx * span, y: py + dir.dy * span))
             sub.stroke(p, with: .color(.primary.opacity(0.7)), lineWidth: 0.5)
         }
+    }
+}
+
+// MARK: - Hatch gradient fill (DXF gradient hatch)
+
+/// Edits a HATCH entity's optional GRADIENT fill (`HatchData.gradient`). A toggle
+/// controls whether the gradient is present: turning it ON seeds defaults (a
+/// two-color linear ramp from the current colors, or black→white) and commits a
+/// `HatchGradient`; turning it OFF commits `nil` so the hatch falls back to its
+/// solid/pattern fill (a gradient SUPERSEDES the pattern at resolve time). While
+/// ON the controls edit the gradient: a kind picker (Linear / Radial), a "Two
+/// colors" toggle (off ⇒ the DXF one-color gradient — a single stop), one or two
+/// inline `ColorPicker` wells, and an angle field (entered in DEGREES, stored in
+/// RADIANS). Every commit routes through the same undoable `.replace` path as the
+/// other hatch fields. View-layer only — `ColorPicker` is inline (no modal that
+/// could hang the headless suite).
+struct HatchGradientEditor: View {
+    /// The hatch's current gradient, or `nil` when it uses a solid/pattern fill.
+    let gradient: HatchGradient?
+    /// Commits the new gradient (a `HatchGradient`) or `nil` (cleared).
+    let onCommit: (HatchGradient?) -> Void
+
+    @State private var enabled: Bool = false
+    @State private var kind: HatchGradient.Kind = .linear
+    @State private var twoColor: Bool = true
+    @State private var color0: Color = .black
+    @State private var color1: Color = .white
+    @State private var degrees: Double = 0
+
+    var body: some View {
+        Group {
+            enableToggle
+            if enabled {
+                kindPicker
+                twoColorToggle
+                colorWells
+                angleField
+            }
+        }
+        .onAppear(perform: seed)
+        .onChange(of: gradient) { _, _ in seed() }
+    }
+
+    // MARK: Controls (decomposed for the type-checker)
+
+    @ViewBuilder
+    private var enableToggle: some View {
+        Toggle("Gradient fill", isOn: Binding(
+            get: { enabled },
+            set: { on in
+                enabled = on
+                onCommit(on ? currentGradient() : nil)
+            }
+        ))
+    }
+
+    @ViewBuilder
+    private var kindPicker: some View {
+        Picker(selection: Binding(
+            get: { kind },
+            set: { newKind in kind = newKind; onCommit(currentGradient()) }
+        )) {
+            Text("Linear").tag(HatchGradient.Kind.linear)
+            Text("Radial").tag(HatchGradient.Kind.radial)
+        } label: {
+            Text("Gradient type").lineLimit(1)
+        }
+        .pickerStyle(.segmented)
+    }
+
+    @ViewBuilder
+    private var twoColorToggle: some View {
+        Toggle("Two colors", isOn: Binding(
+            get: { twoColor },
+            set: { on in twoColor = on; onCommit(currentGradient()) }
+        ))
+    }
+
+    @ViewBuilder
+    private var colorWells: some View {
+        ColorPicker("Color 1", selection: Binding(
+            get: { color0 },
+            set: { c in color0 = c; onCommit(currentGradient()) }
+        ), supportsOpacity: false)
+        if twoColor {
+            ColorPicker("Color 2", selection: Binding(
+                get: { color1 },
+                set: { c in color1 = c; onCommit(currentGradient()) }
+            ), supportsOpacity: false)
+        }
+    }
+
+    @ViewBuilder
+    private var angleField: some View {
+        ScalarField(label: "Gradient angle (°)", value: degrees) { newValue in
+            degrees = newValue
+            onCommit(currentGradient())
+        }
+    }
+
+    // MARK: Model <-> draft
+
+    /// Builds a `HatchGradient` from the current draft state. One stop when
+    /// `twoColor` is off (the DXF one-color gradient); two stops otherwise. Angle
+    /// is converted from the UI's DEGREES to the model's RADIANS.
+    private func currentGradient() -> HatchGradient {
+        let stops: [RGBAColor] = twoColor
+            ? [color0.rgbaColor, color1.rgbaColor]
+            : [color0.rgbaColor]
+        return HatchGradient(kind: kind, colors: stops, angle: degrees * .pi / 180)
+    }
+
+    /// Re-seeds the local draft from the incoming gradient (on appear, and when the
+    /// record changes under us — undo / reselection). Mirrors the per-editor seeding
+    /// convention in this file.
+    private func seed() {
+        guard let g = gradient else {
+            enabled = false
+            return
+        }
+        enabled = true
+        kind = g.kind
+        twoColor = g.colors.count >= 2
+        if let first = g.colors.first { color0 = Color(rgba: first) }
+        if g.colors.count >= 2 { color1 = Color(rgba: g.colors[1]) }
+        degrees = g.angle * 180 / .pi
     }
 }
