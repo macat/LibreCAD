@@ -122,6 +122,48 @@ public struct LineTool: Tool {
         return [ResolvedPolyline(points: [last, endPoint], closed: false, pen: .toolPreview)]
     }
 
+    // MARK: - Live dimensional feedback (W1b)
+
+    /// AutoCAD-style live feedback while the next segment is being dragged: the
+    /// running LENGTH along the (constrained) segment plus the segment ANGLE near
+    /// the cursor. Reuses the SAME `constrained(last, cursor)` endpoint the
+    /// `preview` rubber-band shows, so the numbers match what will be drawn.
+    ///
+    /// Empty before the first point is fixed (`.settingStart`) and after commit
+    /// (each segment is committed on its second click, returning to `.settingEnd`
+    /// with `last == end`, so a stale cursor would still read empty until the next
+    /// move) — the same invariant `referenceSegments` enforces, so it never leaks
+    /// into exports. Both labels are formatted IN-ENGINE via `CoordinateFormatter`
+    /// from `ctx` (no UI dependency).
+    public func liveDimensions(_ ctx: LiveDimensionContext) -> [LiveDimension] {
+        guard case .settingEnd(let last) = state, cursor.valid, last.valid else {
+            return []
+        }
+        let end = constrained(last, cursor)
+        let delta = end - last
+        let length = delta.magnitude
+        // A degenerate (zero-length) drag shows nothing — mirrors the commit guard.
+        guard length > Tolerance.distance else { return [] }
+
+        let lengthLabel = CoordinateFormatter.length(
+            length, format: ctx.linearFormat, precision: ctx.linearPrecision, unit: ctx.unit
+        )
+        let angle = delta.angle
+        let angleLabel = CoordinateFormatter.angle(
+            angle, format: ctx.angleFormat, precision: ctx.anglePrecision
+        )
+
+        // Length dim runs along the segment, labeled at its midpoint; the angle
+        // dim shares the segment and is labeled near the cursor end.
+        let midpoint = (last + end) * 0.5
+        return [
+            LiveDimension(kind: .linear(length), from: last, to: end,
+                          label: lengthLabel, labelAnchor: midpoint),
+            LiveDimension(kind: .angle(angle), from: last, to: end,
+                          label: angleLabel, labelAnchor: end),
+        ]
+    }
+
     // MARK: - Angle constraint (pure)
 
     /// The angle (radians, CCW from +X) the next segment from `from` is locked to,

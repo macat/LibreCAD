@@ -193,6 +193,67 @@ public struct CircleTool: Tool {
         return [ResolvedPolyline(points: pts, closed: true, pen: .toolPreview)]
     }
 
+    // MARK: - Live dimensional feedback (W1b)
+
+    /// AutoCAD-style live feedback while the circle is being dragged: the running
+    /// RADIUS (or DIAMETER, when `sizeMode` is `.diameter`) from the center to the
+    /// cursor. Reuses the SAME computed geometry each construction mode's `preview`
+    /// shows (center→cursor for `.centerRadius`; the `CircleData` from
+    /// `circleFromDiameter` / `circleThrough` for the 2-/3-point modes), so the
+    /// number matches what will be drawn.
+    ///
+    /// Empty before the first pick and after commit (every commit `reset()`s to the
+    /// mode's initial waiting state, which has no live circle) and for any degenerate
+    /// (zero-radius / no-finite-circle) drag — the same invariant `referenceSegments`
+    /// enforces, so it never leaks into exports. The label is formatted IN-ENGINE via
+    /// `CoordinateFormatter` from `ctx` (no UI dependency).
+    public func liveDimensions(_ ctx: LiveDimensionContext) -> [LiveDimension] {
+        guard cursor.valid else { return [] }
+        switch state {
+        case .settingRadius(let center):
+            guard center.valid else { return [] }
+            let radius = (cursor - center).magnitude
+            guard radius > Tolerance.distance else { return [] }
+            return [radiusDimension(center: center, to: cursor, radius: radius, ctx: ctx)]
+
+        case .twoSecond(let first):
+            guard first.valid, let c = Self.circleFromDiameter(first, cursor) else { return [] }
+            return [radiusDimension(center: c.center, to: cursor, radius: c.radius, ctx: ctx)]
+
+        case .threeThird(let first, let second):
+            guard let c = Self.circleThrough(first, second, cursor) else { return [] }
+            return [radiusDimension(center: c.center, to: cursor, radius: c.radius, ctx: ctx)]
+
+        default:
+            return []
+        }
+    }
+
+    /// One radius/diameter live dimension from `center` toward the cursor point
+    /// `to`. In `.diameter` size mode it reports the full diameter (`2·radius`) as a
+    /// `.diameter` kind; otherwise the radius as a `.radius` kind. The label is the
+    /// formatted measured length; the dim line runs center→`to` and the label sits
+    /// at its midpoint.
+    private func radiusDimension(center: Vector, to: Vector, radius: Double,
+                                 ctx: LiveDimensionContext) -> LiveDimension {
+        let midpoint = (center + to) * 0.5
+        switch sizeMode {
+        case .diameter:
+            let diameter = radius * 2
+            let label = CoordinateFormatter.length(
+                diameter, format: ctx.linearFormat, precision: ctx.linearPrecision, unit: ctx.unit
+            )
+            return LiveDimension(kind: .diameter(diameter), from: center, to: to,
+                                 label: label, labelAnchor: midpoint)
+        case .radius:
+            let label = CoordinateFormatter.length(
+                radius, format: ctx.linearFormat, precision: ctx.linearPrecision, unit: ctx.unit
+            )
+            return LiveDimension(kind: .radius(radius), from: center, to: to,
+                                 label: label, labelAnchor: midpoint)
+        }
+    }
+
     /// A draw tool: it IGNORES `context` (it needs only the snapped world points)
     /// and emits new geometry as `.add` edits.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
