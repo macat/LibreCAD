@@ -617,6 +617,8 @@ private struct AppearanceSettingsTab: View {
                 colorRow("Grid", hex: $gridHex)
                 Text("Leave at default to follow the light/dark theme palette.")
                     .font(.caption).foregroundStyle(.secondary)
+                Text("Applies to windows opened after changing this. (Open windows refresh on the next light/dark switch.)")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("Cursor") {
                 Picker("Crosshair", selection: $crosshairRaw) {
@@ -669,12 +671,11 @@ private struct SnappingSettingsTab: View {
     // `CanvasModel.toggleDynamicInput()` writes it back, so this toggle, the status-bar DYN
     // chip, and the model flag all stay in sync.
     @AppStorage(AppSettings.Key.dynamicInput) private var dynamicInput = AppSettings.Default.dynamicInput
-    // READ-SITE (PENDING — a one-line CanvasModel.init follow-up; not in this wave's owned
-    // files): seed the new window's `objectTrackingEnabled` from this SAME key via
-    // `AppSettings.boolPreference(AppSettings.Key.objectTracking, default: AppSettings.Default.objectTracking)`,
-    // mirroring how `dynamicInputEnabled` is seeded. Default OFF == the model's current
-    // hardcoded `false`, so until that one line lands a fresh window simply ignores this
-    // pref (no behavior change); the status-bar OTRK chip + View-menu item still toggle live.
+    // READ-SITE (WIRED): `CanvasModel.objectTrackingEnabled` is seeded from this SAME key
+    // (via `AppSettings.boolPreference(AppSettings.Key.objectTracking, default: AppSettings.Default.objectTracking)`),
+    // exactly mirroring how `dynamicInputEnabled` is seeded, and `CanvasModel.toggleObjectTracking()`
+    // writes it back — so this toggle, the status-bar OTRK chip, and the model flag stay in
+    // sync. Default OFF == the model's historical `false`, so an unset key is unchanged behavior.
     @AppStorage(AppSettings.Key.objectTracking) private var objectTracking = AppSettings.Default.objectTracking
 
     var body: some View {
@@ -690,7 +691,7 @@ private struct SnappingSettingsTab: View {
                         get: { aperture },
                         set: { aperture = AppSettings.clampAperture($0) }
                     ), format: .number)
-                    .frame(width: 80).multilineTextAlignment(.trailing)
+                    .frame(width: DS.Field.narrow).multilineTextAlignment(.trailing)
                 }
             }
             Section("Polar tracking") {
@@ -699,7 +700,7 @@ private struct SnappingSettingsTab: View {
                         get: { polarDegrees },
                         set: { polarDegrees = AppSettings.clampPolarIncrementDegrees($0) }
                     ), format: .number)
-                    .frame(width: 80).multilineTextAlignment(.trailing)
+                    .frame(width: DS.Field.narrow).multilineTextAlignment(.trailing)
                 }
                 Text("The angular step polar tracking (F10) snaps to in new windows. 15° gives 24 even divisions of a full turn.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -731,10 +732,17 @@ private struct SnappingSettingsTab: View {
 }
 
 /// The snap modes the Snapping tab exposes (label + bit). A small local list, like
-/// `DocumentSettingsView`'s `SnapSettingOption`.
-private struct SnapSettingRow {
+/// `DocumentSettingsView`'s `SnapSettingOption`. Internal (not `private`) so the
+/// `_SharedAppSettings.swift` test symlink can assert the default-bit set directly
+/// (it must include perp/tangent/parallel and must NOT include `.free` — finding #33).
+struct SnapSettingRow {
     let label: String
     let mode: SnapMode
+    // `.free` is DELIBERATELY absent: it is the always-on master fallback (forced on
+    // by `AppSettings.snapMode(fromMask:)`), not an opt-in default bit — exposing it
+    // as a toggle would be meaningless. Perpendicular / tangent / parallel ARE valid
+    // default bits (the mask carries all of them), so they belong here, matching the
+    // per-document sheet's `SnapSettingOption.all`.
     static let all: [SnapSettingRow] = [
         SnapSettingRow(label: "Endpoint", mode: .endpoint),
         SnapSettingRow(label: "Midpoint", mode: .middle),
@@ -742,20 +750,28 @@ private struct SnapSettingRow {
         SnapSettingRow(label: "Intersection", mode: .intersection),
         SnapSettingRow(label: "On entity", mode: .onEntity),
         SnapSettingRow(label: "Nearest point", mode: .nearest),
+        SnapSettingRow(label: "Perpendicular", mode: .perpendicular),
+        SnapSettingRow(label: "Tangent", mode: .tangent),
+        SnapSettingRow(label: "Parallel", mode: .parallel),
         SnapSettingRow(label: "Grid", mode: .grid),
     ]
 }
 
 // MARK: Rendering tab
 
-/// Rendering: antialias toggle, LOD/quality tier, default line width. All
-/// STORED-PENDING-A-READ-SITE (the renderer / new-geometry pen default).
+/// Rendering: antialias toggle, LOD/quality tier, default line width. All three are
+/// WIRED into the live renderer: `LineRenderer` re-reads `RenderPrefs.fromDefaults()`
+/// at the top of every `draw(in:)`, so a change takes effect on the next repaint of
+/// any open window (finding #30), and on every window opened afterwards.
 private struct RenderingSettingsTab: View {
-    // READ-SITE: renderer (`CGSceneRenderer`/`RendererGeometry`) MSAA / smoothing.
+    // READ-SITE (WIRED): `LineRenderer` — antialias floors the stroke half-width to a
+    // crisp 1px when OFF (`RenderPrefs.lineHalfWidthPx`).
     @AppStorage(AppSettings.Key.antialias) private var antialias = AppSettings.Default.antialias
-    // READ-SITE: renderer tessellation LOD selection.
+    // READ-SITE (WIRED): `LineRenderer` resolve tessellation LOD
+    // (`RenderPrefs.tessellationToleranceScale` scales the resolve tolerance).
     @AppStorage(AppSettings.Key.renderQuality) private var qualityRaw = AppSettings.Default.renderQuality.rawValue
-    // READ-SITE: new-geometry pen — default line width for newly drawn entities.
+    // READ-SITE (WIRED): `LineRenderer` fallback stroke half-width for pens with no
+    // explicit lineweight (`RenderPrefs.lineHalfWidthPx`, mm → device px).
     @AppStorage(AppSettings.Key.defaultLineWidthMM) private var lineWidthMM = AppSettings.Default.defaultLineWidthMM
 
     var body: some View {
@@ -767,6 +783,8 @@ private struct RenderingSettingsTab: View {
                         Text(q.label).tag(q.rawValue)
                     }
                 }
+                Text("Applies to every open window on its next repaint (pan / zoom / edit).")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("New geometry") {
                 LabeledContent("Default line width (mm)") {
@@ -774,7 +792,7 @@ private struct RenderingSettingsTab: View {
                         get: { lineWidthMM },
                         set: { lineWidthMM = AppSettings.clampLineWidthMM($0) }
                     ), format: .number)
-                    .frame(width: 110).multilineTextAlignment(.trailing)
+                    .frame(width: DS.Field.std).multilineTextAlignment(.trailing)
                 }
                 Text("0 mm uses the layer / global default pen width.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -812,7 +830,7 @@ private struct TextSettingsTab: View {
                         get: { height },
                         set: { height = AppSettings.clampTextHeight($0) }
                     ), format: .number)
-                    .frame(width: 90).multilineTextAlignment(.trailing)
+                    .frame(width: DS.Field.std).multilineTextAlignment(.trailing)
                 }
             }
             Section("Font folder") {

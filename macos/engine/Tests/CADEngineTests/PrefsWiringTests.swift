@@ -295,3 +295,157 @@ struct PrefsWiringTextTests {
         #expect(tool.height == TextTool.standardHeight)
     }
 }
+
+// MARK: - Snapping: default-snap-modes list completeness (#33)
+//
+// The Preferences ▸ Snapping "Default snap modes (new windows)" list
+// (`AppSettingsView.SnapSettingRow.all`) must expose every snap bit that can be
+// on-by-default — including perpendicular / tangent / parallel, which the packed mask
+// fully supports — but must NOT expose `.free` (the always-on master fallback, not an
+// opt-in default bit; `AppSettings.snapMode(fromMask:)` forces it on regardless).
+
+@Suite("Prefs wiring — default snap modes list (#33)")
+struct PrefsWiringSnapDefaultsTests {
+
+    /// The set of bits the Preferences default-snap list offers.
+    private var listedModes: [SnapMode] { SnapSettingRow.all.map(\.mode) }
+
+    @Test("perpendicular / tangent / parallel are offered as default bits")
+    func includesAdvancedBits() {
+        #expect(listedModes.contains(.perpendicular))
+        #expect(listedModes.contains(.tangent))
+        #expect(listedModes.contains(.parallel))
+    }
+
+    @Test(".free is NOT offered (it is the always-on master, not a default bit)")
+    func excludesFree() {
+        #expect(!listedModes.contains(.free))
+    }
+
+    @Test("the classic standard bits remain offered (no regression)")
+    func keepsStandardBits() {
+        for m in [SnapMode.endpoint, .middle, .center, .intersection,
+                  .onEntity, .nearest, .grid] {
+            #expect(listedModes.contains(m))
+        }
+    }
+
+    @Test("every listed bit is a single, distinct SnapMode (no dupes / empties)")
+    func bitsAreDistinctAndNonEmpty() {
+        for m in listedModes { #expect(!m.isEmpty) }
+        // No bit appears twice in the list.
+        #expect(Set(listedModes.map(\.rawValue)).count == listedModes.count)
+    }
+
+    @Test("toggling a listed bit into the mask round-trips through snapMode(fromMask:)")
+    func maskRoundTrip() {
+        // Build a mask from perpendicular+tangent+parallel and read it back. `.free`
+        // is forced on by `snapMode(fromMask:)`, so it is present in the result even
+        // though it was never in the source mask (and never in the list).
+        var set: SnapMode = []
+        for m in [SnapMode.perpendicular, .tangent, .parallel] { set.insert(m) }
+        let resolved = AppSettings.snapMode(fromMask: AppSettings.mask(from: set))
+        #expect(resolved.contains(.perpendicular))
+        #expect(resolved.contains(.tangent))
+        #expect(resolved.contains(.parallel))
+        #expect(resolved.contains(.free))   // always-on master, re-added on read
+    }
+}
+
+// MARK: - Design tokens: field-width tiers (#40)
+//
+// The settings views adopted `DS.Field.{xy,narrow,std,wide}` in place of the retired
+// 56/80/90/110/160 grab-bag. These guard the tier SYSTEM the views now reference: the
+// documented values + that the tiers are strictly ordered & distinct (a regression to
+// the grab-bag would collapse or reorder them).
+
+@Suite("Prefs wiring — DS.Field width tiers (#40)")
+struct PrefsWiringFieldTierTests {
+
+    @Test("the four tiers hold their documented widths")
+    func tierValues() {
+        #expect(DS.Field.xy == 56)       // documented paired-field exception
+        #expect(DS.Field.narrow == 72)
+        #expect(DS.Field.std == 96)
+        #expect(DS.Field.wide == 130)
+    }
+
+    @Test("tiers are strictly increasing (xy < narrow < std < wide) and distinct")
+    func tiersOrdered() {
+        #expect(DS.Field.xy < DS.Field.narrow)
+        #expect(DS.Field.narrow < DS.Field.std)
+        #expect(DS.Field.std < DS.Field.wide)
+        let all = [DS.Field.xy, DS.Field.narrow, DS.Field.std, DS.Field.wide]
+        #expect(Set(all).count == all.count)
+    }
+}
+
+// MARK: - Paper: persisted size/orientation round-trip into the picker (#31)
+//
+// `DocumentSettingsView.loadFromStore()` recovers the picker's PaperSize + orientation
+// from the persisted `PageSetup.paperSize` (a points rect with orientation applied) by:
+//   points → mm → `PrintLayout.nearestStandardPage(...).name` (→ `PaperSize.named`),
+//   landscape ⇔ width > height.
+// `PaperSize.named` is an app-only (non-symlinked) one-liner over the canonical name,
+// so this exercises the symlink-safe CORE: that the points→mm→nearestStandardPage map
+// recovers the right canonical name + orientation for each standard sheet, which is the
+// part that was missing (loadFromStore previously read back only margin + scale, so the
+// picker always re-showed A4/portrait — finding #31).
+
+@Suite("Prefs wiring — paper size/orientation round-trip (#31)")
+struct PrefsWiringPaperRoundTripTests {
+
+    /// The standard sheets the picker offers, with their portrait mm dimensions —
+    /// mirrors `PaperSize.sizeMM` (kept here as plain values, app enum not symlinked).
+    private static let sheets: [(name: String, wMM: Double, hMM: Double)] = [
+        ("A4", 210, 297), ("A3", 297, 420), ("A2", 420, 594),
+        ("A1", 594, 841), ("A0", 841, 1189),
+        ("Letter", 215.9, 279.4), ("Legal", 215.9, 355.6), ("Tabloid", 279.4, 431.8),
+    ]
+
+    /// Build the persisted points rect the store would hold for a sheet in an
+    /// orientation, exactly as `PaperSettingsTab.paperPointSize` does.
+    private func storedRect(wMM: Double, hMM: Double, landscape: Bool) -> SizePt {
+        let wpt = pointsFromMM(wMM), hpt = pointsFromMM(hMM)
+        return landscape ? SizePt(width: hpt, height: wpt)
+                         : SizePt(width: wpt, height: hpt)
+    }
+
+    @Test("each standard sheet round-trips its canonical name in PORTRAIT")
+    func portraitRoundTrip() {
+        for s in Self.sheets {
+            let rect = storedRect(wMM: s.wMM, hMM: s.hMM, landscape: false)
+            // loadFromStore's back-map: points → mm → nearestStandardPage.
+            let widthMM = rect.width * 25.4 / 72.0
+            let heightMM = rect.height * 25.4 / 72.0
+            let std = PrintLayout.nearestStandardPage(widthMM: widthMM, heightMM: heightMM)
+            #expect(std.name == s.name)
+            #expect(std.isExact)                         // an exact standard match
+            #expect(!(rect.width > rect.height))         // portrait: width ≤ height
+        }
+    }
+
+    @Test("each standard sheet round-trips its canonical name in LANDSCAPE")
+    func landscapeRoundTrip() {
+        for s in Self.sheets {
+            let rect = storedRect(wMM: s.wMM, hMM: s.hMM, landscape: true)
+            let widthMM = rect.width * 25.4 / 72.0
+            let heightMM = rect.height * 25.4 / 72.0
+            // The matcher is orientation-normalized, so the name still matches…
+            let std = PrintLayout.nearestStandardPage(widthMM: widthMM, heightMM: heightMM)
+            #expect(std.name == s.name)
+            // …and orientation is recovered from the stored rect's aspect.
+            #expect(rect.width > rect.height)            // landscape: width > height
+        }
+    }
+
+    @Test("a non-A4 sheet does NOT collapse to A4 (the pre-fix behavior)")
+    func notAlwaysA4() {
+        // A3 landscape — the exact case that used to re-show as A4 portrait.
+        let rect = storedRect(wMM: 297, hMM: 420, landscape: true)
+        let widthMM = rect.width * 25.4 / 72.0
+        let heightMM = rect.height * 25.4 / 72.0
+        #expect(PrintLayout.nearestStandardPage(widthMM: widthMM, heightMM: heightMM).name == "A3")
+        #expect(rect.width > rect.height)   // recovered as landscape, not portrait
+    }
+}
