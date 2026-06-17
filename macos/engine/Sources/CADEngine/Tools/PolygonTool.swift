@@ -159,6 +159,39 @@ public struct PolygonTool: Tool {
         return [ResolvedPolyline(points: pts, closed: true, pen: .toolPreview)]
     }
 
+    // MARK: - Live dimensional feedback (W1b)
+
+    /// AutoCAD-style live feedback while the polygon is being dragged: the running
+    /// reference RADIUS (center → cursor) with the side count folded into the label
+    /// (e.g. `"r=12.5  N=6"`). Reuses the SAME center→cursor reference distance the
+    /// `preview` rubber-band is built from, so the number matches what will be drawn.
+    ///
+    /// Only the center-based construction modes (`.centerCorner` / `.star`, where the
+    /// first click IS the center) expose a center→cursor radius; `.edge` reinterprets
+    /// the two clicks as one EDGE (no center), so it returns `[]`. Empty before the
+    /// center is fixed (`.settingCenter`) and after commit (every commit `reset()`s
+    /// to `.settingCenter`), and for a degenerate (zero-radius) drag — the same
+    /// invariant `referenceSegments` enforces, so it never leaks into exports. The
+    /// radius portion of the label is formatted IN-ENGINE via `CoordinateFormatter`
+    /// from `ctx` (no UI dependency).
+    public func liveDimensions(_ ctx: LiveDimensionContext) -> [LiveDimension] {
+        guard case .settingVertex(let center) = state, cursor.valid, center.valid else {
+            return []
+        }
+        // `.edge` has no center→radius semantics (the two picks are one edge).
+        if case .edge = mode { return [] }
+        let radius = (cursor - center).magnitude
+        guard radius > Tolerance.distance else { return [] }
+        let radiusStr = CoordinateFormatter.length(
+            radius, format: ctx.linearFormat, precision: ctx.linearPrecision, unit: ctx.unit
+        )
+        let midpoint = (center + cursor) * 0.5
+        return [
+            LiveDimension(kind: .radius(radius), from: center, to: cursor,
+                          label: "r=\(radiusStr)  N=\(_sides)", labelAnchor: midpoint),
+        ]
+    }
+
     /// A draw tool: it IGNORES `context` (it needs only the snapped world points)
     /// and emits new geometry as `.add` edits.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {

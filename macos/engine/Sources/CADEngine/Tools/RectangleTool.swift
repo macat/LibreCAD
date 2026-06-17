@@ -152,6 +152,40 @@ public struct RectangleTool: Tool {
                                  closed: true, pen: .toolPreview)]
     }
 
+    // MARK: - Live dimensional feedback (W1b)
+
+    /// AutoCAD-style live feedback while the rectangle is being dragged: the running
+    /// WIDTH × HEIGHT spanned by the fixed first corner and the cursor. Reuses the
+    /// SAME first-corner↔cursor span the `preview` rubber-band shows (absolute
+    /// extents, so the readout is unsigned regardless of drag direction), so the
+    /// numbers match what will be drawn.
+    ///
+    /// Empty before the first corner is fixed (`.settingFirst`) and after commit
+    /// (every commit `reset()`s to `.settingFirst`), and for a degenerate (zero-area)
+    /// span — the same invariant `referenceSegments` enforces, so it never leaks into
+    /// exports. The label (`"W × H"`) is formatted IN-ENGINE via `CoordinateFormatter`
+    /// from `ctx` (no UI dependency).
+    public func liveDimensions(_ ctx: LiveDimensionContext) -> [LiveDimension] {
+        guard case .settingSecond(let first) = state, cursor.valid, first.valid else {
+            return []
+        }
+        guard !Self.isDegenerate(first, cursor) else { return [] }
+        let w = abs(cursor.x - first.x)
+        let h = abs(cursor.y - first.y)
+        let wStr = CoordinateFormatter.length(
+            w, format: ctx.linearFormat, precision: ctx.linearPrecision, unit: ctx.unit
+        )
+        let hStr = CoordinateFormatter.length(
+            h, format: ctx.linearFormat, precision: ctx.linearPrecision, unit: ctx.unit
+        )
+        // Label sits near the cursor corner; the dim line spans the diagonal so the
+        // overlay has the full extent to place the "W × H" readout against.
+        return [
+            LiveDimension(kind: .size(w: w, h: h), from: first, to: cursor,
+                          label: "\(wStr) × \(hStr)", labelAnchor: cursor),
+        ]
+    }
+
     /// A draw tool: it IGNORES `context` (it needs only the snapped world points)
     /// and emits new geometry as `.add` edits.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
