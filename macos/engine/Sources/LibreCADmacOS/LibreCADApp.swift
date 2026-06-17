@@ -653,6 +653,10 @@ struct LibreCADApp: App {
             // (the model-space activation is an inert no-op). Routes via the same
             // `activateTool` path as every other tool; the model gates it on paper space.
             toolItem(.viewport, "v", .option)
+            // Wire-wave-4: WIPEOUT masking polygon (a normal draw tool). No free key
+            // chord, so menu/⌘K only (the bare/⇧/⌥ W chords are unused, but the canvas
+            // keymap is owned elsewhere — this wave adds only the menu entry).
+            toolItem(.wipeout, nil, [])
         }
     }
 
@@ -686,6 +690,10 @@ struct LibreCADApp: App {
             toolItem(.join, "j", .shift)
             toolItem(.explodeText, "e", .shift)
             toolItem(.align, "a", .option)
+            // Wire-wave-4: LINE CONSTRUCTION (perpendicular / parallel / bisector /
+            // tangent — the method is chosen in the Tool Options bar after activation).
+            // No free key chord, so menu/⌘K only.
+            toolItem(.lineConstruction, nil, [])
 
             Divider()
             blocksMenu
@@ -708,6 +716,10 @@ struct LibreCADApp: App {
             toolItem(.multileader, "m", .option)
             toolItem(.baselineDim, "d", .option)
             toolItem(.continueDim, "c", .option)
+
+            Divider()
+            // Wire-wave-4: REVISION CLOUD markup. No free key chord, so menu/⌘K only.
+            toolItem(.revcloud, nil, [])
 
             Divider()
             measureMenu
