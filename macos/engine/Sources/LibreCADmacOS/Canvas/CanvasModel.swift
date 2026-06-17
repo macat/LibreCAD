@@ -262,6 +262,18 @@ final class CanvasModel {
     /// persisted), consumed by `polarConstrained` via `PolarConstraint.constrain`.
     var polarAngleIncrement: Double = .pi / 12
 
+    /// Whether DYNAMIC INPUT — the AutoCAD-style live dimensional feedback (a dotted dim
+    /// line + value chip an active draw tool shows while you drag) — is on (AutoCAD F12,
+    /// DYNMODE). When on, `currentLiveDimensions()` returns the active tool's
+    /// `[LiveDimension]` so the on-canvas `LiveDimensionOverlayView` can draw it; when
+    /// off it returns `[]` and the overlay stays blank. UNLIKE ortho/polar (live-only
+    /// drafting aids), this is an APP PREFERENCE that persists across launches: it is
+    /// seeded at init from `AppSettings.Key.dynamicInput` (default `true`) and
+    /// `toggleDynamicInput()` writes it back to `UserDefaults`. Observed so the status-bar
+    /// DYN chip + the menu/preferences toggle track it live.
+    var dynamicInputEnabled: Bool = AppSettings.boolPreference(
+        AppSettings.Key.dynamicInput, default: AppSettings.Default.dynamicInput)
+
     /// How the status-bar coordinate readout is rendered — ABSOLUTE world point,
     /// RELATIVE offset from the last point, or POLAR `dist<angle` (backlog #5). The
     /// single-keystroke "cycle coordinate mode" command advances this through
@@ -4962,6 +4974,41 @@ final class CanvasModel {
         orthoEnabled.toggle()
         if orthoEnabled { polarEnabled = false }   // ortho ⊕ polar — mutually exclusive
         modelVersion &+= 1
+    }
+
+    // MARK: - Dynamic input (live dimensional feedback — AutoCAD F12 / DYNMODE)
+
+    /// Toggles DYNAMIC INPUT — the on-canvas live dimensional feedback (View menu /
+    /// status-bar DYN chip / Preferences). Flips `dynamicInputEnabled`, PERSISTS the new
+    /// value to `UserDefaults` (it is an app preference, unlike the live-only ortho/polar
+    /// aids), and bumps `modelVersion` so the menu checkmark + status chip refresh. The
+    /// canvas mount reads `dynamicInputEnabled` to enable/suppress the
+    /// `LiveDimensionOverlayView` and calls its `refresh()`.
+    func toggleDynamicInput() {
+        dynamicInputEnabled.toggle()
+        AppSettings.setBoolPreference(AppSettings.Key.dynamicInput, dynamicInputEnabled)
+        modelVersion &+= 1
+    }
+
+    /// The live dimensional feedback the ACTIVE draw tool wants shown this frame — the
+    /// dotted dim line(s) + pre-formatted value chip(s) the `LiveDimensionOverlayView`
+    /// draws (live-dim Wave 3 wiring). Empty unless dynamic input is on AND a draw tool
+    /// is active; otherwise it asks the live `tool` value for its `liveDimensions(ctx)`,
+    /// where `ctx` is a `LiveDimensionContext` built from the drawing's display-format
+    /// header variables (`GraphicVariables`) so labels render in the document's
+    /// units/precision exactly like the status-bar readout. The engine contract
+    /// guarantees a tool returns `[]` outside its active operation (before the first
+    /// point / after commit), so the overlay naturally blanks between operations.
+    func currentLiveDimensions() -> [LiveDimension] {
+        guard dynamicInputEnabled, isToolActive, let tool else { return [] }
+        let gv = drawing.graphicVariables
+        let ctx = LiveDimensionContext(
+            linearFormat: gv.linearFormat,
+            linearPrecision: gv.linearPrecision,
+            unit: gv.unit,
+            angleFormat: gv.angleFormat,
+            anglePrecision: gv.anglePrecision)
+        return tool.liveDimensions(ctx)
     }
 
     // MARK: - Status-bar CAD toggles (Wave 4 — surfaces EXISTING state, no new snap logic)

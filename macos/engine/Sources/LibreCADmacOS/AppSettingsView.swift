@@ -52,6 +52,7 @@
 //  Copyright (C) 2026 LibreCAD macOS contributors.
 //
 
+import Foundation
 #if canImport(SwiftUI)
 import SwiftUI
 #endif
@@ -109,6 +110,13 @@ enum AppSettings {
         /// via `AppSettings.polarIncrementRadians(fromDegrees:)`. Degrees is the human-
         /// readable unit users expect in the Preferences UI (AutoCAD POLARANG is in degrees).
         static let polarIncrementDegrees = "app.snapping.polarIncrementDegrees"
+        /// Whether DYNAMIC INPUT — the on-canvas live dimensional feedback shown while
+        /// drawing (AutoCAD F12 / DYNMODE) — is on (Bool). Read at `CanvasModel.init` to
+        /// seed `dynamicInputEnabled`, and written back by `CanvasModel.toggleDynamicInput()`
+        /// (this is the rare key the MODEL persists directly — via
+        /// `AppSettings.setBoolPreference` — because its toggle is also a status-bar/menu
+        /// action, not only a Preferences control).
+        static let dynamicInput = "app.snapping.dynamicInput"
 
         /// Rendering tab.
         /// Whether antialiasing is on.
@@ -149,6 +157,10 @@ enum AppSettings {
         /// 15° — LibreCAD's / AutoCAD's classic polar increment (== `CanvasModel`'s own
         /// `.pi / 12` default, expressed in degrees). 360 / 15 = 24 even divisions of a turn.
         static let polarIncrementDegrees: Double = 15
+        /// Dynamic input (live dimensional feedback) defaults ON — AutoCAD ships DYNMODE on,
+        /// and the feedback is the point of the feature. Honored by `AppSettings.boolPreference`
+        /// (which uses `object(forKey:)`, so a missing key yields this `true`, not `false`).
+        static let dynamicInput = true
 
         static let antialias = true
         static let renderQuality: RenderQuality = .high
@@ -220,6 +232,31 @@ enum AppSettings {
 
     /// Pack a `SnapMode` to the Int rawValue stored in UserDefaults.
     static func mask(from mode: SnapMode) -> Int { Int(mode.rawValue) }
+
+    // MARK: Bool preference read/write (for keys the MODEL seeds + persists directly)
+
+    /// Read a Bool preference, honoring a non-`false` default. `UserDefaults.bool(forKey:)`
+    /// returns `false` for a MISSING key, which would silently override a `true` default;
+    /// this uses `object(forKey:)` so an unset key falls back to `def` (and a stored value
+    /// is coerced through `NSNumber.boolValue`). Pure Foundation (no SwiftUI/AppKit), so
+    /// `CanvasModel.init` can seed `dynamicInputEnabled` from it and the test target can
+    /// exercise it via the symlinked copy. The `defaults` parameter is injectable for tests.
+    static func boolPreference(_ key: String,
+                               default def: Bool,
+                               defaults: UserDefaults = .standard) -> Bool {
+        guard let obj = defaults.object(forKey: key) else { return def }
+        return (obj as? NSNumber)?.boolValue ?? def
+    }
+
+    /// Write a Bool preference back to `UserDefaults`. The write counterpart of
+    /// `boolPreference(_:default:)`, used by `CanvasModel.toggleDynamicInput()` so the
+    /// status-bar/menu toggle persists across launches (the same key the Preferences
+    /// toggle binds via `@AppStorage`). `defaults` is injectable for tests.
+    static func setBoolPreference(_ key: String,
+                                  _ value: Bool,
+                                  defaults: UserDefaults = .standard) {
+        defaults.set(value, forKey: key)
+    }
 }
 
 /// A snapshot of the resolved app preferences as plain values — the shape a read-site
@@ -604,6 +641,11 @@ private struct SnappingSettingsTab: View {
     // READ-SITE: new-window CanvasModel build — seed `polarAngleIncrement` (RADIANS) from
     // this DEGREES value via `AppSettings.polarIncrementRadians(fromDegrees:)`.
     @AppStorage(AppSettings.Key.polarIncrementDegrees) private var polarDegrees = AppSettings.Default.polarIncrementDegrees
+    // READ-SITE (WIRED): live dimensional feedback while drawing. `CanvasModel.init` seeds
+    // `dynamicInputEnabled` from this SAME key (via `AppSettings.boolPreference`), and
+    // `CanvasModel.toggleDynamicInput()` writes it back, so this toggle, the status-bar DYN
+    // chip, and the model flag all stay in sync.
+    @AppStorage(AppSettings.Key.dynamicInput) private var dynamicInput = AppSettings.Default.dynamicInput
 
     var body: some View {
         Form {
@@ -630,6 +672,11 @@ private struct SnappingSettingsTab: View {
                     .frame(width: 80).multilineTextAlignment(.trailing)
                 }
                 Text("The angular step polar tracking (F10) snaps to in new windows. 15° gives 24 even divisions of a full turn.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Dynamic input") {
+                Toggle("Dynamic input — show live dimensions while drawing", isOn: $dynamicInput)
+                Text("Shows the running length / radius / size as a value chip and dotted dimension line at the cursor while a draw tool is active (DYN in the status bar).")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
