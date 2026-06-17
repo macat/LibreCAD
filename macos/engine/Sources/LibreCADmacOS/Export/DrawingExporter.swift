@@ -31,23 +31,42 @@ import CADEngine
 enum ExportFormat: String, CaseIterable, Sendable {
     case pdf
     case png
+    case jpg
+    case bmp
+    case tiff
     case svg
 
+    /// The on-disk file extension (lowercase, no dot).
     var fileExtension: String { rawValue }
 
     var utType: UTType {
         switch self {
-        case .pdf: return .pdf
-        case .png: return .png
-        case .svg: return UTType(filenameExtension: "svg") ?? .svg
+        case .pdf:  return .pdf
+        case .png:  return .png
+        case .jpg:  return .jpeg
+        case .bmp:  return .bmp
+        case .tiff: return .tiff
+        case .svg:  return UTType(filenameExtension: "svg") ?? .svg
         }
     }
 
     var displayName: String {
         switch self {
-        case .pdf: return "PDF Document"
-        case .png: return "PNG Image"
-        case .svg: return "SVG Vector"
+        case .pdf:  return "PDF Document"
+        case .png:  return "PNG Image"
+        case .jpg:  return "JPEG Image"
+        case .bmp:  return "BMP Image"
+        case .tiff: return "TIFF Image"
+        case .svg:  return "SVG Vector"
+        }
+    }
+
+    /// Whether this format is written through the shared CGImage raster pipeline
+    /// (PNG/JPEG/BMP/TIFF) as opposed to the vector PDF / pure-string SVG paths.
+    var isRaster: Bool {
+        switch self {
+        case .png, .jpg, .bmp, .tiff: return true
+        case .pdf, .svg:              return false
         }
     }
 }
@@ -74,13 +93,27 @@ enum ExportError: LocalizedError {
 @MainActor
 enum DrawingExporter {
 
+    /// The default raster resolution (dots-per-inch) used when a caller does not
+    /// specify one. 150 DPI matches the historical PNG default — keeping PNG output
+    /// byte-compatible at the default DPI.
+    static let defaultRasterDPI: Double = 150
+
     /// Exports `drawing` to `url` in `format` under `options`. Returns the number
     /// of drawn elements (polylines + fills) for a status message.
+    ///
+    /// `dpi` controls the output pixel size of the raster formats (PNG/JPEG/BMP/
+    /// TIFF): pixels = page-points × (dpi / 72). It is ignored by the vector PDF
+    /// and pure-string SVG paths.
+    ///
+    /// `jpegQuality` is the JPEG compression quality (0…1) when `format == .jpg`;
+    /// ignored by every other format.
     @discardableResult
     static func export(_ drawing: CADDrawing,
                        to url: URL,
                        format: ExportFormat,
-                       options: ExportOptions = ExportOptions(background: .white)) throws -> Int {
+                       options: ExportOptions = ExportOptions(background: .white),
+                       dpi: Double = defaultRasterDPI,
+                       jpegQuality: Double = 0.9) throws -> Int {
         switch format {
         case .svg:
             let svg = SVGExporter.string(for: drawing, options: options)
@@ -98,9 +131,10 @@ enum DrawingExporter {
             try writePDF(scene: scene, to: url, options: options)
             return scene.polylines.count + scene.fills.count
 
-        case .png:
+        case .png, .jpg, .bmp, .tiff:
             let scene = ExportSceneBuilder.build(drawing)
-            try writePNG(scene: scene, to: url, options: options, dpi: 150)
+            try writeRaster(scene: scene, to: url, options: options,
+                            dpi: dpi, format: format, jpegQuality: jpegQuality)
             return scene.polylines.count + scene.fills.count
         }
     }
@@ -187,10 +221,81 @@ enum DrawingExporter {
         return pdfData as Data
     }
 
-    // MARK: - PNG
+    // MARK: - Raster (PNG / JPEG / BMP / TIFF)
 
-    /// Writes a raster PNG of `scene` at `url` at `dpi` (white-backed).
+    /// Writes a raster PNG of `scene` at `url` at `dpi` (white-backed). Retained as
+    /// a thin convenience wrapper over the generalized `writeRaster` so existing
+    /// callers keep working; PNG output is byte-identical to the previous code path.
     static func writePNG(scene: ExportScene, to url: URL, options: ExportOptions, dpi: Double) throws {
+        try writeRaster(scene: scene, to: url, options: options, dpi: dpi, format: .png)
+    }
+
+    /// Renders `scene` into a `CGImage` bitmap at `dpi`, then writes it to `url`
+    /// encoded as `format`'s raster type (PNG/JPEG/BMP/TIFF). White-backed by
+    /// default (the renderer fills `options.background ?? .white`).
+    ///
+    /// Output pixel size = page-points × (dpi / 72). The shared `CGSceneRenderer`
+    /// draws in page points; the bitmap context carries the DPI scale, so every
+    /// raster format frames the drawing identically to PDF/SVG, just rasterized.
+    static func writeRaster(scene: ExportScene,
+                            to url: URL,
+                            options: ExportOptions,
+                            dpi: Double,
+                            format: ExportFormat,
+                            jpegQuality: Double = 0.9) throws {
+        let data = try rasterData(scene: scene, options: options, dpi: dpi,
+                                  format: format, jpegQuality: jpegQuality)
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            throw ExportError.writeFailed(error.localizedDescription)
+        }
+    }
+
+    /// The PURE "render this scene to encoded raster `Data`" function — NO save
+    /// panel, NO modal — so it is reachable from a unit test (the panel stays in the
+    /// View layer). Returns the encoded image bytes for `format` (must be a raster
+    /// format; `pdf`/`svg` throw). `dpi` sets the pixel size; `jpegQuality` (0…1)
+    /// applies only to JPEG.
+    static func rasterData(scene: ExportScene,
+                           options: ExportOptions,
+                           dpi: Double,
+                           format: ExportFormat,
+                           jpegQuality: Double = 0.9) throws -> Data {
+        guard format.isRaster else {
+            throw ExportError.writeFailed("\(format.rawValue) is not a raster format")
+        }
+        let image = try renderBitmap(scene: scene, options: options, dpi: dpi)
+
+        let mutableData = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(
+            mutableData as CFMutableData, format.utType.identifier as CFString, 1, nil
+        ) else {
+            throw ExportError.imageEncodingFailed
+        }
+
+        // DPI metadata so the file prints/places at the right physical size; JPEG
+        // gets a compression-quality option (other formats use sensible defaults).
+        var props: [CFString: Any] = [
+            kCGImagePropertyDPIWidth: dpi,
+            kCGImagePropertyDPIHeight: dpi
+        ]
+        if format == .jpg {
+            props[kCGImageDestinationLossyCompressionQuality] =
+                Swift.min(Swift.max(jpegQuality, 0), 1)
+        }
+        CGImageDestinationAddImage(dest, image, props as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else {
+            throw ExportError.writeFailed("\(format.rawValue) finalize failed")
+        }
+        return mutableData as Data
+    }
+
+    /// Renders `scene` into a white-backed RGBA `CGImage` at `dpi`. Shared by every
+    /// raster format so the only per-format difference is the encoder.
+    private static func renderBitmap(scene: ExportScene,
+                                     options: ExportOptions,
+                                     dpi: Double) throws -> CGImage {
         let xform = ExportTransform(bounds: scene.bounds, options: options)
         let scale = dpi / 72.0
         let pxW = Swift.max(1, Int((xform.pageSize.width * scale).rounded()))
@@ -210,22 +315,10 @@ enum DrawingExporter {
         ctx.translateBy(x: 0, y: CGFloat(pxH))
         ctx.scaleBy(x: CGFloat(scale), y: -CGFloat(scale))
         ctx.setShouldAntialias(true)
-        CGSceneRenderer.draw(scene: scene, in: ctx, transform: xform, background: options.background ?? .white)
+        CGSceneRenderer.draw(scene: scene, in: ctx, transform: xform,
+                             background: options.background ?? .white)
 
         guard let image = ctx.makeImage() else { throw ExportError.imageEncodingFailed }
-        guard let dest = CGImageDestinationCreateWithURL(
-            url as CFURL, UTType.png.identifier as CFString, 1, nil
-        ) else {
-            throw ExportError.imageEncodingFailed
-        }
-        // Record the DPI in the PNG so it prints at the right physical size.
-        let props: [CFString: Any] = [
-            kCGImagePropertyDPIWidth: dpi,
-            kCGImagePropertyDPIHeight: dpi
-        ]
-        CGImageDestinationAddImage(dest, image, props as CFDictionary)
-        guard CGImageDestinationFinalize(dest) else {
-            throw ExportError.writeFailed("PNG finalize failed")
-        }
+        return image
     }
 }
