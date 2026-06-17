@@ -146,7 +146,7 @@ struct LayersSidebar: View {
             Image(systemName: "minus")
         }
         .buttonStyle(.borderless)
-        .help("Remove the selected layer")
+        .help("Delete the selected layer")
         .disabled(!canRemoveSelected)
 
         Menu {
@@ -406,11 +406,12 @@ struct LayersSidebar: View {
     // MARK: - Layers selection / remove gating
 
     /// Selecting a layer row sets it active (where new geometry lands) — the role the
-    /// old `List(selection:)` filled. No-op if it is already active.
+    /// old `List(selection:)` filled. Routes through the W3B undoable `makeLayerCurrent`
+    /// funnel (the SINGLE active-layer path — matches the gear-menu "Make Current") so the
+    /// activation is undoable and bumps `modelVersion`; no-op if it is already active.
     private func selectLayer(_ name: String) {
         selectedLayer = name
-        guard name != model.drawing.layers.activeLayerName else { return }
-        model.drawing.setActiveLayer(name)
+        if model.makeLayerCurrent(name) { syncRenderAfterLayerEdit() }
     }
 
     /// Selects every entity on `name`: REPLACES the live selection with the layer's
@@ -639,7 +640,7 @@ private struct LayerRow: View {
             // Active indicator: the layer where new geometry lands.
             if isActive {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.tint)
+                    .foregroundStyle(DS.Palette.accent)
                     .help("Active layer")
             }
 

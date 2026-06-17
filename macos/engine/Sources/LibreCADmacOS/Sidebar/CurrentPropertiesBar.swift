@@ -99,9 +99,13 @@ struct CurrentPropertiesBar: View {
         Binding(
             get: { model.drawing.layers.activeLayerName },
             set: { name in
-                guard name != model.drawing.layers.activeLayerName else { return }
-                model.drawing.setActiveLayer(name)
-                controllerBox.controller?.requestRedraw()
+                // Route through the SINGLE active-layer path (`makeLayerCurrent`): the W3B
+                // undoable funnel that bumps `modelVersion` — matching the Layers sidebar /
+                // gear-menu "Make Current" rather than poking `setActiveLayer` directly. The
+                // funnel no-ops when `name` is already current.
+                if model.makeLayerCurrent(name) {
+                    controllerBox.controller?.requestRedraw()
+                }
             }
         )
     }
