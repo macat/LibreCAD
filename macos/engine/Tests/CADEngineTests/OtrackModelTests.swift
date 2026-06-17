@@ -44,7 +44,16 @@ struct OtrackModelTests {
     private let viewSize = CGSize(width: 800, height: 600)
 
     /// A bare model on an empty drawing with a clean (manual-grouping) undo stack.
+    ///
+    /// As of UCS-W2, `CanvasModel.objectTrackingEnabled` is an APP PREFERENCE seeded at
+    /// init from `AppSettings.Key.objectTracking` and `toggleObjectTracking()` PERSISTS
+    /// it. So this helper FORCES the persisted pref to its default (`false`) before
+    /// construction, making every model here seed deterministically `false` regardless of
+    /// prior persisted state / suite-execution order. The toggle tests that flip it back
+    /// on persist `true`; this re-seed neutralizes that for the next model. (Tests that
+    /// want OTRACK on set `m.objectTrackingEnabled = true` explicitly after construction.)
     private func model(drawing: CADDrawing = CADDrawing()) -> CanvasModel {
+        AppSettings.setBoolPreference(AppSettings.Key.objectTracking, false)
         let m = CanvasModel(drawing: drawing, viewSize: viewSize)
         m.undoManager.groupsByEvent = false
         m.undoManager.removeAllActions()
@@ -242,6 +251,10 @@ struct OtrackModelTests {
 
     @Test("OTRACK is INDEPENDENT of ortho/polar (not mutually exclusive)")
     func toggleIndependentOfOrthoPolar() {
+        // This test ends with OTRACK toggled ON, which now PERSISTS `true`. Restore the
+        // pref to its default afterward so the run stays hermetic (other suites / the
+        // host's UserDefaults are unaffected).
+        defer { AppSettings.setBoolPreference(AppSettings.Key.objectTracking, false) }
         let m = model()
         m.orthoEnabled = true
         m.polarEnabled = false

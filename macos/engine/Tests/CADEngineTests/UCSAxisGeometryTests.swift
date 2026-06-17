@@ -3,13 +3,16 @@
 //  CADEngineTests
 //
 //  Tests the PURE UCS-axis geometry helper that drives the canvas UCS axis indicator
-//  overlay (backlog #4b). `UCSAxisOverlayView.axisGeometry(origin:length:)` maps the
-//  on-screen world-origin anchor + a fixed arm length to its two screen-space axis-arm
-//  segments WITHOUT any AppKit drawing or GPU, so the anchor→segments contract is
-//  asserted directly:
-//    • +X arm runs from the origin toward INCREASING screen-x (rightward).
-//    • +Y arm runs from the origin toward DECREASING screen-y (upward on the flipped,
-//      Y-down host view — world +Y points up).
+//  overlay (backlog #4b). `UCSAxisOverlayView.axisGeometry(origin:length:angle:)` maps
+//  the on-screen UCS-origin anchor + a fixed arm length + the UCS angle to its two
+//  screen-space axis-arm segments WITHOUT any AppKit drawing or GPU, so the
+//  anchor+angle→segments contract is asserted directly:
+//    • With the WORLD frame (`angle == 0`, the default):
+//      – +X arm runs from the origin toward INCREASING screen-x (rightward).
+//      – +Y arm runs from the origin toward DECREASING screen-y (upward on the flipped,
+//        Y-down host view — world +Y points up).
+//    • With a ROTATED UCS the arms rotate by the UCS angle, mapping the world direction
+//      `(dx, dy)` to the flipped screen delta `(dx, -dy)`.
 //    • The arms are a CONSTANT on-screen length (independent of the anchor position),
 //      i.e. only the anchor moves with pan/zoom; the gizmo never scales.
 //
@@ -101,6 +104,63 @@ struct UCSAxisGeometryTests {
         let g0 = UCSAxisOverlayView.axisGeometry(origin: CGPoint(x: 0, y: 0), length: length)
         let g1 = UCSAxisOverlayView.axisGeometry(origin: CGPoint(x: 5, y: 5), length: length)
         #expect(g0 != g1)
+    }
+
+    // MARK: UCS angle — the world frame (angle 0) is byte-identical to the old helper
+
+    @Test("angle 0 reduces EXACTLY to the prior axis-aligned geometry (world frame)")
+    func worldAngleIdenticalToDefault() {
+        let withoutAngle = UCSAxisOverlayView.axisGeometry(origin: origin, length: length)
+        let withZero = UCSAxisOverlayView.axisGeometry(origin: origin, length: length, angle: 0)
+        #expect(withoutAngle == withZero)
+        // And those equal the literal axis-aligned arms.
+        #expect(withZero.xArm.to == CGPoint(x: origin.x + length, y: origin.y))
+        #expect(withZero.yArm.to == CGPoint(x: origin.x, y: origin.y - length))
+    }
+
+    // MARK: UCS angle — a rotated UCS rotates the arms into flipped screen space
+
+    @Test("90° UCS: +X arm points up on screen, +Y arm points left")
+    func rotated90() {
+        // UCS angle +90° CCW in world: +X world dir → (0, 1) → screen (0, -length) (UP);
+        // +Y world dir → (-1, 0) → screen (-length, 0) (LEFT).
+        let g = UCSAxisOverlayView.axisGeometry(
+            origin: origin, length: length, angle: .pi / 2)
+        let tol: CGFloat = 1e-9
+        #expect(g.xArm.from == origin)
+        #expect(abs(g.xArm.to.x - origin.x) < tol)            // X arm: no screen-x change
+        #expect(abs(g.xArm.to.y - (origin.y - length)) < tol) // X arm: up the screen
+        #expect(g.yArm.from == origin)
+        #expect(abs(g.yArm.to.x - (origin.x - length)) < tol) // Y arm: left
+        #expect(abs(g.yArm.to.y - origin.y) < tol)            // Y arm: no screen-y change
+    }
+
+    @Test("the gizmo anchors at the supplied (UCS) origin regardless of angle")
+    func anchorsAtSuppliedOrigin() {
+        let o = CGPoint(x: 420, y: 130)
+        let g = UCSAxisOverlayView.axisGeometry(origin: o, length: length, angle: .pi / 3)
+        #expect(g.xArm.from == o)
+        #expect(g.yArm.from == o)
+    }
+
+    @Test("arms stay the fixed length at any UCS angle (rotation, not scale)")
+    func rotatedArmsKeepLength() {
+        let g = UCSAxisOverlayView.axisGeometry(
+            origin: origin, length: length, angle: .pi / 5)
+        let xLen = hypot(g.xArm.to.x - g.xArm.from.x, g.xArm.to.y - g.xArm.from.y)
+        let yLen = hypot(g.yArm.to.x - g.yArm.from.x, g.yArm.to.y - g.yArm.from.y)
+        #expect(abs(xLen - length) < 1e-9)
+        #expect(abs(yLen - length) < 1e-9)
+    }
+
+    @Test("X and Y arms stay perpendicular at any UCS angle")
+    func armsStayPerpendicular() {
+        let g = UCSAxisOverlayView.axisGeometry(
+            origin: origin, length: length, angle: 0.7)
+        let xv = CGVector(dx: g.xArm.to.x - g.xArm.from.x, dy: g.xArm.to.y - g.xArm.from.y)
+        let yv = CGVector(dx: g.yArm.to.x - g.yArm.from.x, dy: g.yArm.to.y - g.yArm.from.y)
+        let dot = xv.dx * yv.dx + xv.dy * yv.dy
+        #expect(abs(dot) < 1e-9)
     }
 
     // MARK: The documented fixed arm length
