@@ -81,11 +81,24 @@ public struct ScaleTool: Tool {
         /// as two FREE points, then a new length (point or typed value); the factor
         /// is `newLen / refLen` and the selection scales about the base.
         case reference
+        /// Non-uniform scale: the X and Y axes scale by INDEPENDENT factors
+        /// `(sx, sy)` about a single picked base (pivot). The two factors come from
+        /// `nonUniformFactors` (set by a later options-bar wire-wave — typed X/Y
+        /// fields); the interaction is a single pick that fixes the base and commits.
+        /// Uses `EntityTransform.scale(sx:sy:about:)` — the engine's non-uniform
+        /// primitive — so e.g. an X-only stretch leaves Y untouched.
+        case nonUniform
     }
 
     /// The active mode. Defaults to `.factor` (the original behavior). Public so a
     /// future options-bar can switch it; UNWIRED for now.
     public var mode: ScaleMode = .factor
+
+    /// The independent `(sx, sy)` factors used by `.nonUniform` mode. Public so a
+    /// later options-bar wire-wave can set typed X/Y fields; UNWIRED for now and
+    /// defaulting to `(1, 1)` (a no-op the commit path rejects until the user enters
+    /// a real factor). Ignored by `.factor`/`.reference` mode.
+    public var nonUniformFactors: (sx: Double, sy: Double) = (1, 1)
 
     // MARK: - Private state machine (no magic Int — engine-architecture note)
 
@@ -118,6 +131,12 @@ public struct ScaleTool: Tool {
         /// typed value). `refLen` is the "old size" and the new length is measured
         /// from `refStart`. The factor is `newLen / refLen`.
         case refPickingNew(base: Vector, refStart: Vector, refLen: Double)
+
+        // --- .nonUniform mode (independent X/Y factors about one base) ---
+        /// Waiting for the base / pivot the selection scales about with the
+        /// independent `(sx, sy)` factors (from `nonUniformFactors`). The single
+        /// pick fixes the base and immediately commits if the factors are valid.
+        case nuPickingBase
     }
 
     /// The current state. Starts waiting for the center point (the `.factor`
@@ -161,6 +180,10 @@ public struct ScaleTool: Tool {
             return "Specify second point of reference length"
         case .refPickingNew:
             return "Specify new length"
+
+        // --- .nonUniform mode ---
+        case .nuPickingBase:
+            return selection.isEmpty ? "Select objects to scale first" : "Specify base point"
         }
     }
 
@@ -169,8 +192,12 @@ public struct ScaleTool: Tool {
     /// set the mode after construction), this presents the reference mode's initial
     /// state instead — without mutating (so `status`/`preview` can be `get`-only).
     private var normalizedState: State {
-        if mode == .reference, state == .pickingCenter, selection.isEmpty {
-            return .refPickingBase
+        if state == .pickingCenter, selection.isEmpty {
+            switch mode {
+            case .factor: break
+            case .reference: return .refPickingBase
+            case .nonUniform: return .nuPickingBase
+            }
         }
         return state
     }
@@ -180,8 +207,11 @@ public struct ScaleTool: Tool {
     /// reference flow starts from `.refPickingBase` even though `state` is
     /// constructed at the `.factor` default.
     private mutating func refNormalizeIfIdle() {
-        if mode == .reference, state == .pickingCenter, selection.isEmpty {
-            state = .refPickingBase
+        guard state == .pickingCenter, selection.isEmpty else { return }
+        switch mode {
+        case .factor: break
+        case .reference: state = .refPickingBase
+        case .nonUniform: state = .nuPickingBase
         }
     }
 
@@ -190,31 +220,43 @@ public struct ScaleTool: Tool {
     /// polylines with the preview pen. Empty before the reference distance is set,
     /// before the cursor has moved, with no selection, or for a degenerate factor.
     public var preview: [ResolvedPolyline] {
-        // Resolve the live (pivot, factor) pair for whichever mode is active; both
-        // share the same "scale the selection about a pivot" rubber-band.
-        let pivotFactor: (pivot: Vector, factor: Double)?
-        switch normalizedState {
-        case .pickingTarget(let center, let refDist, _):
-            pivotFactor = validFactor(target: cursor, center: center, refDist: refDist)
-                .map { (center, $0) }
-        case .refPickingNew(let base, let refStart, let refLen):
-            // New length = distance from the reference-segment start to the cursor.
-            pivotFactor = validFactor(target: cursor, center: refStart, refDist: refLen)
-                .map { (base, $0) }
-        default:
-            pivotFactor = nil
-        }
-        guard let (pivot, factor) = pivotFactor,
-              cursor.valid, pivot.valid, !selection.isEmpty else {
+        guard let t = previewTransform, cursor.valid, !selection.isEmpty else {
             return []
         }
-        let t = Affine2D.scale(factor: factor, about: pivot)
         return selection.flatMap { record -> [ResolvedPolyline] in
             // Transform the geometry, then resolve it directly with the shared
             // tool-preview pen so the overlay reads as a preview.
             record.kind.transformed(by: t)
                 .resolve(pen: .toolPreview, ctx: .default)
                 .polylines
+        }
+    }
+
+    /// The live rubber-band transform for the active mode, or `nil` when there is
+    /// nothing to preview (no pivot yet, degenerate factor, or no-op factors).
+    /// `.factor`/`.reference` build a UNIFORM scale about a pivot from the cursor;
+    /// `.nonUniform` builds a NON-UNIFORM `(sx, sy)` scale about the cursor as the
+    /// prospective base, so the ghost shows the independent X/Y result before the
+    /// base click that commits it.
+    private var previewTransform: Affine2D? {
+        switch normalizedState {
+        case .pickingTarget(let center, let refDist, _):
+            guard let factor = validFactor(target: cursor, center: center, refDist: refDist),
+                  center.valid else { return nil }
+            return .scale(factor: factor, about: center)
+        case .refPickingNew(let base, let refStart, let refLen):
+            // New length = distance from the reference-segment start to the cursor.
+            guard let factor = validFactor(target: cursor, center: refStart, refDist: refLen),
+                  base.valid else { return nil }
+            return .scale(factor: factor, about: base)
+        case .nuPickingBase:
+            // Independent X/Y factors about the cursor (the prospective base). The
+            // ghost tracks the cursor so the user sees where the non-uniform scale
+            // will pivot before committing.
+            guard let (sx, sy) = validNonUniformFactors(), cursor.valid else { return nil }
+            return .scale(sx: sx, sy: sy, about: cursor)
+        default:
+            return nil
         }
     }
 
@@ -252,8 +294,16 @@ public struct ScaleTool: Tool {
 
         case .move(let p):
             cursor = p
-            // A move only matters once a reference distance is fixed AND there's a
-            // non-empty selection with a non-degenerate factor to preview.
+            // In .nonUniform mode the base pick is also the commit, so there is no
+            // post-pivot drag phase; instead the move itself drives the ghost about
+            // the prospective base. Capture the selection snapshot lazily (without
+            // fixing a base) so the live preview can reflect (sx, sy) as the cursor
+            // tracks candidate base points. No-op for .factor/.reference.
+            if case .nuPickingBase = normalizedState, selection.isEmpty {
+                selection = context.selected
+            }
+            // A move only matters once there is a non-empty selection with a
+            // non-degenerate factor to preview.
             return preview.isEmpty ? .none : .preview
 
         case .click(let p):
@@ -344,13 +394,41 @@ public struct ScaleTool: Tool {
                 return .none
             }
             return commitScale(factor: factor, about: base)
+
+        // --- .nonUniform mode (independent X/Y factors about one base) ---
+
+        case .nuPickingBase:
+            // The single pick fixes the base/pivot AND commits, scaling each entity
+            // by the independent (sx, sy) factors about it. The selection may already
+            // have been snapshotted by a preceding `.move`; otherwise capture it now.
+            // Ignore the click if there is nothing to scale or the factors are a
+            // no-op / degenerate (≈ 1 in both axes, or ≈ 0 in either).
+            guard p.valid else { return .none }
+            let snapshot = selection.isEmpty ? context.selected : selection
+            guard !snapshot.isEmpty, let (sx, sy) = validNonUniformFactors() else {
+                return .none
+            }
+            selection = snapshot
+            return commitNonUniform(sx: sx, sy: sy, about: p)
         }
     }
 
     /// Emits one `.replace` per captured entity, scaling its geometry by `factor`
-    /// about `pivot`, then resets the run. Shared by both modes' commit arms.
+    /// about `pivot`, then resets the run. Shared by both uniform modes' commit arms.
     private mutating func commitScale(factor: Double, about pivot: Vector) -> ToolOutcome {
-        let t = Affine2D.scale(factor: factor, about: pivot)
+        commitTransform(Affine2D.scale(factor: factor, about: pivot))
+    }
+
+    /// Emits one `.replace` per captured entity, scaling its geometry by the
+    /// INDEPENDENT `(sx, sy)` factors about `pivot` via the engine's non-uniform
+    /// primitive, then resets the run. The `.nonUniform` mode's commit arm.
+    private mutating func commitNonUniform(sx: Double, sy: Double, about pivot: Vector) -> ToolOutcome {
+        commitTransform(Affine2D.scale(sx: sx, sy: sy, about: pivot))
+    }
+
+    /// Shared commit: one `.replace(id, kind.transformed(by: t))` per captured
+    /// entity, then reset. Used by both the uniform and non-uniform commit arms.
+    private mutating func commitTransform(_ t: Affine2D) -> ToolOutcome {
         let edits: [ToolEdit] = selection.map {
             .replace($0.id, $0.kind.transformed(by: t))
         }
@@ -395,6 +473,10 @@ public struct ScaleTool: Tool {
             state = .refPickingEnd(base: base, refStart: refStart)
             cursor = .invalid
             return .preview
+
+        // --- .nonUniform mode (single pick → nothing to step back) ---
+        case .nuPickingBase:
+            return .none
         }
     }
 
@@ -413,12 +495,34 @@ public struct ScaleTool: Tool {
         return factor
     }
 
+    /// The independent `(sx, sy)` factors for `.nonUniform` mode, validated, or
+    /// `nil` if they are degenerate. Each axis factor must be finite and non-zero
+    /// (a 0 in either axis collapses that axis to a line/point); additionally the
+    /// pair must not be the identity (`sx ≈ 1` AND `sy ≈ 1`), which is a no-op.
+    /// A single axis equal to 1 (e.g. an X-only stretch `(2, 1)`) is allowed.
+    private func validNonUniformFactors() -> (sx: Double, sy: Double)? {
+        let (sx, sy) = nonUniformFactors
+        guard sx.isFinite, sy.isFinite,
+              abs(sx) > Tolerance.distance, abs(sy) > Tolerance.distance else {
+            return nil
+        }
+        // Reject the identity (both axes ≈ 1) — it would emit no-op replaces.
+        if abs(sx - 1) <= Tolerance.distance, abs(sy - 1) <= Tolerance.distance {
+            return nil
+        }
+        return (sx, sy)
+    }
+
     /// Returns to the active mode's initial waiting state, dropping the captured
     /// selection snapshot and cursor. For the `.factor` default this is
     /// `.pickingCenter` (byte-identical to the original); for `.reference` it is
     /// `.refPickingBase`, so a second scale in the same run starts cleanly.
     private mutating func reset() {
-        state = (mode == .reference) ? .refPickingBase : .pickingCenter
+        switch mode {
+        case .factor: state = .pickingCenter
+        case .reference: state = .refPickingBase
+        case .nonUniform: state = .nuPickingBase
+        }
         cursor = .invalid
         selection = []
     }

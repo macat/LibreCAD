@@ -382,4 +382,206 @@ struct ScaleToolTests {
         let outcome = tool.handle(.backspace, context: ctx)
         #expect(outcome == .none)
     }
+
+    // MARK: - Non-uniform mode (independent X/Y factors about one base)
+
+    /// A non-uniform tool with the given (sx, sy) factors set (as the options-bar
+    /// wire-wave would). Mode is `.nonUniform`.
+    private func nonUniformTool(sx: Double, sy: Double) -> ScaleTool {
+        var tool = ScaleTool()
+        tool.mode = .nonUniform
+        tool.nonUniformFactors = (sx, sy)
+        return tool
+    }
+
+    @Test("non-uniform mode: a single base pick commits, scaling X and Y independently")
+    func nonUniformCommitsIndependentXY() {
+        var tool = nonUniformTool(sx: 2, sy: 3)
+        let ctx = selectionContext()
+
+        // The single base pick at the origin commits with sx=2, sy=3 about (0,0).
+        let outcome = tool.handle(.click(Vector(0, 0)), context: ctx)
+        guard let kinds = replacedKinds(outcome) else {
+            Issue.record("expected a .commit of only .replace edits"); return
+        }
+        #expect(kinds.count == 2)
+
+        // Line (0,0)→(10,0) about (0,0): X·2, Y·3 → (0,0)→(20,0) (Y stays 0).
+        guard case .line(let line)? = kinds[Self.lineID] else {
+            Issue.record("line was not replaced with a line"); return
+        }
+        #expect(line.start == Vector(0, 0))
+        #expect(line.end == Vector(20, 0))
+    }
+
+    @Test("non-uniform mode: a point off both axes proves X and Y scale by different factors")
+    func nonUniformScalesXAndYDifferently() {
+        // A line whose endpoint is OFF both axes so X and Y both change measurably.
+        let diagID = EntityID(7)
+        let diag = EntityRecord(id: diagID, kind: .line(LineData(start: Vector(0, 0), end: Vector(4, 5))))
+        let byID = [diagID: diag]
+        let ctx = ToolContext(selected: [diag], entity: { byID[$0] }, gridSpacing: nil)
+
+        var tool = nonUniformTool(sx: 2, sy: 3)
+        // Base at origin → endpoint (4,5) scales to (4·2, 5·3) = (8, 15).
+        let outcome = tool.handle(.click(Vector(0, 0)), context: ctx)
+        guard let kinds = replacedKinds(outcome), case .line(let line)? = kinds[diagID] else {
+            Issue.record("diagonal line was not replaced"); return
+        }
+        #expect(line.start == Vector(0, 0))
+        #expect(abs(line.end.x - 8) < 1e-9)
+        #expect(abs(line.end.y - 15) < 1e-9)
+    }
+
+    @Test("non-uniform mode: scales about a non-origin base independently per axis")
+    func nonUniformAboutNonOriginBase() {
+        let segID = EntityID(8)
+        // A segment from (2,2) to (6,4).
+        let seg = EntityRecord(id: segID, kind: .line(LineData(start: Vector(2, 2), end: Vector(6, 4))))
+        let byID = [segID: seg]
+        let ctx = ToolContext(selected: [seg], entity: { byID[$0] }, gridSpacing: nil)
+
+        var tool = nonUniformTool(sx: 2, sy: 0.5)
+        // Base (2,2): each point p → (base.x + (p.x-base.x)·2, base.y + (p.y-base.y)·0.5).
+        let outcome = tool.handle(.click(Vector(2, 2)), context: ctx)
+        guard let kinds = replacedKinds(outcome), case .line(let line)? = kinds[segID] else {
+            Issue.record("segment was not replaced"); return
+        }
+        // start (2,2) is the base → unchanged.
+        #expect(abs(line.start.x - 2) < 1e-9)
+        #expect(abs(line.start.y - 2) < 1e-9)
+        // end (6,4): x = 2 + (6-2)·2 = 10; y = 2 + (4-2)·0.5 = 3.
+        #expect(abs(line.end.x - 10) < 1e-9)
+        #expect(abs(line.end.y - 3) < 1e-9)
+    }
+
+    @Test("non-uniform mode: an X-only stretch (2,1) leaves Y untouched")
+    func nonUniformXOnlyStretch() {
+        let diagID = EntityID(9)
+        let diag = EntityRecord(id: diagID, kind: .line(LineData(start: Vector(0, 0), end: Vector(4, 5))))
+        let byID = [diagID: diag]
+        let ctx = ToolContext(selected: [diag], entity: { byID[$0] }, gridSpacing: nil)
+
+        var tool = nonUniformTool(sx: 2, sy: 1)   // sy == 1 is allowed (only X stretches)
+        let outcome = tool.handle(.click(Vector(0, 0)), context: ctx)
+        guard let kinds = replacedKinds(outcome), case .line(let line)? = kinds[diagID] else {
+            Issue.record("line was not replaced"); return
+        }
+        #expect(abs(line.end.x - 8) < 1e-9)   // X doubled
+        #expect(abs(line.end.y - 5) < 1e-9)   // Y unchanged
+    }
+
+    @Test("non-uniform mode: status walks select-first → base point")
+    func nonUniformStatus() {
+        let tool = nonUniformTool(sx: 2, sy: 3)
+        // No selection learned yet → select-first hint.
+        #expect(tool.status == "Select objects to scale first")
+
+        var t = nonUniformTool(sx: 2, sy: 3)
+        let ctx = selectionContext()
+        // Once a move learns the selection, the prompt becomes "Specify base point".
+        _ = t.handle(.move(Vector(5, 5)), context: ctx)
+        #expect(t.status == "Specify base point")
+    }
+
+    @Test("non-uniform mode: move shows the live ghost scaled by (sx, sy) about the cursor")
+    func nonUniformPreviewTracksCursor() {
+        var tool = nonUniformTool(sx: 2, sy: 3)
+        let ctx = selectionContext()
+
+        // A move (the prospective base) produces a preview reflecting sx/sy.
+        let outcome = tool.handle(.move(Vector(0, 0)), context: ctx)
+        #expect(outcome == .preview)
+
+        let preview = tool.preview
+        #expect(!preview.isEmpty)
+        #expect(preview.allSatisfy { $0.pen == .toolPreview })
+
+        // The line ghost (2-point polyline) scaled about (0,0) by sx=2: (10,0)→(20,0).
+        let linePreview = preview.first { $0.points.count == 2 }
+        #expect(linePreview != nil)
+        #expect(linePreview?.points.first == Vector(0, 0))
+        #expect(linePreview?.points.last == Vector(20, 0))
+    }
+
+    @Test("non-uniform mode: identity factors (1,1) are a no-op — no commit, no preview")
+    func nonUniformIdentityIgnored() {
+        var tool = nonUniformTool(sx: 1, sy: 1)   // both axes 1 → identity
+        let ctx = selectionContext()
+
+        // A move with identity factors shows no preview.
+        let move = tool.handle(.move(Vector(0, 0)), context: ctx)
+        #expect(move == .none)
+        #expect(tool.preview.isEmpty)
+
+        // A base click with identity factors does not commit.
+        let click = tool.handle(.click(Vector(0, 0)), context: ctx)
+        #expect(click == .none)
+    }
+
+    @Test("non-uniform mode: a zero factor in either axis is ignored")
+    func nonUniformZeroAxisIgnored() {
+        var tool = nonUniformTool(sx: 0, sy: 2)   // sx = 0 collapses X → rejected
+        let ctx = selectionContext()
+        let click = tool.handle(.click(Vector(0, 0)), context: ctx)
+        #expect(click == .none)
+
+        var tool2 = nonUniformTool(sx: 2, sy: 0)  // sy = 0 collapses Y → rejected
+        let click2 = tool2.handle(.click(Vector(0, 0)), context: ctx)
+        #expect(click2 == .none)
+    }
+
+    @Test("non-uniform mode: empty selection is a no-op")
+    func nonUniformEmptySelectionNoOp() {
+        var tool = nonUniformTool(sx: 2, sy: 3)
+        let ctx = emptyContext()
+        let click = tool.handle(.click(Vector(0, 0)), context: ctx)
+        #expect(click == .none)
+        #expect(tool.preview.isEmpty)
+        #expect(tool.status == "Select objects to scale first")
+    }
+
+    @Test("non-uniform mode: commit resets to base-pick for the next scale")
+    func nonUniformCommitResets() {
+        var tool = nonUniformTool(sx: 2, sy: 3)
+        let ctx = selectionContext()
+        _ = tool.handle(.click(Vector(0, 0)), context: ctx)   // commit
+        #expect(tool.status == "Select objects to scale first")
+        #expect(tool.preview.isEmpty)
+
+        // A second scale in the same run still works.
+        let outcome = tool.handle(.click(Vector(0, 0)), context: ctx)
+        #expect(replacedKinds(outcome)?.count == 2)
+    }
+
+    @Test("non-uniform mode: cancel discards the run and resets")
+    func nonUniformCancelResets() {
+        var tool = nonUniformTool(sx: 2, sy: 3)
+        let ctx = selectionContext()
+        _ = tool.handle(.move(Vector(0, 0)), context: ctx)
+        #expect(!tool.preview.isEmpty)
+
+        let outcome = tool.handle(.cancel, context: ctx)
+        #expect(outcome == .finished)
+        #expect(tool.preview.isEmpty)
+        #expect(tool.status == "Select objects to scale first")
+    }
+
+    @Test("non-uniform mode: backspace is a no-op (single pick)")
+    func nonUniformBackspaceNoOp() {
+        var tool = nonUniformTool(sx: 2, sy: 3)
+        let ctx = selectionContext()
+        let outcome = tool.handle(.backspace, context: ctx)
+        #expect(outcome == .none)
+    }
+
+    // MARK: - Default mode is unchanged
+
+    @Test("default mode is .factor and a fresh tool has identity non-uniform factors")
+    func defaultModeIsFactor() {
+        let tool = ScaleTool()
+        #expect(tool.mode == .factor)
+        #expect(tool.nonUniformFactors.sx == 1)
+        #expect(tool.nonUniformFactors.sy == 1)
+    }
 }
