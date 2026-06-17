@@ -267,18 +267,15 @@ struct GeometryEditor: View {
         }
     }
 
-    // MARK: Hatch (pattern name / scale / angle / solid flag)
+    // MARK: Hatch (pattern dropdown / scale / angle / solid flag)
 
     @ViewBuilder
     private func hatchEditor(_ d: HatchData) -> some View {
-        LabeledContent {
-            TextField("Pattern", text: Binding(
-                get: { d.patternName ?? "" },
-                set: { onCommit([replacing(InspectorEdits.setHatchPatternName(record.kind, $0.isEmpty ? nil : $0))]) }
-            ))
-            .frame(width: DS.Field.wide).multilineTextAlignment(.trailing)
-        } label: {
-            Text("Pattern").lineLimit(1)
+        // A pattern dropdown over the bundled `.pat` library (plus a "Solid (none)"
+        // sentinel that clears the name). Drives the existing engine setter
+        // `setHatchPatternName`, so the edit is undoable on the same `.replace` path.
+        HatchPatternPicker(currentName: d.patternName) { newName in
+            onCommit([replacing(InspectorEdits.setHatchPatternName(record.kind, newName))])
         }
         Toggle("Solid fill", isOn: Binding(
             get: { d.solidFill },
@@ -303,7 +300,8 @@ struct GeometryEditor: View {
         }
     }
 
-    // MARK: Dimension (definition point / text override / DIMSTYLE name)
+    // MARK: Dimension (definition point / text override / DIMSTYLE name /
+    //        text placement + rotation + extension oblique — Wave 2A)
 
     @ViewBuilder
     private func dimensionEditor(_ d: DimData) -> some View {
@@ -327,6 +325,21 @@ struct GeometryEditor: View {
             .frame(width: DS.Field.wide).multilineTextAlignment(.trailing)
         } label: {
             Text("Text override").lineLimit(1)
+        }
+        // Text-placement override (DXF code 11): an explicit text middle point.
+        // The toggle adds/clears the override; while overridden, the X/Y pair edits it.
+        DimTextMiddleEditor(point: d.textMiddle) { newMiddle in
+            onCommit([replacing(InspectorEdits.setDimTextMiddle(record.kind, newMiddle))])
+        }
+        // Text rotation override (DXF code 53). Off ⇒ resolve derives the upright
+        // baseline angle; on ⇒ the field's angle (degrees) is used verbatim.
+        DimTextRotationEditor(rotation: d.textRotation) { newRotation in
+            onCommit([replacing(InspectorEdits.setDimTextRotation(record.kind, newRotation))])
+        }
+        // Extension-line oblique (slant) angle (DXF code 52), always present (0 ⇒
+        // perpendicular extension lines).
+        ScalarField(label: "Oblique (°)", value: d.obliqueAngle * 180 / .pi) {
+            onCommit([replacing(InspectorEdits.setDimOblique(record.kind, $0 * .pi / 180))])
         }
     }
 
@@ -901,6 +914,220 @@ struct IndexedPointEditor: View {
             PointFields(label: "\(label) \(clamped + 1)", point: points[clamped]) { pt in
                 onCommit(clamped, pt)
             }
+        }
+    }
+}
+
+// MARK: - Dimension text-placement override (DXF code 11)
+
+/// Edits a DIMENSION's optional explicit text-middle point (`DimData.textMiddle`).
+/// A toggle controls whether the override is present: turning it ON seeds the X/Y
+/// fields from the current value (or origin) and commits that point; turning it OFF
+/// commits `nil` so the resolve recenters the text on the dimension line. While ON,
+/// the X/Y pair edits the override. Every commit routes through the same undoable
+/// `.replace` path as the other dimension fields. View-layer only (no modal).
+struct DimTextMiddleEditor: View {
+    /// The current override point, or `nil` when the dimension auto-centers its text.
+    let point: Vector?
+    /// Commits the new override (a point) or `nil` (cleared).
+    let onCommit: (Vector?) -> Void
+
+    @State private var overridden: Bool = false
+    @State private var x: Double = 0
+    @State private var y: Double = 0
+
+    var body: some View {
+        // Re-seeds draft state when the override appears or changes under us (undo /
+        // reselection). Mirrors the per-editor seeding convention in this file.
+        Group {
+            Toggle("Override text position", isOn: Binding(
+                get: { overridden },
+                set: { on in
+                    overridden = on
+                    onCommit(on ? Vector(x, y) : nil)
+                }
+            ))
+            if overridden {
+                LabeledContent {
+                    HStack(spacing: DS.Space.sm) {
+                        TextField("x", value: $x, format: .number)
+                            .frame(width: DS.Field.xy).multilineTextAlignment(.trailing)
+                            .onSubmit { onCommit(Vector(x, y)) }
+                        TextField("y", value: $y, format: .number)
+                            .frame(width: DS.Field.xy).multilineTextAlignment(.trailing)
+                            .onSubmit { onCommit(Vector(x, y)) }
+                    }
+                } label: {
+                    Text("Text position").lineLimit(1)
+                }
+            }
+        }
+        .onAppear(perform: seed)
+        .onChange(of: point) { _, _ in seed() }
+    }
+
+    private func seed() {
+        overridden = point != nil
+        if let p = point { x = p.x; y = p.y }
+    }
+}
+
+// MARK: - Dimension text-rotation override (DXF code 53)
+
+/// Edits a DIMENSION's optional explicit text rotation (`DimData.textRotation`,
+/// radians). A toggle controls whether the override is present: ON commits the
+/// field's angle (entered in DEGREES); OFF commits `nil` so the resolve derives the
+/// upright baseline angle from the geometry. Same undoable `.replace` path. View-only.
+struct DimTextRotationEditor: View {
+    /// The current rotation override in radians, or `nil` when auto-derived.
+    let rotation: Double?
+    /// Commits the new rotation in RADIANS, or `nil` (cleared).
+    let onCommit: (Double?) -> Void
+
+    @State private var overridden: Bool = false
+    @State private var degrees: Double = 0
+
+    var body: some View {
+        Group {
+            Toggle("Override text rotation", isOn: Binding(
+                get: { overridden },
+                set: { on in
+                    overridden = on
+                    onCommit(on ? degrees * .pi / 180 : nil)
+                }
+            ))
+            if overridden {
+                ScalarField(label: "Text rotation (°)", value: degrees) { newValue in
+                    degrees = newValue
+                    onCommit(newValue * .pi / 180)
+                }
+            }
+        }
+        .onAppear(perform: seed)
+        .onChange(of: rotation) { _, _ in seed() }
+    }
+
+    private func seed() {
+        overridden = rotation != nil
+        if let r = rotation { degrees = r * 180 / .pi }
+    }
+}
+
+// MARK: - Hatch pattern picker (swatch dropdown over the .pat library)
+
+/// A dropdown for a HATCH entity's pattern name, listing the bundled `.pat`
+/// patterns (`HatchPatternLibrary.patterns`) alongside a "Solid (none)" sentinel
+/// that clears the name (`nil` ⇒ solid fill at resolve). Each row shows a small
+/// swatch rendered from the pattern's line families so the user picks by look, not
+/// by name. Selecting a row commits the new name via the caller (which drives the
+/// engine's `setHatchPatternName` on the undoable `.replace` path). View-layer only.
+struct HatchPatternPicker: View {
+    /// The hatch's current pattern name, or `nil` for solid / unnamed.
+    let currentName: String?
+    /// Commits the chosen pattern name, or `nil` for the "Solid (none)" sentinel.
+    let onCommit: (String?) -> Void
+
+    /// The `nil` sentinel's stable tag (no real `.pat` uses an empty name).
+    private static let solidTag = ""
+
+    /// Bundled pattern names, sorted for a stable menu order. Computed once.
+    private static let sortedNames: [String] =
+        HatchPatternLibrary.patterns.keys.sorted()
+
+    var body: some View {
+        Picker(selection: selection) {
+            HStack(spacing: DS.Space.sm) {
+                HatchSwatch(pattern: nil)
+                Text("Solid (none)")
+            }
+            .tag(Self.solidTag)
+            ForEach(Self.sortedNames, id: \.self) { name in
+                HStack(spacing: DS.Space.sm) {
+                    HatchSwatch(pattern: HatchPatternLibrary.patterns[name])
+                    Text(name)
+                }
+                .tag(name)
+            }
+        } label: {
+            Text("Pattern").lineLimit(1)
+        }
+    }
+
+    /// Binds the picker to the current name: an unknown / empty name shows the
+    /// "Solid (none)" row, and selecting it commits `nil`. The library keys are
+    /// upper-cased, so the incoming name is matched case-insensitively.
+    private var selection: Binding<String> {
+        Binding(
+            get: { Self.menuTag(for: currentName) },
+            set: { tag in onCommit(Self.committedName(for: tag)) }
+        )
+    }
+
+    /// Maps a hatch's stored pattern name to the picker's selected ROW tag: a
+    /// known library pattern → its upper-cased key; an empty / unknown / `nil`
+    /// name → the "Solid (none)" sentinel. Pure so it unit-tests without the view.
+    static func menuTag(for name: String?) -> String {
+        guard let raw = name, !raw.isEmpty else { return solidTag }
+        let key = raw.uppercased()
+        return HatchPatternLibrary.patterns[key] != nil ? key : solidTag
+    }
+
+    /// Maps a selected ROW tag back to the name committed to the engine: the
+    /// "Solid (none)" sentinel → `nil` (clears the pattern); any other tag is a
+    /// real pattern key. Pure (testable without the view).
+    static func committedName(for tag: String) -> String? {
+        tag.isEmpty ? nil : tag
+    }
+}
+
+/// A tiny preview swatch for a hatch pattern (or solid when `pattern == nil`),
+/// drawing each line family as a few parallel strokes at its angle inside a fixed
+/// rect. A representative look — not a faithful `.pat` tiling — enough for the user
+/// to recognize a pattern in the dropdown.
+struct HatchSwatch: View {
+    let pattern: HatchPattern?
+
+    private static let side: CGFloat = 22
+
+    var body: some View {
+        Canvas { ctx, size in
+            let rect = CGRect(origin: .zero, size: size)
+            ctx.stroke(Path(rect), with: .color(.secondary.opacity(0.4)), lineWidth: 0.5)
+            guard let pattern else {
+                // Solid: fill the swatch.
+                ctx.fill(Path(rect.insetBy(dx: 1, dy: 1)), with: .color(.primary.opacity(0.55)))
+                return
+            }
+            let families = pattern.lines.isEmpty
+                ? [HatchPatternLine(angle: 0, origin: Vector(0, 0), delta: Vector(0, 4))]
+                : pattern.lines
+            for line in families {
+                strokeFamily(angle: line.angle, in: rect, ctx: &ctx)
+            }
+        }
+        .frame(width: Self.side, height: Self.side)
+    }
+
+    /// Draws a handful of parallel strokes across `rect` at `angle` (the family's
+    /// hatch direction), clipped to the swatch.
+    private func strokeFamily(angle: Double, in rect: CGRect, ctx: inout GraphicsContext) {
+        var sub = ctx
+        sub.clip(to: Path(rect))
+        let dir = CGVector(dx: cos(angle), dy: sin(angle))
+        // Perpendicular spacing between successive parallel lines.
+        let step: CGFloat = 5
+        let span = rect.width + rect.height
+        let half = Int(span / step) + 1
+        let cx = rect.midX, cy = rect.midY
+        let perp = CGVector(dx: -dir.dy, dy: dir.dx)
+        for i in -half...half {
+            let off = CGFloat(i) * step
+            let px = cx + perp.dx * off
+            let py = cy + perp.dy * off
+            var p = Path()
+            p.move(to: CGPoint(x: px - dir.dx * span, y: py - dir.dy * span))
+            p.addLine(to: CGPoint(x: px + dir.dx * span, y: py + dir.dy * span))
+            sub.stroke(p, with: .color(.primary.opacity(0.7)), lineWidth: 0.5)
         }
     }
 }
