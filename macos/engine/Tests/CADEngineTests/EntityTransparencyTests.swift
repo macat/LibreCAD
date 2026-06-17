@@ -307,4 +307,88 @@ struct EntityTransparencyTests {
         let text = try String(contentsOfFile: path, encoding: .utf8)
         #expect(!text.contains("\n440\n"))
     }
+
+    // MARK: - Per-LAYER transparency (Wave W1-1D)
+    //
+    // A `Layer` now carries an `opacity` field; `Layer.resolvedPen` threads it into
+    // `ResolvedPen.opacity` (folded into the resolved color's alpha). This is exactly
+    // what the real resolve path inherits for a `.byLayer` pen — `CADDrawing
+    // .makeResolveContext()` wires `layerAttributes: { table.layer($0)?.resolvedPen }`
+    // — so this single field lights up the whole already-wired resolve + render path.
+
+    @Test("a Layer's opacity flows into resolvedPen.opacity and folds into color.a")
+    func layerResolvedPenCarriesOpacity() {
+        let layer = Layer(name: "L", color: .white, opacity: 0.25)
+        let rp = layer.resolvedPen
+        #expect(abs(rp.opacity - 0.25) < 1e-6)
+        // White (a == 1) × 0.25 == 0.25 folded into the resolved color's alpha.
+        #expect(abs(rp.color.a - 0.25) < 1e-6)
+    }
+
+    @Test("a Layer with the default opacity resolves fully opaque (regression)")
+    func layerResolvedPenDefaultOpaque() {
+        // The historical case: no opacity supplied → fully opaque, color.a unchanged.
+        let layer = Layer(name: "L", color: .white)
+        #expect(layer.opacity == 1.0)
+        #expect(layer.resolvedPen.opacity == 1.0)
+        #expect(layer.resolvedPen.color.a == 1.0)
+    }
+
+    @Test(".byLayer entity inherits a non-opaque LAYER opacity through the resolve path")
+    func byLayerEntityInheritsLayerOpacity() {
+        // Mirror CADDrawing.makeResolveContext(): layerAttributes looks the layer up
+        // in the table and returns its resolvedPen.
+        let table = LayerTable(
+            layers: [Layer(name: "0"),
+                     Layer(name: "Glass", color: .white, opacity: 0.2)],
+            activeLayerName: "0")
+        let ctx = ResolveContext(layerAttributes: { id in
+            table.layer(id)?.resolvedPen
+                ?? ResolvedPen(color: .white, lineType: .solid, lineWidth: .default)
+        })
+        let pen = Pen(transparency: .byLayer)
+        let r = pen.resolved(layer: LayerID("Glass"), in: ctx)
+        #expect(abs(r.opacity - 0.2) < 1e-6)
+        #expect(abs(r.color.a - 0.2) < 1e-6)
+    }
+
+    @Test("LayerTable.setOpacity updates the layer's opacity (and its resolvedPen)")
+    func layerTableSetOpacity() {
+        var table = LayerTable(layers: [Layer(name: "0"), Layer(name: "L")],
+                               activeLayerName: "0")
+        table.setOpacity("L", 0.3)
+        #expect(table.layer(named: "L")?.opacity == 0.3)
+        #expect(abs((table.layer(named: "L")?.resolvedPen.opacity ?? -1) - 0.3) < 1e-6)
+        // Unknown layer is a no-op (does not crash, does not add a layer).
+        table.setOpacity("missing", 0.5)
+        #expect(table.count == 2)
+    }
+
+    @Test("a Layer JSON WITHOUT an opacity key decodes as fully opaque (back-compat)")
+    func layerCodableBackCompatNoOpacityKey() throws {
+        // Build a "legacy" Layer JSON by encoding a real Layer, then STRIPPING the
+        // `opacity` key — exercises the real `decodeIfPresent(...) ?? 1` path.
+        let modern = Layer(name: "L", color: .white, opacity: 0.4)
+        let data = try JSONEncoder().encode(modern)
+        var obj = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(obj["opacity"] != nil)   // modern Layer DID encode the key
+        obj.removeValue(forKey: "opacity")
+        let legacy = try JSONSerialization.data(withJSONObject: obj)
+
+        let l = try JSONDecoder().decode(Layer.self, from: legacy)
+        #expect(l.opacity == 1.0)
+        // And it resolves fully opaque, byte-for-byte the pre-transparency behavior.
+        #expect(l.resolvedPen.opacity == 1.0)
+        #expect(l.resolvedPen.color.a == 1.0)
+    }
+
+    @Test("a Layer with an explicit opacity round-trips through Codable")
+    func layerCodableRoundTrip() throws {
+        let l = Layer(name: "L", color: .white, opacity: 0.42)
+        let data = try JSONEncoder().encode(l)
+        let back = try JSONDecoder().decode(Layer.self, from: data)
+        #expect(back == l)
+        #expect(back.opacity == 0.42)
+    }
 }
