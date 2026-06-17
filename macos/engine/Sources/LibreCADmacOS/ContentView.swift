@@ -2442,10 +2442,13 @@ struct LayoutTabStrip: View {
         var id: String { name }
     }
 
-    /// Whether the strip is shown at all (plan §3d): HIDE it entirely until there is a
-    /// paper-space layout to switch to — with only the implicit "Model" space there is
-    /// nothing to tab between, so a lone "Model" pill is noise. The strip also appears
-    /// while a block-edit session is open so its transient BEDIT tab has a home.
+    /// Whether the strip is shown at all. The Model/Layout tab strip is ALWAYS visible
+    /// (AutoCAD/LibreCAD parity): the "Model" tab, one tab per layout, and the trailing
+    /// "+" that adds a layout. It was briefly hidden until a paper-space layout existed
+    /// (Wave 4 §3d — "a lone Model pill is noise"), but the ONLY add-layout affordance
+    /// ("+") lives INSIDE the strip, so hiding it left a fresh, model-space-only document
+    /// with no GUI way to create its first layout (a dead-end). Always showing the strip
+    /// restores that entry point.
     /// `LayoutTabStrip.shouldShow(layoutCount:isEditingBlock:)` is the pure predicate
     /// (unit-tested); this is its live read.
     private var isVisible: Bool {
@@ -2453,12 +2456,16 @@ struct LayoutTabStrip: View {
                         isEditingBlock: model.editingBlock != nil)
     }
 
-    /// Pure visibility predicate (plan §3d): show the strip iff there is at least one
-    /// paper-space layout to switch to, OR a block-edit session is active (so the
-    /// transient BEDIT tab is reachable). With only model space (`layoutCount == 0`)
-    /// and no session, the strip is hidden — there is nothing to tab between.
+    /// Pure visibility predicate: the strip is ALWAYS shown (returns `true`). The Model
+    /// tab + "+" must stay reachable at all times so a fresh, model-space-only drawing
+    /// can create its first layout — the "+" is the sole add-layout entry point (no menu,
+    /// palette, toolbar, or shortcut creates a layout). Kept as a predicate, rather than
+    /// dropping the gate, so the always-visible contract is unit-tested and any future
+    /// "hide when empty" regression fails loudly. The parameters are retained for that
+    /// test contract (and to document what once gated visibility); the result no longer
+    /// depends on them.
     static func shouldShow(layoutCount: Int, isEditingBlock: Bool) -> Bool {
-        layoutCount > 0 || isEditingBlock
+        true
     }
 
     var body: some View {

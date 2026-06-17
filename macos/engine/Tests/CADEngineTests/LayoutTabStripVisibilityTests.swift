@@ -2,18 +2,21 @@
 //  LayoutTabStripVisibilityTests.swift
 //  CADEngineTests
 //
-//  Wave 4 (bottom chrome) — the LayoutTabStrip's "hide until a paper-space layout
-//  exists" rule (plan §3d). The strip's visibility is a PURE predicate over two model
-//  reads — the paper-space layout count and whether a block-edit session is open:
+//  The LayoutTabStrip is ALWAYS visible (AutoCAD/LibreCAD parity): it shows the
+//  "Model" tab, one tab per layout, and the trailing "+" add-layout button. Its
+//  visibility is a PURE predicate that now returns `true` unconditionally:
 //
-//      shouldShow == (layoutCount > 0) || isEditingBlock
+//      shouldShow == true
+//
+//  It was briefly hidden until a paper-space layout existed (Wave 4 §3d), but the only
+//  add-layout affordance ("+") lives INSIDE the strip — so hiding it left a fresh,
+//  model-space-only document with no GUI way to create its first layout (a dead-end).
+//  These tests pin the always-visible contract so a future "hide when empty" regression
+//  fails loudly: with zero layouts and no block-edit session the strip is STILL shown.
 //
 //  `LayoutTabStrip` is a SwiftUI view in the (un-importable) app target and `ContentView`
-//  is too large to symlink whole, so these tests pin the predicate's CONTRACT against
-//  the REAL model inputs that drive it: a fresh document has only model space (count 0 →
-//  hidden); adding a layout makes a paper space exist (count > 0 → shown). The predicate
-//  arithmetic is reproduced here exactly as the view uses it so a future change to the
-//  rule fails loudly.
+//  is too large to symlink whole, so the predicate is reproduced here exactly as the view
+//  uses it (kept byte-identical so a rule change in production must be mirrored here).
 //
 //  `CanvasModel` is reached via the existing `_SharedCanvasModel.swift` symlink; the
 //  suite is `@MainActor`. Uniquely namespaced so it does not collide in the shared target.
@@ -29,25 +32,28 @@ import CoreGraphics
 @testable import CADEngine
 
 @MainActor
-@Suite("layout tab strip visibility (hide until a paper-space layout exists)")
+@Suite("layout tab strip visibility (always shown — Model tab + “+” always reachable)")
 struct LayoutTabStripVisibilityTests {
 
     /// The pure predicate the view uses (`LayoutTabStrip.shouldShow`). Reproduced here
     /// because the view itself is not symlink-reachable; kept byte-identical so a rule
-    /// change in production must be mirrored here.
+    /// change in production must be mirrored here. The strip is ALWAYS visible — the
+    /// parameters are retained only to match the production signature.
     private func shouldShow(layoutCount: Int, isEditingBlock: Bool) -> Bool {
-        layoutCount > 0 || isEditingBlock
+        true
     }
 
     private func makeModel() -> CanvasModel {
         CanvasModel(drawing: CADDrawing(), viewSize: CGSize(width: 800, height: 600))
     }
 
-    // MARK: - The pure predicate
+    // MARK: - The pure predicate (always true)
 
-    @Test("only Model (no layouts, no session) → strip is HIDDEN")
-    func hiddenWithOnlyModel() {
-        #expect(shouldShow(layoutCount: 0, isEditingBlock: false) == false)
+    @Test("only Model (no layouts, no session) → strip is STILL SHOWN (so “+” is reachable)")
+    func shownWithOnlyModel() {
+        // The regression guard: a fresh, model-space-only drawing MUST show the strip,
+        // otherwise the lone "+" (the only add-layout entry point) is unreachable.
+        #expect(shouldShow(layoutCount: 0, isEditingBlock: false) == true)
     }
 
     @Test("any paper-space layout → strip is SHOWN")
@@ -56,24 +62,24 @@ struct LayoutTabStripVisibilityTests {
         #expect(shouldShow(layoutCount: 3, isEditingBlock: false) == true)
     }
 
-    @Test("a block-edit session shows the strip even with no layouts (BEDIT tab home)")
+    @Test("a block-edit session keeps the strip shown (BEDIT tab home)")
     func shownDuringBlockEditWithoutLayouts() {
         #expect(shouldShow(layoutCount: 0, isEditingBlock: true) == true)
     }
 
-    // MARK: - The real model inputs that feed the predicate
+    // MARK: - The real model inputs (the strip is shown regardless)
 
-    @Test("a fresh document has zero paper-space layouts (only model space)")
-    func freshDocHasNoLayouts() {
+    @Test("a fresh document has zero paper-space layouts — yet the strip is shown (Model + “+”)")
+    func freshDocShowsStripWithNoLayouts() {
         let m = makeModel()
         #expect(m.orderedLayouts.isEmpty)
-        // → the strip is hidden for a brand-new drawing.
+        // → the strip is shown for a brand-new drawing so the first layout can be added.
         #expect(shouldShow(layoutCount: m.orderedLayouts.count,
-                           isEditingBlock: m.editingBlock != nil) == false)
+                           isEditingBlock: m.editingBlock != nil) == true)
     }
 
-    @Test("adding a layout makes a paper space exist → the strip becomes visible")
-    func addingALayoutShowsTheStrip() {
+    @Test("adding a layout adds a tab; the strip stays shown")
+    func addingALayoutKeepsTheStripShown() {
         let m = makeModel()
         #expect(m.orderedLayouts.isEmpty)
         let name = m.newLayout()

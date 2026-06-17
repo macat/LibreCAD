@@ -165,7 +165,7 @@ Where lenses conflict, the **Call** column states the decision.
 | Command-line hint shown twice | Keep syntax hint in the placeholder only; remove the trailing duplicate else-branch (keep it for errors); verb hints (`⏎/⌫/esc`) live in StatusBar only | ContentView:892-917, StatusBar:86 | S | Low |
 | Snap/grid/ortho/polar not clickable | Right-aligned toggle cluster: Grid(F7), Snap(F9), Ortho(F8), Polar(F10), OSNAP(F3) — borderless toggles filling `accent` when on; wire existing F-keys | StatusBar.swift, CanvasModel.swift | M | Med. High CAD-muscle value. |
 | StatusBar labeling inconsistency | Both readouts carry a leading SF Symbol (zoom → `plus.magnifyingglass`) or neither; `Divider().frame(height:16)` between coord/snap/zoom; numerics `rowValue` | StatusBar:119-128 | S | Low |
-| LayoutTabStrip: weak active state, always-on, r5 | Active tab = 2pt accent underline + `.semibold`; pill radius 5→6; fill `selectionFill`; **hide strip until a paper-space layout exists** | ContentView:1974-2012 | S | Low |
+| LayoutTabStrip: weak active state, always-on, r5 | Active tab = 2pt accent underline + `.semibold`; pill radius 5→6; fill `selectionFill`; ~~hide strip until a paper-space layout exists~~ → **strip ALWAYS visible** (the "+" is the sole add-layout entry point, so hiding it was a dead-end; §3d hide-when-empty reverted 2026-06-17) | ContentView:1974-2012 | S | Low |
 
 ### 3e. Global tokens (cross-cutting — built FIRST as Wave 1, then **the radius/tint sweep is folded into each owning wave**, not run as an orphan pass)
 

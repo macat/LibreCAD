@@ -6,6 +6,16 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-17 — FIX: Model/Layout tab strip restored to ALWAYS visible (regression from W4 §3d) — (`native-macos`, 3564 tests held)
+
+**Symptom (owner-reported):** "the layouts disappeared — there are tabs but no way to find layouts or add a layout." **Root cause (recon, triangulated across code + git + the dedicated test):** Wave 4 Stage 3 `d5566b0aa` ("LayoutTabStrip visibility + styling") wrapped the previously-*always-visible* strip in `if isVisible`, with `shouldShow = layoutCount > 0 || isEditingBlock` (plan §3d, "a lone Model pill is noise"). But the **only** GUI add-layout affordance — the trailing "+" — lives *inside* that strip, and **no menu / command-palette / toolbar / shortcut / command-line path creates a layout** (verified by full-repo grep). So a fresh, model-space-only document (0 layouts) hid the whole strip → no "+" → a true dead-end: the first layout could never be created from the GUI. No second/newer regression found (W4-tail `0c6e5fb` only touched Page-Setup plumbing); `orderedLayouts`/`newLayout` verified correct.
+
+- **Decision:** make `LayoutTabStrip.shouldShow` return `true` unconditionally (restore the pre-`d5566b0aa` always-on strip: Model tab + one tab per layout + "+"). The predicate is kept (not deleted) so the always-visible contract stays unit-tested. `LayoutTabStripVisibilityTests` repurposed: the two "hidden when empty" assertions flipped to expect-shown; suite/names/header updated. Test count unchanged (5 tests; 3564 total).
+- **Options considered:** (a) always-visible strip [chosen — matches the owner's "bring it back as tabs" + AutoCAD/LibreCAD parity, and the "+" becomes reachable]; (b) keep the hide-when-empty rule but add a `Layout ▸ New Layout` menu / palette entry as a separate add-layout path [rejected as the primary fix — doesn't restore the tabs the owner asked for; still leaves an empty drawing with no tab strip]. (b) remains an OPTIONAL future hardening (a redundant second entry point), not required now.
+- **How to revisit:** if the "lone Model pill is noise" concern returns, do NOT re-hide the strip while the "+" is its only add-layout home — first add a menu/palette entry point, then the visibility test (`shownWithOnlyModel`) is the guard to update deliberately.
+
+---
+
 ## 2026-06-17 — PARITY PROGRAM COMPLETE: W3 (Wipeout) + W3b (layer-transparency DXF + annotation-scale) + W4 (wire-wave + page-setup + font-dir + layer-opacity) — (`native-macos @ 99e4dd1fa`, **3564 tests**, `.app` rebuilt)
 
 The back half + completion of the owner's "do all of it (parallel program)". Program total: **3393 → 3564 (+171 tests)**, zero regressions, every wave reviewed-or-spot-checked + serial-gated + merged-by-hash.
