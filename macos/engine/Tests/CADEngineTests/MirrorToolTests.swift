@@ -60,6 +60,25 @@ struct MirrorToolTests {
         )
     }
 
+    /// A line with FULLY non-default attributes (layer / pen / flags / space /
+    /// layoutName), id 7. Used to prove the mirror-COPY `.add` record carries every
+    /// source attribute verbatim — only id (→ placeholder) and geometry change.
+    private static let decoratedID = EntityID(7)
+    private static let decoratedLayer = LayerID("walls")
+    private static let decoratedPen = Pen(lineColor: .byBlock, lineType: .dashed)
+    private static let decoratedFlags: EntityFlags = [.visible, .locked]
+    private func decoratedLineRecord() -> EntityRecord {
+        EntityRecord(
+            id: Self.decoratedID,
+            layer: Self.decoratedLayer,
+            pen: Self.decoratedPen,
+            flags: Self.decoratedFlags,
+            kind: .line(LineData(start: Vector(0, 5), end: Vector(10, 5))),
+            space: .paper,
+            layoutName: "Layout1"
+        )
+    }
+
     /// The X axis as a two-point mirror line: p1 = (0,0), p2 = (10,0).
     private static let axisP1 = Vector(0, 0)
     private static let axisP2 = Vector(10, 0)
@@ -78,6 +97,19 @@ struct MirrorToolTests {
         for edit in edits {
             guard case .replace(let id, let kind) = edit else { return nil }
             out[id] = kind
+        }
+        return out
+    }
+
+    /// Pulls the `.add`ed records out of a `.commit`, in order (returns nil if the
+    /// outcome isn't a `.commit` of ONLY `.add` edits — so a `.replace`-only commit
+    /// returns nil, which the regression guard relies on).
+    private func addedRecords(_ outcome: ToolOutcome) -> [EntityRecord]? {
+        guard case .commit(let edits) = outcome else { return nil }
+        var out: [EntityRecord] = []
+        for edit in edits {
+            guard case .add(let record) = edit else { return nil }
+            out.append(record)
         }
         return out
     }
@@ -253,5 +285,111 @@ struct MirrorToolTests {
         // Back to picking the first axis point, but the selection is retained, so
         // the prompt is the base hint (not the select-first hint).
         #expect(tool.status == "Specify first point of mirror line")
+    }
+
+    // MARK: - Mirror-COPY (W1-1C: keepOriginal == true → .add, originals kept)
+
+    @Test("keepOriginal=true commits ONLY .add records (placeholder id, line reflected)")
+    func keepCopyEmitsOnlyAddReflectedLine() {
+        var tool = MirrorTool()
+        tool.keepOriginal = true
+        let ctx = context([lineRecord()])
+
+        let first = tool.handle(.click(Self.axisP1), context: ctx)
+        #expect(first == .none)   // first click only fixes the first axis point
+
+        let outcome = tool.handle(.click(Self.axisP2), context: ctx)
+        guard let added = addedRecords(outcome) else {
+            Issue.record("expected a .commit of only .add edits"); return
+        }
+        #expect(added.count == 1)
+        // New geometry carries the placeholder id — the app mints a real id on add.
+        #expect(added.first?.id == .placeholder)
+
+        // Line (0,5)-(10,5) reflected across the X axis → (0,-5)-(10,-5).
+        guard case .line(let mirroredLine)? = added.first?.kind else {
+            Issue.record("added record was not a line"); return
+        }
+        #expect(approxEqual(mirroredLine.start, Vector(0, -5)))
+        #expect(approxEqual(mirroredLine.end, Vector(10, -5)))
+
+        // The tool resets after the commit (ready for select-first again).
+        #expect(tool.status == "Select objects to mirror first")
+    }
+
+    @Test("keepOriginal=true copies layer/pen/flags/space/layoutName onto the .add record")
+    func keepCopyPreservesAllAttributes() {
+        var tool = MirrorTool()
+        tool.keepOriginal = true
+        let source = decoratedLineRecord()
+        let ctx = context([source])
+
+        _ = tool.handle(.click(Self.axisP1), context: ctx)
+        let outcome = tool.handle(.click(Self.axisP2), context: ctx)
+        guard let added = addedRecords(outcome), let copy = added.first else {
+            Issue.record("expected a .commit of only .add edits"); return
+        }
+        // id is the placeholder (the app mints a fresh id); EVERY other attribute is
+        // copied verbatim from the source — only the geometry is reflected.
+        #expect(copy.id == .placeholder)
+        #expect(copy.id != source.id)
+        #expect(copy.layer == source.layer)
+        #expect(copy.pen == source.pen)
+        #expect(copy.flags == source.flags)
+        #expect(copy.space == source.space)
+        #expect(copy.layoutName == source.layoutName)
+    }
+
+    @Test("keepOriginal=true: polyline bulge SIGN flips on the .add copy (same transform as .replace)")
+    func keepCopyPolylineBulgeSignFlips() {
+        var tool = MirrorTool()
+        tool.keepOriginal = true
+        let ctx = context([polylineRecord()])
+
+        _ = tool.handle(.click(Self.axisP1), context: ctx)
+        let outcome = tool.handle(.click(Self.axisP2), context: ctx)
+        guard let added = addedRecords(outcome),
+              case .polyline(let pl)? = added.first?.kind else {
+            Issue.record("added record was not a polyline"); return
+        }
+        #expect(added.first?.id == .placeholder)
+        // Bulge sign flips (magnitude preserved) — the orientation-reversing
+        // transform is identical to the proven mirror-in-place `.replace` path.
+        #expect(pl.vertices.first?.bulge == -Self.polylineBulge)
+    }
+
+    @Test("keepOriginal=true: arc reversed flag flips on the .add copy (same transform as .replace)")
+    func keepCopyArcReversedFlips() {
+        var tool = MirrorTool()
+        tool.keepOriginal = true
+        let ctx = context([arcRecord()])
+
+        _ = tool.handle(.click(Self.axisP1), context: ctx)
+        let outcome = tool.handle(.click(Self.axisP2), context: ctx)
+        guard let added = addedRecords(outcome),
+              case .arc(let arc)? = added.first?.kind else {
+            Issue.record("added record was not an arc"); return
+        }
+        #expect(added.first?.id == .placeholder)
+        // The source arc is reversed:false → mirror flips it to true (same flip the
+        // `.replace` path proves), and the center reflects across the X axis.
+        #expect(arc.reversed == true)
+        #expect(approxEqual(arc.center, Vector(5, -5)))
+        #expect(abs(arc.radius - 2) < 1e-9)
+    }
+
+    @Test("default (keepOriginal=false) still emits .replace, never .add (regression guard)")
+    func defaultEmitsReplaceNotAdd() {
+        var tool = MirrorTool()
+        // keepOriginal defaults to false — deliberately do NOT set it.
+        let ctx = context([lineRecord()])
+
+        _ = tool.handle(.click(Self.axisP1), context: ctx)
+        let outcome = tool.handle(.click(Self.axisP2), context: ctx)
+
+        // Commit is ONLY `.replace` edits (helper is nil unless every edit replaces).
+        #expect(replacedKinds(outcome) != nil)
+        // And definitively contains no `.add` edits.
+        #expect(addedRecords(outcome) == nil)
     }
 }

@@ -29,7 +29,10 @@
 //                        first axis pick within this run; no commit).
 //    - `.cancel` (Esc) → discard the run, reset to the initial state, `.finished`.
 //
-//  This is mirror-IN-PLACE (the originals are `.replace`d by their reflection).
+//  By default this is mirror-IN-PLACE (the originals are `.replace`d by their
+//  reflection). With `keepOriginal == true` it is mirror-COPY: the originals are
+//  kept and the reflection is emitted as NEW `.add` records (LibreCAD's "Keep
+//  original" option). Both modes share the one orientation-reversing transform.
 //
 //  PURE (ADR-001 / Tool contract): it never touches CADDrawing / Quadtree / GUI.
 //  It reads only the read-only `ToolContext.selected` plus the snapped world
@@ -83,6 +86,16 @@ public struct MirrorTool: Tool {
     /// rebuilds `context.selected` per call, but it stays stable for this run).
     private var selection: [EntityRecord] = []
 
+    // MARK: - Public options
+
+    /// Mirror-COPY toggle (W1-1C). When `false` (the default) this is
+    /// mirror-IN-PLACE: each selected entity is `.replace`d by its reflection —
+    /// byte-identical to the original behavior. When `true` the originals are kept
+    /// and the reflected geometry is emitted as NEW entities (`.add`), i.e.
+    /// mirror-and-keep (LibreCAD's "Keep original" option). Additive and
+    /// default-off, so an unwired call site is completely unaffected.
+    public var keepOriginal: Bool = false
+
     public init() {}
 
     // MARK: - Tool
@@ -126,7 +139,8 @@ public struct MirrorTool: Tool {
     }
 
     /// A MODIFY tool: it reads `context.selected` (the entities to reflect) and
-    /// emits `.replace(id, newKind)` edits — never `.add`.
+    /// emits geometry edits — `.replace(id, newKind)` in the default mirror-in-place
+    /// mode, or `.add(newRecord)` (originals kept) when `keepOriginal` is set.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
         switch input {
         case .value:
@@ -182,12 +196,32 @@ public struct MirrorTool: Tool {
             }
             // The mirror transform (orientation-reversing): arc/ellipse `reversed`
             // and polyline bulge-sign flips are handled inside `EntityTransform`.
+            // The SAME `t` builds the reflected geometry in BOTH modes — derive it
+            // once so mirror-copy's `.add` carries the identical orientation flips
+            // that mirror-in-place's `.replace` does (do NOT re-derive per branch).
             let t = Affine2D.mirror(axisPoint1: p1, axisPoint2: p)
-            // TODO(backlog): mirror-COPY variant — keep the originals and emit
-            // `.add` for the reflected geometry (alongside leaving the selection
-            // in place) instead of `.replace`. Default here is mirror-in-place.
-            let edits: [ToolEdit] = selection.map {
-                .replace($0.id, $0.kind.transformed(by: t))
+            let edits: [ToolEdit] = selection.map { record in
+                let mirroredKind = record.kind.transformed(by: t)
+                if keepOriginal {
+                    // Mirror-COPY (W1-1C): keep the originals untouched and add the
+                    // reflection as a NEW entity with the placeholder id (the app
+                    // mints a fresh id on `add`). Preserve every other attribute
+                    // (layer / pen / flags / space / layoutName) so the copy is a
+                    // faithful duplicate of its source — only id and geometry differ.
+                    return .add(EntityRecord(
+                        id: .placeholder,
+                        layer: record.layer,
+                        pen: record.pen,
+                        flags: record.flags,
+                        kind: mirroredKind,
+                        space: record.space,
+                        layoutName: record.layoutName
+                    ))
+                } else {
+                    // Mirror-IN-PLACE (default): replace each selected entity's
+                    // geometry in place (id / layer / pen / flags preserved by the app).
+                    return .replace(record.id, mirroredKind)
+                }
             }
             reset()
             return .commit(edits)
