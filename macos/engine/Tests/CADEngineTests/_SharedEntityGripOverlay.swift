@@ -1,0 +1,1 @@
+../../Sources/LibreCADmacOS/Canvas/EntityGripOverlay.swift
