@@ -9,10 +9,10 @@
 //  angle, plus a PRE-FORMATTED `dist<angle` readout chip near the snapped point. It is
 //  the first user-visible win of the snap-tracking stack: the engine
 //  (`CanvasModel.trackingDisplay()` → `TrackingDisplay`) emits the value types, this
-//  view renders them. The OTRACK alignment GUIDES / acquired-point MARKERS / lock
-//  MARKER fields of `TrackingDisplay` are populated by a later wave (W5/W6); this view
-//  already iterates them harmlessly (they are empty now) so the W6 render pass only has
-//  to fill the marked TODO stubs.
+//  view renders them. Wave 6 adds the OTRACK VIEW layer: the alignment GUIDES (dotted
+//  accent lines through acquired points), the acquired-point MARKERS (small "+"), and the
+//  lock MARKER ("×") are now drawn from the same `TrackingDisplay` (populated by the W5
+//  model), alongside the polar ray + readout.
 //
 //  ## Why a screen-space AppKit overlay (mirrors the sibling overlays' rationale)
 //  The polar ray + readout must stay a CONSTANT on-screen style (a fixed dotted dash,
@@ -132,6 +132,27 @@ enum TrackingOverlayGeometry {
         let b = CGPoint(x: origin.x + tMax * dx, y: origin.y + tMax * dy)
         return (a, b)
     }
+
+    /// The two WORLD endpoints of an (effectively-infinite) alignment guide line: the
+    /// guide's `origin` extended a large multiple of its unit `direction` BOTH ways, so
+    /// the overlay can project the two far points and `clipRayToBounds` the resulting
+    /// screen segment to the view (a guide is a full line through `origin` along ±`dir`,
+    /// not a one-sided ray like the polar one). `reach` is the world half-length to extend
+    /// (a big number — far enough to leave the view at any sane zoom); the caller projects
+    /// these two points, then clips.
+    ///
+    /// - Parameters:
+    ///   - origin:    a point the guide passes through, in WORLD coords.
+    ///   - direction: the guide's unit direction (WORLD). Need not be exactly unit; it is
+    ///     scaled by `reach` either way (the clip handles the resulting screen segment).
+    ///   - reach:     the world half-length to extend in each direction.
+    /// - Returns: `(near, far)` — the two extended world endpoints (`origin ± reach·dir`).
+    static func guideFarPoints(origin: Vector,
+                               direction: Vector,
+                               reach: Double = 1e9) -> (near: Vector, far: Vector) {
+        let delta = direction * reach
+        return (near: origin - delta, far: origin + delta)
+    }
 }
 
 // MARK: - The snap-tracking overlay view
@@ -220,6 +241,14 @@ final class TrackingOverlayView: NSView {
     private static let labelCornerRadius: CGFloat = 4
     /// Half-padding inside the readout box around the text (points).
     private static let labelPadding: CGFloat = 4
+    /// Half-arm length of an acquired-point "+" marker (points) — so the full cross spans
+    /// ~`2·markerArm` ≈ 6px across, a small AutoCAD-style acquisition glyph.
+    private static let markerArm: CGFloat = 3
+    /// Half-size of the lock marker "×" / box (points). A touch larger than the "+" so the
+    /// engaged-lock glyph reads as the distinct, dominant marker.
+    private static let lockArm: CGFloat = 4
+    /// Stroke width for the acquired "+" / lock "×" marker arms (points).
+    private static let markerLineWidth: CGFloat = 1.2
 
     // MARK: Colors (accent-tinted chrome, DISTINCT from the live-dim dim line)
 
@@ -228,6 +257,15 @@ final class TrackingOverlayView: NSView {
     /// keeps it a faint guide that geometry shows through.
     private static var polarRayColor: NSColor {
         NSColor.controlAccentColor.withAlphaComponent(0.4)
+    }
+    /// OTRACK alignment guides reuse the polar-ray accent dotted style (same dash + 0.4
+    /// alpha) so the whole tracking family reads alike — a faint accent guide through an
+    /// acquired point.
+    private static var guideColor: NSColor { polarRayColor }
+    /// Acquired-point "+" markers + the lock "×" — accent, a touch MORE opaque than the
+    /// faint guide line (markers are the solid anchors the guides radiate from / lock to).
+    private static var markerColor: NSColor {
+        NSColor.controlAccentColor.withAlphaComponent(0.85)
     }
     /// The readout text color.
     private static var readoutTextColor: NSColor { .labelColor }
@@ -256,11 +294,13 @@ final class TrackingOverlayView: NSView {
 
     // MARK: Drawing (GUI-only — exercised in the app, not the headless suite)
 
-    /// Renders the tracking display: the dotted polar ray (clipped to the view) and the
-    /// pre-formatted `dist<angle` readout in a rounded translucent chip near the snapped
-    /// point. A no-op when disabled. THIS WAVE draws only `polarRay` + `readout`; the
-    /// OTRACK `guides` / `acquiredMarkers` / `lockMarker` are iterated harmlessly (empty
-    /// now) with their rendering left as marked TODO stubs for W6.
+    /// Renders the tracking display: the dotted polar ray (clipped to the view), the
+    /// OTRACK alignment `guides` (dotted accent lines clipped to the view), the acquired-
+    /// point `acquiredMarkers` (small "+"), the `lockMarker` ("×"), and the pre-formatted
+    /// `dist<angle` `readout` in a rounded translucent chip near the snapped point. The
+    /// readout is drawn LAST so its chip sits on top of the guides/markers; the live-dim
+    /// chip (a sibling overlay mounted above) still paints over everything. A no-op when
+    /// disabled.
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard isEnabled, let ctx = NSGraphicsContext.current?.cgContext else { return }
@@ -294,29 +334,74 @@ final class TrackingOverlayView: NSView {
         ctx.restoreGState()
     }
 
-    /// OTRACK alignment guides. W5 fills `display.guides`; W6 renders them. This wave
-    /// iterates harmlessly (the array is empty now) so the W6 pass only fills this body.
+    /// Strokes each OTRACK alignment guide (horizontal / vertical / polar / extension) as
+    /// a dotted ACCENT line through its `origin` along ±`direction`, CLIPPED to the view
+    /// bounds in screen space. Each guide is a full (effectively-infinite) line, so the
+    /// origin is extended a large multiple of the unit direction BOTH ways
+    /// (`TrackingOverlayGeometry.guideFarPoints`), the two far points are projected, and
+    /// the resulting screen segment is clipped via the same `clipRayToBounds` the polar
+    /// ray uses. Guides entirely off-screen draw nothing. Reuses the polar-ray accent
+    /// dotted style so the whole tracking family reads alike.
     private func drawTrackingGuides(_ display: CanvasModel.TrackingDisplay, in ctx: CGContext) {
-        for _ in display.guides {
-            // TODO (W6): stroke each alignment guide (horizontal / vertical / polar /
-            // extension) as a dotted accent line clipped to the view bounds.
+        guard !display.guides.isEmpty else { return }
+        ctx.saveGState()
+        ctx.setStrokeColor(Self.guideColor.cgColor)
+        ctx.setLineWidth(Self.lineWidth)
+        ctx.setLineDash(phase: 0, lengths: Self.dashLengths)
+        for guide in display.guides {
+            let (nearW, farW) = TrackingOverlayGeometry.guideFarPoints(
+                origin: guide.origin, direction: guide.direction)
+            guard let (a, b) = TrackingOverlayGeometry.clipRayToBounds(
+                origin: screen(nearW), far: screen(farW), bounds: bounds) else { continue }
+            ctx.move(to: a)
+            ctx.addLine(to: b)
         }
+        ctx.strokePath()
+        ctx.restoreGState()
     }
 
-    /// Acquired-point markers (the small "+" glyphs OTRACK radiates guides from). W5
-    /// fills `display.acquiredMarkers`; W6 renders them. Iterated harmlessly this wave.
+    /// Draws a small accent "+" (~6px across) at each ACQUIRED snap point — the anchors
+    /// OTRACK radiates guides from, so the user sees what they've acquired even before a
+    /// lock engages. A touch more opaque than the faint guide line. Off-screen markers are
+    /// skipped (the "+" would not be visible anyway).
     private func drawAcquiredMarkers(_ display: CanvasModel.TrackingDisplay, in ctx: CGContext) {
-        for _ in display.acquiredMarkers {
-            // TODO (W6): draw a small "+" marker at `screen(point)` for each acquired
-            // snap point.
+        guard !display.acquiredMarkers.isEmpty else { return }
+        ctx.saveGState()
+        ctx.setStrokeColor(Self.markerColor.cgColor)
+        ctx.setLineWidth(Self.markerLineWidth)
+        ctx.setLineDash(phase: 0, lengths: [])   // solid arms (clear any dotted pattern)
+        for world in display.acquiredMarkers {
+            let p = screen(world)
+            guard bounds.contains(p) else { continue }
+            // Horizontal + vertical arms of the "+".
+            ctx.move(to: CGPoint(x: p.x - Self.markerArm, y: p.y))
+            ctx.addLine(to: CGPoint(x: p.x + Self.markerArm, y: p.y))
+            ctx.move(to: CGPoint(x: p.x, y: p.y - Self.markerArm))
+            ctx.addLine(to: CGPoint(x: p.x, y: p.y + Self.markerArm))
         }
+        ctx.strokePath()
+        ctx.restoreGState()
     }
 
-    /// The lock marker (the point the cursor is currently locked to by tracking). W5
-    /// fills `display.lockMarker`; W6 renders it. Handled harmlessly this wave.
+    /// Draws the lock marker — a distinct "×" at the point the cursor is currently LOCKED
+    /// to by tracking (a guide projection or a two-guide intersection). The diagonal "×"
+    /// (vs the acquired points' axis-aligned "+") + the slightly larger arm make the
+    /// engaged lock the dominant glyph. A nil lock / off-screen point draws nothing.
     private func drawLockMarker(_ display: CanvasModel.TrackingDisplay, in ctx: CGContext) {
-        guard display.lockMarker != nil else { return }
-        // TODO (W6): draw the lock marker glyph at `screen(lockMarker)`.
+        guard let lock = display.lockMarker else { return }
+        let p = screen(lock)
+        guard bounds.contains(p) else { return }
+        ctx.saveGState()
+        ctx.setStrokeColor(Self.markerColor.cgColor)
+        ctx.setLineWidth(Self.markerLineWidth)
+        ctx.setLineDash(phase: 0, lengths: [])   // solid arms
+        // Diagonal "×" arms.
+        ctx.move(to: CGPoint(x: p.x - Self.lockArm, y: p.y - Self.lockArm))
+        ctx.addLine(to: CGPoint(x: p.x + Self.lockArm, y: p.y + Self.lockArm))
+        ctx.move(to: CGPoint(x: p.x - Self.lockArm, y: p.y + Self.lockArm))
+        ctx.addLine(to: CGPoint(x: p.x + Self.lockArm, y: p.y - Self.lockArm))
+        ctx.strokePath()
+        ctx.restoreGState()
     }
 
     /// Draws the pre-formatted polar `readout` (`dist<angle`) in a rounded translucent

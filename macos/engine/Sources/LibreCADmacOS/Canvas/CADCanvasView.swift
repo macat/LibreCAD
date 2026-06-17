@@ -563,6 +563,22 @@ final class CADCanvasController {
     private var gestureActive = false
     private var gestureEndWorkItem: DispatchWorkItem?
 
+    // MARK: OTRACK hover-dwell acquisition (snap-tracking W6)
+
+    /// The pending OTRACK hover-dwell work item: fires after the cursor rests ~`dwellDelay`
+    /// over a real object snap (while OTRACK is on) and acquires that snap as a tracking
+    /// point. Cancelable + re-armed whenever the snapped point CHANGES (a resting cursor
+    /// acquires; a moving one keeps cancelling/re-arming so it never fires). `nil` when no
+    /// dwell is pending. View-layer only — never reachable from the headless test path.
+    private var dwellWorkItem: DispatchWorkItem?
+    /// The snapped world point the pending `dwellWorkItem` is keyed on. The re-arm in
+    /// `mouseMoved` compares the current snap against this (`Vector` equality) and only
+    /// re-arms when it changed, so holding still on one snapped point lets the timer fire
+    /// instead of perpetually resetting it.
+    private var dwellSnapPoint: Vector?
+    /// How long the cursor must rest on a real object snap before OTRACK acquires it.
+    private static let dwellDelay: TimeInterval = 0.3
+
     /// A hook ContentView sets so the canvas can hand keyboard focus to the bottom
     /// command/coordinate line (U1) on Space (D1). `nil` until the view appears; the
     /// `handleKey` Space branch calls it (and consumes Space) only when set AND a
@@ -902,14 +918,16 @@ final class CADCanvasController {
             liveDimOverlay.isEnabled = model.dynamicInputEnabled && model.isToolActive
             liveDimOverlay.refresh()
         }
-        // Snap-tracking feedback: show ONLY while a tool is active AND polar tracking is on
-        // (the overlay's display provider also blanks itself when polar isn't engaged /
-        // within the draw aperture), then re-anchor the polar ray + readout to the
-        // (panned/zoomed) cursor + datum on every repaint. Setting `isEnabled` keeps
-        // `isHidden` in sync. (When OTRACK lands in W5, OR in `model.objectTrackingEnabled`
-        // here so the OTRACK guides show with polar off.)
+        // Snap-tracking feedback: show ONLY while a tool is active AND (polar tracking OR
+        // object tracking is on). The overlay's display provider also blanks itself when
+        // neither polar is engaged (within the draw aperture) nor any OTRACK guide/marker is
+        // live, so this is the coarse gate; then re-anchor the polar ray + OTRACK guides /
+        // markers + readout to the (panned/zoomed) cursor + datum on every repaint. Setting
+        // `isEnabled` keeps `isHidden` in sync. (W6: OR in `objectTrackingEnabled` so the
+        // OTRACK guides/markers show with polar off — the W3 TODO.)
         if let trackingOverlay {
-            trackingOverlay.isEnabled = model.isToolActive && model.polarEnabled
+            trackingOverlay.isEnabled = model.isToolActive
+                && (model.polarEnabled || model.objectTrackingEnabled)
             trackingOverlay.refresh()
         }
         view?.setNeedsDisplay(view?.bounds ?? .zero)
@@ -931,6 +949,9 @@ final class CADCanvasController {
 
     private func endGestureSoon() {
         gestureEndWorkItem?.cancel()
+        // A pan/zoom (or any gesture) moves the world under the cursor — drop any pending
+        // OTRACK hover-dwell so a guide isn't acquired from a point the user navigated past.
+        cancelDwell()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.gestureActive = false
@@ -939,6 +960,61 @@ final class CADCanvasController {
         }
         gestureEndWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+
+    // MARK: OTRACK hover-dwell (snap-tracking W6)
+
+    /// (Re)arms the OTRACK hover-dwell timer from the CURRENT snap, mirroring the
+    /// `endGestureSoon` cancelable-`DispatchWorkItem` idiom. Called at the end of every
+    /// `mouseMoved` after the snap is recomputed. Behavior:
+    ///   • If OTRACK is off, or there is no REAL object snap under the cursor
+    ///     (`!osnapActive`), cancel any pending dwell and bail — a free/grid cursor never
+    ///     seeds a guide.
+    ///   • Otherwise, if the snapped point is UNCHANGED from the pending dwell's key, leave
+    ///     the running timer alone (the cursor is resting → let it fire).
+    ///   • If the snapped point CHANGED (cursor moved to a new snap), cancel the old timer
+    ///     and arm a fresh one keyed on the new point.
+    /// When the timer fires it acquires the snap and redraws ONLY if `acquiredPoints`
+    /// actually changed (a re-hover of an already-acquired point toggles it OFF — still a
+    /// change; a no-op acquire must not thrash a redraw).
+    private func armDwell() {
+        guard model.objectTrackingEnabled, model.osnapActive, let snap = model.snap else {
+            cancelDwell()
+            return
+        }
+        // Resting on the same snapped point: keep the in-flight timer (don't reset it).
+        if let pending = dwellSnapPoint, pending == snap.point, dwellWorkItem != nil {
+            return
+        }
+        // New (or first) snapped point — cancel the stale timer and arm a fresh one.
+        dwellWorkItem?.cancel()
+        dwellSnapPoint = snap.point
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.dwellWorkItem = nil
+            self.dwellSnapPoint = nil
+            // Re-validate at fire time: OTRACK still on AND the snap still real (the
+            // cursor could have left / the mode toggled in the 0.3s window).
+            guard self.model.objectTrackingEnabled,
+                  self.model.osnapActive,
+                  let snap = self.model.snap else { return }
+            let before = self.model.acquiredPoints.count
+            self.model.acquireTrackingPoint(snap)
+            // Redraw ONLY if the acquired set changed — a non-acquirable snap is a no-op
+            // (acquireTrackingPoint guards), so don't thrash the canvas when nothing changed.
+            if self.model.acquiredPoints.count != before { self.redraw() }
+        }
+        dwellWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.dwellDelay, execute: work)
+    }
+
+    /// Cancels any pending OTRACK hover-dwell timer and clears its key. Called from
+    /// `mouseExited`, on gesture end (`endGestureSoon`), and whenever the snapped point
+    /// changes / a snap is lost (via `armDwell`).
+    private func cancelDwell() {
+        dwellWorkItem?.cancel()
+        dwellWorkItem = nil
+        dwellSnapPoint = nil
     }
 
     // MARK: Navigation
@@ -1023,6 +1099,10 @@ final class CADCanvasController {
         // ray, never a silent 15° lock with a visible ray.
         model.polarTrackingShiftHeld = Self.shiftHeld
         model.updateSnap(atScreenPoint: point, gridSpacing: spacing)
+        // OTRACK hover-dwell: (re)arm the acquire-on-dwell timer from the freshly-recomputed
+        // snap. It cancels/re-arms whenever the snapped point CHANGES, so a moving cursor
+        // never acquires but a resting one (over a real object snap, with OTRACK on) does.
+        armDwell()
         // When a draw tool is active, feed it the SNAPPED world point so its
         // rubber-band preview tracks the cursor. Otherwise this is select mode and
         // the snap marker / HUD is all that updates. Ortho (if effective) axis-locks
@@ -1043,9 +1123,16 @@ final class CADCanvasController {
             // point. ⇧ disengages ortho (its XOR → free) and ALSO releases polar (its
             // guard is `polarEnabled && !shiftHeld`), so hold-⇧ over ortho is free
             // movement — not a silent 15° polar lock.
-            let constrained = model.polarConstrained(
-                model.orthoConstrained(p, shiftHeld: Self.shiftHeld),
-                shiftHeld: Self.shiftHeld)
+            // OTRACK lock takes PRECEDENCE over ortho/polar (osnap > OTRACK > polar/ortho
+            // > free): wrap the already-ortho/polar-constrained point with
+            // `trackingConstrained`, which returns the LOCKED tracking point when a guide is
+            // engaged (and no real osnap is under the cursor) and the input UNCHANGED
+            // otherwise — so the existing ortho/polar behavior is preserved when nothing is
+            // locked.
+            let constrained = model.trackingConstrained(
+                model.polarConstrained(
+                    model.orthoConstrained(p, shiftHeld: Self.shiftHeld),
+                    shiftHeld: Self.shiftHeld))
             // Route the cursor-move funnel through `handleToolMove` (NOT raw
             // `handleToolInput(.move)`): while DYNAMIC INPUT is active it substitutes the
             // SYNTHETIC cursor so locked / typed fields stay fixed at their typed values
@@ -1067,6 +1154,9 @@ final class CADCanvasController {
 
     func mouseExited() {
         model.clearCursor()
+        // The cursor left the canvas — drop any pending OTRACK hover-dwell so a guide isn't
+        // acquired from the point the cursor rested on as it exited.
+        cancelDwell()
         // Clear the hover highlight (and any in-progress marquee) as the cursor leaves.
         if model.clearHover() { refreshMarquee() }
         // The cursor left the canvas — repaint so the crosshair (which keys off
@@ -1112,9 +1202,14 @@ final class CADCanvasController {
             // gates internally, so chaining ortho→polar mutates the point with at most
             // one. ⇧ disengages ortho AND releases polar (`polarEnabled && !shiftHeld`),
             // so hold-⇧ is free movement — never a silent polar lock.
-            let constrained = model.polarConstrained(
-                model.orthoConstrained(p, shiftHeld: Self.shiftHeld),
-                shiftHeld: Self.shiftHeld)
+            // OTRACK lock takes PRECEDENCE over ortho/polar for the committed point too
+            // (osnap > OTRACK > polar/ortho > free): wrap with `trackingConstrained` so the
+            // clicked point matches the locked preview the user is looking at. It returns
+            // the input UNCHANGED when no guide is engaged, preserving ortho/polar behavior.
+            let constrained = model.trackingConstrained(
+                model.polarConstrained(
+                    model.orthoConstrained(p, shiftHeld: Self.shiftHeld),
+                    shiftHeld: Self.shiftHeld))
             if model.handleToolInput(.click(constrained)) { redraw() }
             return
         }
