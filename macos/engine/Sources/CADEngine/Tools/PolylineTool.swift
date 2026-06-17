@@ -93,6 +93,33 @@ public struct PolylineTool: Tool {
         return [ResolvedPolyline(points: points, closed: false, pen: .toolPreview)]
     }
 
+    /// The AutoCAD-style mid-draw command KEYWORDS the polyline offers at its current
+    /// step, derived PURELY from the committed-vertex count in `state` (no new stored
+    /// fields — reads `state` exactly like `preview`/`status` do). The smart command
+    /// line (Wave 4) renders these as `[Close]`/`[Undo]` chips, and a chosen keyword is
+    /// dispatched back through the EXISTING `ToolInput` events (Wave 3):
+    ///   - `Undo` ↔ `.backspace` (removes the last vertex).
+    ///   - `Close` ↔ `.click(firstVertex)` — clicking on the first vertex closes the
+    ///     loop and commits (`commitPolyline(closed: true)`); there is no standalone
+    ///     close input, so Wave 3 feeds the first vertex back as a `.click`.
+    /// Step gating mirrors LineTool's bracketed options: 0 vertices → none; 1 vertex →
+    /// `Undo` only (nothing to close yet); ≥2 vertices → `Close` + `Undo`. Empty before
+    /// the first point and after commit/reset (`state == .empty`), so it never leaks.
+    public var keywordOptions: [ToolKeyword] {
+        guard case .building(let vertices) = state else { return [] }
+        switch vertices.count {
+        case 0:
+            return []
+        case 1:
+            return [ToolKeyword(keyword: "Undo", label: "Undo")]
+        default:
+            return [
+                ToolKeyword(keyword: "Close", label: "Close"),
+                ToolKeyword(keyword: "Undo", label: "Undo"),
+            ]
+        }
+    }
+
     /// A draw tool: it IGNORES `context` (it needs only the snapped world points)
     /// and emits new geometry as a single `.add` edit on commit.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {
