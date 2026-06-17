@@ -1704,6 +1704,34 @@ public:
         writeStdLType("CONTINUOUS", "Solid line");
         writeStdLType("ByLayer", "");
         writeStdLType("ByBlock", "");
+        // W4B Stage 2 — DASHED-LINE EXPORT FIDELITY: emit each non-solid linetype the
+        // writer names (DXFWriter.lineTypeName: DASHED/DOT/DASHDOT/CENTER/BORDER/
+        // DIVIDE) as a real LTYPE record WITH its dash-element pattern (code 49). The
+        // bug this fixes: before, the LTYPE table held only the three SOLID built-ins,
+        // so a referencing entity's `lineType` (code 6) resolved to an UNDEFINED
+        // linetype in other CAD apps and rendered SOLID. dxfRW::writeLineType already
+        // emits code 73 (size) + 40 (length) + per-element 49/74 — populating `path`
+        // (calling DRW_LType::update() to recompute size/length) is all that is needed,
+        // NO vendored change.
+        //
+        // The element values are the canonical AutoCAD acad.lin pattern lengths (in
+        // drawing units; +dash, -gap, 0=dot) — the de-facto standard every CAD app
+        // recognizes — and follow the SAME rhythm as the screen (RendererGeometry.
+        // dashParamsPx) and CG-export (CGSceneRenderer.dashLengths) renderers: a long
+        // dash, a shorter gap, a tiny dot. (Other apps then scale these by their own
+        // LTSCALE/celtscale, exactly like our resolved linetypeScale scales the dash.)
+        writeDashLType("DASHED",  "Dashed __ __ __ __ __ __ __ __ __ __ __",
+                       { 0.5, -0.25 });
+        writeDashLType("DOT",     "Dot . . . . . . . . . . . . . . . . . .",
+                       { 0.0, -0.25 });
+        writeDashLType("DASHDOT", "Dash dot __ . __ . __ . __ . __ . __ . __",
+                       { 0.5, -0.25, 0.0, -0.25 });
+        writeDashLType("CENTER",  "Center ____ _ ____ _ ____ _ ____ _ ____ _ ____",
+                       { 1.25, -0.25, 0.25, -0.25 });
+        writeDashLType("BORDER",  "Border __ __ . __ __ . __ __ . __ __ . __ __ .",
+                       { 0.5, -0.25, 0.5, -0.25, 0.0, -0.25 });
+        writeDashLType("DIVIDE",  "Divide __ . . __ . . __ . . __ . . __ . . __",
+                       { 0.5, -0.25, 0.0, -0.25, 0.0, -0.25 });
     }
 
     void writeTextstyles() override {
@@ -1980,6 +2008,22 @@ private:
         lt.desc = desc;
         lt.size = 0;
         lt.length = 0.0;
+        m_dxf->writeLineType(&lt);
+    }
+
+    // W4B Stage 2: emit a non-solid LTYPE record carrying its real dash-element
+    // pattern (code 49). `pattern` is the canonical acad.lin element sequence
+    // (+dash, -gap, 0=dot) in drawing units. dxfRW::writeLineType calls
+    // DRW_LType::update() which recomputes `size` (element count, code 73) and
+    // `length` (sum of |element|, code 40) from `path`, then writes one code-49
+    // (+74) group per element — so the LTYPE entry round-trips as a real dashed
+    // linetype in other CAD apps (no vendored change required).
+    void writeDashLType(const char *name, const char *desc,
+                        const std::vector<double> &pattern) {
+        DRW_LType lt;
+        lt.name = name;
+        lt.desc = desc;
+        lt.path = pattern;          // dxfRW::writeLineType → update() fills size/length
         m_dxf->writeLineType(&lt);
     }
 
