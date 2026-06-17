@@ -238,6 +238,14 @@ extension CADEngine {
                let annotationPOD = builder.leaderAnnotationPOD(d, from: record) {
                 entityPODs.append(annotationPOD)
             }
+            // A `.multileader` with an attached annotation ALSO emits the annotation as
+            // a SECOND top-level TEXT/MTEXT (same rationale as `.leader`): stock
+            // libdxfrw's writeMultiLeader does not serialize the CONTEXT_DATA text, so
+            // this is how other CAD tools SEE the multileader's text.
+            if case .multileader(let d) = record.kind,
+               let annotationPOD = builder.multiLeaderAnnotationPOD(d, from: record) {
+                entityPODs.append(annotationPOD)
+            }
         }
         let layerPODs = layers.layers.map { builder.makeLayer($0) }
         // The HEADER var POD (units + $DIM* incl. ext-line offsets) + the DIMSTYLE
@@ -807,16 +815,38 @@ private final class PODBuilder {
             e.vertices = ptr
             e.vertexCount = count
 
-        case .multileader:
-            // ML-W1 STUB: the multileader entity exists end-to-end in the engine
-            // (resolve / transform / snap / Codable) but DXF write is DEFERRED to
-            // ML-W3 (which adds the `LC_ENT_MLEADER` bridge POD + `writeMultiLeader`
-            // — gated on a vendored-libdxfrw sign-off, since stock libdxfrw emits a
-            // geometry-light MULTILEADER). For now mark it UNSUPPORTED so the C side
-            // counts it skipped (no bytes emitted), exactly like any kind the writer
-            // cannot yet represent. The engine's own Codable document path still
-            // round-trips a multileader losslessly.
-            e.kind = Int32(LC_ENT_UNSUPPORTED.rawValue)
+        case .multileader(let d):
+            // Emitted as a DXF MULTILEADER (the C side writes DRW_MLeader). The leg
+            // vertices map to the flat vertex array (bulge unused); the landing
+            // distance (code 41), dogleg flag (code 291) and arrow size (code 42)
+            // round-trip through the entity-level scalars; the annotation text rides
+            // `textValue` (the CONTEXT_DATA `textLabel`), the text height `height`.
+            //
+            // FIDELITY LIMITATION (pinned by MultiLeaderDXFRoundTripTests): stock
+            // libdxfrw's `writeMultiLeader` is GEOMETRY-LIGHT — it emits only the
+            // entity-level scalars, NOT the CONTEXT_DATA{} block, and its DXF reader
+            // parses only those scalars. So across a DXF write→reread the leg
+            // `vertices`, the annotation text, and `styleName` are DROPPED (they
+            // survive only via the engine's own Codable document path); the landing
+            // distance, dogleg flag and arrow size DO survive. We do NOT patch the
+            // vendored libdxfrw; full CONTEXT_DATA interop is a deferred enhancement.
+            // Like LEADER, the writer ALSO emits the annotation as an INDEPENDENT
+            // top-level TEXT/MTEXT (in `writeEntities`) so other CAD tools SEE the
+            // text. MULTILEADER needs R2000+; at R12 / on DWG it is dropped (counted
+            // skipped), matching LEADER/MTEXT/DIMENSION.
+            e.kind = Int32(LC_ENT_MLEADER.rawValue)
+            e.mleaderHasArrow = d.hasArrow ? 1 : 0
+            e.mleaderArrowSize = d.arrowSize
+            e.mleaderLandingDistance = d.landingDistance
+            e.mleaderDoglegEnabled = d.doglegEnabled ? 1 : 0
+            // Carry the annotation text + height for the forward-compat CONTEXT_DATA.
+            if let text = multiLeaderAnnotationText(d) { e.textValue = intern(text) }
+            e.height = multiLeaderAnnotationHeight(d) ?? d.arrowSize
+            if let style = d.styleName, !style.isEmpty { e.styleName = intern(style) }
+            let mleaderVerts = d.vertices.map { PolylineVertex(point: $0) }
+            let (mptr, mcount) = internVertices(mleaderVerts)
+            e.vertices = mptr
+            e.vertexCount = mcount
 
         case .image(let d):
             // Emitted as a DXF IMAGE + its IMAGEDEF (the C side calls
@@ -879,6 +909,51 @@ private final class PODBuilder {
         default:
             // A leader annotation is only ever a text/mtext kind; ignore anything
             // else (the value model bounds the recursion to text kinds).
+            return nil
+        }
+    }
+
+    /// The plain text string of a multileader's annotation (`.text`/`.mtext`), or
+    /// `nil` if it has none. Carried into the MULTILEADER POD's `textValue` (the
+    /// forward-compat CONTEXT_DATA `textLabel`). For `.mtext` we use the raw inline-
+    /// coded passthrough string (the v1 multileader annotation is a `.text`).
+    func multiLeaderAnnotationText(_ d: MultiLeaderData) -> String? {
+        switch d.annotation {
+        case .text(let t):  return t.text.isEmpty ? nil : t.text
+        case .mtext(let m):
+            guard let raw = m.rawCode, !raw.isEmpty else { return nil }
+            return raw
+        default:            return nil
+        }
+    }
+
+    /// The annotation text height of a multileader's annotation, or `nil` if none.
+    func multiLeaderAnnotationHeight(_ d: MultiLeaderData) -> Double? {
+        switch d.annotation {
+        case .text(let t):  return t.height
+        case .mtext(let m): return m.height
+        default:            return nil
+        }
+    }
+
+    /// Builds the POD for a multileader's ATTACHED ANNOTATION as a standalone,
+    /// top-level DXF entity (TEXT/MTEXT), inheriting the multileader's layer + pen, or
+    /// `nil` if it has no text annotation. Mirrors `leaderAnnotationPOD`: stock
+    /// libdxfrw's `writeMultiLeader` does NOT serialize the CONTEXT_DATA annotation,
+    /// so — exactly like LEADER — the writer emits the annotation as an INDEPENDENT
+    /// TEXT/MTEXT so other CAD tools SEE the multileader's text. On re-read it comes
+    /// back as a plain standalone text (not re-attached); the engine's own Codable
+    /// document path keeps the attached form. Pinned by MultiLeaderDXFRoundTripTests.
+    func multiLeaderAnnotationPOD(_ d: MultiLeaderData, from mleader: EntityRecord) -> LCEntity? {
+        guard let annotation = d.annotation else { return nil }
+        switch annotation {
+        case .text, .mtext:
+            let record = EntityRecord(
+                id: mleader.id, layer: mleader.layer, pen: mleader.pen,
+                flags: mleader.flags, kind: annotation,
+                space: mleader.space, layoutName: mleader.layoutName)
+            return makeEntity(record)
+        default:
             return nil
         }
     }

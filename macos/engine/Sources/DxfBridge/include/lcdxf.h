@@ -156,6 +156,32 @@ typedef enum LCEntityKind {
      *  (NOT the entity list) so DXFReader.mapKind's `EntityKind?` contract is
      *  intact (it never sees this kind). The Swift reader zips them onto Layouts. */
     LC_ENT_VIEWPORT = 18,
+    /** A MULTILEADER — AutoCAD's modern annotation callout (DXF MULTILEADER /
+     *  DRW_MLeader), the successor to the legacy LEADER. Like a LEADER it carries a
+     *  leg-path (`vertices`, codes 10/20/30 of the embedded CONTEXT_DATA leader
+     *  line), an arrow flag (`mleaderHasArrow`) + arrow size (`mleaderArrowSize`,
+     *  code 42 `defaultArrowHeadSize`), and an optional inline annotation text in
+     *  `textValue` (the CONTEXT_DATA `textLabel`, code 304); it ADDS a landing
+     *  ("dogleg") tail — `mleaderLandingDistance` (code 41) + `mleaderDoglegEnabled`
+     *  (code 291). `styleName` carries the referenced MLEADERSTYLE name.
+     *
+     *  FIDELITY (the honest, pinned-by-test limitation): stock libdxfrw's
+     *  `writeMultiLeader` is GEOMETRY-LIGHT — it emits the entity-level SCALARS only
+     *  (override flags + leaderType + code 41/42/290/291/45/...), NOT the
+     *  CONTEXT_DATA{} block. And its DXF `parseCode` reader likewise parses ONLY
+     *  those scalars (the CONTEXT_DATA leg points + text are decoded in the DWG
+     *  bit-stream path only, never the DXF path). So across a DXF write→reread:
+     *    SURVIVES — `mleaderLandingDistance` (41), `mleaderDoglegEnabled` (291),
+     *               `mleaderArrowSize` (42), plus the common entity attrs.
+     *    DROPPED  — the leg `vertices`, the annotation `textValue`, `styleName`,
+     *               and `mleaderHasArrow` (no entity-level "has arrow" DXF flag).
+     *  The bridge still POPULATES the DRW_MLeader CONTEXT_DATA (leader root/line
+     *  points + textLabel) on write — correct, forward-compatible, costs nothing —
+     *  but the vendored library does not serialize it. FULL-geometry interop
+     *  (emitting CONTEXT_DATA{}) is a deferred libdxfrw enhancement, intentionally
+     *  out of scope. Distinct from LC_ENT_UNSUPPORTED so the reader maps it to
+     *  `.multileader` (ML-W1 stubbed write → UNSUPPORTED; ML-W3 replaces that). */
+    LC_ENT_MLEADER = 19,
     /** An entity libdxfrw delivered but the reader does not flatten
      *  (ordinate-DIMENSION/...). Carries only its `typeName` so Swift
      *  can collect a warning; geometry fields are unset. */
@@ -412,6 +438,16 @@ typedef struct LCEntity {
      * annotation height is in `height` (code 40); `styleName` the dim style. */
     int32_t leaderHasArrow;      /**< code 71 — 1 if an arrowhead is drawn, else 0. */
     double leaderArrowSize;      /**< arrowhead length (dim style arrow size). */
+
+    /* MULTILEADER-only fields (meaningful when kind == LC_ENT_MLEADER). The leg-path
+     * vertices live in the flat `vertices` array (bulge unused); the annotation text
+     * is in `textValue` (CONTEXT_DATA `textLabel`, code 304); `styleName` is the
+     * referenced MLEADERSTYLE. See the LC_ENT_MLEADER doc for what survives a DXF
+     * round-trip vs is dropped (vendored writeMultiLeader is geometry-light). */
+    int32_t mleaderHasArrow;        /**< 1 if an arrowhead is drawn at the first leg vertex, else 0. */
+    double mleaderArrowSize;        /**< arrowhead length (code 42 defaultArrowHeadSize). Round-trips. */
+    double mleaderLandingDistance;  /**< landing ("dogleg") tail length (code 41). Round-trips. */
+    int32_t mleaderDoglegEnabled;   /**< 1 if the landing tail is drawn (code 291), else 0. Round-trips. */
 
     /* IMAGE-only fields (meaningful when kind == LC_ENT_IMAGE). The insertion
      * (lower-left, code 10) is in p1; the per-pixel U vector (code 11) in p2; the

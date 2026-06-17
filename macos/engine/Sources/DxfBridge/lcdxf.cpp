@@ -419,6 +419,12 @@ public:
         e.insCols = 1;
         e.insRowSpacing = 0.0;
         e.insColSpacing = 0.0;
+        e.leaderHasArrow = 0;
+        e.leaderArrowSize = 0.0;
+        e.mleaderHasArrow = 1;          // multileaders draw an arrowhead by default
+        e.mleaderArrowSize = 0.0;       // <= 0 ⇒ Swift falls back to the default arrow
+        e.mleaderLandingDistance = 0.0;
+        e.mleaderDoglegEnabled = 1;     // the landing tail is drawn by default
         e.attribs = nullptr;
         e.attribCount = 0;
         e.vertices = nullptr;
@@ -904,6 +910,7 @@ public:
     void addDimAngular3P(const DRW_DimAngular3p *data) override { emitDimAngular3P(data); }
     void addDimOrdinate(const DRW_DimOrdinate *data) override { emitDimOrdinate(data); }
     void addLeader(const DRW_Leader *data) override { emitLeader(data); }
+    void addMLeader(const DRW_MLeader *data) override { emitMLeader(data); }
     void addHatch(const DRW_Hatch *data) override { emitHatch(data); }
     // VIEWPORT entity (DRW_Viewport, paper-space P3): a window on a layout sheet.
     // The DXF ENTITIES section always carries an AutoCAD "overview" viewport
@@ -1152,6 +1159,61 @@ private:
         verts.reserve(data->vertexlist.size());
         for (const auto &v : data->vertexlist) {
             if (v) verts.push_back(LCVertex{v->x, v->y, 0.0});
+        }
+        e.vertices = verts.empty() ? nullptr : verts.data();
+        e.vertexCount = static_cast<int32_t>(verts.size());
+        pushEntity(e);
+    }
+
+    // ----- MULTILEADER (modern annotation callout) -----------------------
+    // Flatten a DRW_MLeader into LC_ENT_MLEADER. The leg-path vertices come from the
+    // embedded CONTEXT_DATA leader-line points (context.roots[].leaderLines[].points)
+    // into the flat vertex pool; the annotation text (context.textLabel, code 304)
+    // into `textValue`; the entity-level scalars (landingDistance code 41,
+    // defaultArrowHeadSize code 42, doglegEnabled code 291) into the dedicated
+    // mleader* fields. Style name (handle-only in DXF) is captured if libdxfrw later
+    // resolves it; not available from the unmodified DXF reader.
+    //
+    // FIDELITY: on the DXF READ path stock libdxfrw's DRW_MLeader::parseCode parses
+    // ONLY the entity-level scalars — the CONTEXT_DATA{} leg points + textLabel are
+    // decoded in the DWG bit-stream path (parseDwg) only, NOT the DXF path. So a real
+    // AutoCAD *.dxf* MULTILEADER imports with the scalars set but an EMPTY leg path +
+    // no text (a degenerate, drawn-light callout) — the honest, documented v1 (full
+    // CONTEXT_DATA DXF parsing is a deferred libdxfrw enhancement). A *.dwg* that
+    // libdxfrw decoded fully, or our own forward-compat write, supplies the points.
+    void emitMLeader(const DRW_MLeader *data) {
+        ++m_out->geometryCount;
+        LCEntity e = makeEntity(LC_ENT_MLEADER);
+        if (data) {
+            fillCommon(e, *data);
+        } else {
+            e.layer = intern("0"); e.lineType = intern("BYLAYER");
+            pushEntity(e);
+            return;
+        }
+        const DRW_MLeaderAnnotContext &ctx = data->context;
+        // Arrow size: prefer the context arrow size, else the entity-level default.
+        double arrowSize = ctx.arrowHeadSize > 0 ? ctx.arrowHeadSize
+                                                 : data->defaultArrowHeadSize;
+        e.mleaderArrowSize = arrowSize > 0 ? arrowSize : 0.0;
+        e.mleaderHasArrow = 1;   // DXF MLEADER has no entity-level "no arrow" flag
+        // Landing distance: prefer the entity-level dogleg length, else the root's.
+        double landing = data->landingDistance;
+        if (landing <= 0 && !ctx.roots.empty()) landing = ctx.roots.front().landingDistance;
+        e.mleaderLandingDistance = landing;
+        e.mleaderDoglegEnabled = data->doglegEnabled ? 1 : 0;
+        if (!ctx.textLabel.empty()) e.textValue = intern(ctx.textLabel);
+        e.height = ctx.textHeight;   // annotation text height (code 41 in CONTEXT_DATA)
+
+        // Leg-path vertices: the FIRST root's FIRST leader line's points (single-root
+        // v1, matching MultiLeaderData). Empty when the DXF reader did not decode the
+        // CONTEXT_DATA (the common interop case) — a valid, drawn-light multileader.
+        m_out->vertexPool.emplace_back();
+        std::vector<LCVertex> &verts = m_out->vertexPool.back();
+        if (!ctx.roots.empty() && !ctx.roots.front().leaderLines.empty()) {
+            const auto &pts = ctx.roots.front().leaderLines.front().points;
+            verts.reserve(pts.size());
+            for (const auto &p : pts) verts.push_back(LCVertex{p.x, p.y, 0.0});
         }
         e.vertices = verts.empty() ? nullptr : verts.data();
         e.vertexCount = static_cast<int32_t>(verts.size());
@@ -1677,6 +1739,10 @@ public:
     // libdxfrw's DWG writer (dwgWriter15) has no writeLeader path; DWG leaders are
     // skipped (returns false here so the caller counts the skip), DXF emits them.
     bool emitLeader(DRW_Leader *e)      { if (m_dwg) return false; m_dxf->writeLeader(e); return true; }
+    // dxfRW::writeMultiLeader needs R2000+ (returns false at <= AC1009); dwgWriter15
+    // has no multileader path. On DWG we skip (return false → caller counts the skip),
+    // DXF emits the (geometry-light) MULTILEADER scalars.
+    bool emitMLeader(DRW_MLeader *e)    { if (m_dwg) return false; return m_dxf->writeMultiLeader(e); }
 
     // ----- attribute mapping (inverse of FlatteningReader::fillCommon) -----
     void fillCommon(DRW_Entity &ent, const LCEntity &src) {
@@ -2018,6 +2084,7 @@ public:
     void addDimAngular3P(const DRW_DimAngular3p *data) override { (void)data; }
     void addDimOrdinate(const DRW_DimOrdinate *data) override { (void)data; }
     void addLeader(const DRW_Leader *data) override { (void)data; }
+    void addMLeader(const DRW_MLeader *data) override { (void)data; }
     void addHatch(const DRW_Hatch *data) override { (void)data; }
     void addViewport(const DRW_Viewport &data) override { (void)data; }
     void addImage(const DRW_Image *data) override { (void)data; }
@@ -2105,6 +2172,7 @@ private:
         case LC_ENT_XLINE:      writeXline(e);      break;
         case LC_ENT_RAY:        writeRay(e);        break;
         case LC_ENT_LEADER:     writeLeader(e);     break;
+        case LC_ENT_MLEADER:    writeMLeader(e);    break;
         case LC_ENT_IMAGE:      writeImage(e);      break;
         default:                ++m_skipped;        break; // UNSUPPORTED / ...
         }
@@ -2152,6 +2220,63 @@ private:
         }
         ld.vertnum = static_cast<int>(ld.vertexlist.size());
         if (!emitLeader(&ld)) ++m_skipped;   // DWG has no leader writer
+    }
+
+    // ----- MULTILEADER (modern annotation callout) -----------------------
+    // Emit a DXF MULTILEADER (the inverse of FlatteningReader::emitMLeader). The
+    // entity-level scalars map onto DRW_MLeader: landing distance → code 41,
+    // arrow size → code 42 (defaultArrowHeadSize), dogleg → code 291. We ALSO build
+    // the CONTEXT_DATA payload (one leader root + line carrying the leg-path points,
+    // plus the annotation textLabel + height) so the DRW_MLeader is GEOMETRY-COMPLETE
+    // and correct for a future libdxfrw that serializes CONTEXT_DATA.
+    //
+    // FIDELITY LIMITATION (pinned by a round-trip test): the vendored
+    // dxfRW::writeMultiLeader writes ONLY the entity-level scalars — it does NOT emit
+    // the CONTEXT_DATA{} block, and its DXF parseCode reader does not parse it either.
+    // So across DXF write→reread, the leg vertices + annotation text + style name are
+    // DROPPED (they survive only via the engine's own Codable document path); the
+    // landing distance, dogleg flag and arrow size DO round-trip. We do NOT modify the
+    // vendored library; full CONTEXT_DATA DXF interop is a deferred enhancement.
+    // MULTILEADER needs R2000+; at R12 / on DWG (no DWG multileader writer) the C side
+    // drops it (counted skipped), matching LEADER/MTEXT/DIMENSION.
+    void writeMLeader(const LCEntity &e) {
+        DRW_MLeader ml;
+        fillCommon(ml, e);
+        // Entity-level scalars that survive the vendored writeMultiLeader.
+        ml.landingDistance = e.mleaderLandingDistance;
+        ml.defaultArrowHeadSize = e.mleaderArrowSize;
+        ml.doglegEnabled = (e.mleaderDoglegEnabled != 0);
+        ml.landingEnabled = (e.mleaderDoglegEnabled != 0);
+        ml.leaderType = 1;            // 1 == straight-line leader (our v1 geometry)
+        ml.styleContentType = 2;      // 2 == MTEXT content (our annotation model)
+        if (e.styleName && e.styleName[0]) {
+            // No DXF group emits the style NAME (only a styleHandle), so this does not
+            // survive the vendored writer; carried on the context for completeness.
+        }
+        // Build the (forward-compat) CONTEXT_DATA: one root, one leader line carrying
+        // the leg vertices; the annotation text + height. Not serialized by the
+        // vendored writer, but a structurally-complete DRW_MLeader.
+        ml.context.arrowHeadSize = e.mleaderArrowSize;
+        ml.context.textHeight = e.height;
+        if (e.textValue && e.textValue[0]) {
+            ml.context.hasTextContents = true;
+            ml.context.textLabel = std::string(e.textValue);
+        }
+        DRW_MLeaderRoot root;
+        root.landingDistance = e.mleaderLandingDistance;
+        DRW_MLeaderLeaderLine line;
+        for (int i = 0; i < e.vertexCount; ++i) {
+            line.points.push_back(DRW_Coord(e.vertices[i].x, e.vertices[i].y, 0.0));
+        }
+        if (e.vertexCount > 0) {
+            // The connection point (root anchor) is the LAST leg vertex (the landing
+            // end), matching MultiLeaderData (annotation anchored at vertices.last).
+            root.connectionPoint = DRW_Coord(e.vertices[e.vertexCount - 1].x,
+                                             e.vertices[e.vertexCount - 1].y, 0.0);
+        }
+        root.leaderLines.push_back(std::move(line));
+        ml.context.roots.push_back(std::move(root));
+        if (!emitMLeader(&ml)) ++m_skipped;   // DWG has no multileader writer
     }
 
     // ----- IMAGE (raster image) ------------------------------------------
