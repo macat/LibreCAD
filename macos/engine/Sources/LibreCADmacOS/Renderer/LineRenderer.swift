@@ -876,7 +876,8 @@ final class LineRenderer: NSObject, MTKViewDelegate {
         let (gridVerts, spacing) = OverlayGeometry.grid(
             viewport: viewport,
             renderOrigin: origin,
-            preferredSpacing: model.preferredGridSpacing
+            preferredSpacing: model.preferredGridSpacing,
+            ucs: model.currentUCS
         )
         lastGridSpacing = spacing
         // Drop the grid vertices when the guide is hidden (snap still uses `spacing`).

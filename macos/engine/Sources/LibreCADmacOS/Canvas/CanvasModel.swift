@@ -2048,7 +2048,13 @@ final class CanvasModel {
             // CanvasModel snap-distance field yet (a tiny follow-up: add a
             // `var snapDistance: Double?` tool option, then pass it here).
             ctx: drawing.makeResolveContext(),
-            referencePoint: relativeZero
+            referencePoint: relativeZero,
+            // UCS-W4: snap the grid candidate in the active UCS lattice so grid snap
+            // lands on the SAME nodes as the UCS-aligned drawn grid. A world UCS
+            // (origin .zero, angle 0) makes these defaults, so grid snap is
+            // byte-identical until a UCS is set.
+            gridOrigin: currentUCS.origin,
+            gridAngle: currentUCS.angle
         )
         let changed = result != snap
         snap = result
@@ -5724,6 +5730,11 @@ final class CanvasModel {
     func setUCS(_ ucs: UCS) {
         currentUCS = ucs
         modelVersion &+= 1
+        // UCS-persistence: deferred — writing the active UCS to the document's DXF
+        // header ($UCSORG / $UCSXDIR / $UCSYDIR) would hook in here (and the
+        // reciprocal read in DXFReader would seed `currentUCS` on open). Out of scope
+        // for UCS-W4: `currentUCS` is a live DRAFTING policy, not document content, so
+        // it deliberately does not round-trip through DXF this round.
     }
 
     /// Restores the WORLD frame (`UCS.world`) — the identity, in which every coordinate

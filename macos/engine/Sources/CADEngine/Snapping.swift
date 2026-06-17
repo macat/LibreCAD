@@ -241,6 +241,16 @@ public enum Snapping {
     ///     not enabled) the equidistant snap contributes no candidates, so existing
     ///     callers that omit it are unaffected. The UI sets this from the tool's
     ///     "Snap distance" field.
+    ///   - gridOrigin: world-space anchor of the grid frame (the active UCS origin).
+    ///     The grid nodes are laid out FROM this origin, so a translated UCS shifts
+    ///     the grid lattice. Defaults to `.zero` (the world origin) — the pre-UCS
+    ///     behavior.
+    ///   - gridAngle: rotation (radians, CCW) of the grid frame's axes vs world (the
+    ///     active UCS angle). The grid lattice is rotated by this about `gridOrigin`.
+    ///     Defaults to `0` (world-aligned). With `gridOrigin == .zero` AND
+    ///     `gridAngle == 0` (a world frame) the grid candidate is computed by the
+    ///     exact same `snappedToGrid` path as before these params existed, so existing
+    ///     callers that omit them get byte-identical grid snapping.
     @MainActor
     public static func snap(worldPoint: Vector,
                             modes: SnapMode,
@@ -250,7 +260,9 @@ public enum Snapping {
                             using quadtree: Quadtree,
                             ctx: ResolveContext? = nil,
                             referencePoint: Vector? = nil,
-                            distanceAlong: Double? = nil) -> SnapResult {
+                            distanceAlong: Double? = nil,
+                            gridOrigin: Vector = .zero,
+                            gridAngle: Double = 0) -> SnapResult {
         let freeResult = SnapResult(point: worldPoint, kind: .free, entity: nil)
         guard worldPoint.valid else { return freeResult }
         let tol = Swift.max(worldTolerance, 0)
@@ -342,9 +354,15 @@ public enum Snapping {
             }
         }
 
-        // Grid: round the cursor to the spacing (independent of entities).
+        // Grid: round the cursor to the spacing (independent of entities). The grid
+        // lattice is laid out in the grid frame (the active UCS): the cursor is
+        // expressed in that frame, rounded to the spacing there, then mapped back to
+        // world — so the snap nodes coincide with the UCS-aligned drawn grid. A world
+        // frame (origin .zero, angle 0) takes the identical `snappedToGrid` path as
+        // before (byte-identical for existing callers).
         if modes.contains(.grid), let spacing = gridSpacing, spacing > Tolerance.distance {
-            let gp = snappedToGrid(worldPoint, spacing: spacing)
+            let gp = snappedToGrid(worldPoint, spacing: spacing,
+                                   gridOrigin: gridOrigin, gridAngle: gridAngle)
             appendIfNear(&candidates, point: gp, kind: .grid, entity: nil,
                          cursor: worldPoint, tol: tol)
         }
@@ -833,12 +851,41 @@ public enum Snapping {
         return pts.min(by: { ($0 - near).squared < ($1 - near).squared }) ?? pts[0]
     }
 
-    /// Rounds `point` to the nearest grid node at `spacing` (origin-anchored).
+    /// Rounds `point` to the nearest grid node at `spacing`, anchored at the
+    /// WORLD origin and aligned to the world axes (the classic grid snap).
     static func snappedToGrid(_ point: Vector, spacing: Double) -> Vector {
         guard spacing > Tolerance.distance else { return point }
         let gx = (point.x / spacing).rounded(.toNearestOrAwayFromZero) * spacing
         let gy = (point.y / spacing).rounded(.toNearestOrAwayFromZero) * spacing
         return Vector(gx, gy, point.z)
+    }
+
+    /// Rounds `point` to the nearest grid node at `spacing` in a grid FRAME anchored
+    /// at `gridOrigin` and rotated by `gridAngle` (radians, CCW) — i.e. the active
+    /// UCS lattice. Procedure: express the cursor in the grid frame
+    /// (`rotate(-gridAngle)` about `gridOrigin`), round each component to `spacing`,
+    /// then map the node back to world. The `z` is passed through unchanged.
+    ///
+    /// A world frame (`gridOrigin == .zero` and `gridAngle == 0`, within epsilon)
+    /// short-circuits to the world-anchored `snappedToGrid(_:spacing:)`, so it is
+    /// byte-identical to the pre-UCS grid snap — the UCS frame only changes results
+    /// once a non-world UCS is set.
+    static func snappedToGrid(_ point: Vector, spacing: Double,
+                              gridOrigin: Vector, gridAngle: Double) -> Vector {
+        guard spacing > Tolerance.distance else { return point }
+        // World frame → identical to the world-anchored rounding (regression-lock).
+        let eps = 1e-9
+        if abs(gridOrigin.x) < eps, abs(gridOrigin.y) < eps,
+           abs(Vector.correctAngle(gridAngle)) < eps {
+            return snappedToGrid(point, spacing: spacing)
+        }
+        // Into the grid frame: translate by -origin, rotate by -angle.
+        let local = (point - gridOrigin).rotated(by: -gridAngle)
+        let lx = (local.x / spacing).rounded(.toNearestOrAwayFromZero) * spacing
+        let ly = (local.y / spacing).rounded(.toNearestOrAwayFromZero) * spacing
+        // Back to world: rotate by +angle, translate by +origin. Preserve cursor z.
+        let world = Vector(lx, ly, 0).rotated(by: gridAngle) + gridOrigin
+        return Vector(world.x, world.y, point.z)
     }
 
     // MARK: - Intersection between two entities (RS_Information adapter)
