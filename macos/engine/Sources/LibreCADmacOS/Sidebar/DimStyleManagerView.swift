@@ -90,7 +90,7 @@ struct DimStyleManagerView: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Dimension Styles")
-                    .font(.headline)
+                    .font(DS.Font.panelTitle)
                 Text("Manage the named styles a dimension can reference. The current style is used by new dimensions.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -381,7 +381,7 @@ private struct DimStyleFieldsEditor: View {
                 get: { value },
                 set: { set(Swift.max(minimum, $0)) }
             ), format: .number)
-            .frame(width: 90)
+            .frame(width: DS.Field.std)
             .multilineTextAlignment(.trailing)
         }
     }

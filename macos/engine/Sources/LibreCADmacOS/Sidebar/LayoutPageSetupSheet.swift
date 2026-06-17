@@ -244,7 +244,7 @@ struct LayoutPageSetupSheet: View {
                         get: { form.marginMM },
                         set: { form.marginMM = max(0, $0) }
                     ), format: .number)
-                    .frame(width: 90).multilineTextAlignment(.trailing)
+                    .frame(width: DS.Field.std).multilineTextAlignment(.trailing)
                 }
             }
             Section("Plot scale") {
@@ -279,14 +279,14 @@ struct LayoutPageSetupSheet: View {
                 get: { form.customWidthMM },
                 set: { form.customWidthMM = max(1, $0) }
             ), format: .number)
-            .frame(width: 90).multilineTextAlignment(.trailing)
+            .frame(width: DS.Field.std).multilineTextAlignment(.trailing)
         }
         LabeledContent("Height (mm)") {
             TextField("mm", value: Binding(
                 get: { form.customHeightMM },
                 set: { form.customHeightMM = max(1, $0) }
             ), format: .number)
-            .frame(width: 90).multilineTextAlignment(.trailing)
+            .frame(width: DS.Field.std).multilineTextAlignment(.trailing)
         }
     }
 
@@ -297,7 +297,7 @@ struct LayoutPageSetupSheet: View {
                     get: { form.ratio },
                     set: { form.ratio = ($0.isFinite && $0 > 0) ? $0 : 1 }
                 ), format: .number)
-                .frame(width: 90).multilineTextAlignment(.trailing)
+                .frame(width: DS.Field.std).multilineTextAlignment(.trailing)
                 Text(": 1").foregroundStyle(.secondary)
             }
         }
@@ -308,7 +308,7 @@ struct LayoutPageSetupSheet: View {
             Spacer()
             Button("Cancel", role: .cancel) { onCancel() }
                 .keyboardShortcut(.cancelAction)
-            Button("OK") { onCommit(LayoutPageMapper.pageDescriptor(from: form)) }
+            Button("Done") { onCommit(LayoutPageMapper.pageDescriptor(from: form)) }
                 .keyboardShortcut(.defaultAction)
         }
         .padding()

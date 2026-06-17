@@ -101,10 +101,10 @@ struct BlockAttributeValuesEditor: View {
                 // Constant-mode: the value is fixed by the definition — read-only.
                 Text(def.defaultText.isEmpty ? "—" : def.defaultText)
                     .foregroundStyle(.secondary)
-                    .frame(width: 160, alignment: .trailing)
+                    .frame(width: DS.Field.wide, alignment: .trailing)
             } else {
                 TextField(def.defaultText, text: draftBinding(key))
-                    .frame(width: 160)
+                    .frame(width: DS.Field.wide)
                     .multilineTextAlignment(.trailing)
                     .onSubmit { commit(tag: def.tag, key: key) }
             }
@@ -250,15 +250,15 @@ struct BlockAttributeDefsEditor: View {
     private var addRow: some View {
         LabeledContent("Tag") {
             TextField("TAG", text: $newTag)
-                .frame(width: 160).multilineTextAlignment(.trailing)
+                .frame(width: DS.Field.wide).multilineTextAlignment(.trailing)
         }
         LabeledContent("Prompt") {
             TextField("Prompt", text: $newPrompt)
-                .frame(width: 160).multilineTextAlignment(.trailing)
+                .frame(width: DS.Field.wide).multilineTextAlignment(.trailing)
         }
         LabeledContent("Default") {
             TextField("Default value", text: $newDefault)
-                .frame(width: 160).multilineTextAlignment(.trailing)
+                .frame(width: DS.Field.wide).multilineTextAlignment(.trailing)
         }
         Toggle("Visible", isOn: $newVisible)
         Button("Add Attribute", action: addNew)
@@ -302,13 +302,13 @@ private struct DefRow: View {
         DisclosureGroup(def.tag) {
             LabeledContent("Prompt") {
                 TextField("Prompt", text: $prompt)
-                    .frame(width: 150).multilineTextAlignment(.trailing)
+                    .frame(width: DS.Field.wide).multilineTextAlignment(.trailing)
                     .onSubmit(commit)
                     .onChange(of: prompt) { _, _ in commit() }
             }
             LabeledContent("Default") {
                 TextField("Default value", text: $defaultText)
-                    .frame(width: 150).multilineTextAlignment(.trailing)
+                    .frame(width: DS.Field.wide).multilineTextAlignment(.trailing)
                     .onSubmit(commit)
                     .onChange(of: defaultText) { _, _ in commit() }
             }

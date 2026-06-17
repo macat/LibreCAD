@@ -58,10 +58,10 @@ struct BlockDynamicParametersPanel: View {
             parametersSection
             actionsSection
         }
-        .padding(10)
+        .padding(DS.Space.lg)
         .frame(width: 250)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.separator))
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: DS.Radius.card))
+        .overlay(RoundedRectangle(cornerRadius: DS.Radius.card).stroke(.separator))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Dynamic Parameters")
     }
@@ -69,9 +69,9 @@ struct BlockDynamicParametersPanel: View {
     @ViewBuilder private var header: some View {
         HStack(spacing: 6) {
             Image(systemName: "slider.horizontal.below.square.filled.and.square")
-                .foregroundStyle(.tint)
+                .foregroundStyle(DS.Palette.accent)
             Text("Parameters & Actions")
-                .font(.headline)
+                .font(DS.Font.panelTitle)
             Spacer(minLength: 4)
         }
     }

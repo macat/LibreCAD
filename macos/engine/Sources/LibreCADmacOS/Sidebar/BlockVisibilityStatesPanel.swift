@@ -94,7 +94,7 @@ struct BlockVisibilityStatesPanel: View {
             Image(systemName: "eye.square")
                 .foregroundStyle(DS.Palette.accent)
             Text("Visibility States")
-                .font(.headline)
+                .font(DS.Font.panelTitle)
             Spacer(minLength: 4)
             Button {
                 addStateText = suggestedStateName()
