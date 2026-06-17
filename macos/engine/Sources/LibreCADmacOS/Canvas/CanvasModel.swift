@@ -984,9 +984,13 @@ final class CanvasModel {
     var rotateKeepOriginal: Bool = false
 
     /// Mirror tool: when `true`, KEEP the originals and add mirrored COPIES (AutoCAD
-    /// MIRROR "keep source" — `MirrorTool.keepOriginal`). Default `false` ⇒ mirror in
-    /// place. `applyToolConfig` pushes it onto `MirrorTool`.
-    var mirrorKeepOriginal: Bool = false
+    /// MIRROR "keep source"/"Erase source objects? <No>" — `MirrorTool.keepOriginal`).
+    /// Defaults to `true` ⇒ mirror-COPY (the reflection is a DUPLICATE; the original
+    /// stays), matching AutoCAD's MIRROR default and user expectation — a plain Mirror
+    /// produces two objects, not one reflected in place. Toggle OFF for mirror-in-place
+    /// ("erase source"). `applyToolConfig` pushes it onto `MirrorTool` (whose own engine
+    /// default stays `false`/in-place for byte-identical direct-engine behavior).
+    var mirrorKeepOriginal: Bool = true
 
     /// Line-construction tool: the construction METHOD. `LineConstructionTool.Mode` is
     /// a `String`-raw `CaseIterable` enum (so it CAN be a Picker tag directly — unlike

@@ -125,21 +125,30 @@ struct WireWaveConfigTests {
 
     // MARK: - Mirror ▸ Copy (keep original)
 
-    @Test("Mirror: default is mirror-in-place (keepOriginal == false)")
-    func mirrorDefaultKeepsNothing() throws {
+    @Test("Mirror: default is mirror-COPY (keepOriginal == true) — a plain Mirror duplicates")
+    func mirrorDefaultKeepsOriginal() throws {
         let m = model()
         m.activateTool(.mirror)
         let tool = try #require(m.tool as? MirrorTool, "activating .mirror must mint a MirrorTool")
-        #expect(tool.keepOriginal == false)
+        // AutoCAD MIRROR default keeps the source (erase source? <No>) → the reflection
+        // is a DUPLICATE, not an in-place replace. The user reported a plain Mirror not
+        // duplicating; the app default is now keep-original.
+        #expect(tool.keepOriginal == true)
     }
 
-    @Test("Mirror: the Copy (keep original) toggle flows onto the minted tool")
-    func mirrorKeepOriginalFlowsToTool() throws {
+    @Test("Mirror: toggling Copy OFF flows mirror-in-place onto the minted tool")
+    func mirrorKeepOriginalToggleFlowsToTool() throws {
         let m = model()
-        m.mirrorKeepOriginal = true
+        // Default is keep-original (duplicate); turning the toggle OFF must reach the tool.
+        m.mirrorKeepOriginal = false
         m.activateTool(.mirror)
+        #expect((m.tool as? MirrorTool)?.keepOriginal == false,
+                "mirrorKeepOriginal=false (in-place) must reach the live MirrorTool")
+        // And flipping it back ON mid-run via the options-bar reapply path.
+        m.mirrorKeepOriginal = true
+        m.reapplyActiveToolConfig()
         #expect((m.tool as? MirrorTool)?.keepOriginal == true,
-                "mirrorKeepOriginal must reach the live MirrorTool")
+                "re-enabling Copy must reach the live MirrorTool")
     }
 
     // MARK: - Circle ▸ the new construction modes {TTR / TTT / From Arc}
