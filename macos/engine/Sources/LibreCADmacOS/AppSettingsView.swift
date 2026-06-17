@@ -139,6 +139,12 @@ enum AppSettings {
         static let defaultTextFont = "app.text.defaultTextFont"
         /// Default text height (world units) for new text entities.
         static let defaultTextHeight = "app.text.defaultTextHeight"
+        /// Filesystem PATH of a user-chosen font directory (`.lff` / `.shx`). Empty =
+        /// none. Registered with the engine font providers at launch + on change via
+        /// `CADFonts.addUserFontDirectory`. NOTE: a raw path is stored (not a
+        /// security-scoped bookmark), so under App Sandbox it may not survive relaunch
+        /// — see the `userFontDir` default + the picker row's caption.
+        static let userFontDir = "app.text.userFontDir"
     }
 
     // MARK: Defaults (the typed default values the keys fall back to)
@@ -183,6 +189,9 @@ enum AppSettings {
 
         static let textFont = "Standard"
         static let textHeight: Double = 2.5
+        /// No extra user font directory by default (the bundled / repo fonts already
+        /// resolve). Empty string = none.
+        static let userFontDir = ""
     }
 
     // MARK: Validation / normalization (pure — exercised by AppSettingsTests)
@@ -784,6 +793,10 @@ private struct TextSettingsTab: View {
     @AppStorage(AppSettings.Key.defaultTextFont) private var font = AppSettings.Default.textFont
     // READ-SITE: Text tool new-entity creation — default text height.
     @AppStorage(AppSettings.Key.defaultTextHeight) private var height = AppSettings.Default.textHeight
+    // READ-SITE (WIRED): a user-chosen font directory. Registered with the engine font
+    // providers at launch (`LibreCADApp`) and on change (here, via `.onChange`) through
+    // `CADFonts.addUserFontDirectory`, so `.lff` / `.shx` files in it resolve for text.
+    @AppStorage(AppSettings.Key.userFontDir) private var userFontDir = AppSettings.Default.userFontDir
 
     var body: some View {
         Form {
@@ -802,8 +815,67 @@ private struct TextSettingsTab: View {
                     .frame(width: 90).multilineTextAlignment(.trailing)
                 }
             }
+            Section("Font folder") {
+                fontFolderRow
+                Text("A folder of LibreCAD .lff or AutoCAD .shx fonts to search in addition to the bundled fonts. Applied immediately and re-registered at launch.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
+        // Register the saved directory whenever it changes so the new fonts resolve
+        // immediately (the engine seam clears the providers' caches so a prior miss
+        // is re-searched). Launch-time registration lives in `LibreCADApp`.
+        .onChange(of: userFontDir) { _, newValue in
+            if !newValue.isEmpty {
+                CADFonts.addUserFontDirectory(URL(fileURLWithPath: newValue))
+            } else {
+                // Cleared: drop cached parses so a font that used to come from the
+                // removed folder is re-resolved against the remaining directories.
+                CADFonts.resetUserFontCaches()
+            }
+        }
+    }
+
+    /// The font-folder picker row: the chosen path (or "None") + Choose…/Clear buttons.
+    /// The `NSOpenPanel` lives ONLY here in the View layer (headless-modal trap, gotcha
+    /// #3): nothing the test suite reaches ever runs it.
+    @ViewBuilder
+    private var fontFolderRow: some View {
+        LabeledContent("Folder") {
+            HStack(spacing: 8) {
+                Text(userFontDir.isEmpty ? "None"
+                     : URL(fileURLWithPath: userFontDir).lastPathComponent)
+                    .foregroundStyle(userFontDir.isEmpty ? .secondary : .primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(userFontDir.isEmpty ? "No user font folder chosen" : userFontDir)
+                Spacer(minLength: 0)
+                Button("Choose…") { chooseFontFolder() }
+                    .controlSize(.small)
+                Button("Clear") { userFontDir = "" }
+                    .controlSize(.small)
+                    .disabled(userFontDir.isEmpty)
+            }
+        }
+    }
+
+    /// Presents the directory `NSOpenPanel` and stores the chosen folder's path. The
+    /// stored path drives the `.onChange` registration above. View-layer only.
+    private func chooseFontFolder() {
+        #if canImport(AppKit)
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        panel.message = "Choose a folder of .lff / .shx fonts to search."
+        if !userFontDir.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: userFontDir)
+        }
+        if panel.runModal() == .OK, let url = panel.url {
+            userFontDir = url.path
+        }
+        #endif
     }
 }
 

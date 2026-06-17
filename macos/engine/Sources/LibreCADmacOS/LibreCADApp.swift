@@ -33,6 +33,22 @@ import CADEngine
 @main
 struct LibreCADApp: App {
 
+    /// App launch hook: register the SAVED user font directory (Preferences ▸ Text ▸
+    /// Font folder, 4C) with the engine's `.lff` / `.shx` font providers so its fonts
+    /// resolve from the first text resolve onward. The path is read straight off
+    /// `UserDefaults` (the same `app.text.userFontDir` key `AppSettingsView` binds via
+    /// `@AppStorage`); an empty/missing key registers nothing (unchanged behavior).
+    /// SANDBOX NOTE: a raw path is stored, not a security-scoped bookmark — under App
+    /// Sandbox a path outside the container may not be readable after relaunch. The
+    /// fork ships UNSANDBOXED, where a raw path is durable; bookmarks are the documented
+    /// upgrade if sandboxing is later enabled (see AppSettingsView's `userFontDir` key).
+    init() {
+        let saved = UserDefaults.standard.string(forKey: AppSettings.Key.userFontDir) ?? ""
+        if !saved.isEmpty {
+            CADFonts.addUserFontDirectory(URL(fileURLWithPath: saved))
+        }
+    }
+
     /// The F8 key as a SwiftUI `KeyEquivalent`. SwiftUI ships no function-key
     /// constants, so it is built from AppKit's `NSF8FunctionKey` Unicode scalar — the
     /// same code AppKit's menu key-equivalent matching uses, so ⌥-free F8 in the menu

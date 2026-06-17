@@ -2179,6 +2179,44 @@ public enum CADFonts {
         CompositeFontProvider(native: nativeProvider, stroke: strokeProvider,
                               shx: shxProvider)
 
+    // MARK: - User font directory (Preferences ▸ Text ▸ font folder)
+
+    /// Registers a USER-CHOSEN font directory with BOTH stroke (`.lff`) and SHX
+    /// (`.shx`) providers, then clears their caches so any previously-cached MISS for
+    /// a font that now lives in `url` is re-resolved on the next lookup.
+    ///
+    /// This is the engine seam behind the Preferences ▸ Text ▸ "Font folder" picker
+    /// (4C). The app picks a folder in the View layer (an `NSOpenPanel`, never reached
+    /// by tests), stores its path, and calls this at launch + whenever the pref changes.
+    /// Both providers search `<dir>/<name>.lff` / `<dir>/<name>.shx`, so a directory
+    /// holding either kind contributes its fonts to text resolution. Registering the
+    /// SAME directory twice is harmless (the providers just search it again — a font is
+    /// resolved by the FIRST matching directory either way).
+    ///
+    /// The cache clear is what makes a freshly-added directory take effect immediately:
+    /// `font(named:)` caches a miss, so without it a name looked up BEFORE the directory
+    /// was added would keep returning the cached `nil`. Clearing both caches forces a
+    /// re-search; already-parsed hits simply re-parse on next access (cheap, one-time).
+    public static func addUserFontDirectory(_ url: URL) {
+        strokeProvider.registerSearchDirectory(url)
+        shxProvider.registerSearchDirectory(url)
+        strokeProvider.clearCache()
+        shxProvider.clearCache()
+    }
+
+    /// Drops every cached parse/miss in both font providers, forcing the next lookup
+    /// to re-search the currently-registered directories from disk. The light "reset"
+    /// companion to `addUserFontDirectory(_:)`: it does NOT un-register a previously
+    /// added directory (the providers expose no remove-directory API and those files
+    /// are owned elsewhere), so a folder added this session stays registered until the
+    /// next app launch (which rebuilds the providers from scratch and re-adds only the
+    /// SAVED font dir). Use it after dropping/clearing the saved pref so a stale cached
+    /// hit doesn't linger within the running session.
+    public static func resetUserFontCaches() {
+        strokeProvider.clearCache()
+        shxProvider.clearCache()
+    }
+
     /// Directories searched for `<name>.lff`, in priority order: the app bundle's
     /// `Resources/fonts`, then the in-repo `librecad/support/fonts`.
     static func fontSearchDirectories() -> [URL] {

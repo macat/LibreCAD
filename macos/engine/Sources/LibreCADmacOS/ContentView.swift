@@ -346,8 +346,10 @@ struct ContentView: View {
                         },
                         // #4c: the tab context-menu actions route to the P0-D `CanvasModel`
                         // layout wrappers (rename/delete/duplicate handle the active-tab
-                        // fixup internally) + redraw. Page Setup is STUBBED to opening the
-                        // document settings sheet (the per-layout page editor is deferred).
+                        // fixup internally) + redraw. Page Setup now opens a REAL per-layout
+                        // page editor (the sheet lives in LayoutTabStrip) and commits via
+                        // `CanvasModel.setLayoutPage` (one undoable step; re-frames the sheet
+                        // if it is the active tab).
                         onRenameLayout: { name, newName in
                             if model.renameLayout(name, to: newName) {
                                 controllerBox.controller?.requestRedraw()
@@ -363,11 +365,13 @@ struct ContentView: View {
                                 controllerBox.controller?.requestRedraw()
                             }
                         },
-                        onPageSetup: { _ in
-                            // STUB: open the document-wide Document Settings (Paper tab) —
-                            // a per-layout page editor is deferred; `CanvasModel.setLayoutPage`
-                            // exists for that later wire.
-                            showSettings = true
+                        onPageSetup: { name, page in
+                            // The Page Setup sheet handed back a new engine `PageDescriptor`;
+                            // commit it through the undoable `setLayoutPage` wrapper (a no-op
+                            // if the layout is gone or the page is unchanged) + redraw.
+                            if model.setLayoutPage(name, page) {
+                                controllerBox.controller?.requestRedraw()
+                            }
                         }
                     )
                     // The COMMAND TRANSCRIPT — an AutoCAD-style scrollback of every line
@@ -2406,9 +2410,11 @@ struct LayoutTabStrip: View {
     var onDeleteLayout: (_ name: String) -> Void = { _ in }
     /// Duplicate the named layout into a fresh sheet (and activate the copy).
     var onDuplicateLayout: (_ name: String) -> Void = { _ in }
-    /// Page Setup for the named layout — STUBBED to opening Document Settings for now
-    /// (the per-layout page editor is deferred; `setLayoutPage` exists for a later wire).
-    var onPageSetup: (_ name: String) -> Void = { _ in }
+    /// Page Setup commit for the named layout (#4c): the sheet hands back the new
+    /// engine `PageDescriptor`; the call site forwards it to the P0-D
+    /// `CanvasModel.setLayoutPage(_:_:)` wrapper (one undoable step) + redraws. Defaulted
+    /// to a no-op so the pure unit tests can construct the strip without it.
+    var onPageSetup: (_ name: String, _ page: PageDescriptor) -> Void = { _, _ in }
 
     /// The layout whose Rename sheet is open (View-layer only — never reached by the
     /// headless tests, which exercise the `CanvasModel` rename wrapper directly). `nil`
@@ -2419,6 +2425,20 @@ struct LayoutTabStrip: View {
     /// can present the rename sheet keyed off the target name).
     private struct RenameTarget: Identifiable {
         let name: String
+        var id: String { name }
+    }
+
+    /// The layout whose Page Setup sheet is open (View-layer only — never reached by the
+    /// headless tests, which exercise the `LayoutPageMapper` + `CanvasModel.setLayoutPage`
+    /// round-trip directly). `nil` when no Page Setup is in progress.
+    @State private var pageSetupTarget: PageSetupTarget?
+
+    /// An `Identifiable` carrier for the Page Setup target — the layout name + its CURRENT
+    /// page descriptor (captured when the menu fires, so the sheet seeds its form without
+    /// re-reading the model). Keyed by name for `.sheet(item:)`.
+    private struct PageSetupTarget: Identifiable {
+        let name: String
+        let page: PageDescriptor
         var id: String { name }
     }
 
@@ -2487,6 +2507,22 @@ struct LayoutTabStrip: View {
                 onCancel: { renameTarget = nil }
             )
         }
+        // #4c: the per-layout PAGE SETUP sheet — raised from a tab's context menu (View-
+        // layer modal only; never reached by the headless tests, which drive the
+        // `LayoutPageMapper` + `CanvasModel.setLayoutPage` round-trip directly). On OK the
+        // sheet hands back the new engine `PageDescriptor`, forwarded to the call site's
+        // `onPageSetup` (the `CanvasModel.setLayoutPage` wrapper).
+        .sheet(item: $pageSetupTarget) { target in
+            LayoutPageSetupSheet(
+                layoutName: target.name,
+                page: target.page,
+                onCommit: { page in
+                    pageSetupTarget = nil
+                    onPageSetup(target.name, page)
+                },
+                onCancel: { pageSetupTarget = nil }
+            )
+        }
     }
 
     // MARK: - Tabs
@@ -2538,9 +2574,14 @@ struct LayoutTabStrip: View {
     private func layoutTabContextMenu(_ name: String) -> some View {
         Button("Rename…") { renameTarget = RenameTarget(name: name) }
         Button("Duplicate") { onDuplicateLayout(name) }
-        // Page Setup is a STUB for now (the per-layout page editor is deferred): it opens
-        // the document-wide settings; the `…` marks it as not-yet-the-full editor.
-        Button("Page Setup…") { onPageSetup(name) }
+        // Page Setup (#4c): raise the per-layout Page Setup sheet, seeded with this
+        // layout's CURRENT page (read once, here, so the sheet is a pure value editor).
+        // A missing layout (race) simply opens nothing.
+        Button("Page Setup…") {
+            if let page = model.drawing.layout(named: name)?.page {
+                pageSetupTarget = PageSetupTarget(name: name, page: page)
+            }
+        }
         Divider()
         Button("Delete", role: .destructive) { onDeleteLayout(name) }
     }
