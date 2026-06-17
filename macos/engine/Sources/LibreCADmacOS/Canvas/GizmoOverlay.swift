@@ -269,48 +269,64 @@ final class GizmoOverlayView: NSView {
             drawPreview(in: ctx)
         }
 
-        // The frame outline (dashed) + corner squares + rotate stalk/knob, drawn at
-        // the LIVE transform's frame while dragging so the chrome tracks the drag.
-        let drawnFrame = previewFrame(base: f)
+        // The frame outline (dashed) + corner squares + rotate stalk/knob, drawn as
+        // an ORIENTED QUAD using the SAME transform the object preview re-resolves
+        // each entity with — so the chrome rotates/scales WITH the object during a
+        // drag instead of collapsing back to an upright AABB. Idle (no live
+        // transform) this is identity, so the quad is the plain base AABB.
+        let t = model.gizmoPreviewTransform ?? .identity
+        let base = activeDrag?.frame ?? f
+        // World quad in [bottomLeft, bottomRight, topRight, topLeft] order, mapped
+        // to screen via the existing projection.
+        let quadScreen = GizmoTransform.transformedQuad(base: base, t: t).map { screen($0) }
 
-        // Frame outline.
+        // Frame outline — a closed quad (was an AABB rect, which threw away rotation).
         ctx.saveGState()
         ctx.setStrokeColor(Self.frameColor.cgColor)
         ctx.setLineWidth(1)
         ctx.setLineDash(phase: 0, lengths: [4, 3])
-        ctx.addRect(screenFrameRect(drawnFrame))
+        ctx.move(to: quadScreen[0])
+        ctx.addLine(to: quadScreen[1])
+        ctx.addLine(to: quadScreen[2])
+        ctx.addLine(to: quadScreen[3])
+        ctx.closePath()
         ctx.strokePath()
         ctx.restoreGState()
 
-        // Rotate stalk + knob (from the drawn frame's top edge).
-        let knob = knobScreenCenter(drawnFrame)
-        let topMid = screen(Vector((drawnFrame.min.x + drawnFrame.max.x) * 0.5, drawnFrame.max.y))
+        // Rotate stalk + knob — anchored on the ORIENTED top edge, rising along the
+        // outward normal so the stalk turns with the box. The knob stays a fixed
+        // on-screen distance up that direction (independent of zoom).
+        let anchor = GizmoTransform.transformedKnobAnchor(base: base, t: t)
+        let rootScreen = screen(anchor.root)
+        // Outward direction in SCREEN space: project root and root+outward, take the
+        // screen delta, normalize. (Handles the flipped Y-down overlay automatically.)
+        let outScreen = screen(anchor.root + anchor.outward)
+        var dir = CGPoint(x: outScreen.x - rootScreen.x, y: outScreen.y - rootScreen.y)
+        let dirLen = hypot(dir.x, dir.y)
+        if dirLen > 1e-9 {
+            dir = CGPoint(x: dir.x / dirLen, y: dir.y / dirLen)
+        } else {
+            // Degenerate transformed top edge → fall back to straight up (screen Y-up).
+            dir = CGPoint(x: 0, y: -1)
+        }
+        let knob = CGPoint(x: rootScreen.x + dir.x * Self.knobStalk,
+                           y: rootScreen.y + dir.y * Self.knobStalk)
         ctx.saveGState()
         ctx.setStrokeColor(Self.frameColor.cgColor)
         ctx.setLineWidth(1)
-        ctx.move(to: topMid)
-        ctx.addLine(to: CGPoint(x: knob.x, y: knob.y + Self.knobRadius))
+        ctx.move(to: rootScreen)
+        // Stop the stalk at the knob's edge (not its center) so it reads cleanly.
+        ctx.addLine(to: CGPoint(x: knob.x - dir.x * Self.knobRadius,
+                                y: knob.y - dir.y * Self.knobRadius))
         ctx.strokePath()
         ctx.restoreGState()
 
         drawKnob(at: knob, in: ctx)
 
-        // Corner handles.
-        for c in GizmoHandle.Corner.allCases {
-            drawHandleSquare(at: screen(drawnFrame.corner(c)), in: ctx)
+        // Corner handles — at the 4 ORIENTED screen corners.
+        for p in quadScreen {
+            drawHandleSquare(at: p, in: ctx)
         }
-    }
-
-    /// The frame transformed by the live drag (so the chrome tracks the drag),
-    /// or the base frame when idle. Only the corner points need transforming; we
-    /// rebuild a frame from the transformed corners' AABB so the rect/knob track.
-    private func previewFrame(base: GizmoFrame) -> GizmoFrame {
-        guard let t = model.gizmoPreviewTransform else { return base }
-        var box = AABB.empty
-        for c in GizmoHandle.Corner.allCases {
-            box.expand(toInclude: t.apply(base.corner(c)))
-        }
-        return GizmoFrame(box: box) ?? base
     }
 
     private func drawHandleSquare(at p: CGPoint, in ctx: CGContext) {
