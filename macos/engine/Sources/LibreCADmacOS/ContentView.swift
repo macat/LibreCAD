@@ -122,6 +122,12 @@ struct ContentView: View {
     /// "user cleared everything" from "never customized"). See `pinnedToolsSet`.
     @AppStorage("toolbar.pinnedTools") private var pinnedToolsRaw: String = ""
 
+    /// Whether the COMMAND TRANSCRIPT scrollback pane is shown above the merged command
+    /// line (AutoCAD-style command history). Persisted across launches; default OFF so
+    /// the bottom chrome is unchanged for users who don't opt in. Toggled by the
+    /// disclosure chevron next to the command line (and the View ▸ menu item).
+    @AppStorage("commandTranscript.show") private var showCommandTranscript: Bool = false
+
     // MARK: App-wide preference reads (Preferences ▸ General / Text)
     //
     // These back the new-document seeding (General tab) and the Text tool defaults
@@ -202,6 +208,49 @@ struct ContentView: View {
     /// Encodes an MRU list back to the comma-separated raw-value string for storage.
     private static func encodeMRU(_ mru: [ToolKind]) -> String {
         mru.map(\.rawValue).joined(separator: ",")
+    }
+
+    // MARK: - Command line row (transcript toggle + the merged command line)
+
+    /// The merged command line preceded by a small disclosure chevron that toggles the
+    /// command-transcript scrollback pane above it. Decomposed out of the bottom VStack so
+    /// the SwiftUI type-checker never sees a monolithic chrome expression.
+    @ViewBuilder
+    private var commandLineRow: some View {
+        HStack(spacing: 0) {
+            transcriptToggle
+            CommandLineBar(
+                model: model,
+                text: $commandLineText,
+                focused: $commandLineFocused,
+                pinned: pinnedToolsSet,
+                activateTool: { kind in controllerBox.controller?.activateTool(kind) },
+                placeImage: { chooseAndPlaceImage() },
+                returnFocusToCanvas: { controllerBox.controller?.returnFocusToCanvas() },
+                requestRedraw: { controllerBox.controller?.requestRedraw() }
+            )
+        }
+    }
+
+    /// The disclosure chevron at the leading edge of the command line that shows/hides the
+    /// command-transcript scrollback. Chevron points UP to reveal the history, DOWN to
+    /// collapse it. A plain `Button` (not a focusable field) so it never steals the
+    /// command line's keyboard focus; it only flips the persisted `showCommandTranscript`.
+    @ViewBuilder
+    private var transcriptToggle: some View {
+        Button {
+            showCommandTranscript.toggle()
+        } label: {
+            Image(systemName: showCommandTranscript ? "chevron.down" : "chevron.up")
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+                .frame(width: DS.Size.iconButton, height: DS.Size.iconButton)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(.bar)
+        .overlay(alignment: .top) { Divider() }
+        .help(showCommandTranscript ? "Hide command history" : "Show command history")
     }
 
     /// The canvas detail pane — the interactive canvas + HUD + toolbar + Inspector +
@@ -321,6 +370,15 @@ struct ContentView: View {
                             showSettings = true
                         }
                     )
+                    // The COMMAND TRANSCRIPT — an AutoCAD-style scrollback of every line
+                    // submitted through the command line (echoed input, activated tools,
+                    // resolved coordinates, errors), mounted IMMEDIATELY ABOVE the merged
+                    // command line. Opt-in (default OFF) via the disclosure chevron next to
+                    // the command line / the View menu; the buffer is capped on the model
+                    // side. Passive + read-only — it never steals the command line's focus.
+                    if showCommandTranscript {
+                        CommandTranscriptView(model: model)
+                    }
                     // Wave-4 bottom-chrome redesign: the MERGED smart command line — ONE
                     // full-width row that replaces BOTH the former U1 coordinate line and
                     // the `CommandBar` tool launcher. It handles commands AND coordinates
@@ -329,17 +387,9 @@ struct ContentView: View {
                     // dropdown (opens UPWARD over the canvas) while typing a command, and
                     // recent-command chips that LOAD (not execute) into the field. Image
                     // placement routes through the View-layer file-picker (`.image`'s modal
-                    // never reaches the model/tool).
-                    CommandLineBar(
-                        model: model,
-                        text: $commandLineText,
-                        focused: $commandLineFocused,
-                        pinned: pinnedToolsSet,
-                        activateTool: { kind in controllerBox.controller?.activateTool(kind) },
-                        placeImage: { chooseAndPlaceImage() },
-                        returnFocusToCanvas: { controllerBox.controller?.returnFocusToCanvas() },
-                        requestRedraw: { controllerBox.controller?.requestRedraw() }
-                    )
+                    // never reaches the model/tool). A leading disclosure chevron toggles
+                    // the command-transcript scrollback above it.
+                    commandLineRow
                     // The status bar is the LITERAL bottom row (AutoCAD layout): read-only
                     // telemetry (coords / zoom / OSNAP / POLAR / DYN chips) under the
                     // command line. Moved here in Wave-4; the StatusBar HStack is intact.

@@ -500,6 +500,59 @@ final class CanvasModel {
     /// like `1,,2` shows "Expected x,y" instead of silently doing nothing.
     private(set) var lastCommandError: String?
 
+    // MARK: Command transcript (the AutoCAD-style scrollback above the command line)
+
+    /// The kind of one line in the command transcript — drives its color/role in the
+    /// scrollback view. Pure value, `Sendable` so it crosses no isolation boundary.
+    enum TranscriptKind: Sendable, Equatable {
+        /// The raw line the user submitted (echoed back, e.g. `> line`).
+        case input
+        /// An informational readout the model emitted (e.g. a resolved point).
+        case output
+        /// An error message (a parse failure / unknown command) — shown in red.
+        case error
+        /// A tool was activated by name from the command line (shown in the accent).
+        case tool
+    }
+
+    /// One immutable entry in the command transcript: its `kind` (color/role) + the
+    /// already-formatted display `text`. A plain value (`Equatable`/`Sendable`) so the
+    /// scrollback diffs cheaply and the buffer is trivially testable headlessly.
+    struct TranscriptEntry: Equatable, Sendable {
+        let kind: TranscriptKind
+        let text: String
+    }
+
+    /// The rolling AutoCAD-style command history shown in the scrollback pane ABOVE the
+    /// merged command line. Appended at the single `interpretCommandLine` choke point
+    /// (NOT scattered through every tool); capped at `maxTranscriptEntries` (oldest
+    /// dropped) so it never grows unbounded. Session-only (not undoable / not persisted).
+    /// `private(set)` — mutated only via `appendTranscript` / `clearTranscript`.
+    private(set) var commandTranscript: [TranscriptEntry] = []
+
+    /// The hard cap on the transcript ring buffer. When `append` would exceed this, the
+    /// OLDEST entries are dropped so the newest `maxTranscriptEntries` are kept in order.
+    let maxTranscriptEntries = 200
+
+    /// Append one line to the command transcript, dropping the oldest entries past the
+    /// `maxTranscriptEntries` cap so the buffer never grows unbounded. Bumps
+    /// `modelVersion` so the scrollback view refreshes + auto-scrolls to the newest line.
+    func appendTranscript(_ kind: TranscriptKind, _ text: String) {
+        commandTranscript.append(TranscriptEntry(kind: kind, text: text))
+        if commandTranscript.count > maxTranscriptEntries {
+            commandTranscript.removeFirst(commandTranscript.count - maxTranscriptEntries)
+        }
+        modelVersion &+= 1
+    }
+
+    /// Clear the command transcript (the "Clear" affordance / a fresh session). Bumps
+    /// `modelVersion` so the scrollback view empties.
+    func clearTranscript() {
+        guard !commandTranscript.isEmpty else { return }
+        commandTranscript.removeAll(keepingCapacity: true)
+        modelVersion &+= 1
+    }
+
     // MARK: Command bar state (the bottom AutoCAD-style tool launcher)
 
     /// The live text typed into the bottom command BAR's tool-filter field. While
@@ -2925,8 +2978,13 @@ final class CanvasModel {
     func interpretCommandLine(_ text: String) -> CommandLineResult {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
 
-        // 1) Empty.
+        // 1) Empty — never recorded in the transcript (a stray ⏎ shouldn't echo).
         guard !trimmed.isEmpty else { return .empty }
+
+        // Echo the submitted line FIRST (the single transcript choke point — appends are
+        // NOT scattered through the per-route bodies below). The outcome-specific line is
+        // appended right before each return so the scrollback reads input-then-result.
+        appendTranscript(.input, "> \(trimmed)")
 
         // 2) An offered tool keyword (only when a tool is active).
         if tool != nil,
@@ -2942,6 +3000,7 @@ final class CanvasModel {
         if CommandParser.looksLikeCoordinate(trimmed) {
             guard isToolActive else {
                 lastCommandError = "Start a tool first"
+                appendTranscript(.error, "Start a tool first")
                 return .error("Start a tool first")
             }
             // Typed coordinates are interpreted in the ACTIVE UCS: parse the whole token
@@ -2959,9 +3018,13 @@ final class CanvasModel {
                 lastCommandError = nil
                 let worldPoint = world ? p : currentUCS.toWorld(p)
                 handleToolInput(.value(worldPoint))
+                // Echo the resolved WORLD point as an output readout (kept simple — a
+                // 4-dp `x, y`, e.g. "→ 10, 20"); the tool itself owns any further prompt.
+                appendTranscript(.output, "→ \(Self.transcriptPoint(worldPoint))")
                 return .handled
             case .error(let message):
                 lastCommandError = message
+                appendTranscript(.error, message)
                 return .error(message)
             }
         }
@@ -2970,13 +3033,36 @@ final class CanvasModel {
         if let kind = ToolSuggester.resolve(command: trimmed) {
             recordCommandBarUse(kind)
             lastCommandError = nil
+            appendTranscript(.tool, kind.title)
             return .activateTool(kind)
         }
 
         // 5) Unrecognized.
         let message = "Unknown command: \(trimmed)"
         lastCommandError = message
+        appendTranscript(.error, message)
         return .error(message)
+    }
+
+    /// Format a resolved world point for the transcript `.output` readout: each axis at
+    /// up to 4 decimal places with trailing zeros trimmed (so `10, 20` not `10.0000,
+    /// 20.0000`), joined `x, y`. Pure + `nonisolated static` so it unit-tests with no
+    /// model/GUI from any actor context.
+    nonisolated static func transcriptPoint(_ p: Vector) -> String {
+        "\(transcriptCoord(p.x)), \(transcriptCoord(p.y))"
+    }
+
+    /// One axis value formatted for the transcript: fixed 4-dp then trailing zeros (and a
+    /// dangling decimal point) trimmed. Pure helper for `transcriptPoint`.
+    nonisolated private static func transcriptCoord(_ v: Double) -> String {
+        // Normalize -0.0 → 0 so the readout never shows a signed zero.
+        let value = v == 0 ? 0 : v
+        var s = String(format: "%.4f", value)
+        if s.contains(".") {
+            while s.hasSuffix("0") { s.removeLast() }
+            if s.hasSuffix(".") { s.removeLast() }
+        }
+        return s
     }
 
     /// Builds the read-only `ToolContext` snapshot for one `handle` call: the
