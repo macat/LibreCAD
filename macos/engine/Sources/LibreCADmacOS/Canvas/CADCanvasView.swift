@@ -1210,13 +1210,28 @@ final class CADCanvasController {
     /// `TextTool.defaultHeight` / the "Standard" style's last height.
     private static let defaultTextHeight: Double = 2.5
 
+    /// The block-level layout of the MTEXT entity currently being edited (height /
+    /// rectWidth / rotation / attachment / line-spacing / style), captured on open
+    /// so a rich commit can `.replace` it preserving those fields and swapping only
+    /// the paragraph/run tree. `nil` when authoring new text or editing a `.text`.
+    private var editingMTextLayout: MTextData?
+
     /// Opens the inline editor at a WORLD insertion point. `editing` is the entity
     /// being edited (→ commit replaces it) or `nil` for new text; `initialText`
     /// seeds the editor (the existing string when editing, else empty).
-    func beginTextEditing(atWorldPoint world: Vector, editing: EntityID?, initialText: String) {
+    /// `initialSpanned`, when supplied (editing an existing MTEXT), seeds the editor
+    /// with that entity's per-run bold / italic / colour formatting so it is
+    /// editable (Wave 4C).
+    func beginTextEditing(atWorldPoint world: Vector, editing: EntityID?, initialText: String,
+                          initialSpanned: MTextSpannedText? = nil) {
         guard let view else { return }
         // Tear down any prior editor first.
         teardownEditor(commit: false)
+
+        // New text (or editing a single-line `.text`) carries no MTEXT layout; the
+        // `.mtext` double-click arm sets `editingMTextLayout` AFTER calling us, so we
+        // only clear it here when opening fresh-new text (editing == nil).
+        if editing == nil { editingMTextLayout = nil }
 
         let height = Self.defaultTextHeight
         // Screen anchor: the insertion point, nudged UP by the cap height so the
@@ -1232,6 +1247,7 @@ final class CADCanvasController {
             styleName: TextTool.standardStyleName,
             editingID: editing,
             initialText: initialText,
+            initialSpanned: initialSpanned,
             screenOrigin: origin,
             pointHeight: pointHeight,
             accentColor: .controlAccentColor,
@@ -1273,12 +1289,19 @@ final class CADCanvasController {
         // Only text/mtext entities are editable by the inline editor.
         switch record.kind {
         case .text(let d):
+            editingMTextLayout = nil
             beginTextEditing(atWorldPoint: d.position, editing: id, initialText: d.text)
             redraw()
             return true
         case .mtext(let d):
+            // Capture the block-level layout so a rich commit `.replace`s it
+            // preserving height/rotation/attachment/etc. and swapping only the runs.
+            editingMTextLayout = d
+            // Seed the editor with the existing per-run formatting (Wave 4C) so
+            // bold / italic / colour are editable, not just the flattened text.
+            let spanned = MTextRunConverter.spannedText(from: d.paragraphs)
             beginTextEditing(atWorldPoint: d.position, editing: id,
-                             initialText: Self.plainText(of: d))
+                             initialText: spanned.string, initialSpanned: spanned)
             redraw()
             return true
         case .insert(let d):
@@ -1296,18 +1319,44 @@ final class CADCanvasController {
         }
     }
 
-    /// Commits the inline editor: builds + runs a `TextTool` value (single-line →
-    /// `.text`, multi-line → `.mtext`; editing → `.replace`) and applies the edits
+    /// Commits the inline editor. When the editor carries per-run formatting
+    /// (bold / italic / colour) OR multiple lines, it builds a rich `.mtext` entity
+    /// directly from the editor's run tree (Wave 4C); a plain single line still
+    /// commits via `TextTool` as a single-line `.text`. Either way the edits flow
     /// through the shared `applyToolEdits` (the same undoable `applyCommit` path the
     /// in-canvas tools use). Empty text creates nothing. Tears the editor down.
     func commitTextEditing() {
         guard let overlay = textEditor else { return }
         let string = overlay.currentText
+        let editingID = overlay.editingID
+        let savedLayout = editingMTextLayout
         textEditor = nil
+        editingMTextLayout = nil
         overlay.container.removeFromSuperview()
 
+        // Nothing to commit for empty / whitespace-only text.
+        guard !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            redraw(); return
+        }
+
+        let isMultiline = string.contains("\n") || string.contains("\r")
+        if overlay.hasRichFormatting || isMultiline {
+            // RICH / multi-line → author an `.mtext` from the editor's run tree.
+            let paragraphs = overlay.richParagraphs
+            let kind = Self.makeMTextKind(
+                paragraphs: paragraphs, at: overlay.worldPoint,
+                height: overlay.worldHeight, styleName: overlay.styleName,
+                preserving: savedLayout)
+            let edit: ToolEdit = editingID.map { .replace($0, kind) }
+                ?? .add(EntityRecord(id: .placeholder, kind: kind))
+            model.applyToolEdits([edit])
+            redraw()
+            return
+        }
+
+        // Plain single line → the existing `TextTool` path (commits a `.text`).
         var tool: TextTool
-        if let id = overlay.editingID {
+        if let id = editingID {
             tool = TextTool(
                 editing: id, at: overlay.worldPoint, text: string,
                 height: overlay.worldHeight, styleName: overlay.styleName)
@@ -1324,6 +1373,30 @@ final class CADCanvasController {
         redraw()
     }
 
+    /// Builds an `.mtext` `EntityKind` from authored paragraphs. When editing an
+    /// existing MTEXT (`preserving` non-nil), it keeps that entity's block-level
+    /// layout (height/rectWidth/rotation/attachment/line-spacing/style) and swaps in
+    /// the new run tree — and clears `rawCode` so the DXF writer re-emits the codes
+    /// from the edited run tree (not a stale verbatim string). New text uses the
+    /// authoring defaults (top-left attachment, no wrap).
+    private static func makeMTextKind(
+        paragraphs: [MTextParagraph], at point: Vector, height: Double, styleName: String,
+        preserving existing: MTextData?
+    ) -> EntityKind {
+        if var d = existing {
+            d.paragraphs = paragraphs
+            d.rawCode = nil          // edited → re-emit from the run tree on write
+            return .mtext(d)
+        }
+        return .mtext(MTextData(
+            position: point,
+            height: height,
+            rotation: 0,
+            styleName: styleName,
+            attachment: .topLeft,
+            paragraphs: paragraphs))
+    }
+
     /// Cancels the inline editor (Esc): discards the typed text, no entity created
     /// or replaced.
     func cancelTextEditing() {
@@ -1338,21 +1411,6 @@ final class CADCanvasController {
         guard let overlay = textEditor else { return }
         textEditor = nil
         overlay.container.removeFromSuperview()
-    }
-
-    /// Reconstructs a plain multi-line string from an `MTextData`'s paragraph/run
-    /// tree (run texts concatenated per paragraph; paragraphs joined with `\n`), so
-    /// the inline editor can pre-fill when editing an existing MTEXT entity.
-    private static func plainText(of data: MTextData) -> String {
-        data.paragraphs.map { paragraph in
-            paragraph.inlines.map { inline -> String in
-                switch inline {
-                case .run(let run):       return run.text
-                case .stacked(let s):     return "\(s.upper)/\(s.lower)"
-                case .tab:                return "\t"
-                }
-            }.joined()
-        }.joined(separator: "\n")
     }
 
     // MARK: Tool activation + keyboard
