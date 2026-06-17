@@ -126,11 +126,33 @@ public enum CoordinateFormatter {
     ///
     /// The input is normalized into `[0, 2π)` first (LibreCAD `correctAngle`), so a
     /// negative or multi-turn angle renders the same as its principal value.
+    ///
+    /// The optional `angleBase` / `clockwise` parameters apply the drawing's angle
+    /// basis (AutoCAD `$ANGBASE` / `$ANGDIR`) BEFORE formatting, mirroring how the
+    /// CAD core measures user-facing angles:
+    ///
+    /// - `angleBase` (radians, default `0`) shifts the displayed zero direction:
+    ///   the WCS direction `angleBase` reads as `0`. (e.g. `angleBase: π/2` makes a
+    ///   world angle of `π/2` display as `0`.)
+    /// - `clockwise` (default `false` ⇒ CCW, `$ANGDIR == 0`) reverses the direction
+    ///   of increasing angle. When `true` (`$ANGDIR == 1`) the displayed angle grows
+    ///   clockwise from `angleBase`.
+    ///
+    /// The displayed angle is `correctAngle(clockwise ? (angleBase - radians)
+    /// : (radians - angleBase))`, then formatted exactly as before. With the
+    /// defaults (`angleBase: 0, clockwise: false`) the output is byte-identical to
+    /// the prior behavior, so existing callers/tests are unaffected. The basis is
+    /// applied uniformly to every `AngleFormat` (including `.surveyors`).
     public static func angle(_ radians: Double,
                              format: AngleFormat = .degreesDecimal,
-                             precision: Int = 4) -> String {
+                             precision: Int = 4,
+                             angleBase: Double = 0,
+                             clockwise: Bool = false) -> String {
         let p = clampPrecision(precision)
-        let a = MathUtils.correctAngle(radians)
+        // Apply the angle basis ($ANGBASE shifts the zero; $ANGDIR=1 measures CW),
+        // then normalize into [0, 2π) — defaults (0, false) are a no-op.
+        let display = clockwise ? (angleBase - radians) : (radians - angleBase)
+        let a = MathUtils.correctAngle(display)
         switch format {
         case .degreesDecimal:
             let deg = MathUtils.rad2deg(a)
@@ -198,16 +220,24 @@ public enum CoordinateFormatter {
     /// `unit`), angle via `angle` (honoring the angular `angleFormat`/`anglePrecision`).
     /// The `<` is LibreCAD's polar separator. A zero offset reads `"0<…"` at the base
     /// angle (`atan2(0,0) == 0`).
+    ///
+    /// The optional `angleBase` / `clockwise` parameters apply the drawing's angle
+    /// basis (`$ANGBASE` / `$ANGDIR`) to the displayed angle component, forwarded to
+    /// `angle(_:format:precision:angleBase:clockwise:)`. Their defaults
+    /// (`0` / `false`) keep the output byte-identical to the prior behavior.
     public static func polarPair(dx: Double, dy: Double,
                                  format: LinearFormat = .decimal,
                                  precision: Int = 4,
                                  unit: DrawingUnit = .none,
                                  angleFormat: AngleFormat = .degreesDecimal,
-                                 anglePrecision: Int = 4) -> String {
+                                 anglePrecision: Int = 4,
+                                 angleBase: Double = 0,
+                                 clockwise: Bool = false) -> String {
         let dist = (dx * dx + dy * dy).squareRoot()
         let theta = atan2(dy, dx)
         let distStr = length(dist, format: format, precision: precision, unit: unit)
-        let angStr = angle(theta, format: angleFormat, precision: anglePrecision)
+        let angStr = angle(theta, format: angleFormat, precision: anglePrecision,
+                           angleBase: angleBase, clockwise: clockwise)
         return "\(distStr)<\(angStr)"
     }
 

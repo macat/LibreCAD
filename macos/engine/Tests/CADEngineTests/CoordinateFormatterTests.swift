@@ -141,3 +141,148 @@ struct CoordinateFormatterPairTests {
         #expect(s == "X 1'-0\"   Y 2'-0\"")
     }
 }
+
+// MARK: - Angle basis ($ANGBASE / $ANGDIR) — UCS-W0
+
+/// Covers the additive `angleBase` / `clockwise` parameters on
+/// `CoordinateFormatter.angle` (and the forwarded `polarPair`). The angle basis is
+/// AutoCAD's `$ANGBASE` (the WCS direction that displays as zero) plus `$ANGDIR`
+/// (0 = CCW default, 1 = CW). The displayed angle is
+/// `correctAngle(clockwise ? (angleBase - radians) : (radians - angleBase))`.
+@Suite("CoordinateFormatter angle basis ($ANGBASE/$ANGDIR)")
+struct CoordinateFormatterAngleBasisTests {
+
+    // MARK: - Default params are byte-identical to the basis-free overload
+
+    @Test("default angleBase/clockwise reproduce the current angle output exactly")
+    func defaultsAreIdentical() {
+        // Lock the regression: with the defaults the new signature must equal what
+        // the formatter produced before the basis params existed, across formats.
+        #expect(CoordinateFormatter.angle(.pi / 2, format: .degreesDecimal, precision: 2) == "90°")
+        #expect(CoordinateFormatter.angle(.pi / 4, format: .degreesDecimal, precision: 4) == "45°")
+        #expect(CoordinateFormatter.angle(atan2(4.0, 3.0), format: .degreesDecimal, precision: 2) == "53.13°")
+        #expect(CoordinateFormatter.angle(-.pi / 2, format: .degreesDecimal, precision: 0) == "270°")
+        #expect(CoordinateFormatter.angle(2 * .pi + .pi / 2, format: .degreesDecimal, precision: 0) == "90°")
+        #expect(CoordinateFormatter.angle(.pi, format: .radians, precision: 4) == "3.1416r")
+        #expect(CoordinateFormatter.angle(.pi / 2, format: .gradians, precision: 2) == "100g")
+        #expect(CoordinateFormatter.angle(.pi / 2, format: .degreesMinutesSeconds, precision: 4) == "90°0'0\"")
+        #expect(CoordinateFormatter.angle(.pi / 4, format: .surveyors) == "N 45°0'0\" E")
+    }
+
+    @Test("explicitly passing angleBase:0, clockwise:false equals the bare call")
+    func explicitDefaultsMatchBare() {
+        let inputs: [Double] = [0.0, Double.pi / 6, Double.pi / 2, Double.pi,
+                                3 * Double.pi / 2, -Double.pi / 3, 2.7]
+        for raw in inputs {
+            let bare = CoordinateFormatter.angle(raw, format: .degreesDecimal, precision: 4)
+            let explicit = CoordinateFormatter.angle(raw, format: .degreesDecimal, precision: 4,
+                                                     angleBase: 0, clockwise: false)
+            #expect(bare == explicit)
+        }
+    }
+
+    // MARK: - $ANGBASE shifts the displayed zero
+
+    @Test("angleBase shifts the displayed zero direction")
+    func angleBaseShiftsZero() {
+        // With base = 90°, a world angle of 90° displays as 0°.
+        #expect(CoordinateFormatter.angle(.pi / 2, format: .degreesDecimal, precision: 0,
+                                          angleBase: .pi / 2) == "0°")
+        // A world angle of 180° displays as 90° (180 - 90).
+        #expect(CoordinateFormatter.angle(.pi, format: .degreesDecimal, precision: 0,
+                                          angleBase: .pi / 2) == "90°")
+        // World 0° with base 90° wraps to 270° (0 - 90 normalized into [0,2π)).
+        #expect(CoordinateFormatter.angle(0, format: .degreesDecimal, precision: 0,
+                                          angleBase: .pi / 2) == "270°")
+    }
+
+    @Test("angleBase works with a non-orthogonal base (45°)")
+    func angleBaseFortyFive() {
+        // base = 45°, world = 90° ⇒ displays 45°.
+        #expect(CoordinateFormatter.angle(.pi / 2, format: .degreesDecimal, precision: 0,
+                                          angleBase: .pi / 4) == "45°")
+    }
+
+    // MARK: - $ANGDIR (clockwise) negates direction
+
+    @Test("clockwise negates the direction of increasing angle")
+    func clockwiseNegates() {
+        // CW with base 0: world 90° displays as (0 - 90) → 270°.
+        #expect(CoordinateFormatter.angle(.pi / 2, format: .degreesDecimal, precision: 0,
+                                          clockwise: true) == "270°")
+        // CW: world 270° displays as (0 - 270) → 90°.
+        #expect(CoordinateFormatter.angle(3 * .pi / 2, format: .degreesDecimal, precision: 0,
+                                          clockwise: true) == "90°")
+        // Zero is unchanged under pure CW (0 → 0).
+        #expect(CoordinateFormatter.angle(0, format: .degreesDecimal, precision: 0,
+                                          clockwise: true) == "0°")
+        // 180° is its own CW reflection.
+        #expect(CoordinateFormatter.angle(.pi, format: .degreesDecimal, precision: 0,
+                                          clockwise: true) == "180°")
+    }
+
+    // MARK: - Combined base + direction
+
+    @Test("combined angleBase and clockwise apply (angleBase - radians)")
+    func combinedBaseAndClockwise() {
+        // CW with base 90°: world 0° displays as (90 - 0) → 90°.
+        #expect(CoordinateFormatter.angle(0, format: .degreesDecimal, precision: 0,
+                                          angleBase: .pi / 2, clockwise: true) == "90°")
+        // CW with base 90°: world 90° displays as (90 - 90) → 0°.
+        #expect(CoordinateFormatter.angle(.pi / 2, format: .degreesDecimal, precision: 0,
+                                          angleBase: .pi / 2, clockwise: true) == "0°")
+        // CW with base 90°: world 180° displays as (90 - 180) → -90 → 270°.
+        #expect(CoordinateFormatter.angle(.pi, format: .degreesDecimal, precision: 0,
+                                          angleBase: .pi / 2, clockwise: true) == "270°")
+    }
+
+    // MARK: - Normalization across ±2π with a basis applied
+
+    @Test("the displayed angle is normalized into [0,2π) after the basis")
+    func normalizationWithBasis() {
+        // World 90° + 2π full turn, base 90° ⇒ still 0°.
+        #expect(CoordinateFormatter.angle(.pi / 2 + 2 * .pi, format: .degreesDecimal, precision: 0,
+                                          angleBase: .pi / 2) == "0°")
+        // A large negative world angle with a base still folds in.
+        #expect(CoordinateFormatter.angle(-3 * .pi / 2, format: .degreesDecimal, precision: 0,
+                                          angleBase: .pi / 2) == "0°")
+        // CW with a multi-turn input normalizes the same as its principal value.
+        #expect(CoordinateFormatter.angle(.pi / 2 - 4 * .pi, format: .degreesDecimal, precision: 0,
+                                          clockwise: true) == "270°")
+    }
+
+    // MARK: - The basis applies across formats (gradians / DMS / surveyors)
+
+    @Test("basis applies uniformly across angle formats")
+    func basisAcrossFormats() {
+        // base 90°: world 180° displays 90° ⇒ 100g in gradians.
+        #expect(CoordinateFormatter.angle(.pi, format: .gradians, precision: 0,
+                                          angleBase: .pi / 2) == "100g")
+        // base 90°: world 180° displays 90° ⇒ "90°0'0\"" in DMS.
+        #expect(CoordinateFormatter.angle(.pi, format: .degreesMinutesSeconds, precision: 4,
+                                          angleBase: .pi / 2) == "90°0'0\"")
+        // base 90°: world 180° displays 90° ⇒ "N" in surveyors.
+        #expect(CoordinateFormatter.angle(.pi, format: .surveyors,
+                                          angleBase: .pi / 2) == "N")
+    }
+
+    // MARK: - polarPair forwards the basis to its angle component
+
+    @Test("polarPair forwards angleBase/clockwise; defaults stay identical")
+    func polarPairForwardsBasis() {
+        // Default basis: unchanged from the established polar output.
+        #expect(CoordinateFormatter.polarPair(dx: 3, dy: 4,
+                                              format: .decimal, precision: 0,
+                                              angleFormat: .degreesDecimal, anglePrecision: 2) == "5<53.13°")
+        // dx=0,dy=10 ⇒ θ=90°; base 90° ⇒ angle component reads 0°. Distance unaffected.
+        #expect(CoordinateFormatter.polarPair(dx: 0, dy: 10,
+                                              format: .decimal, precision: 0,
+                                              angleFormat: .degreesDecimal, anglePrecision: 0,
+                                              angleBase: .pi / 2) == "10<0°")
+        // Same offset, clockwise ⇒ (0 - 90) → 270°.
+        #expect(CoordinateFormatter.polarPair(dx: 0, dy: 10,
+                                              format: .decimal, precision: 0,
+                                              angleFormat: .degreesDecimal, anglePrecision: 0,
+                                              clockwise: true) == "10<270°")
+    }
+}
