@@ -215,6 +215,60 @@ struct GizmoTransformTests {
         #expect(GizmoTransform.rotateAngle(frame: frame, from: center, to: p) == nil)
     }
 
+    // MARK: - Point-based overloads (oriented gizmo pivot/center)
+
+    @Test("point-based cornerScale about an explicit pivot matches the frame-based form")
+    func cornerScalePivotOverload() {
+        let frame = Self.frame
+        let corner: GizmoHandle.Corner = .topRight
+        let pivot = frame.oppositeCorner(corner)
+        let p0 = frame.corner(corner)
+        let p1 = Vector(20, 12)
+        let viaFrame = GizmoTransform.cornerScale(frame: frame, corner: corner, from: p0, to: p1)
+        let viaPivot = GizmoTransform.cornerScale(pivot: pivot, from: p0, to: p1)
+        #expect(viaPivot == viaFrame)
+        // It scales about an ARBITRARY (oriented) pivot the frame can't express.
+        let oriented = GizmoTransform.cornerScale(pivot: Vector(2, 1), from: Vector(4, 3), to: Vector(6, 5))
+        #expect(approx(oriented.apply(Vector(2, 1)), Vector(2, 1)))   // pivot fixed
+    }
+
+    @Test("point-based cornerScale is identity for a degenerate drag")
+    func cornerScalePivotDegenerate() {
+        // pivot == p0 → oldDist 0 → identity.
+        let t = GizmoTransform.cornerScale(pivot: Vector(5, 5), from: Vector(5, 5), to: Vector(9, 9))
+        #expect(t == .identity)
+    }
+
+    @Test("point-based rotate about an explicit center matches the frame-based form")
+    func rotateCenterOverload() {
+        let frame = Self.frame
+        let center = frame.center
+        let p0 = center + Vector(4, 0)
+        let p1 = center + Vector(0, 4)
+        let viaFrame = GizmoTransform.rotate(frame: frame, from: p0, to: p1)
+        let viaCenter = GizmoTransform.rotate(center: center, from: p0, to: p1)
+        #expect(viaCenter == viaFrame)
+        // About an arbitrary oriented center.
+        let c = Vector(2, 2)
+        let t = GizmoTransform.rotate(center: c, from: c + Vector(3, 0), to: c + Vector(0, 3))
+        #expect(approx(t.apply(c + Vector(3, 0)), c + Vector(0, 3)))
+        #expect(approx(t.apply(c), c))   // center fixed
+    }
+
+    @Test("point-based rotateAngle snaps and rejects degenerate drags")
+    func rotateAngleCenterOverload() {
+        let c = Vector(0, 0)
+        // ~20° → snaps to 15°.
+        let p0 = c + Vector(4, 0)
+        let p1 = c + Vector(4 * cos(20 * .pi / 180), 4 * sin(20 * .pi / 180))
+        let a = GizmoTransform.rotateAngle(center: c, from: p0, to: p1, snap: true)
+        #expect(a != nil)
+        #expect(approx(a!, .pi / 12, 1e-9))
+        // p0 == p1 → nil; a point at the center → nil.
+        #expect(GizmoTransform.rotateAngle(center: c, from: p0, to: p0) == nil)
+        #expect(GizmoTransform.rotateAngle(center: c, from: c, to: p0) == nil)
+    }
+
     // MARK: - Oriented frame chrome (transformedQuad / transformedKnobAnchor)
 
     @Test("identity transform yields the base AABB corners in [BL,BR,TR,TL] order")
@@ -306,6 +360,49 @@ struct GizmoTransformTests {
         // For a +90° rotation the original top edge (pointing +X normal +Y) turns:
         // the outward normal is no longer +Y.
         #expect(!approx(a.outward, Vector(0, 1)))
+    }
+
+    // MARK: - Oriented hit-testing (pointInConvexQuad)
+
+    @Test("point-in-quad: inside / outside an axis-aligned quad")
+    func pointInQuadAxisAligned() {
+        let q = [Vector(0, 0), Vector(10, 0), Vector(10, 6), Vector(0, 6)]
+        #expect(GizmoTransform.pointInConvexQuad(Vector(5, 3), quad: q))   // center
+        #expect(GizmoTransform.pointInConvexQuad(Vector(0, 0), quad: q))   // corner
+        #expect(!GizmoTransform.pointInConvexQuad(Vector(-1, 3), quad: q)) // left of it
+        #expect(!GizmoTransform.pointInConvexQuad(Vector(5, 7), quad: q))  // above it
+    }
+
+    @Test("point-in-quad: a ROTATED quad accepts points the AABB would and rejects corners the AABB wouldn't")
+    func pointInQuadRotated() {
+        // A 10×4 box rotated 45° about its center (5,2): its AABB is much larger.
+        let center = Vector(5, 2)
+        let t = Affine2D.rotation(angle: .pi / 4, about: center)
+        let q = GizmoTransform.transformedQuad(base: GizmoFrame(min: Vector(0, 0), max: Vector(10, 4)), t: t)
+        // The center is inside.
+        #expect(GizmoTransform.pointInConvexQuad(center, quad: q))
+        // A point near a CORNER of the rotated box's AABB but OUTSIDE the rotated
+        // quad is rejected — the oriented test is tighter than a screen AABB.
+        // The rotated box's AABB spans roughly x∈[~-0.95, ~10.95]; pick a far corner.
+        let aabbCorner = Vector(center.x - 4.9, center.y - 4.9)
+        #expect(!GizmoTransform.pointInConvexQuad(aabbCorner, quad: q))
+    }
+
+    @Test("point-in-quad: slop expands the accept region")
+    func pointInQuadSlop() {
+        let q = [Vector(0, 0), Vector(10, 0), Vector(10, 6), Vector(0, 6)]
+        // Just outside the right edge by 0.5.
+        let p = Vector(10.5, 3)
+        #expect(!GizmoTransform.pointInConvexQuad(p, quad: q))            // no slop
+        #expect(GizmoTransform.pointInConvexQuad(p, quad: q, slop: 1.0))  // within slop
+    }
+
+    @Test("point-in-quad: degenerate / non-quad input is rejected")
+    func pointInQuadDegenerate() {
+        #expect(!GizmoTransform.pointInConvexQuad(Vector(0, 0), quad: [Vector(0, 0), Vector(1, 1), Vector(2, 2)]))
+        // Zero-area quad (all points coincide) → rejected.
+        let z = Vector(3, 3)
+        #expect(!GizmoTransform.pointInConvexQuad(z, quad: [z, z, z, z]))
     }
 
     @Test("knob anchor outward stays outward across all four rotation quadrants")

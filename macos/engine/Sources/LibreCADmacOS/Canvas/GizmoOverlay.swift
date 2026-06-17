@@ -62,9 +62,16 @@ final class GizmoOverlayView: NSView {
     /// the dragged geometry preview the model publishes is drawn while dragging.
     private let requestCanvasRedraw: () -> Void
 
-    /// The last computed gizmo frame in WORLD coordinates (Y-up). `nil` when there
-    /// is nothing to show.
+    /// The last computed gizmo base frame in WORLD coordinates (Y-up). This is the
+    /// AXIS-ALIGNED base box (`min`/`max`); the resting chrome is drawn by rotating
+    /// it by `orientation3D` about its center, so a rotated object's gizmo stays
+    /// oriented to it (task #17). `nil` when there is nothing to show.
     private var frame3D: GizmoFrame?
+
+    /// The resting WORLD orientation (radians, CCW) the base frame is drawn at. `0`
+    /// for an unrotated / multi-select / symmetric selection (the legacy upright
+    /// case). Captured from `model.gizmoOrientation` on every `refresh()`.
+    private var orientation3D: Double = 0
 
     /// The in-progress drag, or `nil` when idle.
     private var activeDrag: Drag?
@@ -73,13 +80,22 @@ final class GizmoOverlayView: NSView {
     private struct Drag {
         /// Which handle is grabbed.
         let handle: GizmoHandle
-        /// The gizmo frame captured at mouse-down (the drag math is relative to it,
-        /// so it stays stable even as the live preview moves the geometry).
+        /// The gizmo base frame captured at mouse-down (the drag math is relative to
+        /// it, so it stays stable even as the live preview moves the geometry).
         let frame: GizmoFrame
+        /// The resting orientation captured at mouse-down, so the chrome stays
+        /// oriented mid-drag (the live preview is composed ON TOP of this rotation).
+        let orientation: Double
         /// The drag's START world point. For a corner drag this is the corner's own
-        /// world position (so the scale factor is exact); for move/rotate it is the
-        /// world point under the cursor at mouse-down.
+        /// ORIENTED world position (so the scale factor is exact); for move/rotate it
+        /// is the world point under the cursor at mouse-down.
         let startWorld: Vector
+        /// The scale PIVOT for a corner drag: the ORIENTED opposite corner (world).
+        /// Unused for move/rotate. Captured so the scale is about the right oriented
+        /// corner even though `frame` itself is axis-aligned.
+        let pivot: Vector
+        /// The rotate/scale CENTER (the oriented base-box center in world).
+        let center: Vector
     }
 
     // MARK: Geometry constants (screen points)
@@ -123,7 +139,11 @@ final class GizmoOverlayView: NSView {
     /// Hides the overlay when there is no selection (so it never blocks clicks).
     /// Called by the controller on selection / pan / zoom change.
     func refresh() {
-        frame3D = model.selectionWorldBounds.flatMap { GizmoFrame(box: $0) }
+        // The ORIENTED base frame + orientation (task #17). At orientation 0 the
+        // base frame is byte-identical to the legacy upright AABB, so an unrotated /
+        // multi-select / symmetric selection draws exactly as before.
+        frame3D = model.gizmoOrientedBaseFrame
+        orientation3D = model.gizmoOrientation
         isHidden = (frame3D == nil)
         needsDisplay = true
     }
@@ -140,40 +160,101 @@ final class GizmoOverlayView: NSView {
     private func screen(_ world: Vector) -> CGPoint { model.viewport.worldToScreen(world) }
     private func world(_ screen: CGPoint) -> Vector { model.viewport.screenToWorld(screen) }
 
-    /// The rotate-knob CENTER in screen points: above the top edge's screen midpoint
-    /// by `knobStalk` (screen Y-down, so "above" is a SMALLER y).
-    private func knobScreenCenter(_ f: GizmoFrame) -> CGPoint {
-        let topMidWorld = Vector((f.min.x + f.max.x) * 0.5, f.max.y)
-        let s = screen(topMidWorld)
-        return CGPoint(x: s.x, y: s.y - Self.knobStalk)
+    /// The base frame + orientation the chrome is currently drawn from: the captured
+    /// drag base/orientation while dragging, else the live resting frame/orientation.
+    private var chromeBase: (frame: GizmoFrame, orientation: Double)? {
+        if let drag = activeDrag { return (drag.frame, drag.orientation) }
+        guard let f = frame3D else { return nil }
+        return (f, orientation3D)
+    }
+
+    /// The WORLD transform the chrome (frame outline / corners / knob) is drawn with.
+    /// At rest this is the base orientation about the base center; during a drag the
+    /// live preview transform is composed ON TOP so the chrome rotates/scales WITH
+    /// the object preview while STAYING oriented. Returns `.identity` when the base
+    /// orientation is 0 and there's no live preview (the legacy upright case —
+    /// byte-identical to today).
+    private func chromeTransform(base: GizmoFrame, orientation: Double) -> Affine2D {
+        let rest = orientation == 0 ? .identity : Affine2D.rotation(angle: orientation, about: base.center)
+        if let live = model.gizmoPreviewTransform {
+            // Apply the resting orientation first, then the live drag transform.
+            return live * rest
+        }
+        return rest
+    }
+
+    /// The four ORIENTED world corners of the current chrome (BL,BR,TR,TL), or `nil`
+    /// when idle with nothing to show.
+    private func orientedWorldCorners() -> [Vector]? {
+        guard let cb = chromeBase else { return nil }
+        let t = chromeTransform(base: cb.frame, orientation: cb.orientation)
+        return GizmoTransform.transformedQuad(base: cb.frame, t: t)
+    }
+
+    /// The rotate-knob CENTER in screen points, anchored on the ORIENTED top edge:
+    /// the transformed top-edge midpoint, offset by `knobStalk` along the screen-
+    /// projected outward normal (so the knob turns with a rotated box). Falls back to
+    /// straight up (screen Y-down → smaller y) for a degenerate edge.
+    private func knobScreenCenter(_ f: GizmoFrame, orientation: Double) -> CGPoint {
+        let t = chromeTransform(base: f, orientation: orientation)
+        let anchor = GizmoTransform.transformedKnobAnchor(base: f, t: t)
+        let rootScreen = screen(anchor.root)
+        let outScreen = screen(anchor.root + anchor.outward)
+        var dir = CGPoint(x: outScreen.x - rootScreen.x, y: outScreen.y - rootScreen.y)
+        let len = hypot(dir.x, dir.y)
+        if len > 1e-9 { dir = CGPoint(x: dir.x / len, y: dir.y / len) }
+        else { dir = CGPoint(x: 0, y: -1) }
+        return CGPoint(x: rootScreen.x + dir.x * Self.knobStalk,
+                       y: rootScreen.y + dir.y * Self.knobStalk)
     }
 
     // MARK: Hit-testing (transparent except over a handle)
 
     /// The handle (if any) under a screen point. Corners first (most specific),
-    /// then the rotate knob, then the body (inside the frame) for move.
+    /// then the rotate knob, then the body (inside the ORIENTED quad) for move.
+    ///
+    /// The corners + body use the ORIENTED chrome quad (the resting rotated box, or
+    /// the live-dragged box mid-drag) so a rotated object's handles are grabbed at
+    /// their drawn positions; at orientation 0 this is the same axis-aligned quad as
+    /// before, so unrotated/multi-select hit-testing is unchanged.
     private func handle(at p: CGPoint) -> GizmoHandle? {
         guard let f = frame3D else { return nil }
+        // The four oriented corners in [BL,BR,TR,TL] order, projected to screen.
+        let cornersOrder: [GizmoHandle.Corner] = [.bottomLeft, .bottomRight, .topRight, .topLeft]
+        guard let worldCorners = orientedWorldCorners() else { return nil }
+        let screenCorners = worldCorners.map { screen($0) }
 
-        // Corners.
-        for c in GizmoHandle.Corner.allCases {
-            let cs = screen(f.corner(c))
+        // Corners (most specific) — within the handle square + slop of an oriented
+        // corner. Box test in screen space is fine: the square is drawn axis-aligned.
+        for (i, c) in cornersOrder.enumerated() {
+            let cs = screenCorners[i]
             if abs(p.x - cs.x) <= Self.handleHalf + Self.hitSlop,
                abs(p.y - cs.y) <= Self.handleHalf + Self.hitSlop {
                 return .corner(c)
             }
         }
 
-        // Rotate knob.
-        let knob = knobScreenCenter(f)
+        // Rotate knob (oriented top-edge anchor).
+        let knob = knobScreenCenter(f, orientation: orientation3D)
         let dk = hypot(p.x - knob.x, p.y - knob.y)
         if dk <= Self.knobRadius + Self.hitSlop { return .rotate }
 
-        // Body (inside the frame rect in screen space) → move.
-        let r = screenFrameRect(f)
-        if r.insetBy(dx: -Self.hitSlop, dy: -Self.hitSlop).contains(p) { return .move }
+        // Body → move: point-in-ORIENTED-quad (convex containment of the screen
+        // quad), expanded by `hitSlop` so the grab area matches the drawn frame.
+        if pointInQuad(p, quad: screenCorners, slop: Self.hitSlop) { return .move }
 
         return nil
+    }
+
+    /// Convex-quad containment of screen point `p` in `quad` (4 points), expanded
+    /// outward by `slop` points. Delegates to the pure, unit-tested
+    /// `GizmoTransform.pointInConvexQuad` (the quad is the screen-projected oriented
+    /// chrome; screen points are passed as `Vector`s — z is irrelevant in 2D).
+    private func pointInQuad(_ p: CGPoint, quad: [CGPoint], slop: CGFloat) -> Bool {
+        GizmoTransform.pointInConvexQuad(
+            Vector(Double(p.x), Double(p.y)),
+            quad: quad.map { Vector(Double($0.x), Double($0.y)) },
+            slop: Double(slop))
     }
 
     /// `hitTest` returns this view ONLY when the point is over a handle (so it can
@@ -194,14 +275,23 @@ final class GizmoOverlayView: NSView {
         let p = convert(event.locationInWindow, from: nil)
         guard let h = handle(at: p) else { super.mouseDown(with: event); return }
 
-        // The drag start world point: for a corner, the corner's own world position
-        // (exact scale factor); for move/rotate, the cursor's world point.
+        // The ORIENTED chrome quad at mouse-down (orientation 0 → axis-aligned).
+        let t = chromeTransform(base: f, orientation: orientation3D)
+        let orientedCenter = t.apply(f.center)
+
+        // The drag start world point: for a corner, the corner's own ORIENTED world
+        // position (exact scale factor); for move/rotate, the cursor's world point.
         let startWorld: Vector
+        var pivot = orientedCenter
         switch h {
-        case .corner(let c): startWorld = f.corner(c)
-        default:             startWorld = world(p)
+        case .corner(let c):
+            startWorld = t.apply(f.corner(c))
+            pivot = t.apply(f.corner(c.opposite))   // the oriented opposite corner
+        default:
+            startWorld = world(p)
         }
-        activeDrag = Drag(handle: h, frame: f, startWorld: startWorld)
+        activeDrag = Drag(handle: h, frame: f, orientation: orientation3D,
+                          startWorld: startWorld, pivot: pivot, center: orientedCenter)
         needsDisplay = true
     }
 
@@ -235,33 +325,29 @@ final class GizmoOverlayView: NSView {
 
     // MARK: Drag → transform (delegates the math to GizmoTransform)
 
-    /// Builds the `Affine2D` for the current drag from its world endpoints.
+    /// Builds the `Affine2D` for the current drag from its world endpoints. Corner
+    /// scale + rotate use the ORIENTED pivot / center captured at mouse-down (via the
+    /// point-based `GizmoTransform` overloads), so a rotated box scales about its
+    /// oriented opposite corner and rotates about its oriented center. The world
+    /// transform itself is pivot/center-relative, so the existing undoable commit
+    /// path needs no change.
     private func transform(for drag: Drag, cursorWorld: Vector, shift: Bool) -> Affine2D {
         switch drag.handle {
         case .move:
             return GizmoTransform.move(from: drag.startWorld, to: cursorWorld, constrained: shift)
-        case .corner(let c):
-            return GizmoTransform.cornerScale(frame: drag.frame, corner: c,
+        case .corner:
+            return GizmoTransform.cornerScale(pivot: drag.pivot,
                                               from: drag.startWorld, to: cursorWorld)
         case .rotate:
-            return GizmoTransform.rotate(frame: drag.frame, from: drag.startWorld,
+            return GizmoTransform.rotate(center: drag.center, from: drag.startWorld,
                                          to: cursorWorld, snap: shift)
         }
     }
 
     // MARK: Drawing
 
-    /// The selection frame as a screen-space rect (in our flipped, Y-down space).
-    private func screenFrameRect(_ f: GizmoFrame) -> CGRect {
-        let a = screen(f.bottomLeft)   // world min → screen (Y-down → larger y)
-        let b = screen(f.topRight)     // world max → screen (Y-down → smaller y)
-        let x = Swift.min(a.x, b.x)
-        let y = Swift.min(a.y, b.y)
-        return CGRect(x: x, y: y, width: abs(a.x - b.x), height: abs(a.y - b.y))
-    }
-
     override func draw(_ dirtyRect: NSRect) {
-        guard let f = frame3D, let ctx = NSGraphicsContext.current?.cgContext else { return }
+        guard let cb = chromeBase, let ctx = NSGraphicsContext.current?.cgContext else { return }
 
         // During a drag, draw the dragged geometry preview (the selection at the
         // live transform) as green polylines, matching the tool-preview look.
@@ -270,12 +356,13 @@ final class GizmoOverlayView: NSView {
         }
 
         // The frame outline (dashed) + corner squares + rotate stalk/knob, drawn as
-        // an ORIENTED QUAD using the SAME transform the object preview re-resolves
-        // each entity with — so the chrome rotates/scales WITH the object during a
-        // drag instead of collapsing back to an upright AABB. Idle (no live
-        // transform) this is identity, so the quad is the plain base AABB.
-        let t = model.gizmoPreviewTransform ?? .identity
-        let base = activeDrag?.frame ?? f
+        // an ORIENTED QUAD. The transform is the resting orientation about the base
+        // center (task #17) composed with any live drag transform — so the chrome is
+        // ORIENTED at rest AND rotates/scales WITH the object during a drag. At
+        // orientation 0 with no live drag the transform is identity, so the quad is
+        // the plain base AABB (byte-identical to the legacy upright gizmo).
+        let base = cb.frame
+        let t = chromeTransform(base: base, orientation: cb.orientation)
         // World quad in [bottomLeft, bottomRight, topRight, topLeft] order, mapped
         // to screen via the existing projection.
         let quadScreen = GizmoTransform.transformedQuad(base: base, t: t).map { screen($0) }

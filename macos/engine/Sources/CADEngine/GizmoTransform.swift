@@ -195,6 +195,23 @@ public enum GizmoTransform {
         return .scale(factor: factor, about: pivot)
     }
 
+    /// UNIFORM scale `Affine2D` for a corner drag from `p0` to `p1` about an
+    /// EXPLICIT `pivot` — the point-based overload the ORIENTED gizmo uses so the
+    /// pivot is the oriented opposite-corner (not the axis-aligned `frame`'s). The
+    /// math is identical to `cornerScale(frame:corner:from:to:)` once the pivot is
+    /// fixed (that variant just derives the pivot from the upright frame), so a
+    /// rotated box scales about the right corner and the resulting world `Affine2D`
+    /// rounds through the same undoable commit path. Degenerate → `.identity`.
+    public static func cornerScale(pivot: Vector, from p0: Vector, to p1: Vector) -> Affine2D {
+        guard pivot.valid, p0.valid, p1.valid else { return .identity }
+        let oldDist = (p0 - pivot).magnitude
+        let newDist = (p1 - pivot).magnitude
+        guard oldDist > Tolerance.distance else { return .identity }
+        let factor = newDist / oldDist
+        guard factor.isFinite, factor > Tolerance.distance else { return .identity }
+        return .scale(factor: factor, about: pivot)
+    }
+
     /// The uniform scale FACTOR alone for a corner drag (exposed for the view's HUD
     /// and for tests asserting the factor directly). Mirrors `cornerScale`'s math;
     /// returns `nil` for a degenerate drag.
@@ -234,15 +251,21 @@ public enum GizmoTransform {
         return .rotation(angle: angle, about: frame.center)
     }
 
-    /// The swept rotation ANGLE alone (radians, `(−π, +π]`), or `nil` for a
-    /// degenerate drag. Exposed for the view's HUD and for tests.
-    public static func rotateAngle(
-        frame: GizmoFrame,
-        from p0: Vector,
-        to p1: Vector,
-        snap: Bool = false
-    ) -> Double? {
-        let center = frame.center
+    /// The rotation `Affine2D` for a knob drag from `p0` to `p1` about an EXPLICIT
+    /// `center` — the point-based overload the ORIENTED gizmo uses so the pivot is
+    /// the oriented box center. Identical to `rotate(frame:from:to:snap:)` once the
+    /// center is fixed. A near-zero sweep (or a point at the center) → `.identity`.
+    public static func rotate(center: Vector, from p0: Vector, to p1: Vector, snap: Bool = false) -> Affine2D {
+        guard let angle = rotateAngle(center: center, from: p0, to: p1, snap: snap) else {
+            return .identity
+        }
+        return .rotation(angle: angle, about: center)
+    }
+
+    /// The swept rotation ANGLE about an EXPLICIT `center` (radians, `(−π, +π]`), or
+    /// `nil` for a degenerate drag. The shared core both the frame-based and
+    /// point-based `rotate*` call.
+    public static func rotateAngle(center: Vector, from p0: Vector, to p1: Vector, snap: Bool = false) -> Double? {
         guard center.valid, p0.valid, p1.valid,
               (p0 - center).magnitude > Tolerance.distance,
               (p1 - center).magnitude > Tolerance.distance else {
@@ -256,6 +279,17 @@ public enum GizmoTransform {
         }
         guard abs(delta) > Tolerance.angle else { return nil }
         return delta
+    }
+
+    /// The swept rotation ANGLE alone (radians, `(−π, +π]`), or `nil` for a
+    /// degenerate drag. Exposed for the view's HUD and for tests.
+    public static func rotateAngle(
+        frame: GizmoFrame,
+        from p0: Vector,
+        to p1: Vector,
+        snap: Bool = false
+    ) -> Double? {
+        rotateAngle(center: frame.center, from: p0, to: p1, snap: snap)
     }
 
     // MARK: Oriented frame chrome (for the DRAWN gizmo during a drag)
@@ -305,5 +339,41 @@ public enum GizmoTransform {
             normal = Vector(-normal.x, -normal.y)
         }
         return (root: root, outward: normal)
+    }
+
+    // MARK: Oriented hit-testing (point-in-quad)
+
+    /// Convex-quad containment of point `p` in `quad` (exactly 4 points, CW or CCW),
+    /// expanded outward by `slop` on every edge. Winding-agnostic: the test derives
+    /// the polygon winding from its signed area, so a screen projection that flips
+    /// handedness still tests correctly. Used by the overlay's body/move hit-test on
+    /// the screen-projected ORIENTED chrome quad (a rotated box is no longer an
+    /// axis-aligned rect, so a plain rect-containment test would miss).
+    ///
+    /// `slop` is in the same units as `quad`/`p` (the overlay passes SCREEN points).
+    /// Returns `false` for a non-quad input or a degenerate (zero-area) quad.
+    public static func pointInConvexQuad(_ p: Vector, quad: [Vector], slop: Double = 0) -> Bool {
+        guard quad.count == 4 else { return false }
+        var area = 0.0
+        for i in 0..<4 {
+            let a = quad[i], b = quad[(i + 1) % 4]
+            area += a.x * b.y - b.x * a.y
+        }
+        guard abs(area) > Tolerance.distance else { return false }
+        let ccw = area > 0
+        for i in 0..<4 {
+            let a = quad[i], b = quad[(i + 1) % 4]
+            let ex = b.x - a.x, ey = b.y - a.y
+            let len = (ex * ex + ey * ey).squareRoot()
+            guard len > Tolerance.distance else { continue }
+            // Signed distance of p from the directed edge a→b (positive = left).
+            let dist = (ex * (p.y - a.y) - ey * (p.x - a.x)) / len
+            if ccw {
+                if dist < -slop { return false }   // inside == left of every edge
+            } else {
+                if dist > slop { return false }    // inside == right of every edge
+            }
+        }
+        return true
     }
 }
