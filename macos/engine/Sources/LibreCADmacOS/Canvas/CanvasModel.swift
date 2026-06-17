@@ -298,6 +298,44 @@ final class CanvasModel {
     @ObservationIgnored
     var polarTrackingResult: PolarTracking.Result?
 
+    // MARK: Object-snap tracking (OTRACK) — W5 model layer
+
+    /// Whether OBJECT-SNAP TRACKING (OTRACK — LibreCAD's object snap tracking,
+    /// AutoCAD F11) is on. UNLIKE ortho/polar (which are mutually exclusive with each
+    /// other), OTRACK is an INDEPENDENT aid: it can be on together with ortho OR polar,
+    /// so `toggleObjectTracking` never disturbs `orthoEnabled`/`polarEnabled`. When on,
+    /// REAL object snaps the user hovers (endpoint/center/…) can be ACQUIRED (added to
+    /// `acquiredPoints`); the cursor then locks onto the alignment guides radiating from
+    /// those points (horizontal/vertical/polar) — or onto the intersection of two guides.
+    /// `@ObservationIgnored`: like the polar-tracking display state, the overlay reads it
+    /// via `trackingDisplay()` on the same redraw the snap marker drives. A live drafting
+    /// policy (not persisted to the document). The dwell-to-acquire trigger, the guide
+    /// rendering, and the toggle key are LATER waves (W6/W7) — this wave is the model only.
+    @ObservationIgnored
+    var objectTrackingEnabled: Bool = false
+
+    /// The snap points the user has ACQUIRED for object-snap tracking — the small "+"
+    /// glyphs OTRACK radiates alignment guides from. Mutated only through
+    /// `acquireTrackingPoint` (append / toggle-off duplicate / drop-oldest at the cap) and
+    /// `clearTrackingPoints`; transient drafting state cleared on tool change / run-end /
+    /// cursor-leave, NEVER persisted. `@ObservationIgnored`: read via `trackingDisplay()`.
+    @ObservationIgnored
+    private(set) var acquiredPoints: [AcquiredPoint] = []
+
+    /// The latest OTRACK lock under the cursor — the guide projection or two-guide
+    /// intersection the cursor snapped to, plus the engaged guide(s) and the
+    /// distance/angle from the first guide's origin. Refreshed inside `updateSnap` AFTER
+    /// the snap is set (so a real osnap suppresses it — geometry snap wins), or `nil` when
+    /// OTRACK is not engaged / no guide is near. DISPLAY + constraint data only.
+    /// `@ObservationIgnored`: read via `trackingDisplay()` / `trackingConstrained`.
+    @ObservationIgnored
+    private(set) var trackingResult: TrackingResult?
+
+    /// The cap on the number of simultaneously-acquired OTRACK points (AutoCAD-like).
+    /// Acquiring beyond this drops the OLDEST acquired point (FIFO), keeping the guide
+    /// list bounded so resolving stays responsive (rendering-performance.md §5).
+    static let maxAcquiredPoints = 7
+
     /// Whether DYNAMIC INPUT — the AutoCAD-style live dimensional feedback (a dotted dim
     /// line + value chip an active draw tool shows while you drag) — is on (AutoCAD F12,
     /// DYNMODE). When on, `currentLiveDimensions()` returns the active tool's
@@ -1954,6 +1992,9 @@ final class CanvasModel {
         let changed = result != snap
         snap = result
         refreshPolarTracking()
+        // OTRACK lock refresh — AFTER snap + polar so a real osnap suppresses both the
+        // polar ray and the OTRACK lock (geometry snap wins). Uses the same world tolerance.
+        refreshObjectTracking()
         return changed
     }
 
@@ -2082,6 +2123,7 @@ final class CanvasModel {
         cursorWorld = nil
         snap = nil
         polarTrackingResult = nil   // no cursor → no tracking ray
+        clearTrackingPoints()       // OTRACK acquisitions are transient — drop them when the cursor leaves
     }
 
     // MARK: - Tool activation + routing
@@ -2102,6 +2144,10 @@ final class CanvasModel {
         // command line's `@`/polar/distance input has no leftover reference. A LOCKED
         // datum survives the tool change (the user pinned it deliberately).
         if !relativeZeroLocked { relativeZero = nil }
+        // OTRACK acquisitions are transient drafting state, like the relative-zero — a
+        // tool change starts a fresh tracking context (unconditional: acquisitions are
+        // never "locked").
+        clearTrackingPoints()
         // A tool change abandons any in-flight typed dimension entry (the new tool has
         // its own — possibly no — editable fields).
         resetDynInput()
@@ -2405,6 +2451,9 @@ final class CanvasModel {
             // the in-flight typed entry is consumed/abandoned, so clear dyn state. Idempotent
             // when `dynCommit` already cleared it (it resets via `defer`).
             resetDynInput()
+            // A geometry commit ends this acquisition context — drop the acquired OTRACK
+            // points so the next placement starts fresh (transient drafting state).
+            clearTrackingPoints()
             return true
         case .finished:
             // CreateBlockTool does NOT emit `.commit` edits — block creation touches
@@ -2426,6 +2475,9 @@ final class CanvasModel {
             // The run is over — drop the relative-zero so the next run starts fresh,
             // UNLESS it is locked (a user-pinned datum persists across runs).
             if !relativeZeroLocked { relativeZero = nil }
+            // The run ended (commit/cancel → `.finished`): drop the acquired OTRACK points
+            // so the next run starts with a clean tracking context (transient, never locked).
+            clearTrackingPoints()
             // The operation ended (commit/cancel → fresh tool): abandon any typed entry.
             resetDynInput()
             return true
@@ -5537,7 +5589,104 @@ final class CanvasModel {
     /// is on, "—" when off (mirrors `orthoReadout`).
     var polarReadout: String { polarEnabled ? "Polar" : "\u{2014}" }
 
-    // MARK: - Snap tracking display (polar tracking now; OTRACK next wave — W5)
+    // MARK: - Object-snap tracking (OTRACK — LibreCAD object snap tracking / AutoCAD F11)
+
+    /// Toggles the persistent OTRACK flag (View ▸ Object Tracking / status bar). UNLIKE
+    /// `toggleOrtho`/`togglePolar` — which are mutually exclusive with each other — OTRACK
+    /// is INDEPENDENT: it never clears `orthoEnabled`/`polarEnabled`, so the user can run
+    /// object tracking together with ortho or polar. Turning it OFF discards any acquired
+    /// points (`clearTrackingPoints`, which also nils `trackingResult`). Bumps
+    /// `modelVersion` so the menu checkmark + status chip refresh (the same redraw
+    /// mechanism `togglePolar` uses). The toggle KEY binding is a later wire-wave (W7).
+    func toggleObjectTracking() {
+        objectTrackingEnabled.toggle()
+        if !objectTrackingEnabled { clearTrackingPoints() }  // clearTrackingPoints bumps modelVersion
+        modelVersion &+= 1
+    }
+
+    /// ACQUIRES (or, on a duplicate, de-acquires) a snap point for object tracking. Only a
+    /// REAL object snap is acquirable — `snap.kind` must be a geometry snap, NOT `.free` /
+    /// `.grid` (the same "real osnap" notion `osnapActive` encodes) — so the cursor's free
+    /// position or a grid crossing can never seed a tracking guide. If the snap point is
+    /// already acquired (within `worldTolerance`, "≈ equal"), it is REMOVED (the AutoCAD
+    /// toggle: hovering an acquired point again drops it). Otherwise it is appended; if the
+    /// list is at `maxAcquiredPoints`, the OLDEST is dropped first (FIFO) so the guide list
+    /// stays bounded. No-op for a non-geometry snap. The dwell-to-acquire trigger that
+    /// CALLS this is a later wave (W6); this is the model-side mutation.
+    func acquireTrackingPoint(_ snap: SnapResult) {
+        guard Self.isAcquirableSnapKind(snap.kind), snap.point.valid else { return }
+        // Toggle off an already-acquired point ("≈ equal" within the snap aperture).
+        if let dupIndex = acquiredPoints.firstIndex(where: {
+            $0.point.distance(to: snap.point) <= worldTolerance
+        }) {
+            acquiredPoints.remove(at: dupIndex)
+            modelVersion &+= 1
+            return
+        }
+        // Append (drop the oldest if at the cap — FIFO).
+        if acquiredPoints.count >= Self.maxAcquiredPoints {
+            acquiredPoints.removeFirst()
+        }
+        acquiredPoints.append(
+            AcquiredPoint(point: snap.point, kind: snap.kind, sourceEntity: snap.entity))
+        modelVersion &+= 1
+    }
+
+    /// Clears every acquired OTRACK point and the live `trackingResult`. Called when OTRACK
+    /// is turned off, and from every relative-zero / run-end reset site (acquisitions are
+    /// transient drafting state, like the relative-zero). Bumps `modelVersion` so the
+    /// overlay erases the "+"s / guides on the next redraw.
+    func clearTrackingPoints() {
+        guard !acquiredPoints.isEmpty || trackingResult != nil else { return }
+        acquiredPoints.removeAll()
+        trackingResult = nil
+        modelVersion &+= 1
+    }
+
+    /// Recomputes `trackingResult` for the OTRACK lock + display. Called from `updateSnap`
+    /// AFTER `snap` + `refreshPolarTracking` so a real object snap can SUPPRESS the lock
+    /// (geometry snap wins — `!osnapActive`). Engaged only when OTRACK is on, there is at
+    /// least one acquired point to radiate from, no real osnap is under the cursor, and a
+    /// live cursor exists. Uses the SAME `worldTolerance` `updateSnap` snaps with, so a
+    /// guide engages at the same aperture the snapper uses. Display + constraint data only;
+    /// it never alters the snap or the polar lock.
+    private func refreshObjectTracking() {
+        guard objectTrackingEnabled,
+              !acquiredPoints.isEmpty,
+              !osnapActive,                 // a real osnap wins — yield so geometry snap takes the point
+              let cursor = cursorWorld
+        else {
+            trackingResult = nil
+            return
+        }
+        let gs = Tracking.guides(from: acquiredPoints, polarIncrement: polarAngleIncrement)
+        trackingResult = Tracking.resolve(guides: gs, cursor: cursor, worldTolerance: worldTolerance)
+    }
+
+    /// Applies the OTRACK lock to a candidate world point: returns the locked
+    /// `trackingResult.point` when OTRACK is on, a lock is live, and no real osnap is
+    /// under the cursor (geometry snap always wins); otherwise the point passes through
+    /// unchanged. OTRACK's lock takes PRECEDENCE over polar/ortho — W6 will chain this
+    /// FIRST in the input funnel (osnap > OTRACK > polar/ortho > free).
+    func trackingConstrained(_ point: Vector) -> Vector {
+        guard objectTrackingEnabled, !osnapActive, let result = trackingResult else { return point }
+        return result.point
+    }
+
+    /// `true` if `kind` is a REAL geometry snap (acquirable for OTRACK) — anything but
+    /// `.free` / `.grid`. Mirrors the `osnapActive` predicate so acquisition and
+    /// osnap-suppression agree about what counts as a geometry snap.
+    static func isAcquirableSnapKind(_ kind: SnapKind) -> Bool {
+        switch kind {
+        case .endpoint, .center, .middle, .intersection, .onEntity,
+             .perpendicular, .tangent, .nearest, .parallel:
+            return true
+        case .grid, .free:
+            return false
+        }
+    }
+
+    // MARK: - Snap tracking display (polar tracking + OTRACK — W5)
 
     /// PURE display data the snap-tracking overlay reads — the dotted polar ray, the
     /// OTRACK alignment guides / acquired-point markers / lock marker, and a
@@ -5584,30 +5733,63 @@ final class CanvasModel {
     /// `guides` / `acquiredMarkers` / `lockMarker` stay empty (OTRACK — W5). Returns an
     /// empty `TrackingDisplay()` whenever polar tracking is not engaged. This never
     /// touches the always-on angle LOCK (`polarConstrained` is independent).
+    /// THIS WAVE (W5) ALSO fills the OTRACK fields:
+    ///   - `acquiredMarkers` — the "+" glyphs for every acquired point (drawn WHENEVER
+    ///     OTRACK is on, so the user sees what they've acquired even before a lock).
+    ///   - On an OTRACK lock (`trackingResult != nil`): `guides` = only the ENGAGED guides
+    ///     (`lockedGuides`), `lockMarker` = the locked point, and `readout` = the
+    ///     `dist<angle` chip anchored at the locked point, pre-formatted the same way as
+    ///     the polar readout. The OTRACK lock/readout takes PRECEDENCE over polar: when
+    ///     OTRACK is locked, the polar ray + readout are SUPPRESSED (an engaged tracking
+    ///     lock owns the chip). With no OTRACK lock, the polar ray/readout shows as before.
     func trackingDisplay() -> TrackingDisplay {
         var display = TrackingDisplay()
+        let gv = drawing.graphicVariables
+
+        // --- OTRACK lock takes precedence over polar ---
+        if objectTrackingEnabled {
+            // Always show the acquired "+"s so the user sees what they've acquired.
+            display.acquiredMarkers = acquiredPoints.map(\.point)
+            if let track = trackingResult {
+                display.guides = track.lockedGuides         // draw only the ENGAGED guides
+                display.lockMarker = track.point
+                display.readout = (
+                    text: Self.formatPolarReadout(distance: track.distance, angle: track.angle, gv: gv),
+                    anchor: track.point)
+                // OTRACK lock owns the chip — suppress the polar ray/readout entirely.
+                return display
+            }
+        }
+
+        // --- Polar ray/readout (fallback — only when OTRACK is not locked) ---
         guard let result = polarTrackingResult,
               result.withinAperture,
               let reference = relativeZero
         else { return display }
 
         display.polarRay = (from: reference, to: result.rayFar)
+        display.readout = (
+            text: Self.formatPolarReadout(distance: result.distance, angle: result.engagedAngle, gv: gv),
+            anchor: result.snappedPoint)
 
-        // Pre-format the `dist<angle` readout in-engine, honoring the drawing's display
-        // settings (same source as `currentLiveDimensions()` / the status bar). The
-        // overlay draws this string verbatim and does no formatting itself.
-        let gv = drawing.graphicVariables
+        return display
+    }
+
+    /// Pre-formats a `dist<angle` chip in-engine, honoring the drawing's display settings
+    /// (the same source the status bar / `currentLiveDimensions()` use), so the overlay
+    /// draws the string verbatim and does no formatting itself. `<` is LibreCAD's polar
+    /// separator (matching `CoordinateFormatter.polarPair`). Shared by the polar ray and
+    /// the OTRACK lock readouts so both chips read consistently.
+    private static func formatPolarReadout(distance: Double, angle: Double, gv: GraphicVariables) -> String {
         let distStr = CoordinateFormatter.length(
-            result.distance,
+            distance,
             format: gv.linearFormat,
             precision: gv.linearPrecision,
             unit: gv.unit)
         let angStr = CoordinateFormatter.angle(
-            result.engagedAngle,
+            angle,
             format: gv.angleFormat,
             precision: gv.anglePrecision)
-        display.readout = (text: "\(distStr)<\(angStr)", anchor: result.snappedPoint)
-
-        return display
+        return "\(distStr)<\(angStr)"
     }
 }
