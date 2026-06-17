@@ -112,6 +112,7 @@ public struct ToolSuggestionCatalog: Sendable {
         .baselineDim: ["dim"],
         .continueDim: ["dim"],
         .leader: ["callout", "annotation"],
+        .multileader: ["mleader", "mlead", "mld"],
         .measureDistance: ["dist", "measure"],
         .measureAngle: ["measure", "angle"],
         .measureArea: ["measure", "area"],

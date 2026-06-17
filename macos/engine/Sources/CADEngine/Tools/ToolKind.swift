@@ -165,6 +165,10 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     /// The Leader annotation tool (`LeaderTool`) — click callout vertices (arrow at the
     /// first), commit a `.leader` with an optional attached text annotation.
     case leader
+    /// The Multileader (MLEADER) annotation tool (`MultiLeaderTool`) — click callout
+    /// vertices (arrow at the first), commit a `.multileader` with a landing/dogleg
+    /// tail and an optional attached text annotation.
+    case multileader
     /// The Baseline linear-dimension tool (`BaselineDimTool`) — chain dims from a
     /// common baseline origin, each stepped one DIMDLI further out (a stacked run).
     case baselineDim
@@ -244,6 +248,7 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .align:           return "Align"
         case .arrayPath:       return "Array Along Path"
         case .leader:          return "Leader"
+        case .multileader:     return "Multileader"
         case .baselineDim:     return "Baseline Dimension"
         case .continueDim:     return "Continue Dimension"
         case .image:           return "Image"
@@ -323,6 +328,7 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .align:           return AlignTool()
         case .arrayPath:       return ArrayPathTool()
         case .leader:          return LeaderTool()
+        case .multileader:     return MultiLeaderTool()
         case .baselineDim:     return BaselineDimTool()
         case .continueDim:     return ContinueDimTool()
         // ImageTool minted with NO file (inert no-op) — the app presents a file-picker
