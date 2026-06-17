@@ -411,3 +411,119 @@ struct InspectorLeaderEditTests {
         #expect(InspectorEdits.leaderText(cleared) == "")
     }
 }
+
+@Suite("Inspector multileader edits")
+struct InspectorMultiLeaderEditTests {
+
+    private func bareMultiLeader() -> EntityKind {
+        .multileader(MultiLeaderData(
+            vertices: [Vector(0, 0), Vector(10, 5)],
+            hasArrow: true, arrowSize: 2.5,
+            landingDistance: 2.0, doglegEnabled: true))
+    }
+
+    @Test("arrow size / has-arrow / style edits keep the vertices + landing config")
+    func multiLeaderBasics() {
+        let kind = bareMultiLeader()
+
+        let sz = InspectorEdits.setMultiLeaderArrowSize(kind, 4)
+        guard case .multileader(let d) = sz else { Issue.record("not multileader"); return }
+        #expect(d.arrowSize == 4)
+        #expect(d.vertices.count == 2)        // path kept
+        #expect(d.landingDistance == 2.0)     // landing config untouched
+        #expect(d.doglegEnabled == true)
+
+        let off = InspectorEdits.setMultiLeaderHasArrow(kind, false)
+        guard case .multileader(let d2) = off else { Issue.record("not multileader"); return }
+        #expect(d2.hasArrow == false)
+
+        let clampedNeg = InspectorEdits.setMultiLeaderArrowSize(kind, -3)
+        guard case .multileader(let d3) = clampedNeg else { Issue.record("not multileader"); return }
+        #expect(d3.arrowSize == 0)            // clamped non-negative
+
+        let styled = InspectorEdits.setMultiLeaderStyleName(kind, "Standard")
+        guard case .multileader(let d4) = styled else { Issue.record("not multileader"); return }
+        #expect(d4.styleName == "Standard")
+        let unstyled = InspectorEdits.setMultiLeaderStyleName(styled, nil)
+        guard case .multileader(let d5) = unstyled else { Issue.record("not multileader"); return }
+        #expect(d5.styleName == nil)
+    }
+
+    @Test("landing distance + dogleg toggle round-trip (distance clamped non-negative)")
+    func multiLeaderLanding() {
+        let kind = bareMultiLeader()
+
+        let dist = InspectorEdits.setMultiLeaderLandingDistance(kind, 7.5)
+        guard case .multileader(let d) = dist else { Issue.record("not multileader"); return }
+        #expect(d.landingDistance == 7.5)
+        #expect(d.vertices.count == 2)        // path kept
+
+        let clamped = InspectorEdits.setMultiLeaderLandingDistance(kind, -4)
+        guard case .multileader(let d2) = clamped else { Issue.record("not multileader"); return }
+        #expect(d2.landingDistance == 0)      // clamped non-negative
+
+        let off = InspectorEdits.setMultiLeaderDoglegEnabled(kind, false)
+        guard case .multileader(let d3) = off else { Issue.record("not multileader"); return }
+        #expect(d3.doglegEnabled == false)
+        let on = InspectorEdits.setMultiLeaderDoglegEnabled(off, true)
+        guard case .multileader(let d4) = on else { Issue.record("not multileader"); return }
+        #expect(d4.doglegEnabled == true)
+    }
+
+    @Test("vertices replace keeps arrow + landing config")
+    func multiLeaderVertices() {
+        let kind = bareMultiLeader()
+        let moved = InspectorEdits.setMultiLeaderVertices(kind, [Vector(1, 1), Vector(2, 2), Vector(3, 3)])
+        guard case .multileader(let d) = moved else { Issue.record("not multileader"); return }
+        #expect(d.vertices.count == 3)
+        #expect(d.hasArrow == true)
+        #expect(d.landingDistance == 2.0)
+        #expect(d.doglegEnabled == true)
+    }
+
+    @Test("setting text on a bare multileader creates a .text annotation at the last vertex")
+    func multiLeaderTextCreate() {
+        let kind = bareMultiLeader()
+        #expect(InspectorEdits.multiLeaderText(kind) == "")   // none initially
+
+        let withText = InspectorEdits.setMultiLeaderText(kind, "See detail A")
+        guard case .multileader(let d) = withText else { Issue.record("not multileader"); return }
+        guard case .text(let t)? = d.annotation else { Issue.record("no text annotation"); return }
+        #expect(t.text == "See detail A")
+        #expect(t.position == Vector(10, 5))  // anchored at the last vertex
+        #expect(InspectorEdits.multiLeaderText(withText) == "See detail A")
+    }
+
+    @Test("editing text on a multileader with an existing .text annotation replaces only the string")
+    func multiLeaderTextReplace() {
+        let withText = InspectorEdits.setMultiLeaderText(bareMultiLeader(), "old")
+        let edited = InspectorEdits.setMultiLeaderText(withText, "new")
+        guard case .multileader(let d) = edited, case .text(let t)? = d.annotation else {
+            Issue.record("no text annotation"); return
+        }
+        #expect(t.text == "new")
+        #expect(t.position == Vector(10, 5))  // placement kept
+    }
+
+    @Test("setting empty text clears the annotation back to a bare multileader")
+    func multiLeaderTextClear() {
+        let withText = InspectorEdits.setMultiLeaderText(bareMultiLeader(), "x")
+        let cleared = InspectorEdits.setMultiLeaderText(withText, "")
+        guard case .multileader(let d) = cleared else { Issue.record("not multileader"); return }
+        #expect(d.annotation == nil)
+        #expect(InspectorEdits.multiLeaderText(cleared) == "")
+    }
+
+    @Test("all setters are no-ops on a non-multileader kind (the .replace undo contract)")
+    func multiLeaderSettersNoOpOnOtherKinds() {
+        let line: EntityKind = .line(LineData(start: Vector(0, 0), end: Vector(1, 1)))
+        #expect(InspectorEdits.setMultiLeaderArrowSize(line, 9) == line)
+        #expect(InspectorEdits.setMultiLeaderHasArrow(line, false) == line)
+        #expect(InspectorEdits.setMultiLeaderVertices(line, [Vector(2, 2)]) == line)
+        #expect(InspectorEdits.setMultiLeaderStyleName(line, "x") == line)
+        #expect(InspectorEdits.setMultiLeaderLandingDistance(line, 5) == line)
+        #expect(InspectorEdits.setMultiLeaderDoglegEnabled(line, false) == line)
+        #expect(InspectorEdits.setMultiLeaderText(line, "x") == line)
+        #expect(InspectorEdits.multiLeaderText(line) == "")
+    }
+}

@@ -703,8 +703,9 @@ struct LibreCADApp: App {
             dimensionsMenu
 
             Divider()
-            // Leader callout + chained linear dims (stacked / running).
+            // Leader + multileader callouts + chained linear dims (stacked / running).
             toolItem(.leader, "l", .option)
+            toolItem(.multileader, "m", .option)
             toolItem(.baselineDim, "d", .option)
             toolItem(.continueDim, "c", .option)
 

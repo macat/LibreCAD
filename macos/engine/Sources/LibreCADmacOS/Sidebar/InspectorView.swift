@@ -512,6 +512,21 @@ struct InspectorView: View {
                 }
                 numberRow("Text height", $model.leaderTextHeight) { reapplyTool() }
             }
+        case .multileader:
+            Section("Multileader Options") {
+                LabeledContent {
+                    TextField("Annotation", text: $model.multiLeaderText)
+                        .frame(width: DS.Field.wide)
+                        .onSubmit { reapplyTool() }
+                        .onChange(of: model.multiLeaderText) { _, _ in reapplyTool() }
+                } label: {
+                    Text("Text").lineLimit(1)
+                }
+                numberRow("Text height", $model.multiLeaderTextHeight) { reapplyTool() }
+                numberRow("Landing distance", $model.multiLeaderLandingDistance) { reapplyTool() }
+                Toggle("Landing (dogleg)", isOn: $model.multiLeaderDoglegEnabled)
+                    .onChange(of: model.multiLeaderDoglegEnabled) { _, _ in reapplyTool() }
+            }
         case .baselineDim:
             Section("Baseline Dimension Options") {
                 numberRow("Spacing", $model.baselineSpacing) { reapplyTool() }

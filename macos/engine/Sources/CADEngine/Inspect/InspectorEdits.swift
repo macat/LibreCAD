@@ -452,6 +452,97 @@ public enum InspectorEdits {
         return .leader(d)
     }
 
+    // MARK: - Multileader field edits (DXF MULTILEADER / MLEADER)
+    //
+    // The multileader mirrors the leader's editable surface (arrow flag/size, style
+    // name, annotation text) and adds its two distinguishing fields — the landing
+    // ("dogleg") tail length and whether that tail is drawn. Each is a pure
+    // `EntityKind -> EntityKind` `.replace` (no-op on a non-multileader kind); the
+    // Inspector routes the result through the undoable replace path.
+
+    /// Replaces a `.multileader`'s arrow size (clamped non-negative), keeping its leg
+    /// path + annotation + landing config. No-op for other kinds.
+    public static func setMultiLeaderArrowSize(_ kind: EntityKind, _ size: Double) -> EntityKind {
+        guard case .multileader(var d) = kind else { return kind }
+        d.arrowSize = Swift.max(0, size)
+        return .multileader(d)
+    }
+
+    /// Sets/clears whether a `.multileader` draws an arrowhead at its first vertex.
+    public static func setMultiLeaderHasArrow(_ kind: EntityKind, _ on: Bool) -> EntityKind {
+        guard case .multileader(var d) = kind else { return kind }
+        d.hasArrow = on
+        return .multileader(d)
+    }
+
+    /// Replaces a `.multileader`'s entire leg-vertex path, keeping its arrow +
+    /// annotation + landing config. (The path may be empty.)
+    public static func setMultiLeaderVertices(_ kind: EntityKind, _ vertices: [Vector]) -> EntityKind {
+        guard case .multileader(var d) = kind else { return kind }
+        d.vertices = vertices
+        return .multileader(d)
+    }
+
+    /// Points a `.multileader` at a named MLEADER/dimension style (DXF code 3),
+    /// keeping the rest.
+    public static func setMultiLeaderStyleName(_ kind: EntityKind, _ styleName: String?) -> EntityKind {
+        guard case .multileader(var d) = kind else { return kind }
+        d.styleName = styleName
+        return .multileader(d)
+    }
+
+    /// Replaces a `.multileader`'s landing ("dogleg") tail length in world units
+    /// (clamped non-negative). The landing is only DRAWN when `doglegEnabled`, but
+    /// the length round-trips regardless. No-op for other kinds.
+    public static func setMultiLeaderLandingDistance(_ kind: EntityKind, _ distance: Double) -> EntityKind {
+        guard case .multileader(var d) = kind else { return kind }
+        d.landingDistance = Swift.max(0, distance)
+        return .multileader(d)
+    }
+
+    /// Sets/clears whether a `.multileader`'s landing/dogleg tail segment is drawn.
+    /// When `false`, the leg runs straight to the annotation with no tail.
+    public static func setMultiLeaderDoglegEnabled(_ kind: EntityKind, _ on: Bool) -> EntityKind {
+        guard case .multileader(var d) = kind else { return kind }
+        d.doglegEnabled = on
+        return .multileader(d)
+    }
+
+    /// The plain text of a `.multileader`'s attached annotation (its `.text` string or
+    /// its `.mtext` plain text), for seeding the inline editor. Empty for a bare
+    /// multileader (no annotation) or a non-multileader kind.
+    public static func multiLeaderText(_ kind: EntityKind) -> String {
+        guard case .multileader(let d) = kind, let annotation = d.annotation else { return "" }
+        switch annotation {
+        case .text(let t):  return t.text
+        case .mtext:        return mtextPlainText(annotation)
+        default:            return ""
+        }
+    }
+
+    /// Sets a `.multileader`'s annotation text. If it already carries a `.text`/`.mtext`
+    /// annotation, its string is replaced (its placement/height kept); otherwise a
+    /// fresh single-line `.text` annotation is created at the multileader's LAST vertex
+    /// (the landing anchor) with a default height. An empty string CLEARS the
+    /// annotation back to a bare multileader.
+    public static func setMultiLeaderText(_ kind: EntityKind, _ text: String) -> EntityKind {
+        guard case .multileader(var d) = kind else { return kind }
+        if text.isEmpty {
+            d.annotation = nil
+            return .multileader(d)
+        }
+        switch d.annotation {
+        case .text:
+            d.annotation = setTextString(d.annotation!, text)
+        case .mtext:
+            d.annotation = setMTextPlainText(d.annotation!, text)
+        default:
+            let anchor = d.vertices.last ?? Vector(0, 0)
+            d.annotation = .text(TextData(position: anchor, height: 2.5, text: text))
+        }
+        return .multileader(d)
+    }
+
     // MARK: - Image field edits (RS_Image, DXF IMAGE)
 
     /// Replaces an `.image`'s insertion (lower-left) corner, keeping its u/v +

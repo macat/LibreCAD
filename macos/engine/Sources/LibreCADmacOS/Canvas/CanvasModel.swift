@@ -874,6 +874,14 @@ final class CanvasModel {
     var leaderText: String = ""
     var leaderTextHeight: Double = 2.5
 
+    /// Multileader (MLEADER) tool: the optional attached annotation text (empty ⇒ a
+    /// bare multileader), its cap height, and the landing ("dogleg") tail length +
+    /// whether that tail is drawn. `applyToolConfig` pushes them onto `MultiLeaderTool`.
+    var multiLeaderText: String = ""
+    var multiLeaderTextHeight: Double = 2.5
+    var multiLeaderLandingDistance: Double = 2.0
+    var multiLeaderDoglegEnabled: Bool = true
+
     /// Baseline dimension tool: the DIMDLI spacing (world units) each successive
     /// dimension line is stepped further out by. `applyToolConfig` maps it onto
     /// `BaselineDimTool.baselineSpacing`.
@@ -2427,6 +2435,13 @@ final class CanvasModel {
             // Empty text ⇒ a bare leader (the tool maps "" to no annotation).
             t.annotationText = leaderText.isEmpty ? nil : leaderText
             t.textHeight = Swift.max(InspectorEdits.minTextHeight, leaderTextHeight)
+            tool = t
+        case var t as MultiLeaderTool:
+            // Empty text ⇒ a bare multileader (the tool maps "" to no annotation).
+            t.annotationText = multiLeaderText.isEmpty ? nil : multiLeaderText
+            t.textHeight = Swift.max(InspectorEdits.minTextHeight, multiLeaderTextHeight)
+            t.landingDistance = Swift.max(0, multiLeaderLandingDistance)
+            t.doglegEnabled = multiLeaderDoglegEnabled
             tool = t
         case is BaselineDimTool:
             // BaselineDimTool clamps/stores `baselineSpacing` at construction, so
