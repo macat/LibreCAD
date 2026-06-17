@@ -107,35 +107,65 @@ enum DrawingExporter {
     ///
     /// `jpegQuality` is the JPEG compression quality (0…1) when `format == .jpg`;
     /// ignored by every other format.
+    ///
+    /// `space` selects WHICH drawing space the export captures — `.model` /
+    /// `.paper(layoutName:)` builds the scene from ONLY that space (like the live
+    /// canvas's active space), instead of unioning model + every layout. It defaults
+    /// to `.all` (the historical behavior) so existing callers are unchanged; the
+    /// View-layer call site should pass the live `CanvasModel`'s active space (see
+    /// `exportSpace(forActiveSpace:layout:)`) so a default export matches the screen.
     @discardableResult
     static func export(_ drawing: CADDrawing,
                        to url: URL,
                        format: ExportFormat,
                        options: ExportOptions = ExportOptions(background: .white),
                        dpi: Double = defaultRasterDPI,
-                       jpegQuality: Double = 0.9) throws -> Int {
+                       jpegQuality: Double = 0.9,
+                       space: ExportSpace = .all) throws -> Int {
         switch format {
         case .svg:
-            let svg = SVGExporter.string(for: drawing, options: options)
+            let scene = ExportSceneBuilder.build(drawing, space: space)
+            let svg = SVGExporter.string(for: scene, options: options)
             do {
                 try svg.write(to: url, atomically: true, encoding: .utf8)
             } catch {
                 throw ExportError.writeFailed(error.localizedDescription)
             }
-            // Recompute element count cheaply from a fresh scene.
-            let scene = ExportSceneBuilder.build(drawing)
             return scene.polylines.count + scene.fills.count
 
         case .pdf:
-            let scene = ExportSceneBuilder.build(drawing)
+            let scene = ExportSceneBuilder.build(drawing, space: space)
             try writePDF(scene: scene, to: url, options: options)
             return scene.polylines.count + scene.fills.count
 
         case .png, .jpg, .bmp, .tiff:
-            let scene = ExportSceneBuilder.build(drawing)
+            let scene = ExportSceneBuilder.build(drawing, space: space)
             try writeRaster(scene: scene, to: url, options: options,
                             dpi: dpi, format: format, jpegQuality: jpegQuality)
             return scene.polylines.count + scene.fills.count
+        }
+    }
+
+    /// Maps the live canvas's active-space pair (`CanvasModel.activeSpace` /
+    /// `.activeLayout`) to an `ExportSpace`, so the View-layer export call site can
+    /// thread the on-screen space into `export(…, space:)` with one helper (no app
+    /// type reaches the engine — this takes the raw `EntitySpace` + layout name). A
+    /// model space → `.model`; a paper space → `.paper(layoutName:)`.
+    ///
+    /// NOTE (deferral / non-owned-file dependency): wiring this at the actual call
+    /// site (`ContentView.exportDrawing`, which is NOT in this lane's owned files)
+    /// is required to make a DEFAULT export honor the active space. That call site
+    /// already has `model.activeSpace` / `model.activeLayout` (both readable today),
+    /// so a one-line change there —
+    ///   `space: DrawingExporter.exportSpace(forActiveSpace: model.activeSpace,
+    ///                                        layout: model.activeLayout)`
+    /// — finishes finding #6. Until that wave, `export` defaults to `.all` (the
+    /// historical union behavior), so nothing regresses.
+    static func exportSpace(forActiveSpace space: EntitySpace,
+                            layout: String?) -> ExportSpace {
+        switch space {
+        case .model: return .model
+        case .paper: return .paper(layoutName: layout)
         }
     }
 
