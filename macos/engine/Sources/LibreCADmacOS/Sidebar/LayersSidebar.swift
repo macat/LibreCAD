@@ -193,6 +193,7 @@ struct LayersSidebar: View {
                 onColorChange: { setColor(layer.name, $0) },
                 onLineTypeChange: { setLineType(layer.name, $0) },
                 onLineWidthChange: { setLineWidth(layer.name, $0) },
+                onOpacityChange: { setOpacity(layer.name, $0) },
                 onRename: { rename(layer.name, to: $0) }
             )
             // Per-entity / per-layer ops (F17): right-click a layer row.
@@ -501,6 +502,16 @@ struct LayersSidebar: View {
         syncRenderAfterLayerEdit()
     }
 
+    /// Sets a layer's transparency/opacity through the undoable layer funnel (mirrors
+    /// `setColor`): `mutateLayers` + `LayerTable.setOpacity`, then the render nudge so
+    /// the renderer re-resolves the layer's pens (the opacity folds into
+    /// `ResolvedPen.opacity`). `value` is the 0…1 alpha (1 = fully opaque); the row
+    /// clamps + de-dups, so this is a no-op-safe funnel.
+    private func setOpacity(_ name: String, _ value: Double) {
+        model.drawing.mutateLayers { $0.setOpacity(name, value) }
+        syncRenderAfterLayerEdit()
+    }
+
     private func rename(_ oldName: String, to newName: String) {
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != oldName else { return }
@@ -574,6 +585,7 @@ private struct LayerRow: View {
     let onColorChange: (RGBAColor) -> Void
     let onLineTypeChange: (PenLineType) -> Void
     let onLineWidthChange: (PenLineWidth) -> Void
+    let onOpacityChange: (Double) -> Void
     let onRename: (String) -> Void
 
     /// Local edit buffer for the inline name field (committed on return / blur).
@@ -703,6 +715,20 @@ private struct LayerRow: View {
                 includeDefault: true,
                 label: "Line width"
             )
+            Divider()
+            // Per-layer transparency: a 0…100 % slider over the layer's `opacity`
+            // (1 = opaque). Routed through the undoable `setOpacity` funnel; the % read-
+            // out keeps the row tight by living inside this menu (not as another inline
+            // control). `Layer.opacity` folds into `ResolvedPen.opacity` at resolve, so a
+            // change repaints every `.byLayer` entity at the new alpha.
+            Section("Transparency") {
+                Slider(value: opacityBinding, in: 0...1) {
+                    Text("Opacity")
+                }
+                Text("\(Int((layer.opacity * 100).rounded()))% opaque")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         } label: {
             // Show the layer's ACTUAL dash pattern (not a cryptic "/" glyph) so the row
             // communicates the line type at a glance.
@@ -730,6 +756,19 @@ private struct LayerRow: View {
         Binding(
             get: { layer.lineWidth },
             set: { if $0 != layer.lineWidth { onLineWidthChange($0) } }
+        )
+    }
+
+    /// A binding to the layer's OPACITY (0…1) routed through the undoable callback. GET
+    /// reads the live `layer.opacity`; SET clamps to 0…1 and de-dups (a no-op write
+    /// registers no undo step). Drives the Transparency slider in the pen menu.
+    private var opacityBinding: Binding<Double> {
+        Binding(
+            get: { layer.opacity },
+            set: { newValue in
+                let clamped = min(max(newValue, 0), 1)
+                if clamped != layer.opacity { onOpacityChange(clamped) }
+            }
         )
     }
 
