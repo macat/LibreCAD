@@ -466,10 +466,19 @@ dictionaries / the `BlockTable` record's `AcDbBlockRepresentation`/`AcDbEvalGrap
 is a **LARGE separate reverse-engineering effort** well beyond this program and is **not in
 libdxfrw's stable surface**.
 
-**Recommendation (v1):**
-- Persist the full dynamic model via the engine's **own Codable** (the `DynamicBlockDef` /
+> **STATUS UPDATE (R4a/R4b — IMPLEMENTED, lossless-now).** The original v1 recommendation below
+> assumed the engine had its own native (non-DXF) document format that would round-trip the dynamic
+> model "for free" via `Codable`. **That is NOT the case: the document IS DXF** (the only on-disk
+> format is `.dxf`/`.dwg` through the DxfBridge), so author→save→reopen previously LOST all dynamic
+> behavior — the in-memory `DynamicBlockDef`/`InsertDynamicState` `Codable` never reached disk. R4b
+> closes that gap: the dynamic model is now persisted LOSSLESSLY inside the DXF itself. See
+> **§6a (IMPLEMENTED)** below for the actual mechanism; the strike-through bullet's premise is wrong.
+
+**Recommendation (v1) — original (superseded by §6a; the first bullet's premise is incorrect):**
+- ~~Persist the full dynamic model via the engine's **own Codable** (the `DynamicBlockDef` /
   `InsertDynamicState` fields) — the native document format round-trips losslessly with zero extra
-  work (it is just more JSON on `Block`/`InsertData`).
+  work (it is just more JSON on `Block`/`InsertData`).~~ **WRONG: there is no native non-DXF document
+  format; the in-memory `Codable` does not survive a DXF save→reopen. See §6a.**
 - **DXF EXPORT of a dynamic insert = BAKE:** write the EVALUATED member geometry as a plain
   (static) block + a plain INSERT, so other CAD apps see the correct current configuration but not
   the dynamism. This reuses `BlockEvaluator.evaluate`'s output — trivial once evaluation exists.
@@ -486,6 +495,52 @@ libdxfrw's stable surface**.
 This keeps DXF a first-class round-trip for static blocks (unchanged) and makes dynamic blocks a
 native-format feature first — matching how attributes/visibility were sequenced ("consume from
 imported DXF first", block-ux-plan §3 D1).
+
+---
+
+## 6a. DXF persistence — IMPLEMENTED (R4b, lossless-now)
+
+The document is DXF-only, so the dynamic model is embedded **inside the DXF** as compact JSON. This
+is a LOSSLESS *own-format* round-trip (our save→our reopen recovers the full model); it is NOT the
+AutoCAD eval-graph encoding (§6 — still deferred). Other CAD apps simply ignore the embedded JSON and
+see the static geometry.
+
+**The carrier — a reserved-tag block ATTRIBUTE (not XDATA).** The natural DXF carrier would be
+extended data (XDATA, group 1001/1000). But the (patched-)vendored libdxfrw's DXF writer emits
+entity `extData` for only MTEXT/MLINE/UNDERLAY — **NOT for INSERT, and never for the BLOCK record** —
+and its appData (code-102) *reader* is broken. So XDATA/appData does **not** round-trip for
+INSERT/BLOCK through the unmodified library (and we do not modify libdxfrw). What DOES round-trip
+verbatim is the block ATTRIBUTE path (ATTRIB tag/text on an INSERT; ATTDEF tag/text inside a BLOCK).
+The dynamic JSON therefore rides a single **reserved-tag** attribute, tag `LIBRECAD$DYN` (the `$` is
+illegal in a user attribute tag, so it can never collide):
+
+| Half | Carrier | Content |
+|---|---|---|
+| per-INSTANCE state (`InsertDynamicState`) | a reserved ATTRIB on each dynamic INSERT | name/string-keyed JSON (no remap) |
+| per-DEFINITION authoring (`DynamicBlockDef`) | a reserved ATTDEF inside each dynamic BLOCK | INDEX-keyed JSON (see remap) |
+
+The C bridge (`lcdxf.cpp`) appends the carrier on write and **filters the reserved tag back out** on
+read (surfacing the text as `LCEntity.dynamicJSON` / `LCBlock.dynamicJSON`, never a user-visible
+attribute), so the Swift entity model is unchanged. The carrier is marked invisible (attribFlags
+bit 1).
+
+**The EntityID↔INDEX remap (the load-bearing correctness piece).** `DynamicBlockDef` references
+members by `EntityID` (visibility-state + action member sets). The DXF reader MINTS FRESH sequential
+`EntityID`s on every read, so a persisted raw id is stale on reopen. Block members are written and
+re-read in stable DECLARATION ORDER, so the wire form is keyed by member **INDEX**: on write each
+referenced `EntityID` → its index in the block's written member list; on read each index → the fresh
+`EntityID` at that position. Implemented as `DynamicBlockDef.encodeIndexKeyedJSON(memberOrder:)` /
+`decodeIndexKeyedJSON(_:memberOrder:)` (pure, in `DynamicBlock.swift`); an out-of-range index or an
+unknown id is dropped gracefully. `InsertDynamicState` carries no member ids (only state names +
+parameter-id strings), so it needs no remap.
+
+**Limitations.** (1) **DWG**: dwgWriter15 makes empty blocks and emits no attributes, so
+dynamic-on-DWG does not round-trip — the bridge skips the carrier on DWG (no crash, def lost). Use
+DXF for dynamic-block fidelity. (2) The carrier text is a single DXF group-1 string; compact JSON
+keeps it well within the line limit, but a pathologically large dynamic block could in theory exceed
+it. (3) §6's **bake-on-export** (write evaluated geometry for OTHER apps) remains the recommended
+companion once `BlockEvaluator.evaluate` exists — the embedded JSON makes OUR round-trip lossless;
+bake makes the geometry legible to AutoCAD/LibreCAD desktop.
 
 ---
 
@@ -535,8 +590,9 @@ touched.
 
 `DB-0 (foundation, solo on hot fields)` → `DB-1 visibility (engine + DB-1W wire)` →
 `DB-2 params+actions+grips (engine E1 + DB-2W wire)` → `DB-3 value sets+lookup` →
-`DB-4 polar/XY/array/chain` → `DB-5 extended`. DXF = native round-trip throughout; bake-on-export
-once DB-2 evaluation exists; AutoCAD dynamic-DXF deferred.
+`DB-4 polar/XY/array/chain` → `DB-5 extended`. DXF = native round-trip throughout (R4b: the model is
+embedded in the DXF as reserved-tag-attribute JSON — see §6a, NOT a free native-format Codable);
+bake-on-export once DB-2 evaluation exists; AutoCAD dynamic-DXF deferred.
 
 **Concurrency:** DB-0 is ONE solo engine agent (A1 new files + A2 hot-field touches — merged per
 critic Fix 5). Every resolve/`CADDrawing` edit and each wire-wave is **single-owner, serialized**;

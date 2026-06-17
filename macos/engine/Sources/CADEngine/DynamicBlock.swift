@@ -22,12 +22,21 @@
 //  exhaustive enum switches are never touched (dynamic-blocks-plan §8).
 //
 //  ## Forward-compat (later waves are ADDITIVE on these structs)
-//  `DynamicBlockDef` currently carries ONLY `visibilityStates`. Parameters,
-//  actions, value sets and lookup tables (dynamic-blocks-plan §2a, waves DB-2..DB-5)
-//  are added later as ADDITIVE optional/defaulted fields here — never a new file
-//  on the hot enum, never a new `EntityKind`. `InsertDynamicState.parameterValues`
-//  is defined now (defaulted empty) for that forward-compat but is UNUSED by
-//  visibility — only `activeVisibilityState` matters this wave.
+//  Parameters, actions, value sets and lookup tables (dynamic-blocks-plan §2a, waves
+//  DB-2..DB-5) are added as ADDITIVE optional/defaulted fields here — never a new
+//  file on the hot enum, never a new `EntityKind`. The per-field `init(from:)`
+//  back-compat (decodeIfPresent) below keeps the in-MEMORY `Codable` tolerant of
+//  files written by an earlier wave.
+//
+//  ## DXF persistence (R4b, dynamic-blocks-plan §6a) — LOSSLESS round-trip
+//  The engine has NO native non-DXF document format: the document IS DXF, so the
+//  in-memory `Codable` above does NOT, by itself, survive a save→reopen. The
+//  index-keyed JSON wire form at the BOTTOM of this file
+//  (`encodeIndexKeyedJSON`/`decodeIndexKeyedJSON` for the DEFINITION;
+//  `encodeJSON`/`decodeJSON` for the per-instance state) is what `DXFWriter`/
+//  `DXFReader` + the C bridge embed in / recover from the DXF (carried on a
+//  reserved-tag ATTDEF/ATTRIB). The DEFINITION's member references are remapped
+//  EntityID↔INDEX so they survive the reader minting fresh ids on every read.
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //

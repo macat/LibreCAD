@@ -106,10 +106,18 @@ public struct Block: Sendable, Hashable, Codable, Identifiable {
     /// block born without it — and every old saved file — decodes to `[]`, so
     /// existing blocks are 100% unaffected.
     public var attributeDefs: [BlockAttributeDef]
-    /// The block's DYNAMIC authoring bundle (visibility states this wave; params /
-    /// actions / lookup later — see `DynamicBlockDef`). ADDITIVE optional field: a
-    /// plain (non-dynamic) block — and every old saved file — carries `nil`, so a
-    /// block born without it is byte-identical (dynamic-blocks-plan §2a).
+    /// The block's DYNAMIC authoring bundle (visibility states, parameters, actions —
+    /// see `DynamicBlockDef`). ADDITIVE optional field: a plain (non-dynamic) block —
+    /// and every old saved file — carries `nil`, so a block born without it is
+    /// byte-identical (dynamic-blocks-plan §2a).
+    ///
+    /// PERSISTENCE (R4b, dynamic-blocks-plan §6a): the document is DXF-only, so this
+    /// bundle is round-tripped LOSSLESSLY by embedding it in the DXF as a compact
+    /// INDEX-KEYED JSON string carried on a reserved-tag ATTDEF inside the block
+    /// (`DynamicBlockDef.encodeIndexKeyedJSON` / `decodeIndexKeyedJSON`, wired through
+    /// `DXFWriter`/`DXFReader` + the C bridge). Member references are persisted as
+    /// member INDICES (not `EntityID`s, which the reader re-mints on every read). DXF
+    /// only — dynamic-on-DWG does not round-trip (the DWG writer makes empty blocks).
     public var dynamic: DynamicBlockDef?
 
     public init(

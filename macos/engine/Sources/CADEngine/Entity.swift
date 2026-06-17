@@ -903,12 +903,19 @@ public struct InsertData: Sendable, Hashable, Codable {
     /// born without it — and every old saved file — decodes to `[]`, so a plain
     /// insert is 100% unaffected.
     public var attributes: [BlockAttributeValue]
-    /// Per-INSTANCE dynamic state (the active visibility state this wave; parameter
-    /// values forward-compat — see `InsertDynamicState`). ADDITIVE optional field:
-    /// a plain insert — and every old saved file — carries `nil`, so a record born
-    /// without it is byte-identical (dynamic-blocks-plan §2b). Evaluated inside the
-    /// existing `resolveInsert` via `BlockEvaluator.evaluate`; a `nil` here makes
-    /// the insert resolve exactly as a static insert.
+    /// Per-INSTANCE dynamic state (active visibility state, parameter values, flip
+    /// states — see `InsertDynamicState`). ADDITIVE optional field: a plain insert —
+    /// and every old saved file — carries `nil`, so a record born without it is
+    /// byte-identical (dynamic-blocks-plan §2b). Evaluated inside the existing
+    /// `resolveInsert` via `BlockEvaluator.evaluate`; a `nil` here makes the insert
+    /// resolve exactly as a static insert.
+    ///
+    /// PERSISTENCE (R4b, dynamic-blocks-plan §6a): the document is DXF-only, so this
+    /// state is round-tripped LOSSLESSLY by embedding it in the DXF as a compact JSON
+    /// string carried on a reserved-tag ATTRIB on the INSERT (`InsertDynamicState`'s
+    /// `encodeJSON`/`decodeJSON`, wired through `DXFWriter`/`DXFReader` + the C
+    /// bridge). It is name/string-keyed, so no member-id remap is needed (unlike the
+    /// block DEFINITION). DXF only — dynamic-on-DWG does not round-trip.
     public var dynamic: InsertDynamicState?
 
     public init(
