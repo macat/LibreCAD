@@ -431,6 +431,25 @@ struct LibreCADApp: App {
                     NSApp.sendAction(Selector(("toggleGridAction:")), to: nil, from: nil)
                 }
                 .keyboardShortcut(Self.f7Key, modifiers: [])
+                // View ▸ Object Snap Tracking (OTRACK) — toggles the persistent
+                // object-snap-tracking aid (alignment guides radiating from acquired
+                // snaps), INDEPENDENT of ortho/polar. Routed through the responder chain
+                // to the focused canvas exactly like Ortho / Show Grid above, targeting the
+                // `toggleObjectTrackingAction:` selector whose `@objc` handler lives in the
+                // `FlippedMTKView` extension in THIS file (the same self-contained-wiring
+                // convention the relative-zero / named-views / clipboard items use) — so no
+                // edit to the non-owned canvas-view source is needed. The OTRK status-bar
+                // chip drives the same `CanvasModel.toggleObjectTracking()`.
+                //
+                // NO KEY EQUIVALENT (menu + chip only): OTRACK's AutoCAD-native F11 is a
+                // macOS-RESERVED function key, F10 (polar's help-string) is not actually
+                // bound, and the nearest mnemonic chord (⌥⌘T) collides with macOS's
+                // reserved Show/Hide-Fonts/Toolbar chord — so rather than claim a risky
+                // equivalent we ship this discoverable from the menu + the OTRK chip, the
+                // same no-chord pattern several existing View/Layers items already use.
+                Button("Object Snap Tracking") {
+                    NSApp.sendAction(Selector(("toggleObjectTrackingAction:")), to: nil, from: nil)
+                }
 
                 Divider()
                 // Relative-zero (LibreCAD's "Set relative zero") — the datum the
@@ -779,6 +798,33 @@ extension FlippedMTKView {
     /// View ▸ Reset Relative Zero to Origin (⌥⌘0) — set the relative zero back to (0,0).
     @objc func resetRelativeZeroAction(_ sender: Any?) {
         controller?.model.resetRelativeZeroToOrigin()
+        controller?.requestRedraw()
+    }
+}
+
+// MARK: - Object-snap-tracking responder-chain action (snap-tracking wave — OTRACK)
+//
+// The View ▸ Object Snap Tracking menu item dispatches via `NSApp.sendAction(_:to:nil:
+// from:)` (the same responder-chain wiring the Ortho / Show Grid / relative-zero items
+// use). The focused window's canvas (`FlippedMTKView`) is the first responder, so the
+// action lands here. The handler lives in an EXTENSION on the canvas view (same module)
+// so OTRACK's MENU wiring stays contained to the menu + this file — no edit to the
+// non-owned canvas-view source is needed. It forwards to the owning controller's
+// `CanvasModel.toggleObjectTracking()` (the W5 model verb: flips the INDEPENDENT OTRACK
+// flag, never disturbing ortho/polar, and discards acquired points on toggle-off) and
+// requests a redraw so the acquired-point "+"s / alignment guides paint or clear. The
+// `@objc` selector name matches the `NSApp.sendAction` selector above EXACTLY.
+//
+// (No `validateUserInterfaceItem` checkmark arm is added here: that validator lives in
+// the non-owned canvas-view file, whose `default` arm returns `true`, so the item stays
+// enabled while the canvas is focused — the status-bar OTRK chip is the at-a-glance ON/OFF
+// surface. Wiring a menu checkmark is a small canvas-view follow-up, flagged in the report.)
+extension FlippedMTKView {
+
+    /// View ▸ Object Snap Tracking — toggle the persistent OTRACK flag on the focused
+    /// canvas (independent of ortho/polar). No-op when no canvas is focused.
+    @objc func toggleObjectTrackingAction(_ sender: Any?) {
+        controller?.model.toggleObjectTracking()
         controller?.requestRedraw()
     }
 }
