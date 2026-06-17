@@ -185,6 +185,18 @@ public struct SplineTool: Tool {
         return [ToolKeyword(keyword: "Undo", label: "Undo")]
     }
 
+    /// The WORLD point the smart command line's `Close` keyword re-feeds to close the
+    /// spline: the FIRST committed point, returned EXACTLY when `keywordOptions` offers
+    /// `Close` (≥ 3 committed points — matching `handleClick`'s real close gate), else
+    /// `nil`. There is no standalone close input, so Wave 3 dispatches `Close` as
+    /// `.click(closeAnchor)`; `handleClick`'s close-on-first-point path then commits the
+    /// closed spline. Reads the same private `state.building.points` `keywordOptions`/
+    /// `preview` read — no new stored field. Applies to BOTH modes (they share the flow).
+    public var closeAnchor: Vector? {
+        guard case .building(let points) = state, points.count >= 3 else { return nil }
+        return points.first
+    }
+
     /// A draw tool: it IGNORES `context` (it needs only the snapped world points)
     /// and emits new geometry as a single `.add` edit on commit.
     public mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome {

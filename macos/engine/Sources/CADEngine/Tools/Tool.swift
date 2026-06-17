@@ -315,6 +315,23 @@ public protocol Tool: Sendable {
     /// the EXISTING `ToolInput` events (no new `.keyword` case — that would force an
     /// exhaustive-switch edit across every tool's `handle`). GUI-free: a plain value list.
     var keywordOptions: [ToolKeyword] { get }
+
+    /// Optional WORLD point a `Close` keyword should re-feed to the tool to close the
+    /// in-progress loop. The multi-vertex draw tools (Polyline / Spline) close by clicking
+    /// ON their FIRST placed vertex/point — there is NO standalone "close" input — so when
+    /// such a tool currently offers a `Close` in `keywordOptions`, it exposes that first
+    /// vertex/point here; the command-line dispatch (Wave 3) feeds it back as a
+    /// `.click(closeAnchor)`, and the tool's existing close-on-coincidence path commits the
+    /// closed entity. `nil` whenever closing is not currently offered (before there are
+    /// enough vertices, or after commit/reset) — so it is `non-nil` EXACTLY when
+    /// `keywordOptions` contains a `Close`.
+    ///
+    /// Append-only extension of the frozen contract (the SAME additive-default pattern as
+    /// `referenceSegments` / `liveDimensions` / `keywordOptions`): a default implementation
+    /// in the protocol extension below returns `nil`, so EVERY existing tool inherits "no
+    /// close anchor" with no per-tool change — only the multi-vertex tools that offer
+    /// `Close` (Polyline / Spline) override it. GUI-free: a plain engine `Vector?`.
+    var closeAnchor: Vector? { get }
 }
 
 // MARK: - Default reference segments (additive: all tools inherit "none")
@@ -338,6 +355,12 @@ public extension Tool {
     /// conforming (empty) `keywordOptions`, exactly like `referenceSegments` /
     /// `liveDimensions`.
     var keywordOptions: [ToolKeyword] { [] }
+
+    /// Default: tools have no close anchor. Only the multi-vertex draw tools that offer a
+    /// `Close` keyword (Polyline / Spline) override this to expose the first vertex/point a
+    /// `Close` should re-feed. Keeps the contract append-only — no existing tool file needs
+    /// to change to gain a conforming (`nil`) `closeAnchor`, exactly like the others.
+    var closeAnchor: Vector? { nil }
 }
 
 // MARK: - Command-line keyword (additive value type)
