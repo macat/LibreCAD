@@ -374,6 +374,41 @@ final class CanvasModel {
     /// later wave). Ortho/grid-relative and the set-UCS UI are also later waves.
     var currentUCS: UCS = .world
 
+    /// The state of an in-progress interactive "set UCS by picking" gesture (UCS-W3).
+    /// Mirrors the lightweight transient-pick style of `settingRelativeZeroArmed` /
+    /// `zoomWindowArmed` (a model-owned interaction state, NOT a `Tool` / `ToolKind`):
+    /// the canvas view feeds SNAPPED clicks to `ucsPickClick(_:)` and routes Esc to
+    /// `cancelUCSPick()` while `isUCSPicking`. Two flavors:
+    ///   - 1-point ("Set UCS Origin"): one click sets `currentUCS` to that origin with
+    ///     angle 0 (axes parallel to world), then the pick ends.
+    ///   - 2-point ("Set UCS by 2 Points"): the first click captures the origin, the
+    ///     second click defines the UCS +X direction; `currentUCS` becomes that origin
+    ///     rotated to point its +X at the second click, then the pick ends.
+    /// `.inactive` is the resting state (the predicate `isUCSPicking` reads `!= .inactive`).
+    /// Driven only through `beginUCSPick` / `ucsPickClick` / `cancelUCSPick`, each of which
+    /// bumps `modelVersion` so the status prompt + axis overlay chrome refresh.
+    enum UCSPick: Equatable {
+        /// No pick in progress (resting state).
+        case inactive
+        /// Awaiting the UCS ORIGIN click. `twoPoint` records whether a second
+        /// (X-axis) click follows (2-point flavor) or the origin click finishes it
+        /// (1-point flavor, axes parallel to world).
+        case awaitingOrigin(twoPoint: Bool)
+        /// Awaiting the X-AXIS click (2-point flavor only); `origin` is the captured
+        /// first click. The second click's direction from `origin` sets the UCS angle.
+        case awaitingXAxis(origin: Vector)
+    }
+
+    /// The live UCS-pick gesture state (UCS-W3). `.inactive` unless the user invoked
+    /// "Set UCS by 2 Points" / "Set UCS Origin" (View menu). Interaction state, not
+    /// document content — not undoable, not persisted. Observed (via `modelVersion`
+    /// bumps) so the status prompt + cursor reflect the pick.
+    private(set) var ucsPick: UCSPick = .inactive
+
+    /// Whether a UCS-pick gesture is in progress (the canvas consults this to route
+    /// clicks/Esc into the pick instead of the active tool / selection).
+    var isUCSPicking: Bool { ucsPick != .inactive }
+
     /// The grid step (world units) last seen via `updateSnap`/`snappedWorldPoint`.
     /// The renderer owns the live grid spacing and the canvas view passes it down
     /// on every cursor event; we cache the latest here so `handleToolInput` can put
@@ -2728,6 +2763,9 @@ final class CanvasModel {
     /// discoverable. Empty `toolStatus` ⇒ just the tool title; select mode ⇒ a
     /// neutral "Select" prompt so the bar is never blank.
     var toolStepReadout: String {
+        // An in-progress UCS pick owns the prompt (it overrides both tool + select
+        // mode): the user is mid-gesture and needs the "Specify UCS …" step text.
+        if let ucsPrompt = ucsPickReadout { return ucsPrompt }
         guard isToolActive else { return "Select \u{2014} click to select, drag to pan" }
         let prompt = toolStatus.isEmpty ? "" : ": \(toolStatus)"
         return "\(activeToolKind.title)\(prompt)"
@@ -5573,7 +5611,17 @@ final class CanvasModel {
         guard orthoEffective(shiftHeld: shiftHeld) else { return point }
         guard !osnapActive else { return point }                 // osnap wins
         guard let reference = relativeZero else { return point }  // need a last point
-        return OrthoConstraint.constrain(point, relativeTo: reference)
+        // Ortho locks to the UCS axes (UCS-W3): convert the candidate + reference INTO
+        // the active UCS frame, axis-lock there with the unchanged pure kernel, then
+        // convert the result back to WORLD. With `UCS.world` `toUCS`/`toWorld` are the
+        // identity, so this is BYTE-IDENTICAL to the world-axis behavior (regression-lock).
+        if currentUCS.isWorld {
+            return OrthoConstraint.constrain(point, relativeTo: reference)
+        }
+        let pUCS = currentUCS.toUCS(point)
+        let rUCS = currentUCS.toUCS(reference)
+        let lockedUCS = OrthoConstraint.constrain(pUCS, relativeTo: rUCS)
+        return currentUCS.toWorld(lockedUCS)
     }
 
     /// Whether the latest `snap` is a REAL geometry snap (endpoint/center/middle/
@@ -5631,8 +5679,20 @@ final class CanvasModel {
         guard polarEnabled, !shiftHeld else { return point }     // ⇧ releases polar
         guard !osnapActive else { return point }                 // osnap wins
         guard let reference = relativeZero else { return point }  // need a last point
-        return PolarConstraint.constrain(
-            point, relativeTo: reference, incrementRadians: polarAngleIncrement)
+        // Polar measures the angle increment from the UCS +X axis (UCS-W3): convert the
+        // candidate + reference INTO the active UCS frame, angle-lock there with the
+        // unchanged pure kernel (so the increments are measured from UCS X, not world X),
+        // then convert the result back to WORLD. With `UCS.world` `toUCS`/`toWorld` are
+        // the identity, so this is BYTE-IDENTICAL to the world behavior (regression-lock).
+        if currentUCS.isWorld {
+            return PolarConstraint.constrain(
+                point, relativeTo: reference, incrementRadians: polarAngleIncrement)
+        }
+        let pUCS = currentUCS.toUCS(point)
+        let rUCS = currentUCS.toUCS(reference)
+        let lockedUCS = PolarConstraint.constrain(
+            pUCS, relativeTo: rUCS, incrementRadians: polarAngleIncrement)
+        return currentUCS.toWorld(lockedUCS)
     }
 
     /// Short status-bar label for the polar readout: "Polar" when the persistent flag
@@ -5657,6 +5717,80 @@ final class CanvasModel {
     func resetUCS() {
         currentUCS = .world
         modelVersion &+= 1
+    }
+
+    // MARK: - Interactive UCS pick (UCS-W3 — "Set UCS by 2 Points" / "Set UCS Origin")
+
+    /// Begins an interactive UCS pick. `twoPoint == false` ("Set UCS Origin"): the
+    /// next snapped canvas click sets the UCS origin with angle 0 (axes parallel to
+    /// world). `twoPoint == true` ("Set UCS by 2 Points"): the first click captures
+    /// the origin, the second defines the UCS +X direction. Mirrors the one-shot
+    /// `armSetRelativeZero` style — model interaction state, not a `Tool`. Bumps
+    /// `modelVersion` so the status prompt ("Specify UCS origin") shows immediately.
+    func beginUCSPick(twoPoint: Bool) {
+        ucsPick = .awaitingOrigin(twoPoint: twoPoint)
+        modelVersion &+= 1
+    }
+
+    /// Advances the UCS pick with a (SNAPPED) world click. The canvas funnel feeds
+    /// the snapped world point here while `isUCSPicking`, consuming the click (the
+    /// active tool / selection never sees it):
+    ///   - `.awaitingOrigin(twoPoint: false)` → install `UCS(origin: world, angle: 0)`,
+    ///     pick ends (`.inactive`).
+    ///   - `.awaitingOrigin(twoPoint: true)` → capture the origin, advance to
+    ///     `.awaitingXAxis(origin:)` (next click sets +X).
+    ///   - `.awaitingXAxis(origin)` → install `UCS(origin, angle: (world − origin).angle)`,
+    ///     pick ends. A degenerate second click coincident with the origin yields a
+    ///     zero direction whose `.angle` is 0 (world +X) — a harmless fallback, never a
+    ///     bogus frame.
+    /// No-op (and `false`) when not picking or the click is invalid. Returns whether
+    /// the gesture consumed the click (so the caller redraws). `setUCS` is reused for
+    /// the install so the same `modelVersion` bump / chrome refresh applies.
+    @discardableResult
+    func ucsPickClick(_ world: Vector) -> Bool {
+        guard world.valid else { return false }
+        switch ucsPick {
+        case .inactive:
+            return false
+        case .awaitingOrigin(let twoPoint):
+            if twoPoint {
+                ucsPick = .awaitingXAxis(origin: world)
+                modelVersion &+= 1
+            } else {
+                ucsPick = .inactive
+                setUCS(UCS(origin: world, angle: 0))   // setUCS bumps modelVersion
+            }
+            return true
+        case .awaitingXAxis(let origin):
+            // The +X direction is the click relative to the captured origin; a
+            // coincident click degenerates to angle 0 (world +X) — never invalid.
+            let angle = (world - origin).angle
+            ucsPick = .inactive
+            setUCS(UCS(origin: origin, angle: angle))  // setUCS bumps modelVersion
+            return true
+        }
+    }
+
+    /// Cancels an in-progress UCS pick (Esc / mode change) WITHOUT changing the active
+    /// UCS — `currentUCS` is untouched, only the gesture state is cleared. No-op (and
+    /// `false`) when not picking. Bumps `modelVersion` so the status prompt restores.
+    @discardableResult
+    func cancelUCSPick() -> Bool {
+        guard isUCSPicking else { return false }
+        ucsPick = .inactive
+        modelVersion &+= 1
+        return true
+    }
+
+    /// The status-bar prompt for the current UCS-pick step, or `nil` when not picking.
+    /// Surfaced through `toolStepReadout` (the command-hint / status channel) so the
+    /// user sees "Specify UCS origin" / "Specify point on X-axis" while picking.
+    var ucsPickReadout: String? {
+        switch ucsPick {
+        case .inactive:                    return nil
+        case .awaitingOrigin:              return "Specify UCS origin"
+        case .awaitingXAxis:               return "Specify point on X-axis"
+        }
     }
 
     // MARK: - Object-snap tracking (OTRACK — LibreCAD object snap tracking / AutoCAD F11)

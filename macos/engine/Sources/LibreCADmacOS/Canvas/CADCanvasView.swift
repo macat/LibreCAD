@@ -1170,6 +1170,18 @@ final class CADCanvasController {
     /// (A larger-travel down→up is a pan and is handled by `panDrag`, NOT here.)
     func mouseClick(at point: CGPoint) {
         syncViewSizeFromView()
+        // Interactive UCS pick (UCS-W3): while a "Set UCS by 2 Points" / "Set UCS Origin"
+        // gesture is in progress, this click belongs to the pick — feed the SNAPPED world
+        // point (so the UCS origin/X-axis bind to geometry like any pick) and CONSUME it,
+        // so the active tool / selection never sees it. Takes precedence over every other
+        // click handling below. The UCSAxisOverlay follows `currentUCS` once the pick sets
+        // it, so no extra overlay is needed here.
+        if model.isUCSPicking {
+            let spacing = renderer?.lastGridSpacing
+            let p = model.snappedWorldPoint(atScreenPoint: point, gridSpacing: spacing)
+            if model.ucsPickClick(p) { redraw() }
+            return
+        }
         // The Text tool authors text via the inline NSTextView editor, not the
         // model's geometry-tool input path: a click sets the insertion point and
         // raises the editor. (Detected by the active tool's identity so it works the
@@ -1920,6 +1932,15 @@ final class CADCanvasController {
         }
 
         if isEscape {
+            // Esc during an interactive UCS pick (UCS-W3) cancels the gesture WITHOUT
+            // changing the active UCS — the earliest unwind step, before the grip / zoom /
+            // marquee / tool ladder, so Esc backs out of "Set UCS …" first (and the active
+            // tool run, if any, is left intact for a subsequent Esc). Returns early.
+            if model.isUCSPicking {
+                model.cancelUCSPick()
+                redraw()
+                return true
+            }
             // Esc on an in-progress PER-ENTITY GRIP drag drops the preview WITHOUT
             // committing (re-anchors the grips) — the earliest unwind step, alongside the
             // dynamic-grip cancel, before any tool/marquee/selection handling. Routed here

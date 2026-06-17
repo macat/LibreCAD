@@ -480,6 +480,38 @@ struct LibreCADApp: App {
                     NSApp.sendAction(Selector(("resetRelativeZeroAction:")), to: nil, from: nil)
                 }
                 .keyboardShortcut("0", modifiers: [.command, .option])
+
+                Divider()
+                // User Coordinate System (UCS — LibreCAD / AutoCAD UCS) — a rotated/
+                // translated input/display frame. The document stays in WORLD coordinates;
+                // the UCS only changes how coordinates READ/TYPE and which axes ortho/polar
+                // lock to (UCS-W3). Each item dispatches through the responder chain
+                // (`NSApp.sendAction(_:to:nil:from:)`) to the focused canvas (`FlippedMTKView`,
+                // the first responder), whose `@objc` handlers live in an extension in THIS
+                // file (the same self-contained wiring the Ortho / Relative-zero / OTRACK items
+                // use) — so no edit to the non-owned canvas-view source is needed.
+                //
+                // KEY EQUIVALENTS: the two pick items use ⌥⌘U / ⌥⇧⌘U and Reset uses ⌥⌘W. These
+                // ⌥⌘ chords match the Relative-zero group's convention (⌥⌘R/L/0, all free in the
+                // keymap) and avoid the system-reserved letters; ⌘U (underline) is NOT claimed
+                // (we use the ⌥⌘ variant), and these do not collide with the canvas bare/⇧/⌥
+                // tool letters nor the existing ⌘ menu chords.
+                //
+                // "Set UCS by 2 Points" arms a two-click pick (origin, then +X direction);
+                // "Set UCS Origin" arms a one-click pick (origin only, axes parallel to world);
+                // "Reset UCS to World" restores the identity frame.
+                Button("Set UCS by 2 Points") {
+                    NSApp.sendAction(Selector(("setUCSByTwoPointsAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("u", modifiers: [.command, .option])
+                Button("Set UCS Origin") {
+                    NSApp.sendAction(Selector(("setUCSOriginAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("u", modifiers: [.command, .option, .shift])
+                Button("Reset UCS to World") {
+                    NSApp.sendAction(Selector(("resetUCSAction:")), to: nil, from: nil)
+                }
+                .keyboardShortcut("w", modifiers: [.command, .option])
             }
             // The Tools menu — the discoverable source of truth for EVERY tool and
             // its shortcut. Grouped into Draw / Modify / Annotate SUBMENUS (consistent
@@ -825,6 +857,46 @@ extension FlippedMTKView {
     /// canvas (independent of ortho/polar). No-op when no canvas is focused.
     @objc func toggleObjectTrackingAction(_ sender: Any?) {
         controller?.model.toggleObjectTracking()
+        controller?.requestRedraw()
+    }
+}
+
+// MARK: - UCS responder-chain actions (LibreCAD / AutoCAD User Coordinate System) — UCS-W3
+//
+// The View ▸ Set UCS by 2 Points / Set UCS Origin / Reset UCS to World menu items dispatch
+// via `NSApp.sendAction(_:to:nil:from:)` (the same responder-chain wiring the Ortho /
+// Relative-zero / OTRACK items use). The focused window's canvas (`FlippedMTKView`) is the
+// first responder, so the action lands here. These handlers live in an EXTENSION on the
+// canvas view (same module) so the UCS-pick MENU wiring stays contained to the menu + this
+// file — no edit to the non-owned canvas-view source is needed. Each forwards to the owning
+// controller's `CanvasModel` (the testable pick/reset logic) and requests a redraw so the
+// status prompt + UCS axis overlay refresh. The pick itself is consumed on the canvas
+// view's existing click/Esc funnel (`mouseClick` / `handleKey`) once armed here — no modal,
+// fully headless-testable at the model layer.
+//
+// (No `validateUserInterfaceItem` checkmark arm is added: that validator lives in the
+// non-owned canvas-view file, whose `default` arm returns `true`, so the items stay enabled
+// while the canvas is focused. A menu checkmark for "is a non-world UCS active" is a small
+// canvas-view follow-up, flagged in the report.)
+extension FlippedMTKView {
+
+    /// View ▸ Set UCS by 2 Points (⌥⌘U) — arm a two-click pick: the first snapped canvas
+    /// click sets the UCS origin, the second defines the UCS +X direction.
+    @objc func setUCSByTwoPointsAction(_ sender: Any?) {
+        controller?.model.beginUCSPick(twoPoint: true)
+        controller?.requestRedraw()
+    }
+
+    /// View ▸ Set UCS Origin (⌥⇧⌘U) — arm a one-click pick: the next snapped canvas click
+    /// sets the UCS origin (axes parallel to world).
+    @objc func setUCSOriginAction(_ sender: Any?) {
+        controller?.model.beginUCSPick(twoPoint: false)
+        controller?.requestRedraw()
+    }
+
+    /// View ▸ Reset UCS to World (⌥⌘W) — restore the identity (world) frame.
+    @objc func resetUCSAction(_ sender: Any?) {
+        controller?.model.resetUCS()
         controller?.requestRedraw()
     }
 }
