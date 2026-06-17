@@ -6,6 +6,20 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-17 — PARITY PROGRAM W2 + W5 shipped (offset flags · revision-cloud · viewport freeze/display/twist · line-construction · circle tangents) — (`native-macos @ 50d02792c`, **3490 tests**)
+
+W2/W5 of the parity program — all UNWIRED engine work (UI wiring batches into W4). **In-process agents adopted mid-wave** after background dispatch proved flaky (1A died, 2C stalled — both empty worktrees, no idle ping); in-process runs returned results directly and reliably.
+
+- **2A — offset bothSides + eraseSource** `ba8418a`: additive flags (default false = byte-identical single `.add`); opposite-side copy (degenerate r−d≤0 dropped); erase-source removes a producing source once.
+- **2B — Revision Cloud tool** `897a5277` (UNWIRED): new `RevisionCloudTool` → ONE closed bulged `.polyline` (fixed outward scallops via shoelace→CW normalization); NO new EntityKind. **Found a 2nd coupled no-default ToolKind switch** (`ContentView.metadata`, beyond `CommandPalette.glyph`) → both arms required per ToolKind add. **Backlog:** `Resolve.expandPolyline` draws a closed polyline's implicit closing edge straight (the closing scallop doesn't render; data + DXF round-trip are correct).
+- **2C — Line Construction tool** `21ea4e6` (UNWIRED): perpendicular-foot / parallel-through / bisector / tangent-1/2 / orth-tangent modes → plain `.line`; additive `SnapGeometry` bisector helper. (First background attempt stalled empty → in-process redo.)
+- **2D — per-viewport freeze/display/twist** `6988a4c`: additive `LayoutViewport` fields (`displayOn`/`twistRadians`/`frozenLayers`) honored in `packViewportContents`; renderer byte-identity for default viewports proven two ways. Document-payload only (DXF VP_FREEZE/twist round-trip deferred).
+- **5A — circle tangent modes** `9f44111` (UNWIRED): TTR / TTT-inscribe / from-arc on `CircleConstructionMode`; additive `SnapGeometry` tangent-circle solver. TTT = three-line case (mixed line/circle Apollonius deferred); ellipse pair = graceful no-op.
+
+**Gate note:** the W2 Round-1 batch gate hit a **1/13 non-reproducing** test failure (2s "1 issue", never seen in 12 consecutive reruns) — consistent with the known Core-Text static-init intermittent. **All UNWIRED** — new tools/modes reachable only via `ToolKind` until the W4 wire-wave; `.app` rebuild deferred to W4.
+
+---
+
 ## 2026-06-17 — PARITY PROGRAM W1 shipped (text-style DXF round-trip + rotate/mirror-copy + layer transparency) — (`native-macos @ 1d8869087`, **3411 tests**, `.app` rebuilt)
 
 Owner chose **"do all of it (parallel program)"** after a where-are-we/parity audit (LibreCAD ≈ done bar a few finishers + one data-loss bug; the frontier is AutoCAD-LT plotting/annotation). Planned via the `parity-program-plan` workflow (6 cluster probes → sequencing DAG → critic **APPROVE-WITH-FIXES**); full DAG + serialized critical sections + deferred list in `macos/docs/parity-program-plan.md`. W1 = 4 disjoint engine lanes, built in isolated worktrees, merged by hash, one serial gate.
