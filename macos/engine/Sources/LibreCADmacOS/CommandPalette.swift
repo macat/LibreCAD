@@ -157,6 +157,9 @@ enum CommandRegistry {
         case .image:           return ("photo", "⇧Y")
         // Paper-space Viewport placement (⌥V) — only meaningful in a layout tab.
         case .viewport:        return ("rectangle.dashed", "⌥V")
+        // Parity-program W2: Revision Cloud markup (UNWIRED — no canvas chord yet,
+        // so the palette surfaces it without a shortcut hint).
+        case .revcloud:        return ("cloud", nil)
         }
     }
 

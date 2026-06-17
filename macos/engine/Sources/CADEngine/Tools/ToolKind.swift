@@ -192,6 +192,11 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     /// `CanvasModel` and routes the finished viewport to `CADDrawing.addViewport`. Only
     /// meaningful in PAPER space with an active layout (a no-op in model space).
     case viewport
+    // --- Parity-program W2 tool (built UNWIRED; surfaced in a later wire-wave) ---
+    /// The Revision Cloud markup tool (`RevisionCloudTool`) — click a path, commit
+    /// ONE closed `.polyline` whose every segment is a fixed outward-bowing arc
+    /// (the AutoCAD REVCLOUD scallop). No new `EntityKind` — it reuses `.polyline`.
+    case revcloud
     // Append new draw tools here (one `case` per tool) — see the collision note.
 
     /// A short title for the UI (toolbar button / menu).
@@ -253,6 +258,7 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .continueDim:     return "Continue Dimension"
         case .image:           return "Image"
         case .viewport:        return "Viewport"
+        case .revcloud:        return "Revision Cloud"
         // Append a title arm per new case.
         }
     }
@@ -343,6 +349,8 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         // cannot flow through the `Tool`/`ToolEdit` contract). The app keys off
         // `activeToolKind == .viewport` and runs `ViewportTool` itself.
         case .viewport:        return nil
+        // Parity-program W2: Revision Cloud markup tool (UNWIRED — surfaced later).
+        case .revcloud:        return RevisionCloudTool()
         // Append a `case <kind>: return <Name>Tool()` arm per new tool.
         }
     }

@@ -89,6 +89,7 @@ struct ToolKindWiringTests {
             .multileader,                                          // ML-W2 (annotate — MLEADER)
             .image,                                                // wire-wave (image)
             .viewport,                                             // wire-wave-1 (paper-space, out-of-band)
+            .revcloud,                                             // parity-program W2 (annotate — UNWIRED)
         ]
         #expect(Set(ToolKind.allCases) == expected,
                 "ToolKind.allCases (\(ToolKind.allCases)) != expected roster")
@@ -519,6 +520,7 @@ struct ToolKindWiringTests {
         .ordinateDim, .arcLengthDim, .angular3pDim,
         .leader, .multileader, .baselineDim, .continueDim,
         .measureDistance, .measureAngle, .measureArea, .measureLength,
+        .revcloud,   // parity-program W2 (markup — UNWIRED; grouped so it's not orphaned)
     ]
 
     /// Every `ToolKind` (except `.select`, the core mode) appears in EXACTLY ONE UI
