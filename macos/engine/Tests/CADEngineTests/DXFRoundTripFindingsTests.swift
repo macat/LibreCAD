@@ -93,14 +93,13 @@ struct DXFRoundTripFindingsTests {
         #expect(abs(back.arrowSize - 0.090) < 1e-12)
     }
 
-    @Test("the DXF writer emits the per-entity override into the file as an ACAD:DSTYLE xdata group OR (until the vendored patch) leaves it for the value model — PINNED")
-    func dimensionOverrideDXFRoundTrip_pendingVendoredEmit() async throws {
-        // The Swift writer + bridge now BUILD the ACAD:DSTYLE xdata on the DIMENSION
-        // (text-height dim-var 140, arrow-size 41), but stock libdxfrw's
-        // `dxfRW::writeDimension` does NOT call `writeExtData(ent->extData)`, so the
-        // group is not yet serialized to the .dxf bytes. This test PINS the current
-        // state honestly: the override does NOT yet survive a DXF byte round-trip;
-        // when the 1-line vendored patch lands, FLIP the two #expect blocks below.
+    @Test("the DXF writer emits the per-entity override into the file as an ACAD:DSTYLE xdata group that survives a byte round-trip")
+    func dimensionOverrideDXFRoundTrip() async throws {
+        // The Swift writer + bridge BUILD the ACAD:DSTYLE xdata on the DIMENSION
+        // (text-height dim-var 140, arrow-size 41), and the 1-line vendored patch to
+        // `dxfRW::writeDimension` (now calling `writeExtData(ent->extData)`, mirroring
+        // writeMText) serializes it to the .dxf bytes — so the per-entity override now
+        // survives a full write→read round-trip.
         let rec = EntityRecord(id: EntityID(1), kind: .dimension(DimData(
             kind: .aligned(extension1: Vector(0, 0), extension2: Vector(10, 0)),
             definitionPoint: Vector(0, 5),
@@ -109,16 +108,11 @@ struct DXFRoundTripFindingsTests {
         let result = try await roundTrip([rec])
         let d = try #require(firstDim(result.records), "expected a re-read dimension")
 
-        // PINNED current state (no vendored emit): the per-entity override does not
-        // survive DXF — it reads back as 0 (the "inherit document/style" sentinel).
-        #expect(d.textHeight == 0,
-                "until dxfRW::writeDimension emits extData, the DSTYLE text-height override is not serialized")
-        #expect(d.arrowSize == 0,
-                "until dxfRW::writeDimension emits extData, the DSTYLE arrow-size override is not serialized")
-
-        // FLIP-WHEN-FIXED (uncomment after the 1-line vendored libdxfrw patch):
-        // #expect(abs(d.textHeight - 0.180) < 1e-6)
-        // #expect(abs(d.arrowSize - 0.090) < 1e-6)
+        // The per-entity override now round-trips through the DXF bytes (ACAD:DSTYLE).
+        #expect(abs(d.textHeight - 0.180) < 1e-6,
+                "the DSTYLE text-height override should survive the DXF byte round-trip")
+        #expect(abs(d.arrowSize - 0.090) < 1e-6,
+                "the DSTYLE arrow-size override should survive the DXF byte round-trip")
     }
 
     @Test("a dimension with NO per-entity override writes no DSTYLE override + reads back as inherit (0)")

@@ -1357,6 +1357,14 @@ bool dxfRW::writeDimension(DRW_Dimension *ent) {
         default:
             break;
         }
+        // LibreCAD-macOS [consistency W1 / #19]: serialize the per-entity DSTYLE
+        // override xdata (text height = dim-var 140, arrow size = 41) that the bridge
+        // builds onto extData. Stock libdxfrw's writeDimension never emits extData
+        // (unlike writeMText/writeText), so the override group would otherwise be
+        // dropped on save. Guarded + placed to mirror the MText path.
+        if (!ent->extData.empty()) {
+            writeExtData(ent->extData);
+        }
     } else  {
         //RLZ: todo not supported by acad 12 saved as unnamed block
     }
