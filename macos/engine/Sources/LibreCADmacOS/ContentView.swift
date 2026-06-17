@@ -740,12 +740,13 @@ struct ContentView: View {
         groupOverflowMenu(group)
     }
 
-    /// Renders one pinned toolbar entry: a Draw flyout when `kind` has one registered,
-    /// else a plain tool button. Split out so `groupSection`'s `ForEach` body stays a
-    /// single small expression for the type-checker.
+    /// Renders one pinned toolbar entry: a flyout when `kind` has one registered (Draw
+    /// Line/Circle/Arc/Rectangle/Spline or Modify Divide/Scale), else a plain tool
+    /// button. Split out so `groupSection`'s `ForEach` body stays a single small
+    /// expression for the type-checker.
     @ViewBuilder
     private func pinnedButton(_ kind: ToolKind, in group: ToolGroup) -> some View {
-        if group == .draw, let flyout = ToolCatalog.drawFlyout(for: kind) {
+        if let flyout = ToolCatalog.flyout(for: kind) {
             drawFlyoutButton(flyout)
         } else {
             toolButton(kind)
@@ -883,7 +884,7 @@ struct ContentView: View {
         if let active = flyout.variants.first(where: { isActiveVariant($0) }) {
             switch active {
             case .kind(let k):     return k.title
-            case .circleMode, .arcMode:
+            case .circleMode, .arcMode, .splineMode, .divideStyle, .scaleMode:
                 return "\(flyout.primary.title) · \(ToolCatalog.variantTitle(active))"
             }
         }
@@ -891,10 +892,10 @@ struct ContentView: View {
     }
 
     /// Activates one flyout variant. A `.kind` variant routes through the normal
-    /// `activate(_:)` (so Image/Create-Block special-cases still hold); a `.circleMode`
-    /// / `.arcMode` variant sets the model's construction mode FIRST, then activates the
-    /// base Circle/Arc kind so `applyToolConfig` re-mints the tool in that mode — exactly
-    /// the ToolOptionsBar path (ToolOptionsBar.swift:214 / :243).
+    /// `activate(_:)` (so Image/Create-Block special-cases still hold); a MODE variant
+    /// sets the matching model config FIRST, then activates the base kind so
+    /// `applyToolConfig` re-mints/re-applies the tool in that mode — exactly the
+    /// ToolOptionsBar path (the Wave-3B/3F plumbing on `CanvasModel`).
     private func activateVariant(_ variant: ToolCatalog.FlyoutVariant) {
         switch variant {
         case .kind(let k):
@@ -905,13 +906,22 @@ struct ContentView: View {
         case .arcMode(let mode):
             model.arcMode = mode
             controllerBox.controller?.activateTool(.arc)
+        case .splineMode(let mode):
+            model.splineMode = mode
+            controllerBox.controller?.activateTool(.spline)
+        case .divideStyle(let index):
+            model.divideModeStyle = index
+            controllerBox.controller?.activateTool(.divide)
+        case .scaleMode(let mode):
+            model.scaleMode = mode
+            controllerBox.controller?.activateTool(.scale)
         }
     }
 
     /// Whether `variant` is the CURRENT live configuration (drives the hold-menu
     /// checkmark + the button's active-variant title). A `.kind` variant is active when
     /// it is the active tool kind; a mode variant is active when its base kind is active
-    /// AND the model's construction mode matches.
+    /// AND the model's construction/creation mode matches.
     private func isActiveVariant(_ variant: ToolCatalog.FlyoutVariant) -> Bool {
         switch variant {
         case .kind(let k):
@@ -920,6 +930,12 @@ struct ContentView: View {
             return model.activeToolKind == .circle && model.circleConstructionMode == mode
         case .arcMode(let mode):
             return model.activeToolKind == .arc && model.arcMode == mode
+        case .splineMode(let mode):
+            return model.activeToolKind == .spline && model.splineMode == mode
+        case .divideStyle(let index):
+            return model.activeToolKind == .divide && model.divideModeStyle == index
+        case .scaleMode(let mode):
+            return model.activeToolKind == .scale && model.scaleMode == mode
         }
     }
 
@@ -1122,34 +1138,84 @@ struct ContentView: View {
     // Open/Save/Save As/autosave; export renders the live drawing to other formats
     // and Print drives the system print dialog.
 
-    /// Export… for one `format`: present an `NSSavePanel` defaulting to a sensible
-    /// name with that format's extension, then render the current drawing through
-    /// the shared export facade (PDF/PNG via the CGContext renderer, SVG via the
-    /// engine's pure-Swift emitter). Status/errors land in the HUD — never a crash.
+    /// Export… for one `format`: present an `NSSavePanel` (carrying a small SwiftUI
+    /// ACCESSORY — a format picker spanning every supported format incl. the raster
+    /// JPEG/BMP/TIFF, a DPI field for the raster pipeline, and a JPEG-quality slider),
+    /// then render the current drawing through the shared export facade
+    /// (`DrawingExporter.export(…, dpi:, jpegQuality:)`). The accessory's live format
+    /// drives the panel's allowed type + name extension, so the final URL always matches
+    /// the chosen format. `format` only SEEDS the picker — the default (PNG @ 150 DPI) is
+    /// unchanged when the accessory is left untouched. Status/errors land in the HUD —
+    /// never a crash. The `NSSavePanel`/accessory live in this View layer only.
     @MainActor
     private func exportDrawing(_ format: ExportFormat) async {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [format.utType]
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
-        panel.nameFieldStringValue = "\(exportBaseName).\(format.fileExtension)"
-        panel.title = "Export \(format.displayName)"
+        panel.title = "Export Drawing"
         panel.prompt = "Export"
+
+        let options = ExportOptionsState(format: format)
+        applyExportFormat(format, to: panel)              // seed allowed type + name ext.
+        panel.accessoryView = exportAccessoryView(options: options, panel: panel)
 
         guard panel.runModal() == .OK, let url = panel.url else {
             status = "Export cancelled"
             return
         }
+        // The accessory keeps the panel's allowed type + name extension in sync with the
+        // chosen format, so `url` already carries it; re-derive the extension from the
+        // chosen format anyway (belt-and-suspenders) so the written file's extension
+        // always matches what is encoded. Security-scoped access is requested on the
+        // panel-GRANTED `url` (same directory as `finalURL`).
+        let chosen = options.format
+        let finalURL = url.deletingPathExtension()
+            .appendingPathExtension(chosen.fileExtension)
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         do {
-            let count = try DrawingExporter.export(model.drawing, to: url, format: format)
-            status = "Exported \(url.lastPathComponent) — \(count) elements"
-            NSLog("CADCanvas: exported \(count) elements to \(url.lastPathComponent)")
+            let count = try DrawingExporter.export(model.drawing, to: finalURL,
+                                                   format: chosen,
+                                                   dpi: options.effectiveDPI,
+                                                   jpegQuality: options.jpegQuality)
+            status = "Exported \(finalURL.lastPathComponent) — \(count) elements"
+            NSLog("CADCanvas: exported \(count) elements to \(finalURL.lastPathComponent)")
         } catch {
             status = "Export failed: \(error.localizedDescription)"
             NSLog("CADCanvas: export failed: \(error)")
         }
+    }
+
+    /// Syncs an `NSSavePanel` to one export `format`: its allowed content type plus the
+    /// name field's extension (preserving the base name the user has typed). Called when
+    /// the panel is first built and whenever the accessory's format picker changes, so the
+    /// panel + the eventual URL always carry the chosen format's extension.
+    @MainActor
+    private func applyExportFormat(_ format: ExportFormat, to panel: NSSavePanel) {
+        panel.allowedContentTypes = [format.utType]
+        let current = panel.nameFieldStringValue
+        let base = current.isEmpty
+            ? exportBaseName
+            : (current as NSString).deletingPathExtension
+        let stem = base.isEmpty ? exportBaseName : base
+        panel.nameFieldStringValue = "\(stem).\(format.fileExtension)"
+    }
+
+    /// Builds the `NSSavePanel` ACCESSORY view (an `NSHostingView` wrapping the SwiftUI
+    /// `ExportOptionsAccessory`). The accessory binds to `options`; its format change
+    /// closure re-syncs the host `panel` (allowed type + extension). The hosting view is
+    /// auto-sized to its SwiftUI content so the panel lays it out correctly.
+    @MainActor
+    private func exportAccessoryView(options: ExportOptionsState,
+                                     panel: NSSavePanel) -> NSView {
+        let accessory = ExportOptionsAccessory(options: options) { [weak panel] newFormat in
+            guard let panel else { return }
+            applyExportFormat(newFormat, to: panel)
+        }
+        let host = NSHostingView(rootView: accessory)
+        host.translatesAutoresizingMaskIntoConstraints = true
+        host.setFrameSize(host.fittingSize)
+        return host
     }
 
     // MARK: - Image placement (file-picker → two-click placement)
@@ -1508,26 +1574,40 @@ enum ToolCatalog {
 
     // MARK: Draw flyouts (#1 — click = default tool, hold = variants)
 
-    /// One VARIANT inside a Draw flyout. A variant is EITHER:
+    /// One VARIANT inside a toolbar flyout. A variant is EITHER:
     ///   • `.kind` — a SEPARATE `ToolKind` (e.g. Ray / Construction Line / Polygon),
     ///     activated directly via the toolbar's `activate(_:)` routing; OR
-    ///   • `.circleMode` / `.arcMode` — a CONSTRUCTION MODE of the SAME kind (Circle /
-    ///     Arc), which is NOT its own `ToolKind`. These set the model's
-    ///     `circleConstructionMode` / `arcMode` FIRST, then activate the base kind so
-    ///     `applyToolConfig` re-mints the tool in that mode (the ToolOptionsBar path).
+    ///   • a CONSTRUCTION / CREATION MODE of the SAME kind (Circle / Arc / Spline /
+    ///     Divide / Scale), which is NOT its own `ToolKind`. These set the matching
+    ///     model config (`circleConstructionMode` / `arcMode` / `splineMode` /
+    ///     `divideModeStyle` / `scaleMode`) FIRST, then activate the base kind so
+    ///     `applyToolConfig` re-mints/re-applies the tool in that mode (the
+    ///     ToolOptionsBar path — Wave-3B/3F plumbing).
     ///
     /// No new `ToolKind` / `EntityKind` / mode is introduced — every case resolves to
-    /// an EXISTING kind or an existing construction mode (verified against
-    /// `CircleConstructionMode` / `ArcCreationMode`, which have exactly the cases listed).
+    /// an EXISTING kind or an existing construction/creation mode (verified against
+    /// `CircleConstructionMode` / `ArcCreationMode` / `SplineMode` /
+    /// `ScaleTool.ScaleMode` and the `divideModeStyle` index, which have exactly the
+    /// cases listed).
     enum FlyoutVariant: Hashable {
         case kind(ToolKind)
         case circleMode(CircleConstructionMode)
         case arcMode(ArcCreationMode)
+        /// Spline ▸ Fit points / Control points (`CanvasModel.splineMode`).
+        case splineMode(SplineMode)
+        /// Divide ▸ By number / By length — the model's `divideModeStyle` INDEX
+        /// (`0` = count, `1` = length; the engine `DivideMode` carries an associated
+        /// value so it can't be a `Hashable` tag, exactly as the options bar splits it).
+        case divideStyle(Int)
+        /// Scale ▸ Uniform (`.factor`) / Non-uniform X/Y (`.nonUniform`)
+        /// (`CanvasModel.scaleMode`). `.reference` is options-bar-only — the flyout
+        /// offers just the two headline modes the brief lists.
+        case scaleMode(ScaleTool.ScaleMode)
     }
 
-    /// A Draw-toolbar FLYOUT: a primary tool button (click = activate `primary`) that,
+    /// A toolbar FLYOUT: a primary tool button (click = activate `primary`) that,
     /// when held, opens a menu of `variants`. Replaces a plain pinned button so the
-    /// related tools/modes for a draw family are one hold away (#1).
+    /// related tools/modes for a tool family are one hold away (#1).
     struct Flyout: Identifiable {
         /// The kind the flyout's button activates on a plain click (and whose glyph it
         /// shows). Also the `id` so the toolbar `ForEach`/lookup is stable.
@@ -1537,13 +1617,14 @@ enum ToolCatalog {
         var id: ToolKind { primary }
     }
 
-    /// The Draw-group flyouts (#1), in toolbar order. ONLY the four pinned Draw tools
-    /// that have meaningful variants/modes are flyouts; every other Draw tool stays a
-    /// plain button (and the whole group stays reachable via the `▾` overflow menu).
+    /// The DRAW-group flyouts (#1), in toolbar order. ONLY the pinned Draw tools that
+    /// have meaningful variants/modes are flyouts; every other Draw tool stays a plain
+    /// button (and the whole group stays reachable via the `▾` overflow menu).
     ///   • Line ▸ {Construction Line (XLine), Ray}  — separate KINDS.
     ///   • Rectangle ▸ {Polygon}                    — a separate KIND.
     ///   • Circle ▸ {Center+Radius, 2 Points, 3 Points} — construction MODES.
-    ///   • Arc ▸ {Center/Start/End, 3 Points, Tangential} — construction MODES.
+    ///   • Arc ▸ {Center/Start/End, 3 Points, Tangential} — creation MODES.
+    ///   • Spline ▸ {Fit points (default), Control points} — `SplineMode` (Wave-3B).
     /// (Circle has no TTR mode and Rectangle has no rounded/chamfer KIND in this build,
     /// so neither is offered — only existing kinds/modes are listed.)
     static let drawFlyouts: [Flyout] = [
@@ -1555,12 +1636,35 @@ enum ToolCatalog {
             .arcMode(.centerStartEnd), .arcMode(.threePoint), .arcMode(.tangential),
         ]),
         Flyout(primary: .rectangle, variants: [.kind(.polygon)]),
+        Flyout(primary: .spline, variants: [
+            .splineMode(.fit), .splineMode(.controlPoints),
+        ]),
     ]
 
-    /// The flyout (if any) whose PRIMARY button is `kind` — so `groupSection(.draw)` can
-    /// render a flyout in place of a plain button for the four flyout primaries.
-    static func drawFlyout(for kind: ToolKind) -> Flyout? {
-        drawFlyouts.first { $0.primary == kind }
+    /// The MODIFY-group flyouts (Wave-3C), in toolbar order. Surface the Wave-3B/3F
+    /// parameterized MODES of Divide and Scale as hold-menu variants (the click still
+    /// activates the tool in its current/default mode):
+    ///   • Divide ▸ {By number (count, default), By length} — the `divideModeStyle`
+    ///     INDEX (0 / 1; the engine `DivideMode` carries an associated value).
+    ///   • Scale ▸ {Uniform (default), Non-uniform X/Y} — `ScaleTool.ScaleMode`
+    ///     (`.factor` / `.nonUniform`; `.reference` stays options-bar-only).
+    static let modifyFlyouts: [Flyout] = [
+        Flyout(primary: .divide, variants: [
+            .divideStyle(0), .divideStyle(1),
+        ]),
+        Flyout(primary: .scale, variants: [
+            .scaleMode(.factor), .scaleMode(.nonUniform),
+        ]),
+    ]
+
+    /// Every toolbar flyout (Draw then Modify), in toolbar order. The single source of
+    /// truth the `flyout(for:)` lookup and the no-orphan test share.
+    static var allFlyouts: [Flyout] { drawFlyouts + modifyFlyouts }
+
+    /// The flyout (if any) whose PRIMARY button is `kind` — so `groupSection` can render
+    /// a flyout in place of a plain button for any flyout primary (Draw or Modify).
+    static func flyout(for kind: ToolKind) -> Flyout? {
+        allFlyouts.first { $0.primary == kind }
     }
 
     /// A short display title for one flyout variant (the hold-menu row label / the
@@ -1571,6 +1675,9 @@ enum ToolCatalog {
         case .kind(let k):           return k.title
         case .circleMode(let m):     return circleModeTitle(m)
         case .arcMode(let m):        return arcModeTitle(m)
+        case .splineMode(let m):     return splineModeTitle(m)
+        case .divideStyle(let i):    return divideStyleTitle(i)
+        case .scaleMode(let m):      return scaleModeTitle(m)
         }
     }
 
@@ -1580,6 +1687,11 @@ enum ToolCatalog {
         case .kind(let k):       return metadata(for: k).symbol
         case .circleMode:        return "circle"
         case .arcMode:           return "point.topleft.down.to.point.bottomright.curvepath"
+        case .splineMode:        return "scribble.variable"
+        case .divideStyle(let i): return i == 1 ? "ruler" : "number"
+        case .scaleMode(let m):  return m == .nonUniform
+                                        ? "arrow.up.left.and.arrow.down.right"
+                                        : "arrow.up.left.and.down.right.magnifyingglass"
         }
     }
 
@@ -1599,6 +1711,30 @@ enum ToolCatalog {
         case .centerStartEnd: return "Center, Start, End"
         case .threePoint:     return "3 Points"
         case .tangential:     return "Tangential"
+        }
+    }
+
+    /// Display names for the Spline creation modes (`SplineMode`).
+    static func splineModeTitle(_ mode: SplineMode) -> String {
+        switch mode {
+        case .fit:           return "Fit Points"
+        case .controlPoints: return "Control Points"
+        }
+    }
+
+    /// Display names for the Divide MODE styles, keyed by the model's `divideModeStyle`
+    /// index (`0` = by number / count, `1` = by length / measure).
+    static func divideStyleTitle(_ index: Int) -> String {
+        index == 1 ? "By Length" : "By Number"
+    }
+
+    /// Display names for the Scale modes offered in the flyout (`.factor` reads as the
+    /// headline "Uniform" workflow; `.nonUniform` as "Non-uniform X/Y").
+    static func scaleModeTitle(_ mode: ScaleTool.ScaleMode) -> String {
+        switch mode {
+        case .factor:     return "Uniform"
+        case .reference:  return "By Reference"
+        case .nonUniform: return "Non-uniform X/Y"
         }
     }
 
@@ -2458,5 +2594,112 @@ struct LayoutTabStrip: View {
             }
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Export options (NSSavePanel accessory state + view)
+
+/// The mutable selection backing the export `NSSavePanel`'s accessory: the chosen
+/// `format` (any `ExportFormat`, incl. the raster JPEG/BMP/TIFF), the raster `dpi`, and
+/// the JPEG compression `quality`. Seeded from the format the Export command requested;
+/// the defaults (PNG @ `DrawingExporter.defaultRasterDPI`, quality 0.9) leave the
+/// historical behavior unchanged when the accessory is left untouched. `@MainActor`
+/// (it is read back on the main actor right after the modal returns) and an
+/// `ObservableObject` so the SwiftUI accessory binds to it.
+@MainActor
+final class ExportOptionsState: ObservableObject {
+    @Published var format: ExportFormat
+    /// Raster resolution (dots-per-inch). Only meaningful for raster formats; ignored by
+    /// the vector PDF / pure-string SVG paths.
+    @Published var dpi: Double
+    /// JPEG compression quality (0…1). Only meaningful for `.jpg`.
+    @Published var jpegQuality: Double
+
+    init(format: ExportFormat,
+         dpi: Double = DrawingExporter.defaultRasterDPI,
+         jpegQuality: Double = 0.9) {
+        self.format = format
+        self.dpi = dpi
+        self.jpegQuality = jpegQuality
+    }
+
+    /// The DPI to hand the exporter: the edited value clamped finite-and-positive,
+    /// falling back to the default when the field is left empty/invalid (so a bad entry
+    /// never produces a zero-pixel image). Capped at a sane ceiling to avoid a runaway
+    /// allocation.
+    var effectiveDPI: Double {
+        guard dpi.isFinite, dpi > 0 else { return DrawingExporter.defaultRasterDPI }
+        return Swift.min(dpi, 2400)
+    }
+}
+
+/// The SwiftUI ACCESSORY presented inside the export `NSSavePanel`: a format picker
+/// (every `ExportFormat`), plus — for raster formats — a DPI field, and — for JPEG — a
+/// compression-quality slider. Picking a format runs `onFormatChange` so the host panel
+/// re-syncs its allowed type + name extension. Kept small + decomposed so the SwiftUI
+/// type-checker handles it (gotcha #2); lives in the View layer only (never reached by a
+/// test — it is built solely inside `exportDrawing`'s modal path).
+struct ExportOptionsAccessory: View {
+    @ObservedObject var options: ExportOptionsState
+    /// Called whenever the format changes, so the host `NSSavePanel` updates its allowed
+    /// content type and the name field's extension.
+    let onFormatChange: (ExportFormat) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            formatRow
+            if options.format.isRaster {
+                dpiRow
+            }
+            if options.format == .jpg {
+                qualityRow
+            }
+        }
+        .padding(16)
+        .frame(width: 360)
+    }
+
+    /// The format picker spanning every supported export format.
+    @ViewBuilder
+    private var formatRow: some View {
+        HStack {
+            Text("Format").frame(width: 70, alignment: .leading)
+            Picker("Format", selection: $options.format) {
+                ForEach(ExportFormat.allCases, id: \.self) { fmt in
+                    Text(fmt.displayName).tag(fmt)
+                }
+            }
+            .labelsHidden()
+            .onChange(of: options.format) { _, newValue in
+                onFormatChange(newValue)
+            }
+        }
+    }
+
+    /// The DPI field for the raster pipeline (PNG/JPEG/BMP/TIFF).
+    @ViewBuilder
+    private var dpiRow: some View {
+        HStack {
+            Text("Resolution").frame(width: 70, alignment: .leading)
+            TextField("DPI", value: $options.dpi, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 80)
+                .labelsHidden()
+            Text("DPI").foregroundStyle(.secondary)
+            Spacer()
+        }
+    }
+
+    /// The JPEG compression-quality slider (0…1), shown only for `.jpg`.
+    @ViewBuilder
+    private var qualityRow: some View {
+        HStack {
+            Text("Quality").frame(width: 70, alignment: .leading)
+            Slider(value: $options.jpegQuality, in: 0...1)
+            Text("\(Int((options.jpegQuality * 100).rounded()))%")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 44, alignment: .trailing)
+        }
     }
 }
