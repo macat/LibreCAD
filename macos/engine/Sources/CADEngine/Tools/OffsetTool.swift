@@ -88,6 +88,25 @@ public struct OffsetTool: Tool {
     /// the future options-bar; UNWIRED for now.
     public var distance: Double = 0
 
+    /// When `true`, also emit the OPPOSITE-side offset copy for each source —
+    /// LibreCAD's "both sides" option. The primary copy still lands toward the
+    /// picked point/cursor; the mirror copy is its reflection across the source's
+    /// axis (line: across the line; circle/arc: radius `r − delta`). A degenerate
+    /// mirror (circle/arc whose radius would be ≤ 0) is silently dropped, so only
+    /// valid geometry is emitted. Defaults to `false` — a default tool produces a
+    /// single `.add`, byte-identical to the original behavior. Public for the
+    /// future options-bar; UNWIRED for now.
+    public var bothSides: Bool = false
+
+    /// When `true`, ERASE each source that produced at least one offset copy —
+    /// LibreCAD's "delete original" option — by appending a `.remove(source.id)`
+    /// alongside its `.add`(s). A source is removed at most ONCE even when
+    /// `bothSides` emitted two copies, and a source that produced NO copy (an
+    /// unsupported kind, or a degenerate offset) is left untouched. Defaults to
+    /// `false` — the original copy-only behavior. Public for the future
+    /// options-bar; UNWIRED for now.
+    public var eraseSource: Bool = false
+
     // MARK: - Private state machine (no magic Int — engine-architecture note)
 
     /// The tool's lifecycle. Offset is a SINGLE-pick action (the through point),
@@ -152,6 +171,20 @@ public struct OffsetTool: Tool {
         }
     }
 
+    /// The offset COPIES for one source `kind` toward `p`: the primary (toward-`p`)
+    /// offset, plus — when `bothSides` is set — the opposite-side copy. A degenerate
+    /// opposite (circle/arc whose mirrored radius would be ≤ 0) is dropped, so this
+    /// never returns invalid geometry. Empty when the kind is unsupported or the
+    /// primary offset itself is degenerate (e.g. `p` on the line / d ≈ 0).
+    private func offsetCopies(of kind: EntityKind, toward p: Vector) -> [EntityKind] {
+        guard let primary = offsetForCurrentMode(kind, toward: p) else { return [] }
+        guard bothSides else { return [primary] }
+        if let opposite = Self.oppositeOffset(of: kind, primary: primary) {
+            return [primary, opposite]
+        }
+        return [primary]
+    }
+
     /// A MODIFY tool: it reads `context.selected` to capture the set to offset,
     /// then on the through-point click emits one `.add` per SUPPORTED entity (a
     /// parallel COPY; originals stay). It never `.replace`s or `.remove`s.
@@ -201,19 +234,29 @@ public struct OffsetTool: Tool {
         // nudges the user to select first.
         guard !captured.isEmpty, p.valid else { return .none }
 
-        // One `.add` per SUPPORTED entity whose offset is well-defined for this
-        // through point (a degenerate/zero offset or an unsupported kind yields no
-        // edit). Preserve each original's layer/pen/flags; only the geometry is
-        // the offset copy. Originals stay (no `.replace`/`.remove`).
-        let edits: [ToolEdit] = captured.compactMap { record in
-            guard let kind = offsetForCurrentMode(record.kind, toward: p) else { return nil }
-            return .add(EntityRecord(
-                id: .placeholder,
-                layer: record.layer,
-                pen: record.pen,
-                flags: record.flags,
-                kind: kind
-            ))
+        // One or two `.add`s per SUPPORTED entity whose offset is well-defined for
+        // this through point (a degenerate/zero offset or an unsupported kind
+        // yields no edit). `bothSides` adds the opposite-side copy; `eraseSource`
+        // appends a single `.remove` for any source that produced ≥1 copy.
+        // Preserve each original's layer/pen/flags; only the geometry is the offset
+        // copy. Without `eraseSource`, originals stay (no `.replace`/`.remove`).
+        let edits: [ToolEdit] = captured.flatMap { record -> [ToolEdit] in
+            let copies = offsetCopies(of: record.kind, toward: p)
+            guard !copies.isEmpty else { return [] }   // produced nothing → no edit
+            var recordEdits: [ToolEdit] = copies.map { kind in
+                .add(EntityRecord(
+                    id: .placeholder,
+                    layer: record.layer,
+                    pen: record.pen,
+                    flags: record.flags,
+                    kind: kind
+                ))
+            }
+            // Erase the source ONCE (only because it produced ≥1 copy above).
+            if eraseSource {
+                recordEdits.append(.remove(record.id))
+            }
+            return recordEdits
         }
 
         // Reset for another offset of the SAME selection if the app keeps the tool
@@ -388,5 +431,50 @@ public struct OffsetTool: Tool {
             endAngle: d.endAngle,
             reversed: d.reversed
         )
+    }
+
+    // MARK: - Opposite-side offset (bothSides)
+
+    /// Given a `source` entity and its PRIMARY offset copy `primary` (same kind,
+    /// already computed for the active mode), returns the offset copy on the
+    /// OPPOSITE side — the mirror of `primary` across the source's axis — or `nil`
+    /// when that mirror is degenerate (circle/arc radius ≤ 0) or the kind is
+    /// unsupported. Mode-agnostic: it derives the opposite purely from the source
+    /// and its primary copy, so it works identically for `.through` and `.distance`.
+    ///
+    /// - line:   reflect `primary` back across the source line. The primary was
+    ///           `source ± shift`; the opposite is `source ∓ shift`, i.e. each
+    ///           endpoint shifted by `−(primary − source)`.
+    /// - circle: radius `r − delta` where `delta = primaryRadius − r` (the primary
+    ///           moved the radius by `delta`; the opposite moves it the other way).
+    ///           Equivalently `2·r − primaryRadius`. `nil` when that is ≤ 0.
+    /// - arc:    same radius rule, preserving the source's angles + `reversed` flag.
+    private static func oppositeOffset(of source: EntityKind, primary: EntityKind) -> EntityKind? {
+        switch (source, primary) {
+        case let (.line(s), .line(p)):
+            // Shift that produced the primary copy; negate it for the other side.
+            let shift = p.start - s.start
+            return .line(LineData(start: s.start - shift, end: s.end - shift))
+
+        case let (.circle(s), .circle(p)):
+            let opposite = 2 * s.radius - p.radius
+            guard opposite > Tolerance.distance else { return nil }   // radius ≤ 0 → drop
+            return .circle(CircleData(center: s.center, radius: opposite))
+
+        case let (.arc(s), .arc(p)):
+            let opposite = 2 * s.radius - p.radius
+            guard opposite > Tolerance.distance else { return nil }   // radius ≤ 0 → drop
+            return .arc(ArcData(
+                center: s.center,
+                radius: opposite,
+                startAngle: s.startAngle,
+                endAngle: s.endAngle,
+                reversed: s.reversed
+            ))
+
+        // Unsupported / kind-mismatch (shouldn't happen — primary is the same kind):
+        default:
+            return nil
+        }
     }
 }
