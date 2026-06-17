@@ -150,7 +150,7 @@ enum CommandRegistry {
         case .align:           return ("arrow.up.and.down.righttriangle.up.righttriangle.down", "⌥A")
         case .arrayPath:       return ("point.topleft.down.to.point.bottomright.curvepath", "⌥P")
         case .leader:          return ("text.bubble", "⌥L")
-        case .multileader:     return ("text.bubble.fill", nil)
+        case .multileader:     return ("text.bubble.fill", "⌥M")
         case .baselineDim:     return ("arrow.up.and.line.horizontal.and.arrow.down", "⌥D")
         case .continueDim:     return ("arrow.left.and.line.vertical.and.arrow.right", "⌥C")
         // Image: place a reference to an image file (picked up front), ⇧Y.
