@@ -289,4 +289,22 @@ struct EntityTransparencyTests {
         #expect(text.contains("\n440\n"))
         #expect(text.contains("33554560"))
     }
+
+    @Test("R2000 export DROPS code 440 (documented version limit — regression)")
+    func dxfR2000OmitsCode440() async throws {
+        // libdxfrw only writes code 440 for versions > AC1015 (R2000). At R2000 a
+        // transparent entity must emit NO 440 group — anchor that documented limit
+        // so a future libdxfrw bump can't silently change it. (Same produce+grep as
+        // `dxfWritesCode440`, with `.r2000` and a NEGATED contains.)
+        let rec = EntityRecord(
+            id: EntityID(1),
+            pen: Pen(lineColor: .explicit(.white), transparency: .opacity(0.5)),
+            kind: .line(LineData(start: Vector(0, 0), end: Vector(1, 1))))
+        let path = tempDXFPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        _ = try await CADEngine.shared.writeEntities(
+            [rec], layers: LayerTable(), toPath: path, version: .r2000)
+        let text = try String(contentsOfFile: path, encoding: .utf8)
+        #expect(!text.contains("\n440\n"))
+    }
 }
