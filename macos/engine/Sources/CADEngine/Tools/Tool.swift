@@ -297,6 +297,24 @@ public protocol Tool: Sendable {
     /// feedback only shows mid-operation and never leaks into exports (exports never
     /// read a tool's overlay).
     func liveDimensions(_ ctx: LiveDimensionContext) -> [LiveDimension]
+
+    /// Optional per-tool COMMAND KEYWORDS to surface as tappable chips on the smart
+    /// command line — the AutoCAD-style bracketed options a tool offers at its current
+    /// step (e.g. a Line tool's "Close"/"Undo", an Arc tool's "Center"/"3 Points", a
+    /// Circle tool's "2P"/"3P"/"Ttr"). Each `ToolKeyword` pairs the literal `keyword`
+    /// the user types (or the chip text routed back in) with a human `label` for the
+    /// chip. The list reflects the tool's current `State`, mirroring how `status`
+    /// already reflects state — a tool returns only the options valid right now.
+    ///
+    /// Append-only extension of the frozen contract (the SAME additive-default pattern
+    /// as `referenceSegments` / `liveDimensions`): a default implementation in the
+    /// protocol extension below returns `[]`, so EVERY existing tool inherits "no
+    /// keyword options" with no per-tool change — only tools that opt in (in a later
+    /// wire-wave) override it. This is purely the data the UI (Wave 4) renders and the
+    /// per-tool keyword overrides (Wave 2) populate; dispatching a chosen keyword reuses
+    /// the EXISTING `ToolInput` events (no new `.keyword` case — that would force an
+    /// exhaustive-switch edit across every tool's `handle`). GUI-free: a plain value list.
+    var keywordOptions: [ToolKeyword] { get }
 }
 
 // MARK: - Default reference segments (additive: all tools inherit "none")
@@ -313,6 +331,35 @@ public extension Tool {
     /// Keeps the contract append-only — no existing tool file needs to change to gain
     /// a conforming (empty) `liveDimensions`, exactly like `referenceSegments`.
     func liveDimensions(_ ctx: LiveDimensionContext) -> [LiveDimension] { [] }
+
+    /// Default: tools surface no command-line keyword chips. Only tools that opt in
+    /// (in a later wire-wave) override this to expose their bracketed options. Keeps
+    /// the contract append-only — no existing tool file needs to change to gain a
+    /// conforming (empty) `keywordOptions`, exactly like `referenceSegments` /
+    /// `liveDimensions`.
+    var keywordOptions: [ToolKeyword] { [] }
+}
+
+// MARK: - Command-line keyword (additive value type)
+
+/// One AutoCAD-style command KEYWORD a tool offers on the smart command line at its
+/// current step — the bracketed option text the user can type or tap (e.g. `[Close]`,
+/// `[2 Points]`, `[Undo]`). A pure value type with NO UI dependency: the engine returns
+/// the data and the app's command-line view (a later wave) renders the chips and routes
+/// a chosen keyword back through the EXISTING `ToolInput` events. Mirrors the append-only,
+/// value-only design of `LiveDimension` / `referenceSegments`.
+public struct ToolKeyword: Sendable, Equatable {
+    /// The literal keyword the user types (or the chip text routed back in) — e.g.
+    /// `"Close"`, `"2P"`, `"Undo"`. This is the machine-facing token the tool matches on.
+    public let keyword: String
+    /// The human-readable label shown on the chip — e.g. `"Close"`, `"2 Points"`. May
+    /// differ from `keyword` when the typed token is terse (`"2P"` → `"2 Points"`).
+    public let label: String
+
+    public init(keyword: String, label: String) {
+        self.keyword = keyword
+        self.label = label
+    }
 }
 
 // MARK: - Live dimensional feedback (additive value types)
