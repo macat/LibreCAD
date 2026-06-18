@@ -59,6 +59,20 @@ fix + the 7 straightforward AutoCAD kinds + the panel shipped; these are the doc
   compiler-exhaustive like `displayName`) — a future kind silently gets the neutral "·" joiner (cosmetic).
   Optionally drop the `default`. Add a test for `referenceDescription`'s multi-role single-entity branch.
   *(constraints review-laneC NITs)*
+- **`unsatisfiedConstraintIDs` stale id on entity DELETE** — `CADDrawing.remove(_:)` drops an entity's
+  constraints via `dropDangling` without going through the app-level `removeConstraint`, so a flagged id for a
+  deleted entity lingers in `CanvasModel.unsatisfiedConstraintIDs`. Harmless for display (overlay/list key off
+  live `allConstraints`; no aggregate reader) and bounded, but the `deleteSelection` path should `subtract` the
+  deleted entities' constraint ids (or recompute). *(constraints review-robust NIT-1)*
+- **Over-constrain rollback NITs** — `ConstraintsSidebar.unsatisfiedNote` (~245) is called with `[constraint.id]`
+  inside an `if isUnsatisfied`, so its `?? fallback` is dead code — pass `model.unsatisfiedConstraintIDs` or
+  inline the string; and the `commitConstraints` re-solve comment (~6020) overstates "undo motion" (a `.failed`
+  solve writes nothing — the re-solve just refreshes the unsatisfied set). Cosmetic. *(constraints review-robust NIT-2,3)*
+- **Reproduce the 2nd-screenshot symptom (H/V on diagonal lines) from a real artifact** — synthetic repros
+  couldn't produce it; if it recurs after relaunch, capture the owner's file or a badged line's endpoints. The
+  one un-exercised surface is the DXF/DWG constraint-IMPORT path (whether imported constraints enforce/flag on
+  open) — note `setDrawing` now re-solves payload-restored constraints, but pure-DXF carries none today.
+  *(constraints follow-up)*
 
 ## Parity program — W1 follow-up NITs (text-style round-trip)
 - **Loaded-file re-save adds a benign `1071=1` on Standard** — `DXFReader` decodes libdxfrw's default stroke font "txt" to `.native(family:"txt")`, which `makeTextStyle` re-encodes WITH the TTF flag, so re-saving a *loaded* file gains a spurious `1071=1` on Standard. Functionally benign (code-3 name preserved; consistent with the dimStyle precedent) — but scope the "byte-identical" comment (DXFWriter.swift ~266-279) to new/in-memory drawings, OR decode a bare no-flag/no-extension name to a flag-free source. *(review-w1a NIT-1)*

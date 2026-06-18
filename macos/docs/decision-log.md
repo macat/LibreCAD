@@ -6,6 +6,19 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-18 — CONSTRAINTS UX FOLLOW-UP: glyphs floated off the geometry + manual over-constrain now rejected/flagged — (`native-macos @ bc94dab84`, **4066 tests**, .app rebuilt)
+
+Owner re-tested (2nd screenshot): auto-added coincident dots "nice", but "constraints just did not work" + "move the constraints a bit away from the object." Two fixes, each investigated→built→reviewed→gated.
+
+- **Glyph offset `52b8591bf`:** constraint badges now float a constant SCREEN-space gap OFF the geometry (perpendicular to a line at its midpoint; outward corner-bisector at a shared vertex; small nudge off a center) instead of drawing on top — zoom-stable via a world→screen-normalized offset. 6 tests.
+- **"Constraints did not work" — root cause + fix `bc94dab84`:** an investigation (4 hypotheses, real headless repros) proved the AUTO-constrain path is CORRECT (the 1° gate rejects diagonals; the solver enforces H/V; grip-drag holds; auto-adds roll back on `.failed`). The bug was the MANUAL apply path: `commitConstraints` added a constraint, re-solved, and returned success WITHOUT checking the result — so applying a constraint that OVER-constrains a component left `resolveConstraints` writing nothing (geometry unchanged) while the constraint stayed in the table with a visible badge → a badge on un-enforced geometry, with no feedback ("did not work"). Fix: `commitConstraints` now shares `touchedComponentsAllSolve` with the auto path; on a post-add `.failed` component it ROLLS BACK the add (one undo group) and surfaces an "over-constrained — delete a conflicting constraint" message — only GENUINE over-constraints are rejected (under-constrained/regularizer adds still succeed, test-proven). Plus a safety net: `unsatisfiedConstraintIDs` (constraints in a `.failed` component) now render ORANGE in the overlay + flagged in the Constraints panel, so no visible badge ever silently lies; and `setDrawing` now re-solves loaded constraints on open (undo/dirty-neutral; pure-DXF carries none anyway). Review APPROVE-WITH-NITS. 4052 → **4066 tests**.
+
+**Flag to owner:** the synthetic repros could NOT reproduce the exact 2nd-screenshot symptom (H/V badges on clearly-DIAGONAL lines) — that state requires either near-axis-at-draw (which the solver would enforce flat) or the manual over-constrain path now fixed. If it persists after relaunching the freshly-rebuilt `.app`, sharing the actual file or one badged line's endpoints (via the Inspector) would pin a path not yet exercised (e.g. a DXF-import constraint surface).
+
+Not pushed (owner pushes).
+
+---
+
 ## 2026-06-18 — PARAMETRIC CONSTRAINTS: AutoConstrain-on-draw (fixes "rectangle falls apart") + 7 new AutoCAD kinds + Constraints GUI — (`native-macos @ 2867d383b`, **4046 tests**, .app rebuilt)
 
 Owner (with a screenshot of a constrained "rectangle" that splayed apart when a corner was dragged): "when drawing lines, automatically add VISIBLE constraints (90° + keep the ends together); go through the AutoCAD constraints and implement them; add GUI to handle them — they're hard to find in the menu." Ran an investigation→critic, then a delegated **A → B → (C, D)** build (builders + per-lane code-review + merge-by-hash + serial gate each wave). Constraints are NOT EntityKinds (additive on `CADDrawing.constraints`) — no 28-file switch; the contended set was the 5-file constraint-kind section (Constraints/ConstraintSolver/CanvasModel/glyph/ContentView).
