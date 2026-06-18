@@ -46,8 +46,9 @@ private func removeFile(_ path: String) {
     try? FileManager.default.removeItem(atPath: path)
 }
 
-/// Read the first 6 bytes of a file and decode them as a UTF-8 string.
-/// Returns nil if the file cannot be read or is shorter than 6 bytes.
+/// Read the first 6 bytes of a file and decode them as a UTF-8 string. Throws if the
+/// file cannot be read; `#expect`s (does not return early) that the file is longer than
+/// 6 bytes, then always returns the decoded 6-byte prefix.
 private func readMagic(at path: String) throws -> String {
     let data = try Data(contentsOf: URL(fileURLWithPath: path))
     #expect(data.count > 6, "DWG file too short to contain a magic header")
@@ -181,6 +182,10 @@ struct DWGVersionRoundTripTests {
         let back = try await CADEngine.shared.readEntities(dwgPath: path)
         #expect(!back.records.isEmpty,
                 "reader returned no entities after writing at \(version)")
+        // The TOTAL count must be exactly 3 — catches spurious extra entities the
+        // per-kind tallies below would otherwise miss (e.g. a stray POINT/INSERT).
+        #expect(back.records.count == 3,
+                "total entity count mismatch after \(version) round-trip: expected 3, got \(back.records.count)")
 
         var lines = 0, arcs = 0
         for r in back.records {
