@@ -1139,8 +1139,60 @@ struct ContentView: View {
             restoreNamedView: { sendDocumentAction(Selector(("restoreNamedViewAction:"))) },
             insertBlockFromFile: { insertBlockFromFile() },
             saveBlockToFile: { if let name = saveBlockTargetName { saveBlockToFile(named: name) } },
-            newLayout: { _ = model.newLayout() }
+            newLayout: { _ = model.newLayout() },
+            // Wire-wave 2 — constraints + Insert-Field fire the SAME responder-chain
+            // selectors the Constrain / Insert menus fire (so ⌘K == the menu action). The
+            // selector is chosen from the kind here; the focused canvas's `@objc` handler
+            // (LibreCADApp) forwards to the CanvasModel constraint/field verb.
+            applyGeometricConstraint: { kind in
+                sendDocumentAction(Selector((Self.geometricConstraintSelector(kind))))
+            },
+            applyDimensionalConstraint: { kind in
+                sendDocumentAction(Selector((Self.dimensionalConstraintSelector(kind))))
+            },
+            insertField: { token in
+                sendDocumentAction(Selector((Self.fieldInsertSelector(token))))
+            }
         ))
+    }
+
+    /// The responder-chain selector name for a GEOMETRIC constraint kind (matches the
+    /// Constrain-menu `@objc` handlers in LibreCADApp). The two solver-unsupported families
+    /// route to a no-op-ish handler that posts a status note via the same path.
+    private static func geometricConstraintSelector(_ kind: GeometricConstraintKind) -> String {
+        switch kind {
+        case .coincident:    return "applyCoincidentConstraintAction:"
+        case .horizontal:    return "applyHorizontalConstraintAction:"
+        case .vertical:      return "applyVerticalConstraintAction:"
+        case .parallel:      return "applyParallelConstraintAction:"
+        case .perpendicular: return "applyPerpendicularConstraintAction:"
+        case .fix:           return "applyFixConstraintAction:"
+        // Only the MVP kinds are surfaced in the palette; map the rest to Fix's handler
+        // defensively (never reached — no palette entry builds them).
+        case .collinear, .tangent, .equal, .concentric, .symmetric:
+            return "applyFixConstraintAction:"
+        }
+    }
+
+    /// The responder-chain selector name for a DIMENSIONAL constraint kind.
+    private static func dimensionalConstraintSelector(_ kind: DimensionalConstraintKind) -> String {
+        switch kind {
+        case .distance: return "applyDistanceConstraintAction:"
+        case .radius:   return "applyRadiusConstraintAction:"
+        case .horizontalDistance, .verticalDistance, .diameter, .angle:
+            return "applyDistanceConstraintAction:"   // not surfaced; defensive default
+        }
+    }
+
+    /// The responder-chain selector name for an Insert-Field token (matches the Insert ▸
+    /// Field `@objc` handlers in LibreCADApp).
+    private static func fieldInsertSelector(_ token: FieldToken) -> String {
+        switch token {
+        case .date:           return "insertDateFieldAction:"
+        case .layoutName:     return "insertLayoutNameFieldAction:"
+        case .fileName:       return "insertFileNameFieldAction:"
+        case .objectProperty: return "insertDateFieldAction:"   // not surfaced; defensive default
+        }
     }
 
     /// Fires a standard document menu selector down the responder chain (used by the

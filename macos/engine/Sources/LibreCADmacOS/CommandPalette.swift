@@ -102,6 +102,16 @@ enum CommandRegistry {
         var insertBlockFromFile: () -> Void
         var saveBlockToFile: () -> Void
         var newLayout: () -> Void
+        // Wire-wave 2 — PARAMETRIC constraints on the selection (the Constrain menu's
+        // verbs) + Insert-Field. Each fires the SAME responder-chain selector its menu
+        // item fires (see `ContentView.paletteCommands`), so running it from ⌘K is
+        // byte-for-byte the menu action. `applyGeometricConstraint` / `applyDimensional…`
+        // take the kind (the selector is chosen in the closure). Defaulted to inert no-ops
+        // so existing `Actions(...)` call sites (e.g. test stubs) keep compiling — the live
+        // `ContentView.paletteCommands` supplies the real responder-chain closures.
+        var applyGeometricConstraint: (GeometricConstraintKind) -> Void = { _ in }
+        var applyDimensionalConstraint: (DimensionalConstraintKind) -> Void = { _ in }
+        var insertField: (FieldToken) -> Void = { _ in }
     }
 
     /// SF Symbol + shortcut hint for each tool, mirroring the toolbar/menu so the
@@ -272,6 +282,46 @@ enum CommandRegistry {
                            systemImage: "square.and.arrow.up", run: actions.saveBlockToFile),
             PaletteCommand(id: "app.newLayout", title: "New Layout",
                            systemImage: "plus.rectangle.on.folder", run: actions.newLayout),
+        ])
+
+        // Wire-wave 2 — PARAMETRIC constraints on the selection + Insert-Field. Each fires
+        // the SAME responder-chain selector its Constrain / Insert menu item fires. Titled
+        // "Constrain: …" / "Insert Field: …" so the fuzzy matcher surfaces them under a
+        // discoverable verb. Dimensional entries note that they lock the CURRENT value.
+        list.append(contentsOf: [
+            PaletteCommand(id: "constrain.coincident", title: "Constrain: Coincident",
+                           systemImage: "smallcircle.filled.circle",
+                           run: { actions.applyGeometricConstraint(.coincident) }),
+            PaletteCommand(id: "constrain.horizontal", title: "Constrain: Horizontal",
+                           systemImage: "arrow.left.and.right",
+                           run: { actions.applyGeometricConstraint(.horizontal) }),
+            PaletteCommand(id: "constrain.vertical", title: "Constrain: Vertical",
+                           systemImage: "arrow.up.and.down",
+                           run: { actions.applyGeometricConstraint(.vertical) }),
+            PaletteCommand(id: "constrain.parallel", title: "Constrain: Parallel",
+                           systemImage: "line.diagonal",
+                           run: { actions.applyGeometricConstraint(.parallel) }),
+            PaletteCommand(id: "constrain.perpendicular", title: "Constrain: Perpendicular",
+                           systemImage: "perspective",
+                           run: { actions.applyGeometricConstraint(.perpendicular) }),
+            PaletteCommand(id: "constrain.fix", title: "Constrain: Fix",
+                           systemImage: "lock",
+                           run: { actions.applyGeometricConstraint(.fix) }),
+            PaletteCommand(id: "constrain.distance", title: "Constrain: Distance (lock current)",
+                           systemImage: "ruler",
+                           run: { actions.applyDimensionalConstraint(.distance) }),
+            PaletteCommand(id: "constrain.radius", title: "Constrain: Radius (lock current)",
+                           systemImage: "circle.and.line.horizontal",
+                           run: { actions.applyDimensionalConstraint(.radius) }),
+            PaletteCommand(id: "insert.field.date", title: "Insert Field: Date",
+                           systemImage: "calendar",
+                           run: { actions.insertField(.date()) }),
+            PaletteCommand(id: "insert.field.layout", title: "Insert Field: Layout Name",
+                           systemImage: "rectangle.on.rectangle",
+                           run: { actions.insertField(.layoutName()) }),
+            PaletteCommand(id: "insert.field.fileName", title: "Insert Field: File Name",
+                           systemImage: "doc",
+                           run: { actions.insertField(.fileName()) }),
         ])
 
         return list

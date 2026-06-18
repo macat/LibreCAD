@@ -186,6 +186,14 @@ struct LibreCADApp: App {
     @FocusedValue(\.deleteActiveLayout) private var deleteActiveLayout
     @FocusedValue(\.duplicateActiveLayout) private var duplicateActiveLayout
 
+    /// View ▸ Show Constraints — the persisted (default ON) toggle that drives the
+    /// read-only constraint glyph overlay's visibility (wire-wave 2). Backed by the SAME
+    /// `@AppStorage` key the canvas controller reads (`CADCanvasController.showConstraintsKey`);
+    /// toggling it posts `.lcShowConstraintsDidChange` so every open window's overlay
+    /// flips live. Default ON: the property's initial value is `true`, and the controller's
+    /// reader treats a missing key as ON, so the two agree before the user ever toggles.
+    @AppStorage(CADCanvasController.showConstraintsKey) private var showConstraints = true
+
     var body: some Scene {
         // The document scene: a brand-new document is the empty `LibreCADDocument()`;
         // opening a file constructs `LibreCADDocument(configuration:)` OFF-main from
@@ -445,6 +453,18 @@ struct LibreCADApp: App {
                 // `showCurrentPropertiesBar.toggle()` via the focused value.
                 Button("Show Current Properties Bar") { toggleCurrentPropertiesBar?() }
                     .disabled(toggleCurrentPropertiesBar == nil)
+                // View ▸ Show Constraints (wire-wave 2) — a persisted (default ON) toggle
+                // that drives the read-only constraint glyph overlay (∥ / ⊥ / H / V / • /
+                // lock / ↔ / R near each constrained entity). A `Toggle` bound to the
+                // `@AppStorage` flag (the canvas controller reads the same key + treats a
+                // missing key as ON); on change we post `.lcShowConstraintsDidChange` so
+                // every OPEN window flips its overlay live. Always available (no focused
+                // value needed): the overlay is pure chrome on whatever the focused window
+                // is drawing. No key chord (the overlay-visibility toggles are menu-only).
+                Toggle("Show Constraints", isOn: $showConstraints)
+                    .onChange(of: showConstraints) { _, _ in
+                        NotificationCenter.default.post(name: .lcShowConstraintsDidChange, object: nil)
+                    }
                 // View ▸ Zoom Window (⇧⌘Z is taken by Redo; use ⌥⌘Z) — arm the
                 // transient drag-box zoom: the next drag draws a box, releasing zooms
                 // to fit it (F23). Routed through the responder chain to the focused
@@ -718,7 +738,26 @@ struct LibreCADApp: App {
                 Button("Page Setup… (use the tab’s ⋯ menu)") { }
                     .disabled(true)
             }
-            }   // end Group (Arrange / Layers / Layout)
+            // The Constrain menu (wire-wave 2) — apply a PARAMETRIC constraint to the
+            // CURRENT SELECTION. GEOMETRIC items (Coincident / Horizontal / Vertical /
+            // Parallel / Perpendicular / Fix) pin a relationship; DIMENSIONAL items
+            // (Distance / Radius) LOCK THE CURRENT MEASURED VALUE (no modal prompt this
+            // wave — editing the driven value is a deferred follow-up). Each dispatches
+            // through the responder chain (`NSApp.sendAction`) to the focused canvas
+            // (`FlippedMTKView`), whose `@objc` handlers (in the extension in THIS file)
+            // forward to `CanvasModel.applyGeometric/DimensionalConstraintToSelection` —
+            // arity-validated, undoable, re-solved immediately (one ⌘Z). On an arity
+            // failure the model posts a status note (no crash). The menu items stay enabled
+            // while a canvas is focused (the model verb is a safe no-op for a bad
+            // selection); `validateUserInterfaceItem`'s `default` arm (non-owned canvas
+            // file) returns `true`. No key chords (matches most CAD constraint menus).
+            constrainMenu
+            // The Insert menu (wire-wave 2) — Insert ▸ Field appends an auto-updating
+            // field (Date / Layout Name / File Name) to the SELECTED text/mtext entity via
+            // the SAME undoable engine setter the Inspector's "Insert Field" affordance
+            // uses. Routed through the responder chain to the focused canvas like Constrain.
+            insertMenu
+            }   // end Group (Arrange / Layers / Layout / Constrain / Insert)
         }
 
         // The APPLICATION-LEVEL Preferences window (audit G7). On macOS a `Settings`
@@ -915,6 +954,62 @@ struct LibreCADApp: App {
                 if let name = saveBlockTargetName { saveBlockToFile?(name) }
             }
             .disabled(saveBlockToFile == nil || saveBlockTargetName == nil)
+        }
+    }
+
+    // MARK: - Constrain / Insert menus (wire-wave 2)
+    //
+    // Both are top-level `CommandMenu`s (wrapped in the `Group` above to stay under the
+    // `.commands` child-count limit). Each item dispatches a UNIQUE selector through the
+    // responder chain to the focused canvas (`FlippedMTKView`), whose `@objc` handlers (in
+    // the extension at the bottom of this file) forward to the window's `CanvasModel`. The
+    // selectors are constructed by name (matching the existing Ortho / UCS / Layers items)
+    // so no edit to the non-owned canvas-view source is needed. Split into small computed
+    // properties so the SwiftUI type-checker never sees a large menu expression (gotcha #2).
+
+    /// Tools-adjacent ▸ Constrain — geometric + dimensional constraints on the selection.
+    @CommandsBuilder
+    private var constrainMenu: some Commands {
+        CommandMenu("Constrain") {
+            // Geometric — pin a relationship (no value).
+            constrainItem("Coincident",    "applyCoincidentConstraintAction:")
+            constrainItem("Horizontal",    "applyHorizontalConstraintAction:")
+            constrainItem("Vertical",      "applyVerticalConstraintAction:")
+            constrainItem("Parallel",      "applyParallelConstraintAction:")
+            constrainItem("Perpendicular", "applyPerpendicularConstraintAction:")
+            constrainItem("Fix",           "applyFixConstraintAction:")
+
+            Divider()
+            // Dimensional — LOCK the current measured value (no modal this wave).
+            constrainItem("Distance (lock current)", "applyDistanceConstraintAction:")
+            constrainItem("Radius (lock current)",   "applyRadiusConstraintAction:")
+        }
+    }
+
+    /// One Constrain-menu item: a button firing `selector` down the responder chain to the
+    /// focused canvas. Enabled while a canvas is focused (the model verb is a safe no-op /
+    /// status-note for a bad-arity selection). No key chord.
+    @ViewBuilder
+    private func constrainItem(_ title: String, _ selector: String) -> some View {
+        Button(title) { NSApp.sendAction(Selector((selector)), to: nil, from: nil) }
+    }
+
+    /// Insert ▸ Field — append an auto-updating field to the selected text/mtext entity.
+    @CommandsBuilder
+    private var insertMenu: some Commands {
+        CommandMenu("Insert") {
+            Menu("Field") {
+                Button("Date") {
+                    NSApp.sendAction(Selector(("insertDateFieldAction:")), to: nil, from: nil)
+                }
+                Button("Layout Name") {
+                    NSApp.sendAction(Selector(("insertLayoutNameFieldAction:")), to: nil, from: nil)
+                }
+                Button("File Name") {
+                    NSApp.sendAction(Selector(("insertFileNameFieldAction:")), to: nil, from: nil)
+                }
+            }
+            .help("Insert an auto-updating field (date / layout name / file name) into the selected text or mtext object.")
         }
     }
 
@@ -1371,5 +1466,88 @@ extension FlippedMTKView {
         model.selection = Selection(ids: newIDs)
         model.modelDirty = true
         model.modelVersion &+= 1
+    }
+}
+
+// MARK: - Constrain-menu responder-chain actions (wire-wave 2 — PARAMETRIC constraints)
+//
+// The Constrain ▸ Coincident / Horizontal / Vertical / Parallel / Perpendicular / Fix /
+// Distance / Radius menu items (and their ⌘K palette entries) dispatch via
+// `NSApp.sendAction(_:to:nil:from:)` (the same responder-chain wiring the Ortho / UCS /
+// Layers items use). The focused window's canvas (`FlippedMTKView`) is the first
+// responder, so each action lands here and forwards to the owning controller's
+// `CanvasModel` constraint-from-selection verb — arity-validated, undoable, re-solved
+// immediately as ONE undo group. A bad-arity selection is a SAFE no-op that posts a
+// status note (the model handles it; no crash), so the items stay enabled while a canvas
+// is focused. A successful add bumps the model + requests a redraw so the new constraint's
+// glyph badge appears and any re-solved geometry repaints. DIMENSIONAL constraints
+// (distance / radius) LOCK THE CURRENT MEASURED VALUE — the model computes the present
+// value from the selection (no modal prompt this wave).
+extension FlippedMTKView {
+
+    /// Constrain ▸ Coincident — pin the two selected entities' start points together.
+    @objc func applyCoincidentConstraintAction(_ sender: Any?) { applyGeometric(.coincident) }
+    /// Constrain ▸ Horizontal — make the single selected line horizontal.
+    @objc func applyHorizontalConstraintAction(_ sender: Any?) { applyGeometric(.horizontal) }
+    /// Constrain ▸ Vertical — make the single selected line vertical.
+    @objc func applyVerticalConstraintAction(_ sender: Any?) { applyGeometric(.vertical) }
+    /// Constrain ▸ Parallel — make the two selected lines parallel.
+    @objc func applyParallelConstraintAction(_ sender: Any?) { applyGeometric(.parallel) }
+    /// Constrain ▸ Perpendicular — make the two selected lines perpendicular.
+    @objc func applyPerpendicularConstraintAction(_ sender: Any?) { applyGeometric(.perpendicular) }
+    /// Constrain ▸ Fix — anchor the single selected entity's DOFs.
+    @objc func applyFixConstraintAction(_ sender: Any?) { applyGeometric(.fix) }
+
+    /// Constrain ▸ Distance — lock the current gap between the two selected entities.
+    @objc func applyDistanceConstraintAction(_ sender: Any?) { applyDimensional(.distance) }
+    /// Constrain ▸ Radius — lock the current radius of the selected circle.
+    @objc func applyRadiusConstraintAction(_ sender: Any?) { applyDimensional(.radius) }
+
+    /// Shared funnel: apply a GEOMETRIC constraint to the focused canvas's selection,
+    /// redrawing on success so the glyph badge + any re-solved geometry repaint.
+    private func applyGeometric(_ kind: GeometricConstraintKind) {
+        guard let controller else { return }
+        if controller.model.applyGeometricConstraintToSelection(kind) {
+            controller.requestRedraw()
+        }
+    }
+
+    /// Shared funnel: apply a DIMENSIONAL constraint (locking the current measured value)
+    /// to the focused canvas's selection, redrawing on success.
+    private func applyDimensional(_ kind: DimensionalConstraintKind) {
+        guard let controller else { return }
+        if controller.model.applyDimensionalConstraintToSelection(kind) {
+            controller.requestRedraw()
+        }
+    }
+}
+
+// MARK: - Insert-Field responder-chain actions (wire-wave 2 — auto-updating FIELDS)
+//
+// The Insert ▸ Field ▸ Date / Layout Name / File Name menu items (and their ⌘K palette
+// entries) dispatch via `NSApp.sendAction(_:to:nil:from:)` to the focused canvas
+// (`FlippedMTKView`). Each forwards to `CanvasModel.appendFieldToSelectedText`, which
+// appends the field through the SAME undoable engine setter the Inspector's "Insert
+// Field" affordance uses (`InspectorEdits.appendField` → `replaceEntityKind`). A no-op
+// (with a status note) unless exactly one TEXT/MTEXT entity is selected. On success it
+// redraws so the field's live value (date / layout name) shapes onto the canvas. The
+// selectors match the `NSApp.sendAction` selectors above EXACTLY.
+extension FlippedMTKView {
+
+    /// Insert ▸ Field ▸ Date — append a live date field to the selected text/mtext.
+    @objc func insertDateFieldAction(_ sender: Any?) { insertField(.date()) }
+    /// Insert ▸ Field ▸ Layout Name — append a live layout-name field.
+    @objc func insertLayoutNameFieldAction(_ sender: Any?) { insertField(.layoutName()) }
+    /// Insert ▸ Field ▸ File Name — append a file-name field (renders "####" until the
+    /// document name is threaded into the field context — a flagged deferral).
+    @objc func insertFileNameFieldAction(_ sender: Any?) { insertField(.fileName()) }
+
+    /// Shared funnel: append `token` to the focused canvas's selected text/mtext, redrawing
+    /// on success so the inserted field's live value shapes onto the canvas.
+    private func insertField(_ token: FieldToken) {
+        guard let controller else { return }
+        if controller.model.appendFieldToSelectedText(token) {
+            controller.requestRedraw()
+        }
     }
 }
