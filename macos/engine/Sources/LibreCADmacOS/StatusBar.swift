@@ -365,8 +365,45 @@ struct StatusBar: View {
                        help: "Object snap tracking — alignment guides from acquired points") {
                 model.toggleObjectTracking(); requestRedraw()
             }
+            // ISO (Wire-wave 3) — isometric drafting toggle that ALSO shows the active
+            // plane. Unlike the fixed-label toggles above, its label carries the plane
+            // ("ISO: Top") so the at-a-glance status answers both "is iso on" and "which
+            // face"; clicking TOGGLES iso on/off (F5 / the Isoplane submenu cycle the
+            // plane). When iso is off the label drops the plane suffix ("ISO") so the chip
+            // reads cleanly as a plain off toggle.
+            isoToggle
         }
         .accessibilityElement(children: .contain)
+    }
+
+    /// The ISO drafting chip: a borderless pill (like `modeToggle`) whose label includes
+    /// the active iso PLANE when on ("ISO: Top"). Click toggles isometric drafting; the
+    /// plane is cycled by F5 / the View ▸ Isoplane submenu. Filled accent when on.
+    private var isoToggle: some View {
+        let on = model.isometricMode
+        let label = on ? "ISO: \(model.isoPlaneLabel)" : "ISO"
+        return Button {
+            model.toggleIsometric()
+            requestRedraw()
+        } label: {
+            Text(label)
+                .font(DS.Font.secondaryLabel.weight(.medium))
+                .padding(.horizontal, DS.Space.sm)
+                .padding(.vertical, DS.Space.xxs)
+                .foregroundStyle(on ? DS.Palette.onAccent : Color.secondary)
+                .background(
+                    RoundedRectangle(cornerRadius: DS.Radius.selection)
+                        .fill(on ? DS.Palette.accent : Color.clear)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: DS.Radius.selection))
+        }
+        .buttonStyle(.plain)
+        .help(on
+              ? "Isometric drafting on (plane: \(model.isoPlaneLabel)) — click to turn off; F5 cycles the plane"
+              : "Isometric drafting — click to turn on; F5 cycles the isoplane")
+        .accessibilityLabel("Isometric drafting")
+        .accessibilityValue(on ? "on, plane \(model.isoPlaneLabel)" : "off")
+        .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
     }
 
     /// One borderless mode toggle: a short uppercase label in a `DS.Radius.selection`
