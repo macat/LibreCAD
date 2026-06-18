@@ -8,24 +8,58 @@
 //  Quadtree, no GUI — it takes value inputs and returns values, so it unit-tests
 //  without a GPU or a live view (ADR-001/§testing).
 //
-//  ## Approach (Levenberg–Marquardt least-squares)
-//  Each free degree of freedom (a line endpoint x/y, a point x/y, a circle center
-//  x/y + radius) is one variable in a packed `[Double]` vector. `fix` constraints
-//  REMOVE those DOFs (the coordinate is anchored at its current value and never
-//  varied). Each constraint contributes one or more RESIDUALS — a scalar that is 0
-//  exactly when the constraint is satisfied:
-//    coincident     two points equal      → (Δx, Δy)
-//    horizontal     line dy == 0          → (ey − sy)
-//    vertical       line dx == 0          → (ex − sx)
-//    parallel       cross(d1, d2) == 0    → d1.x·d2.y − d1.y·d2.x
-//    perpendicular  dot(d1, d2)  == 0     → d1.x·d2.x + d1.y·d2.y
-//    distance       |p2 − p1| == value    → |p2 − p1| − value
-//    radius         r == value            → r − value
-//  The solver minimizes Σ residual² via Levenberg–Marquardt with a NUMERIC
-//  (finite-difference) Jacobian, LM damping, and an iteration cap. It returns
-//  `.solved(updatedGeometry)` on convergence, or `.failed(reason)` for a singular
-//  / non-converging (over- or under-constrained) system — NEVER a partial /
-//  garbage write.
+//  ## Why a re-parametrized, min-displacement solver (the rewrite)
+//  The first cut minimized Σresidual² over the raw endpoint coordinates
+//  (sx,sy,ex,ey). That has two fatal failure modes on the COMMON under-constrained
+//  case (e.g. perpendicular on two fully-free lines: 8 DOFs, 1 residual):
+//
+//    1. COLLAPSE — `dot(d1,d2)==0` can be satisfied by SHRINKING a line to zero
+//       length so the two overlap ("become one"). A least-squares minimum over raw
+//       endpoints happily picks a degenerate line. Degenerate geometry must never
+//       be a solution.
+//    2. CONDITIONING — the raw direction residuals (`d1·d2`, `d1×d2`) scale with
+//       line length (~100 for length-10 lines) and are badly nonlinear across a
+//       large rotation, so LM converges poorly or not at all.
+//
+//  ### Fix A — re-parametrize each LINE around (angle θ, halfLength L)
+//  A line's geometry is stored as an ANCHOR point + (θ, L). For a FREE line the
+//  anchor is its CENTER and both endpoints are derived symmetrically
+//  (start = c − L·u, end = c + L·u, u = (cosθ,sinθ)); for a line with ONE pinned
+//  endpoint the anchor IS that endpoint (start = A, end = A + 2L·u — or the mirror).
+//  Crucially:
+//    • Every DIRECTION constraint acts ONLY on θ and is bounded + well-conditioned:
+//        horizontal      → sin θ == 0
+//        vertical        → cos θ == 0
+//        parallel(a,b)   → sin(θa − θb) == 0
+//        perpendicular   → cos(θa − θb) == 0
+//    • L is an independent DOF that NO direction residual ever touches → a line
+//      CANNOT collapse to satisfy a direction constraint. This is the structural
+//      cure for failure mode (1).
+//  Circles stay (cx,cy,r); points stay (px,py).
+//
+//  ### Fix B — `fix` by DOF ELIMINATION (not a penalty)
+//  A `fix` on a POINT or CIRCLE-CENTER removes those DOFs outright. A `fix` on a
+//  whole LINE (both endpoints) removes all of the line's DOFs (it becomes rigid). A
+//  `fix` on ONE line endpoint re-anchors that line on the fixed endpoint and keeps
+//  only (θ, L) free — the pinned endpoint is held EXACTLY by construction, with no
+//  weighted penalty and therefore no conditioning blow-up. (A penalty/Lagrangian on
+//  a derived endpoint spans many orders of magnitude against the direction residuals
+//  and wrecks LM convergence; algebraic elimination is exact and well-conditioned.)
+//
+//  ### Fix C — min-displacement (nearest-solution) regularization
+//  An under-constrained system has a whole manifold of solutions. We bias the solve
+//  toward the one NEAREST the original geometry by appending a weak Tikhonov
+//  residual `√wᵣ·(xᵢ − x₀ᵢ)` per free DOF. That pins the null space (unrelated
+//  geometry barely moves) without overpowering the hard constraints (its weight is
+//  tiny), and it makes the Jacobian full-rank so Gauss–Newton/LM is well-posed even
+//  with a single real residual.
+//
+//  The solver minimizes the residual (hard constraints + the weak min-displacement
+//  term) via Levenberg–Marquardt with a numeric (finite-difference) Jacobian,
+//  adaptive damping, and an iteration cap. Convergence is judged on the HARD
+//  residuals (the regularizer is never expected to reach zero). It returns
+//  `.solved(updatedGeometry)` on convergence, or `.failed` for a singular /
+//  non-converging / over-constrained system — NEVER a partial write.
 //
 //  ## MVP scope
 //  Geometry: `.line`, `.circle`, `.point` (the kinds the MVP constraints touch).
@@ -85,8 +119,9 @@ public struct ConstraintSolver: Sendable {
 
     /// Tuning knobs (sensible defaults; overridable for tests / hard systems).
     public struct Options: Sendable {
-        /// Residual-norm convergence tolerance (the solve succeeds when the RMS
-        /// residual drops below this). Default 1e-9 (well inside engine tolerance).
+        /// Residual-norm convergence tolerance (the solve succeeds when the RMS of
+        /// the HARD residuals drops below this). Default 1e-9 (well inside engine
+        /// tolerance).
         public var convergenceTolerance: Double
         /// Max Gauss–Newton/LM iterations before declaring `.didNotConverge`.
         public var maxIterations: Int
@@ -95,17 +130,25 @@ public struct ConstraintSolver: Sendable {
         /// Initial LM damping factor (λ). Adapted up on a rejected step, down on an
         /// accepted one.
         public var initialDamping: Double
+        /// Weight (√w applied to the residual) of the min-displacement / nearest-
+        /// solution regularization term that pulls each free DOF toward its original
+        /// value. Small enough not to fight a hard constraint, large enough to pin
+        /// the null space so unrelated geometry barely moves and the Jacobian is
+        /// full-rank.
+        public var regularizationWeight: Double
 
         public init(
             convergenceTolerance: Double = 1e-9,
             maxIterations: Int = 200,
             fdStep: Double = 1e-7,
-            initialDamping: Double = 1e-3
+            initialDamping: Double = 1e-3,
+            regularizationWeight: Double = 1e-6
         ) {
             self.convergenceTolerance = convergenceTolerance
             self.maxIterations = maxIterations
             self.fdStep = fdStep
             self.initialDamping = initialDamping
+            self.regularizationWeight = regularizationWeight
         }
     }
 
@@ -134,19 +177,26 @@ public struct ConstraintSolver: Sendable {
             return .failed(.unsupported)
         }
 
-        // (1) Build the variable layout: each solvable entity contributes its DOFs.
+        // (1) Decide each entity's anchoring from the `fix` constraints, THEN build
+        //     the variable layout. A line with one pinned endpoint is re-anchored on
+        //     it (so the pin is held by construction); a whole-line / point / circle
+        //     fix removes the relevant DOFs.
+        var fixSpec = FixSpec()
+        for c in constraints where c.kind == .geometric(.fix) {
+            for p in c.points { fixSpec.note(p) }
+        }
+        guard fixSpec.allReferencesPresent(in: entities) || fixSpec.isEmpty else {
+            // A `fix` naming an entity not in the component is an invalid reference;
+            // (the general validation in (3) also catches this, but failing early
+            // keeps the layout build clean).
+            return .failed(.invalidInput)
+        }
+
         var layout = VariableLayout()
         for (id, kind) in entities.sorted(by: { $0.key.rawValue < $1.key.rawValue }) {
-            layout.register(id: id, kind: kind)
+            layout.register(id: id, kind: kind, fix: fixSpec.anchoring(for: id))
         }
         guard !layout.entities.isEmpty else { return .failed(.invalidInput) }
-
-        // (2) Apply `fix` constraints — anchor the named coordinates (remove DOFs).
-        for c in constraints where c.kind == .geometric(.fix) {
-            for p in c.points {
-                layout.anchor(point: p)
-            }
-        }
 
         // (3) Validate every constraint resolves against the layout (catches a
         //     reference to an entity not in `entities`, or a bad point/kind pairing).
@@ -156,22 +206,33 @@ public struct ConstraintSolver: Sendable {
             }
         }
 
-        // (4) The packed free-variable vector (the current values of the free DOFs).
-        var x = layout.packFree()
-        let residualCount = constraints.reduce(0) { $0 + ResidualBuilder.residualCount($1) }
+        // (4) The packed free-variable vector + the originals (for min-displacement).
+        let x0 = layout.packFree()
+        var x = x0
+        let hardResidualCount =
+            constraints.reduce(0) { $0 + ResidualBuilder.residualCount($1) }
+        let regCount = x.count   // one regularization residual per free DOF
 
-        // Nothing to satisfy → trivially solved at the current geometry.
-        if residualCount == 0 {
-            return .solved(layout.unpackAll(free: x))
-        }
-
-        // The residual evaluator at a given free-variable vector.
-        func residuals(_ free: [Double]) -> [Double] {
+        // The HARD residuals — the actual constraint errors. Convergence is judged
+        // on these (their natural scale).
+        func hardResiduals(_ free: [Double]) -> [Double] {
             let full = layout.expand(free: free)
             var out: [Double] = []
-            out.reserveCapacity(residualCount)
+            out.reserveCapacity(hardResidualCount)
             for c in constraints {
                 ResidualBuilder.appendResiduals(of: c, values: full, layout: layout, into: &out)
+            }
+            return out
+        }
+
+        // The residual vector the optimizer MINIMIZES: the hard residuals plus the
+        // weak min-displacement term (xᵢ − x₀ᵢ).
+        func optimizerResiduals(_ free: [Double]) -> [Double] {
+            var out = hardResiduals(free)
+            if options.regularizationWeight > 0 {
+                let w = options.regularizationWeight
+                out.reserveCapacity(out.count + regCount)
+                for i in 0..<free.count { out.append(w * (free[i] - x0[i])) }
             }
             return out
         }
@@ -183,18 +244,27 @@ public struct ConstraintSolver: Sendable {
             return (ss / Double(r.count)).squareRoot()
         }
 
-        var r = residuals(x)
-        var err = rms(r)
-        if err <= options.convergenceTolerance {
+        // Convergence is judged on the HARD residuals only.
+        func hardRMS(_ free: [Double]) -> Double { rms(hardResiduals(free)) }
+
+        // Nothing hard to satisfy → trivially solved at the current geometry.
+        if hardResidualCount == 0 {
             return .solved(layout.unpackAll(free: x))
         }
 
-        // No free DOFs but residuals remain unsatisfied → over-constrained / locked.
+        if hardRMS(x) <= options.convergenceTolerance {
+            return .solved(layout.unpackAll(free: x))
+        }
+
+        // No free DOFs but hard residuals remain unsatisfied → over-constrained.
         if x.isEmpty {
             return .failed(.overConstrained)
         }
 
-        // (5) Levenberg–Marquardt loop with a numeric Jacobian.
+        // (5) Levenberg–Marquardt loop with a numeric Jacobian over the (regularized)
+        //     residual.
+        var r = optimizerResiduals(x)
+        var err = rms(r)
         var lambda = options.initialDamping
         let n = x.count
 
@@ -206,13 +276,13 @@ public struct ConstraintSolver: Sendable {
                 var xp = x
                 let h = options.fdStep * Swift.max(1.0, abs(x[j]))
                 xp[j] += h
-                let rp = residuals(xp)
+                let rp = optimizerResiduals(xp)
                 for i in 0..<m {
                     jac[i][j] = (rp[i] - r[i]) / h
                 }
             }
 
-            // Normal equations: (JᵀJ + λ·diag(JᵀJ)) δ = −Jᵀr  (LM).
+            // Normal equations: (JᵀJ + λ·(diag(JᵀJ)+1)) δ = −Jᵀr  (LM).
             var jtj = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
             var jtr = [Double](repeating: 0, count: n)
             for a in 0..<n {
@@ -228,18 +298,14 @@ public struct ConstraintSolver: Sendable {
             }
 
             // Try an LM step, growing λ until the step reduces the error (or we give
-            // up). The damped diagonal makes the system well-conditioned even when
-            // JᵀJ is singular (under-constrained) — the step is then small but valid.
+            // up). The damped diagonal keeps the system well-conditioned even when
+            // JᵀJ is rank-deficient — the step is then small but valid.
             var stepAccepted = false
             for _ in 0..<12 {
                 var aMat = jtj
-                // LM damping with a Levenberg FLOOR on each diagonal: `λ·(JᵀJ_dd + 1)`.
-                // The `+1` floor is essential for RANK-DEFICIENT systems (e.g. an
-                // under-constrained distance whose JᵀJ has a near-zero diagonal in the
-                // free direction): a pure Marquardt `λ·JᵀJ_dd` term would leave that
-                // direction nearly undamped, so Cholesky produces a wild step that is
-                // always rejected (λ explodes, the solve stalls). The floor strongly
-                // damps the degenerate direction to a small, safe step instead.
+                // LM damping with a Levenberg FLOOR on each diagonal: `λ·(JᵀJ_dd+1)`.
+                // The `+1` floor strongly damps a degenerate direction to a small,
+                // safe step instead of a wild one that always gets rejected.
                 for d in 0..<n { aMat[d][d] += lambda * (jtj[d][d] + 1.0) }
 
                 guard let delta = LinearSolve.solveSPD(aMat, rhs: jtr) else {
@@ -250,7 +316,7 @@ public struct ConstraintSolver: Sendable {
 
                 var xNew = x
                 for d in 0..<n { xNew[d] -= delta[d] }     // (JᵀJ+λD)δ = +Jᵀr ⇒ x -= δ
-                let rNew = residuals(xNew)
+                let rNew = optimizerResiduals(xNew)
                 let errNew = rms(rNew)
 
                 if errNew < err {
@@ -267,7 +333,7 @@ public struct ConstraintSolver: Sendable {
                 }
             }
 
-            if err <= options.convergenceTolerance {
+            if hardRMS(x) <= options.convergenceTolerance {
                 return .solved(layout.unpackAll(free: x))
             }
             if !stepAccepted {
@@ -277,28 +343,107 @@ public struct ConstraintSolver: Sendable {
         }
 
         // Converged late inside the loop?
-        if err <= options.convergenceTolerance {
+        if hardRMS(x) <= options.convergenceTolerance {
             return .solved(layout.unpackAll(free: x))
         }
         return .failed(.didNotConverge)
     }
 }
 
+// MARK: - Fix specification (which endpoints/points each entity has pinned)
+
+/// Accumulates the `fix` constraints over a component and tells the layout how to
+/// anchor each entity. A line can be free, start-pinned, end-pinned, or rigid; a
+/// point / circle is free or rigid.
+private struct FixSpec {
+    /// For each fixed entity, which characteristic points are pinned.
+    private(set) var pinned: [EntityID: Set<EntityPoint>] = [:]
+
+    var isEmpty: Bool { pinned.isEmpty }
+
+    mutating func note(_ p: ConstraintPoint) {
+        pinned[p.entityID, default: []].insert(p.point)
+    }
+
+    func allReferencesPresent(in entities: [EntityID: EntityKind]) -> Bool {
+        pinned.keys.allSatisfy { entities[$0] != nil }
+    }
+
+    /// How an entity should be anchored, given its pinned points (`nil` == free).
+    func anchoring(for id: EntityID) -> LineAnchor {
+        guard let pts = pinned[id] else { return .free }
+        // For a line, .start/.end name endpoints; .center maps to .start (the sole
+        // point of a point entity is interchangeably .start/.center).
+        let hasStart = pts.contains(.start) || pts.contains(.center)
+        let hasEnd = pts.contains(.end)
+        switch (hasStart, hasEnd) {
+        case (true, true):   return .rigid
+        case (true, false):  return .pinStart
+        case (false, true):  return .pinEnd
+        case (false, false): return .free
+        }
+    }
+}
+
+/// How a line (or point/circle) is anchored in the variable layout.
+enum LineAnchor {
+    /// No endpoint pinned — free to move/rotate (a line uses its CENTER as the DOF
+    /// origin; a point/circle keeps its positional DOFs).
+    case free
+    /// The START is pinned (a line is re-anchored on it; a point/circle is rigid).
+    case pinStart
+    /// The END is pinned (a line is re-anchored on it).
+    case pinEnd
+    /// Fully fixed — no DOFs at all.
+    case rigid
+}
+
 // MARK: - Variable layout (DOF packing + fix anchoring + point resolution)
 
-/// Maps a component's entities to a flat variable vector and back. Each entity
-/// owns a contiguous block of FULL-variable slots (a line: sx,sy,ex,ey; a circle:
-/// cx,cy,r; a point: px,py); `fix` anchors specific slots (they keep their current
-/// value and are excluded from the FREE vector the optimizer varies).
+/// Maps a component's entities to a flat variable vector and back.
+///
+/// PARAMETRIZATION (the structural anti-collapse fix):
+///   - line  → anchor point + (angle θ, halfLength L). Endpoints are DERIVED:
+///       • free line:  anchor = center; start = c − L·u, end = c + L·u, u=(cosθ,sinθ)
+///       • start-pinned: anchor = fixed start; start = A, end = A + 2L·u
+///       • end-pinned:   anchor = fixed end;   end = A,   start = A − 2L·u
+///       • rigid:        no DOFs (both endpoints constant)
+///     L is an independent DOF that NO direction residual touches → a line cannot
+///     collapse to satisfy a direction constraint.
+///   - circle → (cx, cy, r)   (rigid `fix` removes cx,cy)
+///   - point  → (px, py)      (rigid `fix` removes both)
 struct VariableLayout {
+    /// The per-line geometric parametrization. A line is described by an ANCHOR
+    /// point + a direction angle θ + a length L:
+    ///   - FREE line: the anchor is the CENTER and is itself a pair of DOFs
+    ///     (centerSlot ≥ 0). Endpoints derive symmetrically: start = c − L·u,
+    ///     end = c + L·u (u = (cosθ,sinθ)), L is the HALF-length.
+    ///   - PINNED line (one endpoint fixed): the anchor is that endpoint, held
+    ///     CONSTANT (centerSlot == −1), and L is the FULL length to the other end.
+    ///   - RIGID line: θ and L are anchored too (thetaSlot/lenSlot still index the
+    ///     fixed slots; they just never vary).
+    struct LineParam {
+        /// The fixed anchor (the pinned endpoint) when `centerSlot == −1`; otherwise
+        /// the INITIAL center (the live center lives in the two `centerSlot` DOFs).
+        var anchor: Vector
+        var theta: Double        // initial direction angle
+        var length: Double       // half-length (free) / full length (pinned)
+        var mode: LineAnchor     // .free / .pinStart / .pinEnd / .rigid
+        var centerSlot: Int      // full-vector index of cx (cy = cx+1); −1 if pinned
+        var thetaSlot: Int       // full-vector index of θ
+        var lenSlot: Int         // full-vector index of L
+    }
+
     /// One entity's slot block in the full-variable vector.
     struct EntitySlots {
         let id: EntityID
         let kind: EntityKind
         /// The full-vector index where this entity's block starts.
         let base: Int
-        /// How many slots (4 line / 3 circle / 2 point).
+        /// How many FREE-able slots this entity contributes.
         let width: Int
+        /// Line parametrization (only for `.line`).
+        var line: LineParam?
     }
 
     private(set) var entities: [EntitySlots] = []
@@ -306,67 +451,147 @@ struct VariableLayout {
     private(set) var fullValues: [Double] = []
     /// Whether each full slot is anchored (true == fixed, excluded from `free`).
     private var anchored: [Bool] = []
-    /// id → its `EntitySlots` (for point resolution).
+    /// id → its `EntitySlots`.
     private var byID: [EntityID: EntitySlots] = [:]
 
-    /// Registers an entity's DOFs (only solvable kinds add slots; others are ignored
-    /// — they act as rigid anchors with no free variables).
-    mutating func register(id: EntityID, kind: EntityKind) {
+    /// Registers an entity's DOFs under the given anchoring.
+    mutating func register(id: EntityID, kind: EntityKind, fix: LineAnchor) {
         let base = fullValues.count
         switch kind {
         case .line(let d):
-            fullValues.append(contentsOf: [d.start.x, d.start.y, d.end.x, d.end.y])
-            anchored.append(contentsOf: [false, false, false, false])
-            addEntity(id: id, kind: kind, base: base, width: 4)
+            registerLine(id: id, data: d, base: base, fix: fix)
         case .circle(let d):
+            // (cx, cy, r); a rigid fix anchors cx,cy (radius can still be driven).
             fullValues.append(contentsOf: [d.center.x, d.center.y, d.radius])
-            anchored.append(contentsOf: [false, false, false])
-            addEntity(id: id, kind: kind, base: base, width: 3)
+            let lock = (fix == .rigid)
+            anchored.append(contentsOf: [lock, lock, false])
+            addEntity(id: id, kind: kind, base: base, width: 3, line: nil)
         case .point(let d):
             fullValues.append(contentsOf: [d.position.x, d.position.y])
-            anchored.append(contentsOf: [false, false])
-            addEntity(id: id, kind: kind, base: base, width: 2)
+            let lock = (fix == .rigid || fix == .pinStart || fix == .pinEnd)
+            anchored.append(contentsOf: [lock, lock])
+            addEntity(id: id, kind: kind, base: base, width: 2, line: nil)
         default:
-            // Non-solvable kind: registered with zero width so references still
-            // resolve to its (rigid) geometry but it contributes no free DOFs.
-            addEntity(id: id, kind: kind, base: base, width: 0)
+            // Non-solvable kind: zero width (rigid anchor, no free DOFs).
+            addEntity(id: id, kind: kind, base: base, width: 0, line: nil)
         }
     }
 
-    private mutating func addEntity(id: EntityID, kind: EntityKind, base: Int, width: Int) {
-        let slots = EntitySlots(id: id, kind: kind, base: base, width: width)
+    private mutating func registerLine(id: EntityID, data d: LineData, base: Int, fix: LineAnchor) {
+        let dx = d.end.x - d.start.x
+        let dy = d.end.y - d.start.y
+        let theta = atan2(dy, dx)
+        let fullLen = (dx * dx + dy * dy).squareRoot()
+        let halfLen = 0.5 * fullLen
+        let center = Vector((d.start.x + d.end.x) * 0.5, (d.start.y + d.end.y) * 0.5)
+
+        switch fix {
+        case .free, .rigid:
+            // 4 DOFs: [cx, cy, θ, L]. The center is free (so coincident / distance
+            // can TRANSLATE the line); θ rotates; L (half-length) scales. A `.rigid`
+            // line locks all four.
+            let cxSlot = base, cySlot = base + 1
+            let thetaSlot = base + 2, lenSlot = base + 3
+            fullValues.append(contentsOf: [center.x, center.y, theta, halfLen])
+            let lock = (fix == .rigid)
+            anchored.append(contentsOf: [lock, lock, lock, lock])
+            let lp = LineParam(anchor: center, theta: theta, length: halfLen,
+                               mode: fix, centerSlot: cxSlot,
+                               thetaSlot: thetaSlot, lenSlot: lenSlot)
+            _ = cySlot
+            addEntity(id: id, kind: kind(d), base: base, width: 4, line: lp)
+
+        case .pinStart, .pinEnd:
+            // 2 DOFs: [θ, L]. The anchor (the pinned endpoint) is held CONSTANT in
+            // the LineParam (not a DOF) — that is how the pin is enforced EXACTLY,
+            // with no penalty / conditioning blow-up. L is the FULL length.
+            let anchor = (fix == .pinStart) ? d.start : d.end
+            let thetaSlot = base, lenSlot = base + 1
+            fullValues.append(contentsOf: [theta, fullLen])
+            anchored.append(contentsOf: [false, false])
+            let lp = LineParam(anchor: anchor, theta: theta, length: fullLen,
+                               mode: fix, centerSlot: -1,
+                               thetaSlot: thetaSlot, lenSlot: lenSlot)
+            addEntity(id: id, kind: kind(d), base: base, width: 2, line: lp)
+        }
+    }
+
+    private func kind(_ d: LineData) -> EntityKind { .line(d) }
+
+    private mutating func addEntity(id: EntityID, kind: EntityKind, base: Int, width: Int, line: LineParam?) {
+        let slots = EntitySlots(id: id, kind: kind, base: base, width: width, line: line)
         entities.append(slots)
         byID[id] = slots
     }
 
-    /// Anchors the full slots a constraint-point names (a `fix`): for a line point
-    /// that's its (x,y); for a circle center its (cx,cy); for a point its (x,y).
-    mutating func anchor(point p: ConstraintPoint) {
-        guard let (xi, yi) = coordinateIndices(of: p) else { return }
-        anchored[xi] = true
-        anchored[yi] = true
-    }
+    /// The kind of a registered entity (nil if absent).
+    func kindOf(_ id: EntityID) -> EntityKind? { byID[id]?.kind }
 
-    /// The (xIndex, yIndex) FULL-vector slots of a constraint-point, or `nil` if the
-    /// entity is absent / the point doesn't apply to its kind.
+    /// The line parametrization for `id`, or `nil` if not a registered line.
+    func lineParam(of id: EntityID) -> LineParam? { byID[id]?.line }
+
+    /// The (xIndex, yIndex) FULL-vector slots of a constraint-point for a CIRCLE
+    /// center or a POINT, or `nil`. A LINE endpoint is DERIVED (use `endpoint`).
     func coordinateIndices(of p: ConstraintPoint) -> (Int, Int)? {
         guard let s = byID[p.entityID] else { return nil }
         switch s.kind {
         case .line:
-            switch p.point {
-            case .start:          return (s.base, s.base + 1)
-            case .end:            return (s.base + 2, s.base + 3)
-            case .center:         return nil          // a line has no "center" point
-            }
+            return nil
         case .circle:
-            // Only the center is a positional point of a circle.
             return p.point == .center || p.point == .start ? (s.base, s.base + 1) : nil
         case .point:
-            // A point's sole position; .start/.center are interchangeable here.
             return p.point == .end ? nil : (s.base, s.base + 1)
         default:
             return nil
         }
+    }
+
+    /// Whether a constraint-point names a resolvable position (a line endpoint, a
+    /// circle center, or a point).
+    func resolvesPosition(_ p: ConstraintPoint) -> Bool {
+        guard let s = byID[p.entityID] else { return false }
+        switch s.kind {
+        case .line:   return p.point == .start || p.point == .end
+        case .circle: return p.point == .center || p.point == .start
+        case .point:  return p.point != .end
+        default:      return false
+        }
+    }
+
+    /// The DERIVED (x,y) of a line endpoint from a FULL `values` vector.
+    func endpoint(of id: EntityID, which: EntityPoint, values: [Double]) -> (Double, Double) {
+        guard let lp = byID[id]?.line else { return (0, 0) }
+        let theta = values[lp.thetaSlot]
+        let len = values[lp.lenSlot]
+        let ux = cos(theta), uy = sin(theta)
+        switch lp.mode {
+        case .free, .rigid:
+            // center is the (live) anchor; half-length each side.
+            let cx = values[lp.centerSlot], cy = values[lp.centerSlot + 1]
+            switch which {
+            case .end:  return (cx + len * ux, cy + len * uy)
+            default:    return (cx - len * ux, cy - len * uy)
+            }
+        case .pinStart:
+            // anchor == fixed start; full length to end.
+            switch which {
+            case .end:  return (lp.anchor.x + len * ux, lp.anchor.y + len * uy)
+            default:    return (lp.anchor.x, lp.anchor.y)
+            }
+        case .pinEnd:
+            // anchor == fixed end; full length back to start.
+            switch which {
+            case .end:  return (lp.anchor.x, lp.anchor.y)
+            default:    return (lp.anchor.x - len * ux, lp.anchor.y - len * uy)
+            }
+        }
+    }
+
+    /// The stored / live θ of a line, or `nil` if `id` is not a line. (Even a RIGID
+    /// line's θ lives in a slot — anchored, so its value never changes.)
+    func angleValue(of id: EntityID, values: [Double]) -> Double? {
+        guard let lp = byID[id]?.line else { return nil }
+        return values[lp.thetaSlot]
     }
 
     /// The FULL-vector slot of a circle's RADIUS, or `nil` if `id` is not a circle.
@@ -407,8 +632,10 @@ struct VariableLayout {
             switch s.kind {
             case .line(let d):
                 var nd = d
-                nd.start = Vector(full[s.base], full[s.base + 1])
-                nd.end = Vector(full[s.base + 2], full[s.base + 3])
+                let st = endpoint(of: s.id, which: .start, values: full)
+                let en = endpoint(of: s.id, which: .end, values: full)
+                nd.start = Vector(st.0, st.1)
+                nd.end = Vector(en.0, en.1)
                 out[s.id] = .line(nd)
             case .circle(let d):
                 var nd = d
@@ -432,6 +659,11 @@ struct VariableLayout {
 /// Builds the residual vector contributions for each constraint kind from a FULL
 /// variable vector. The single source of truth for "what does this constraint
 /// require" — both the residual evaluation and the up-front validation route here.
+///
+/// Direction constraints are written in the NORMALIZED, well-conditioned form on the
+/// line ANGLE θ (sin/cos of an angle, range [−1,1]) rather than the raw, length-
+/// scaled cross/dot of endpoint deltas. Positional constraints (coincident /
+/// distance) read the DERIVED endpoints.
 enum ResidualBuilder {
 
     /// How many scalar residuals a constraint contributes (so the solver can size
@@ -461,22 +693,25 @@ enum ResidualBuilder {
     static func canBuild(_ c: Constraint, layout: VariableLayout) -> Bool {
         switch c.kind {
         case .geometric(.fix):
-            // Every fixed point must resolve to a coordinate (else it's a bad ref).
-            return c.points.allSatisfy { layout.coordinateIndices(of: $0) != nil }
+            return c.points.allSatisfy { layout.resolvesPosition($0) }
 
         case .geometric(.coincident), .dimensional(.distance):
             guard c.points.count >= 2 else { return false }
-            return layout.coordinateIndices(of: c.points[0]) != nil
-                && layout.coordinateIndices(of: c.points[1]) != nil
+            return layout.resolvesPosition(c.points[0])
+                && layout.resolvesPosition(c.points[1])
 
         case .geometric(.horizontal), .geometric(.vertical):
+            // The two points name the SAME line whose angle is constrained.
             guard c.points.count >= 2 else { return false }
-            return layout.coordinateIndices(of: c.points[0]) != nil
-                && layout.coordinateIndices(of: c.points[1]) != nil
+            return layout.lineParam(of: c.points[0].entityID) != nil
+                && c.points[0].entityID == c.points[1].entityID
 
         case .geometric(.parallel), .geometric(.perpendicular):
             guard c.points.count >= 4 else { return false }
-            return (0..<4).allSatisfy { layout.coordinateIndices(of: c.points[$0]) != nil }
+            return layout.lineParam(of: c.points[0].entityID) != nil
+                && layout.lineParam(of: c.points[2].entityID) != nil
+                && c.points[0].entityID == c.points[1].entityID
+                && c.points[2].entityID == c.points[3].entityID
 
         case .dimensional(.radius):
             guard let first = c.points.first else { return false }
@@ -500,37 +735,33 @@ enum ResidualBuilder {
 
         case .geometric(.coincident):
             let (a, b) = (c.points[0], c.points[1])
-            let pa = point(a, values, layout), pb = point(b, values, layout)
+            let pa = position(a, values, layout), pb = position(b, values, layout)
             out.append(pa.0 - pb.0)   // Δx
             out.append(pa.1 - pb.1)   // Δy
 
         case .geometric(.horizontal):
-            // The line's two endpoints share a Y: ey − sy == 0.
-            let s = point(c.points[0], values, layout)
-            let e = point(c.points[1], values, layout)
-            out.append(e.1 - s.1)
+            // Line horizontal ⇒ sin θ == 0 (normalized, bounded direction residual).
+            out.append(sin(layout.angleValue(of: c.points[0].entityID, values: values) ?? 0))
 
         case .geometric(.vertical):
-            // ex − sx == 0.
-            let s = point(c.points[0], values, layout)
-            let e = point(c.points[1], values, layout)
-            out.append(e.0 - s.0)
+            // Line vertical ⇒ cos θ == 0.
+            out.append(cos(layout.angleValue(of: c.points[0].entityID, values: values) ?? 0))
 
         case .geometric(.parallel):
-            let d1 = direction(c.points[0], c.points[1], values, layout)
-            let d2 = direction(c.points[2], c.points[3], values, layout)
-            // cross(d1, d2) == 0.
-            out.append(d1.0 * d2.1 - d1.1 * d2.0)
+            // Parallel ⇒ sin(θ1 − θ2) == 0 (well-conditioned; CANNOT collapse a line).
+            let t1 = layout.angleValue(of: c.points[0].entityID, values: values) ?? 0
+            let t2 = layout.angleValue(of: c.points[2].entityID, values: values) ?? 0
+            out.append(sin(t1 - t2))
 
         case .geometric(.perpendicular):
-            let d1 = direction(c.points[0], c.points[1], values, layout)
-            let d2 = direction(c.points[2], c.points[3], values, layout)
-            // dot(d1, d2) == 0.
-            out.append(d1.0 * d2.0 + d1.1 * d2.1)
+            // Perpendicular ⇒ cos(θ1 − θ2) == 0.
+            let t1 = layout.angleValue(of: c.points[0].entityID, values: values) ?? 0
+            let t2 = layout.angleValue(of: c.points[2].entityID, values: values) ?? 0
+            out.append(cos(t1 - t2))
 
         case .dimensional(.distance):
-            let pa = point(c.points[0], values, layout)
-            let pb = point(c.points[1], values, layout)
+            let pa = position(c.points[0], values, layout)
+            let pb = position(c.points[1], values, layout)
             let dx = pb.0 - pa.0, dy = pb.1 - pa.1
             out.append((dx * dx + dy * dy).squareRoot() - c.value)
 
@@ -544,18 +775,16 @@ enum ResidualBuilder {
         }
     }
 
-    /// The (x, y) of a constraint-point from the FULL vector.
-    private static func point(_ p: ConstraintPoint, _ values: [Double], _ layout: VariableLayout) -> (Double, Double) {
-        guard let (xi, yi) = layout.coordinateIndices(of: p) else { return (0, 0) }
-        return (values[xi], values[yi])
-    }
-
-    /// The (dx, dy) direction `from → to` from the FULL vector.
-    private static func direction(_ from: ConstraintPoint, _ to: ConstraintPoint,
-                                  _ values: [Double], _ layout: VariableLayout) -> (Double, Double) {
-        let a = point(from, values, layout)
-        let b = point(to, values, layout)
-        return (b.0 - a.0, b.1 - a.1)
+    /// The (x, y) WORLD position of a constraint-point from the FULL vector — a line
+    /// endpoint (derived), a circle center, or a point.
+    private static func position(_ p: ConstraintPoint, _ values: [Double], _ layout: VariableLayout) -> (Double, Double) {
+        if let kind = layout.kindOf(p.entityID), case .line = kind {
+            return layout.endpoint(of: p.entityID, which: p.point, values: values)
+        }
+        if let (xi, yi) = layout.coordinateIndices(of: p) {
+            return (values[xi], values[yi])
+        }
+        return (0, 0)
     }
 }
 

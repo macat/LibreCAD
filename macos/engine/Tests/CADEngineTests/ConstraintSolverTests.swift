@@ -314,6 +314,111 @@ final class ConstraintSolverTests: XCTestCase {
         XCTAssertEqual(r, .failed(.invalidInput))
     }
 
+    // MARK: - Anti-collapse / minimal-change (the user's bug + the rewrite gate)
+    //
+    // The first solver minimized Σresidual² over raw endpoints and could satisfy a
+    // direction constraint on UNDER-constrained (free) lines by SHRINKING one to ~0
+    // length so the two overlapped ("become one"). The re-parametrized, min-
+    // displacement solver must instead ROTATE the lines while PRESERVING length and
+    // pick the solution nearest the original. These are the gating tests.
+
+    /// The signed length of a solved line's direction vector.
+    private func length(_ d: LineData) -> Double { d.start.distance(to: d.end) }
+    /// The dot of two solved lines' direction vectors.
+    private func dirDot(_ a: LineData, _ b: LineData) -> Double {
+        (a.end - a.start).dot(b.end - b.start)
+    }
+    /// The cross of two solved lines' direction vectors.
+    private func dirCross(_ a: LineData, _ b: LineData) -> Double {
+        let da = a.end - a.start, db = b.end - b.start
+        return da.x * db.y - da.y * db.x
+    }
+
+    /// THE USER'S EXACT BUG: perpendicular on two FREE near-parallel lines must
+    /// rotate them perpendicular while keeping BOTH lengths — never collapse one to
+    /// make the two overlap.
+    func testPerpendicularOnTwoFreeNearParallelLinesNoCollapse() {
+        let a = id(1), b = id(2)
+        let la = LineData(start: Vector(0, 0), end: Vector(10, 0))   // length 10
+        let lb = LineData(start: Vector(0, 1), end: Vector(10, 2))   // length ~10.05, near-parallel
+        let origA = length(la), origB = length(lb)
+        let r = ConstraintSolver.solve(entities: [a: .line(la), b: .line(lb)],
+                                       constraints: [Constraint.perpendicular(line: a, line: b)])
+        guard let da = solvedLine(r, a), let db = solvedLine(r, b) else { return }
+        // The constraint is satisfied …
+        XCTAssertEqual(dirDot(da, db), 0, accuracy: 1e-5, "lines must be perpendicular")
+        // … WITHOUT collapsing either line (the bug shrank one to ~0).
+        XCTAssertEqual(length(da), origA, accuracy: 1.5, "line A must keep ~its length")
+        XCTAssertEqual(length(db), origB, accuracy: 1.5, "line B must keep ~its length")
+        // And neither degenerated to a point.
+        XCTAssertGreaterThan(length(da), 1.0, "line A must not collapse")
+        XCTAssertGreaterThan(length(db), 1.0, "line B must not collapse")
+    }
+
+    /// Parallel on two free lines: aligns directions, preserves both lengths.
+    func testParallelOnTwoFreeLinesNoCollapse() {
+        let a = id(1), b = id(2)
+        let la = LineData(start: Vector(0, 0), end: Vector(10, 1))
+        let lb = LineData(start: Vector(0, 5), end: Vector(8, 2))
+        let origA = length(la), origB = length(lb)
+        let r = ConstraintSolver.solve(entities: [a: .line(la), b: .line(lb)],
+                                       constraints: [Constraint.parallel(line: a, line: b)])
+        guard let da = solvedLine(r, a), let db = solvedLine(r, b) else { return }
+        XCTAssertEqual(dirCross(da, db), 0, accuracy: 1e-5, "lines must be parallel")
+        XCTAssertEqual(length(da), origA, accuracy: 1.5, "line A must keep ~its length")
+        XCTAssertEqual(length(db), origB, accuracy: 1.5, "line B must keep ~its length")
+        XCTAssertGreaterThan(length(da), 1.0)
+        XCTAssertGreaterThan(length(db), 1.0)
+    }
+
+    /// Perpendicular on two free lines ALREADY perpendicular: the minimal-change
+    /// solver must leave the geometry essentially untouched.
+    func testPerpendicularOnAlreadyPerpendicularLinesIsMinimalChange() {
+        let a = id(1), b = id(2)
+        let la = LineData(start: Vector(0, 0), end: Vector(10, 0))   // horizontal
+        let lb = LineData(start: Vector(3, 0), end: Vector(3, 7))    // vertical (already ⊥)
+        let r = ConstraintSolver.solve(entities: [a: .line(la), b: .line(lb)],
+                                       constraints: [Constraint.perpendicular(line: a, line: b)])
+        guard let da = solvedLine(r, a), let db = solvedLine(r, b) else { return }
+        // Already satisfied → nearest solution is the original geometry, unchanged.
+        XCTAssertEqual(da.start.x, 0, accuracy: tol);  XCTAssertEqual(da.start.y, 0, accuracy: tol)
+        XCTAssertEqual(da.end.x, 10, accuracy: tol);   XCTAssertEqual(da.end.y, 0, accuracy: tol)
+        XCTAssertEqual(db.start.x, 3, accuracy: tol);  XCTAssertEqual(db.start.y, 0, accuracy: tol)
+        XCTAssertEqual(db.end.x, 3, accuracy: tol);    XCTAssertEqual(db.end.y, 7, accuracy: tol)
+    }
+
+    /// A STRESS chain: H(A) → A‖B → B⊥C → C‖D over four free lines. The whole chain
+    /// converges and NO line collapses (each keeps its original length).
+    func testFreeLineConstraintChainConvergesWithoutCollapse() {
+        let a = id(1), b = id(2), c = id(3), d = id(4)
+        let la = LineData(start: Vector(0, 0), end: Vector(10, 1))
+        let lb = LineData(start: Vector(0, 5), end: Vector(9, 7))
+        let lc = LineData(start: Vector(2, 2), end: Vector(11, 3))
+        let ld = LineData(start: Vector(1, 8), end: Vector(10, 10))
+        let orig = [a: length(la), b: length(lb), c: length(lc), d: length(ld)]
+        let constraints = [
+            Constraint.horizontal(line: a),
+            Constraint.parallel(line: a, line: b),
+            Constraint.perpendicular(line: b, line: c),
+            Constraint.parallel(line: c, line: d),
+        ]
+        let r = ConstraintSolver.solve(
+            entities: [a: .line(la), b: .line(lb), c: .line(lc), d: .line(ld)],
+            constraints: constraints)
+        guard let ra = solvedLine(r, a), let rb = solvedLine(r, b),
+              let rc = solvedLine(r, c), let rd = solvedLine(r, d) else { return }
+        // Relationships hold.
+        XCTAssertEqual(ra.start.y, ra.end.y, accuracy: 1e-5, "A horizontal")
+        XCTAssertEqual(dirCross(ra, rb), 0, accuracy: 1e-5, "A ‖ B")
+        XCTAssertEqual(dirDot(rb, rc), 0, accuracy: 1e-5, "B ⊥ C")
+        XCTAssertEqual(dirCross(rc, rd), 0, accuracy: 1e-5, "C ‖ D")
+        // No line collapsed — each kept its original length.
+        XCTAssertEqual(length(ra), orig[a]!, accuracy: 1e-4, "A length preserved")
+        XCTAssertEqual(length(rb), orig[b]!, accuracy: 1e-4, "B length preserved")
+        XCTAssertEqual(length(rc), orig[c]!, accuracy: 1e-4, "C length preserved")
+        XCTAssertEqual(length(rd), orig[d]!, accuracy: 1e-4, "D length preserved")
+    }
+
     // MARK: - LinearSolve unit (the Cholesky core)
 
     func testLinearSolveSPD() {
