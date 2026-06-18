@@ -819,6 +819,69 @@ public enum InspectorEdits {
         }.joined(separator: "\n")
     }
 
+    // MARK: - FIELD insertion (Wave 3 — embed an auto-updating field)
+    //
+    // A FIELD is a placeholder inside a TEXT/MTEXT string whose DISPLAYED value is
+    // computed on demand from the document context at resolve time (the date, the
+    // active layout name, the file name, …). Inserting one APPENDS the field's
+    // `FieldEvaluator.placeholder(for:)` marker to the entity's text AND a matching
+    // `FieldRun` to the entity's `fields` list (the storage that names the token each
+    // placeholder displays — see `FieldToken.swift` / `FieldEvaluator.swift`). The
+    // evaluated value is NEVER stored on the entity (ADR-001): the placeholder shows
+    // as the zero-width marker (and the stored string round-trips verbatim) until a
+    // later wire-wave supplies a `ResolveContext.fieldContext`, at which point
+    // `resolve()` substitutes the live value before shaping.
+    //
+    // MVP: the field is appended at the END of the text (cursor-position insertion is
+    // a follow-up). Each is a pure `EntityKind -> EntityKind` `.replace` (no-op on a
+    // non-text/mtext kind); the Inspector routes the result through the undoable
+    // replace funnel, so the insert is undoable and Codable round-trips losslessly.
+
+    /// The next free placeholder INDEX for a field-bearing string — one past the
+    /// largest existing `FieldRun.index`, or `0` when there are no fields yet. Keeping
+    /// indices monotonically increasing means a newly appended placeholder marker can
+    /// never collide with an existing one already embedded in the text. Internal so
+    /// `FieldInsertEditTests` can assert the allocation directly.
+    static func nextFieldIndex(_ fields: [FieldRun]?) -> Int {
+        guard let fields, !fields.isEmpty else { return 0 }
+        return (fields.map(\.index).max() ?? -1) + 1
+    }
+
+    /// Appends an auto-updating field carrying `token` to a `.text` or `.mtext` entity:
+    /// a fresh `FieldRun` (at the next free index) is added to the entity's `fields`
+    /// list and that index's placeholder marker is appended to the entity's text. The
+    /// placeholder is zero-width, so until a `fieldContext` is wired the appended field
+    /// renders to nothing rather than as visible garbage. No-op for any other kind.
+    public static func appendField(to kind: EntityKind, token: FieldToken) -> EntityKind {
+        switch kind {
+        case .text(var d):
+            let index = nextFieldIndex(d.fields)
+            d.text += FieldEvaluator.placeholder(for: index)
+            d.fields = (d.fields ?? []) + [FieldRun(index: index, token: token)]
+            return .text(d)
+
+        case .mtext(var d):
+            let index = nextFieldIndex(d.fields)
+            let marker = FieldEvaluator.placeholder(for: index)
+            // Append the marker as a trailing run on the LAST paragraph (create a
+            // paragraph if the body is empty), so it rides the existing run tree and
+            // `resolve()` substitutes it per-run like any other run text. Clear
+            // `rawCode` so the writer re-emits from the (now field-bearing) paragraphs
+            // rather than the stale verbatim code — mirrors `setMTextPlainText`.
+            if d.paragraphs.isEmpty {
+                d.paragraphs = [MTextParagraph(inlines: [.run(TextRun(text: marker))])]
+            } else {
+                d.paragraphs[d.paragraphs.count - 1].inlines.append(.run(TextRun(text: marker)))
+            }
+            d.rawCode = nil
+            d.fields = (d.fields ?? []) + [FieldRun(index: index, token: token)]
+            return .mtext(d)
+
+        default:
+            return kind
+        }
+    }
+
     // MARK: - Font / style derivation (the font-system payoff)
 
     /// A canonical text style for a chosen font + bold/italic, with a STABLE,

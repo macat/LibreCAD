@@ -187,7 +187,10 @@ struct InspectorView: View {
         // Values commit through the same undoable record-replace funnel (`commit`).
         attributeValuesSection(record)
 
-        // The font/style editor — the user-facing payoff of the font system.
+        // The font/style editor — the user-facing payoff of the font system. It also
+        // hosts the Wave 3 "Insert Field" affordance (an auto-updating date / layout /
+        // file-name field appended to the TEXT/MTEXT body), committed undoably through
+        // the same `onKindCommit` funnel below.
         switch record.kind {
         case .text, .mtext:
             TextStyleEditor(
