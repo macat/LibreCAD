@@ -1073,7 +1073,8 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             viewport: viewport,
             renderOrigin: origin,
             preferredSpacing: model.preferredGridSpacing,
-            ucs: model.currentUCS
+            ucs: model.currentUCS,
+            isoPlane: model.isoPlaneIfActive
         )
         lastGridSpacing = spacing
         // Drop the grid vertices when the guide is hidden (snap still uses `spacing`).

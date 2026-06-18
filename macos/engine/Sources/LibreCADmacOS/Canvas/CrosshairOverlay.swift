@@ -286,7 +286,8 @@ final class CrosshairOverlayView: NSView {
 
         // The cross-line extent is driven by the user's preference. `.none` yields an
         // empty geometry (no lines); we still draw the snap marker below.
-        let geometry = Self.crosshairGeometry(style: currentStyle, bounds: bounds, center: center)
+        let geometry = Self.crosshairGeometry(style: currentStyle, bounds: bounds, center: center,
+                                              axisAngles: model.crosshairAxisAngles)
 
         // Adaptive, low-contrast lines via a semantic color so they read on both the
         // light and dark canvas (and dim enough not to fight the geometry).
