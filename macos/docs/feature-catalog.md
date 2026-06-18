@@ -207,8 +207,8 @@ For context, the current Swift surface:
 | **INSERT DXF read/write** | `RS_FilterDXFRW` | missing (blocked on §1) | **P0** | L | Block refs not preserved through DXF. |
 | **Hatch pattern + boundary-arc round-trip** | libdxfrw `writeHatch` | partial/lossy (boundary written as line edges; bulges dropped; pattern → solid) | P1 | M | Backlog `ws-dxf-write-fidelity`. |
 | **MTEXT write (true multi-line)** | `RS_FilterDXFRW` | partial/lossy (MTEXT written as single-line TEXT) | P1 | M | Reconstruct MTEXT codes on write. |
-| **DXF version picker (R12 / R2018)** | `RS_FilterDXFRW` versions | partial (writer supports versions; default R2000; no UI picker) | P2 | S | Expose version in Save dialog. |
-| **DWG read / write** | `RS_FilterDXFRW` (DWGSUPPORT) | partial (C bridge added DWG per recent commits; NOT surfaced in Swift engine/app) | P1 | M | Wire DWG path into reader/writer + open/save UTTypes. |
+| **DXF version picker (R12 / R2018)** | `RS_FilterDXFRW` versions | **done** (Preferences ▸ General ▸ Files picker; default R2000; resolved off-main through the codec) | — | — | `DXFExportVersion` + `DXFVersionPickerTests`. |
+| **DWG read / write** | `RS_FilterDXFRW` (DWGSUPPORT) | **done** (open `.dwg` + versioned save R2000/R2004/R2010/R2013/R2018 over libdxfrw round-3 writers; UTType/Info.plist registered; round-trip tested) | — | — | DWG save-version picker in Preferences (R2007/R12/R14 excluded — no `dwgwriter21`, clamp to R2000); honest "may not round-trip" caption; foreign-AutoCAD fidelity unverified in-repo. |
 | **Image (raster) import** | `rs_image.h` | missing | P2 | M | See §1 image entity. |
 | **SVG / PDF *import*** | (not native upstream; PDF via poppler-ish) | missing | P3 | L | We export SVG/PDF but can't import. |
 | **LFF / CXF font *files* as user fonts** | `RS_FilterLFF/CXF` | partial (LFF/SHX parsing exists; bundling/user-font picker TBD) | P2 | S | Font management UI. |
