@@ -1171,6 +1171,14 @@ private final class PODBuilder {
         if gv.has("$GRIDMODE") { appendInt("$GRIDMODE", gv.int("$GRIDMODE")) }
         if gv.has("$PDMODE")   { appendInt("$PDMODE",   gv.int("$PDMODE")) }
         if gv.has("$ANGDIR")   { appendInt("$ANGDIR",   gv.int("$ANGDIR")) }
+        // ISOMETRIC drafting (Wave 2c): $SNAPSTYLE (0 = rectangular, 1 = isometric).
+        // A standard AutoCAD header var in libdxfrw's curated emit list, so once it
+        // rides DRW_Header.vars it writes for free and round-trips on read (the bridge
+        // whitelists SNAPSTYLE in kExtraInt). The PRIVATE plane var $LC_ISOPLANE is
+        // deliberately NOT emitted — it would be dropped by libdxfrw's curated writer
+        // anyway; it persists only in memory / the Codable payload (plane resets to
+        // .top on a pure-DXF reopen).
+        if gv.has("$SNAPSTYLE") { appendInt("$SNAPSTYLE", gv.int("$SNAPSTYLE")) }
         // Double-typed doc-settings vars.
         if gv.has("$PDSIZE")   { appendDouble("$PDSIZE",  gv.double("$PDSIZE")) }
         if gv.has("$ANGBASE")  { appendDouble("$ANGBASE", gv.double("$ANGBASE")) }
