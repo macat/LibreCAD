@@ -188,6 +188,27 @@ final class CanvasModel {
     @ObservationIgnored
     var modelVersion = 0
 
+    /// The ids of constraints that, after the most recent re-solve, live in a
+    /// component the solver could NOT satisfy (`.failed` — over-constrained / non-
+    /// convergent / unsupported). The geometry does NOT honor these constraints, so the
+    /// UI must flag them rather than show them as if they hold: the glyph overlay tints
+    /// their badge in a WARNING style and the Constraints list marks the row. Recomputed
+    /// in `resolveConstraints` for the components it touched (and over the WHOLE table on
+    /// `setDrawing`, so a freshly-loaded drawing flags any constraint its restored
+    /// geometry does not satisfy). The common case is EMPTY (every constraint solves).
+    ///
+    /// OBSERVED (no `@ObservationIgnored`) so the SwiftUI Constraints sidebar repaints
+    /// when membership changes; the AppKit glyph overlay reads it on its `refresh()`.
+    var unsatisfiedConstraintIDs: Set<UUID> = []
+
+    /// The outcome of the most recent `commitConstraints` call — read by the selection-
+    /// apply funnels (`applyGeometricConstraintToSelection` /
+    /// `applyDimensionalConstraintToSelection`) to distinguish an OVER-CONSTRAINED
+    /// rejection (post the "would conflict — delete a constraint" message) from a plain
+    /// arity failure. `@ObservationIgnored`: transient internal handoff, never rendered.
+    @ObservationIgnored
+    var lastConstraintCommitResult: ConstraintCommitResult = .noneAdded
+
     /// Enabled snap modes. The *interactive* default deliberately OMITS `.grid`:
     /// with grid-snap on, a click in empty space rounds the cursor's world point to
     /// the nearest grid node (up to the 8-pt aperture away), so a drawn line lands
@@ -1244,6 +1265,15 @@ final class CanvasModel {
         // (Document Settings round-trip). Header vars are the source of truth.
         loadSettingsFromDrawing()
         rebuildIndex()
+        // ENFORCE restored constraints on the loaded geometry: a drawing opened from a
+        // payload/DXF carries its constraint table but its geometry was last written by
+        // whatever produced the file, so re-solve every constrained component now (and flag
+        // any the geometry can't satisfy via `unsatisfiedConstraintIDs`). Constrained
+        // entities that moved get their AABBs refreshed by `applySolvedGeometry`'s quadtree
+        // update inside the resolve. The undo stack is cleared AGAIN afterward so this
+        // load-time enforcement is part of the clean baseline (not a user-undoable step).
+        resolveAllConstraints()
+        undoManager.removeAllActions()
         let box = drawing.boundingBox()
         renderOrigin = RendererGeometry.renderOrigin(for: box)
         selection.clear()
@@ -5294,15 +5324,44 @@ final class CanvasModel {
             let constraints = drawing.constraints.constraints(within: component)
             guard !constraints.isEmpty else { continue }
 
-            // (3) Solve. On failure, write NOTHING for this component (clean revert).
+            // (3) Solve. On failure, write NOTHING for this component (clean revert) but
+            //     FLAG every constraint in it as unsatisfied (the geometry does not honor
+            //     it — the overlay/list must surface the dangling badge, not hide it). On
+            //     success, CLEAR those ids from the unsatisfied set (they hold again).
             switch ConstraintSolver.solve(entities: entities, constraints: constraints) {
             case .failed:
+                unsatisfiedConstraintIDs.formUnion(constraints.map(\.id))
                 continue
             case .solved(let geometry):
+                unsatisfiedConstraintIDs.subtract(constraints.map(\.id))
                 if applySolvedGeometry(geometry) { changedAny = true }
             }
         }
         return changedAny
+    }
+
+    /// RE-SOLVES every constrained component in the drawing (the union of all referenced
+    /// entities) and refreshes `unsatisfiedConstraintIDs` over the WHOLE table — the
+    /// load-time / full-table counterpart of `resolveConstraints(touching:)`. Used by
+    /// `setDrawing` so a freshly-opened drawing ENFORCES its restored constraints on the
+    /// loaded geometry (and flags any the geometry doesn't satisfy). A no-op when the
+    /// table is empty.
+    ///
+    /// Unlike `resolveConstraints(touching:)` (which relies on a caller-owned group), this
+    /// OPENS ITS OWN undo group when one isn't already open (`groupsByEvent == false`,
+    /// e.g. the `setDrawing` load path or a test) so its `drawing.replace` calls always
+    /// have a group to register into. `setDrawing` clears the undo stack right after, so
+    /// the load-time enforcement is part of the clean baseline, not a user-undoable step.
+    @discardableResult
+    func resolveAllConstraints() -> Bool {
+        guard !drawing.constraints.isEmpty else {
+            unsatisfiedConstraintIDs.removeAll()
+            return false
+        }
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        return resolveConstraints(touching: drawing.constraints.referencedEntityIDs)
     }
 
     /// Folds solver output back into the drawing through the undoable `drawing.replace`
@@ -5717,6 +5776,10 @@ final class CanvasModel {
     ///   • collinear/tangent/equal/concentric/symmetric → rejected (solver-unsupported)
     @discardableResult
     func addConstraint(_ kind: GeometricConstraintKind, entities: [EntityID]) -> Bool {
+        // Reset the commit-result handoff so an EARLY arity/kind rejection here (which
+        // never reaches `commitConstraints`) doesn't leave a stale `.overConstrained`
+        // from a prior call for the selection-apply caller to mis-read.
+        lastConstraintCommitResult = .noneAdded
         guard kind.isSolverSupported else { return false }
         guard entities.allSatisfy({ drawing.contains($0) }) else { return false }
         let constraint: Constraint
@@ -5739,12 +5802,12 @@ final class CanvasModel {
             guard entities.count == 2 else { return false }
             let main = Constraint.parallel(line: entities[0], line: entities[1])
             return commitConstraints(withInferredCorner(main, lineA: entities[0], lineB: entities[1]),
-                                     touching: Set(entities))
+                                     touching: Set(entities)) == .added
         case .perpendicular:
             guard entities.count == 2 else { return false }
             let main = Constraint.perpendicular(line: entities[0], line: entities[1])
             return commitConstraints(withInferredCorner(main, lineA: entities[0], lineB: entities[1]),
-                                     touching: Set(entities))
+                                     touching: Set(entities)) == .added
         case .coincident:
             guard entities.count == 2 else { return false }
             constraint = .coincident(ConstraintPoint(entityID: entities[0], point: .start),
@@ -5805,6 +5868,7 @@ final class CanvasModel {
     @discardableResult
     func addConstraint(_ kind: DimensionalConstraintKind, entities: [EntityID],
                        value: Double) -> Bool {
+        lastConstraintCommitResult = .noneAdded   // see the geometric overload's note
         guard kind.isSolverSupported, value.isFinite else { return false }
         guard entities.allSatisfy({ drawing.contains($0) }) else { return false }
         let constraint: Constraint
@@ -5856,6 +5920,7 @@ final class CanvasModel {
     @discardableResult
     func addConstraint(_ kind: DimensionalConstraintKind, entities: [EntityID],
                        expression: String) -> Bool {
+        lastConstraintCommitResult = .noneAdded   // see the value overload's note
         guard kind.isSolverSupported else { return false }
         guard entities.allSatisfy({ drawing.contains($0) }) else { return false }
         let trimmed = expression.trimmingCharacters(in: .whitespaces)
@@ -5883,12 +5948,28 @@ final class CanvasModel {
         return commitConstraint(constraint, touching: Set(entities))
     }
 
+    /// The outcome of a manual constraint commit (`commitConstraints`): the constraint(s)
+    /// were ADDED and the geometry enforces them, or the add was REJECTED because it would
+    /// over-constrain a touched component (a clean no-op — nothing left in the table). The
+    /// selection-apply callers map `.added` → success and surface a clear message for
+    /// `.overConstrained`, so a manual constraint that can't be honored is never left as a
+    /// dangling badge on un-enforced geometry.
+    enum ConstraintCommitResult: Equatable {
+        /// The constraint(s) were registered and the geometry now satisfies them.
+        case added
+        /// Nothing was added (empty list, or the table rejected every id).
+        case noneAdded
+        /// The add was ROLLED BACK because it left a touched component `.failed`
+        /// (over-constrained / conflicting). The drawing is exactly as before the call.
+        case overConstrained
+    }
+
     /// Registers `constraint` undoably AND re-solves the geometry it now constrains, in
     /// ONE undo group (a single ⌘Z reverts both the add and any geometry it moved).
-    /// Returns whether the constraint was added.
+    /// Returns whether the constraint was added (false on a rejected over-constrained add).
     @discardableResult
     private func commitConstraint(_ constraint: Constraint, touching ids: Set<EntityID>) -> Bool {
-        commitConstraints([constraint], touching: ids)
+        commitConstraints([constraint], touching: ids) == .added
     }
 
     /// Registers EVERY constraint in `constraints` undoably (in order) AND re-solves the
@@ -5898,24 +5979,58 @@ final class CanvasModel {
     /// list, while the perpendicular/parallel create path commits the user's main
     /// constraint TOGETHER with its auto-inferred hidden coincident companion so they
     /// re-solve ONCE as one undoable step (the corner stays joined as the angle rotates).
-    /// Returns whether AT LEAST ONE constraint was added (the table rejects a duplicate id;
-    /// a freshly-minted one never is). On an empty list it is a no-op returning `false`.
+    ///
+    /// OVER-CONSTRAINT ROLLBACK (the manual-apply mirror of `tentativelyAdd`'s auto
+    /// rollback): after re-solving, if any touched component is left `.failed`
+    /// (over-constrained / conflicting / non-convergent), the just-added constraint(s) are
+    /// REMOVED within the SAME undo group and the components re-solved from the reverted
+    /// table — so a manual constraint that can't be honored is a clean no-op (`.overConstrained`)
+    /// instead of a dangling badge on un-enforced geometry. A normally-solvable add (a
+    /// single H on a free line, a partial set the min-displacement regularizer satisfies)
+    /// is NOT rejected — only a genuinely `.failed` component is. Returns `.added` when the
+    /// constraint(s) hold, `.overConstrained` on a rolled-back add, or `.noneAdded` on an
+    /// empty list / a table that rejected every id.
     @discardableResult
-    private func commitConstraints(_ constraints: [Constraint], touching ids: Set<EntityID>) -> Bool {
-        guard !constraints.isEmpty else { return false }
+    private func commitConstraints(_ constraints: [Constraint],
+                                   touching ids: Set<EntityID>) -> ConstraintCommitResult {
+        guard !constraints.isEmpty else {
+            lastConstraintCommitResult = .noneAdded; return .noneAdded
+        }
         let explicitGroup = !undoManager.groupsByEvent
         if explicitGroup { undoManager.beginUndoGrouping() }
         defer { if explicitGroup { undoManager.endUndoGrouping() } }
 
-        var addedAny = false
+        var added: [Constraint] = []
         for constraint in constraints {
-            if drawing.addConstraint(constraint) { addedAny = true }   // undoable
+            if drawing.addConstraint(constraint) { added.append(constraint) }   // undoable
         }
-        guard addedAny else { return false }
+        guard !added.isEmpty else {
+            lastConstraintCommitResult = .noneAdded; return .noneAdded
+        }
         resolveConstraints(touching: ids)   // apply ALL once, same undo group
+
+        // OVER-CONSTRAINT GUARD: if the add left a touched component `.failed`, the
+        // geometry does NOT honor it — roll the add back (same undo group) so we never
+        // leave a dangling badge on un-enforced geometry, and report it to the caller.
+        if !touchedComponentsAllSolve(seeds: ids) {
+            for constraint in added { drawing.removeConstraint(constraint.id) }   // undoable
+            // Re-solve from the reverted (smaller) table so any motion the rejected add
+            // caused is undone and the unsatisfied-tracking is refreshed for what REMAINS.
+            resolveConstraints(touching: ids)
+            // Drop the just-removed ids from the unsatisfied set explicitly: the re-solve
+            // above only `subtract`s constraints STILL in the component, so the rolled-back
+            // ones (gone from the table) would otherwise linger flagged.
+            unsatisfiedConstraintIDs.subtract(added.map(\.id))
+            modelDirty = true
+            modelVersion &+= 1
+            lastConstraintCommitResult = .overConstrained
+            return .overConstrained
+        }
+
         modelDirty = true
         modelVersion &+= 1
-        return true
+        lastConstraintCommitResult = .added
+        return .added
     }
 
     // MARK: Inferred coincidence (AutoCAD-style hidden corner coincident)
@@ -6197,19 +6312,22 @@ final class CanvasModel {
         // Re-solve once more so any motion the rejected add caused is undone (the now-
         // smaller constraint set re-satisfies the rest from the reverted geometry).
         _ = resolveConstraints(touching: seeds)
+        // Drop the reverted constraint's id from the unsatisfied set: the re-solve above
+        // only `subtract`s ids STILL in a component, so a poisoning add that briefly
+        // flagged the component would otherwise leave its (now-removed) id lingering.
+        unsatisfiedConstraintIDs.remove(constraint.id)
         return false
     }
 
-    /// Whether a just-added auto-constraint should be KEPT: its connected components must
-    /// all still SOLVE (no `.failed`), no seed may have gone NaN, and the seed geometry
-    /// must not have moved beyond a generous tolerance from its pre-add state. A COINCIDENT
-    /// weld is always acceptable when it solves (welding is the whole point — it is allowed
-    /// to translate the new line onto the corner); only ANGULAR constraints are held to the
-    /// "didn't splay the seeds" bar.
-    private func autoConstraintIsAcceptable(_ constraint: Constraint,
-                                            seeds: Set<EntityID>,
-                                            before: [EntityID: EntityKind]) -> Bool {
-        // (a) Every component touching a seed must SOLVE, and no geometry may be non-finite.
+    /// Whether EVERY connected component touched by a seed in `seeds` solves cleanly —
+    /// no `.failed` (over-constrained / non-convergent / unsupported) and no non-finite
+    /// geometry. The shared acceptability core of BOTH the auto-constrain rollback
+    /// (`autoConstraintIsAcceptable` part a) and the MANUAL constraint-apply rollback
+    /// (`commitConstraints`): a constraint whose add leaves a touched component `.failed`
+    /// is unacceptable and must be rolled back rather than left as a dangling badge on
+    /// un-enforced geometry. Empty `seeds`, or a component with no constraints, is
+    /// trivially OK.
+    private func touchedComponentsAllSolve(seeds: Set<EntityID>) -> Bool {
         for seed in seeds {
             let component = drawing.constraints.connectedComponent(of: seed)
             var ents: [EntityID: EntityKind] = [:]
@@ -6226,6 +6344,20 @@ final class CanvasModel {
         for id in seeds {
             if let k = drawing.entity(id)?.kind, !Self.kindIsFinite(k) { return false }
         }
+        return true
+    }
+
+    /// Whether a just-added auto-constraint should be KEPT: its connected components must
+    /// all still SOLVE (no `.failed`), no seed may have gone NaN, and the seed geometry
+    /// must not have moved beyond a generous tolerance from its pre-add state. A COINCIDENT
+    /// weld is always acceptable when it solves (welding is the whole point — it is allowed
+    /// to translate the new line onto the corner); only ANGULAR constraints are held to the
+    /// "didn't splay the seeds" bar.
+    private func autoConstraintIsAcceptable(_ constraint: Constraint,
+                                            seeds: Set<EntityID>,
+                                            before: [EntityID: EntityKind]) -> Bool {
+        // (a) Every component touching a seed must SOLVE, and no geometry may be non-finite.
+        guard touchedComponentsAllSolve(seeds: seeds) else { return false }
 
         // (b) A coincident weld is always kept when it solves (it may legitimately move
         //     the new line onto the corner). An ANGULAR constraint must NOT have SPLAYED
@@ -6315,6 +6447,12 @@ final class CanvasModel {
         if explicitGroup { undoManager.beginUndoGrouping() }
         defer { if explicitGroup { undoManager.endUndoGrouping() } }
         guard drawing.removeConstraint(id) else { return false }   // undoable
+        // The removed constraint can no longer be unsatisfied — drop it from the tracking
+        // set (a subsequent re-solve only `subtract`s ids STILL in a component, so a
+        // removed one would otherwise linger flagged). Removing it also FREES DOFs, so a
+        // previously over-constrained sibling may now solve; the next re-solve (grip /
+        // inspector edit, or the panel's redraw path) clears those ids when it runs.
+        unsatisfiedConstraintIDs.remove(id)
         modelDirty = true
         modelVersion &+= 1
         return true
@@ -6362,7 +6500,14 @@ final class CanvasModel {
     func applyGeometricConstraintToSelection(_ kind: GeometricConstraintKind) -> Bool {
         let ids = orderedSelectionIDs
         guard addConstraint(kind, entities: ids) else {
-            flashStatus(Self.constraintFailureMessage(geometric: kind, count: ids.count))
+            // Distinguish an OVER-CONSTRAINED rollback (the add was arity-valid but the
+            // solver couldn't honor it, so it was reverted) from a plain arity failure —
+            // each gets a message that tells the user how to fix it.
+            if lastConstraintCommitResult == .overConstrained {
+                flashStatus(Self.overConstrainedMessage(geometric: kind))
+            } else {
+                flashStatus(Self.constraintFailureMessage(geometric: kind, count: ids.count))
+            }
             return false
         }
         return true
@@ -6378,7 +6523,13 @@ final class CanvasModel {
         let ids = orderedSelectionIDs
         guard let value = currentDimensionalValue(kind, entities: ids),
               addConstraint(kind, entities: ids, value: value) else {
-            flashStatus(Self.constraintFailureMessage(dimensional: kind, count: ids.count))
+            // An OVER-CONSTRAINED rollback gets the "would conflict" message; everything
+            // else (bad arity, wrong kind) the arity message.
+            if lastConstraintCommitResult == .overConstrained {
+                flashStatus(Self.overConstrainedMessage(dimensional: kind))
+            } else {
+                flashStatus(Self.constraintFailureMessage(dimensional: kind, count: ids.count))
+            }
             return false
         }
         return true
@@ -6457,6 +6608,19 @@ final class CanvasModel {
         case .circle(let c): return c.center
         default:             return nil
         }
+    }
+
+    /// The message posted when a GEOMETRIC constraint was arity-valid but the solver could
+    /// not honor it (OVER-CONSTRAINED), so the add was rolled back. Tells the user the add
+    /// would CONFLICT and how to proceed (delete an existing constraint) — distinct from the
+    /// arity message, which says the SELECTION is wrong.
+    private static func overConstrainedMessage(geometric kind: GeometricConstraintKind) -> String {
+        "Can't add \(kind.rawValue): it would over-constrain the geometry — delete a conflicting constraint first."
+    }
+
+    /// The over-constrained message for a DIMENSIONAL constraint (see the geometric twin).
+    private static func overConstrainedMessage(dimensional kind: DimensionalConstraintKind) -> String {
+        "Can't add \(kind.rawValue): it would over-constrain the geometry — delete a conflicting constraint first."
     }
 
     /// A short, human status message for a rejected GEOMETRIC constraint (wrong arity or

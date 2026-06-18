@@ -135,6 +135,8 @@ struct ConstraintsSectionContent: View {
                 ForEach(rows) { constraint in
                     ConstraintRow(
                         constraint: constraint,
+                        isUnsatisfied: ConstraintListModel.isUnsatisfied(
+                            constraint, unsatisfiedIDs: model.unsatisfiedConstraintIDs),
                         onSelect: { selectEntities(of: constraint) },
                         onDelete: { delete(constraint) })
                 }
@@ -190,6 +192,10 @@ struct ConstraintsSectionContent: View {
 /// routes them through the model's funnels.
 private struct ConstraintRow: View {
     let constraint: Constraint
+    /// Whether the geometry does NOT satisfy this constraint (its id is in the model's
+    /// `unsatisfiedConstraintIDs` — a `.failed` component). Drives the warning styling so
+    /// the row flags it instead of showing it as if it holds.
+    let isUnsatisfied: Bool
     let onSelect: () -> Void
     let onDelete: () -> Void
 
@@ -201,6 +207,7 @@ private struct ConstraintRow: View {
                 referenceLine
             }
             Spacer(minLength: DS.Space.xs)
+            if isUnsatisfied { warningBadge }
             deleteButton
         }
         .padding(.vertical, DS.Space.xxs)
@@ -222,7 +229,21 @@ private struct ConstraintRow: View {
         Text(ConstraintGlyph.label(for: constraint.kind))
             .font(.callout.weight(.semibold))
             .frame(width: DS.Size.rowIcon, alignment: .center)
-            .foregroundStyle(DS.Palette.accent)
+            // Orange when the geometry doesn't honor it (mirrors the on-canvas warning
+            // badge); the normal accent otherwise.
+            .foregroundStyle(isUnsatisfied ? Color.orange : DS.Palette.accent)
+    }
+
+    /// A small warning indicator shown on an UNSATISFIED row: an orange triangle with the
+    /// pure `unsatisfiedNote` as its tooltip, so a constraint the geometry can't honor is
+    /// visibly flagged in the list (not just on the canvas).
+    @ViewBuilder
+    private var warningBadge: some View {
+        Image(systemName: "exclamationmark.triangle.fill")
+            .font(DS.Font.hint)
+            .foregroundStyle(Color.orange)
+            .help(ConstraintListModel.unsatisfiedNote(constraint, unsatisfiedIDs: [constraint.id])
+                  ?? "This constraint is not satisfied by the geometry")
     }
 
     /// The kind name + (for a dimensional constraint) its driven value.

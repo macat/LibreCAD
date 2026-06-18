@@ -94,6 +94,24 @@ enum ConstraintListModel {
             : constraints.filter { !$0.inferred }
     }
 
+    // MARK: Unsatisfied flag (the geometry does NOT honor this constraint)
+
+    /// Whether constraint `c` is currently UNSATISFIED — its id is in `unsatisfiedIDs`
+    /// (the model's `unsatisfiedConstraintIDs`, the constraints living in a `.failed`
+    /// component the solver could not satisfy). A flagged row must read as a WARNING (the
+    /// geometry does not actually honor it), mirroring the glyph overlay's warning tint —
+    /// so an over-constrained / conflicting constraint is never shown as if it holds.
+    static func isUnsatisfied(_ c: Constraint, unsatisfiedIDs: Set<UUID>) -> Bool {
+        unsatisfiedIDs.contains(c.id)
+    }
+
+    /// A short trailing WARNING note for an unsatisfied row (nil when the constraint is
+    /// satisfied), e.g. "not satisfied". The view appends/styles it; kept here so the
+    /// wording is decided in the pure, unit-tested layer.
+    static func unsatisfiedNote(_ c: Constraint, unsatisfiedIDs: Set<UUID>) -> String? {
+        isUnsatisfied(c, unsatisfiedIDs: unsatisfiedIDs) ? "not satisfied" : nil
+    }
+
     // MARK: Click-to-select target
 
     /// The set of entity ids a row's click-to-select should select — the DISTINCT entities

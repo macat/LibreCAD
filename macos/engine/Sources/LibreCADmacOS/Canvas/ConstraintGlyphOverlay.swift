@@ -251,6 +251,18 @@ final class ConstraintGlyphOverlayView: NSView {
     }
     private static var glyphColor: NSColor { NSColor.controlAccentColor }
 
+    // WARNING palette for a constraint the geometry does NOT satisfy (`.failed`
+    // component): an orange tint so an UNSATISFIED constraint is never shown as if it
+    // holds — the safety net for over-constrained DXF loads / edge cases that bypass the
+    // manual-apply rollback.
+    private static var warningChipFill: NSColor {
+        NSColor.systemOrange.withAlphaComponent(0.18)
+    }
+    private static var warningChipStroke: NSColor {
+        NSColor.systemOrange.withAlphaComponent(0.95)
+    }
+    private static var warningGlyphColor: NSColor { NSColor.systemOrange }
+
     // MARK: Click-through
 
     /// ALWAYS transparent to clicks: the constraint badges are pure chrome, so every
@@ -280,12 +292,20 @@ final class ConstraintGlyphOverlayView: NSView {
             worldToScreen: { viewport.worldToScreen($0) },
             worldOutward: { [model] c in Self.outwardWorld(c, model: model) })
 
-        let textAttrs: [NSAttributedString.Key: Any] = [
-            .font: Self.badgeFont,
-            .foregroundColor: Self.glyphColor,
-        ]
+        // Constraints the geometry does NOT satisfy (a `.failed` component) draw in the
+        // WARNING palette so a dangling badge is never shown as if it holds.
+        let unsatisfied = model.unsatisfiedConstraintIDs
 
         for p in placements {
+            let warn = unsatisfied.contains(p.constraintID)
+            let glyphColor = warn ? Self.warningGlyphColor : Self.glyphColor
+            let fill = warn ? Self.warningChipFill : Self.chipFill
+            let stroke = warn ? Self.warningChipStroke : Self.chipStroke
+
+            let textAttrs: [NSAttributedString.Key: Any] = [
+                .font: Self.badgeFont,
+                .foregroundColor: glyphColor,
+            ]
             let attributed = NSAttributedString(string: p.label, attributes: textAttrs)
             let textSize = attributed.size()
             // Rounded chip centered on the anchor.
@@ -297,10 +317,10 @@ final class ConstraintGlyphOverlayView: NSView {
             let chipPath = NSBezierPath(
                 roundedRect: chip,
                 xRadius: Self.badgeCornerRadius, yRadius: Self.badgeCornerRadius)
-            Self.chipFill.setFill()
+            fill.setFill()
             chipPath.fill()
-            Self.chipStroke.setStroke()
-            chipPath.lineWidth = 1
+            stroke.setStroke()
+            chipPath.lineWidth = warn ? 1.5 : 1
             chipPath.stroke()
             // Centered glyph.
             let textOrigin = CGPoint(
