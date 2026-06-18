@@ -56,7 +56,9 @@ typedef enum LCDxfVersion {
     LC_DXF_R2000 = 2,   /**< AC1015 — the default. */
     LC_DXF_R2004 = 3,   /**< AC1018. */
     LC_DXF_R2007 = 4,   /**< AC1021. */
-    LC_DXF_R2018 = 5    /**< AC1032. */
+    LC_DXF_R2018 = 5,   /**< AC1032. */
+    LC_DXF_R2010 = 6,   /**< AC1024 — added for DWG versioned write (R2010). */
+    LC_DXF_R2013 = 7    /**< AC1027 — added for DWG versioned write (R2013). */
 } LCDxfVersion;
 
 /* ------------------------------------------------------------------------- *
@@ -1095,9 +1097,10 @@ LCStatus lc_dxf_write(const char *path,
  * supported entity is encoded into the DWG object stream.
  *
  * Format scope (the honest state of libdxfrw's DWG writer in THIS repo):
- *  - DWG WRITE supports ONLY version R2000 (AC1015). The `version` argument is
- *    ACCEPTED for ABI symmetry with `lc_dxf_write` but is forced to R2000 (any
- *    other value is overridden); libdxfrw's `dwgRW::write` rejects non-AC1015.
+ *  - DWG WRITE supports versions R2000 (AC1015), R2004 (AC1018), R2010 (AC1024),
+ *    R2013 (AC1027), and R2018 (AC1032). Versions R12, R14, R2007, and any unknown
+ *    value clamp to R2000 (AC1015). The `version` argument is honoured; the
+ *    corresponding libdxfrw dwgWriter is selected by `dwgRW::write`.
  *  - Top-level entities of every kind `lc_dxf_write` supports are emitted
  *    (LINE/POINT/CIRCLE/ARC/ELLIPSE/LWPOLYLINE/POLYLINE/SPLINE/TEXT/MTEXT/
  *    SOLID/HATCH/DIMENSION/INSERT). Unsupported kinds are skipped + counted in
@@ -1126,7 +1129,9 @@ LCStatus lc_dxf_write(const char *path,
  *                      (may be NULL iff 0). Accepted for ABI symmetry but NOT
  *                      written for DWG (the writer makes empty blocks).
  * @param blockEntityCount Number of block-member entities (>= 0).
- * @param version       An LCDxfVersion. IGNORED — DWG write is R2000-only.
+ * @param version       An LCDxfVersion. Versioned DWG write: R2000/R2004/R2010/R2013/R2018
+ *                      select the corresponding libdxfrw dwgWriter. R12, R14, R2007, and
+ *                      unknown values clamp to R2000 (AC1015).
  * @param out_skipped   If non-NULL, receives the count of entities whose kind is
  *                      not supported by the writer (skipped). 0 on error.
  * @param header        Optional pointer to the drawing HEADER variables to emit

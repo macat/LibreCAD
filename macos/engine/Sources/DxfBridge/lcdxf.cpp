@@ -1952,10 +1952,14 @@ public:
 
     // DWG mode: drive the DWG writer (`dwgRW`). The SAME per-kind geometry
     // mapping runs; the only differences are routed through the `emit*` helpers
-    // and the table/block callbacks below: dwgWriter15 emits the standard
-    // R2000 tables internally (so writeLayers/LTypes/Textstyles are no-ops),
+    // and the table/block callbacks below: the DWG writers (dwgWriter15/18/24/27/32)
+    // emit the standard tables internally (so writeLayers/LTypes/Textstyles are no-ops),
     // and user blocks are declared via `defineBlock` (empty, no member geometry).
+    // `dwgVersion` must be the same DRW::Version passed to `dwgRW::write` so that
+    // `writerVersion()` gates (transparency/spline/dimension etc.) agree with the
+    // actual format being written.
     WritingInterface(dwgRW *dwg,
+                     DRW::Version dwgVersion,
                      const LCEntity *entities, int entityCount,
                      const LCLayer *layers, int layerCount,
                      const LCBlock *blocks, int blockCount,
@@ -1966,6 +1970,7 @@ public:
                      const LCViewport *viewports, int viewportCount,
                      const LCHeaderVar *headerVars, int headerVarCount)
         : m_dwg(dwg),
+          m_dwgVersion(dwgVersion),
           m_entities(entities), m_entityCount(entityCount < 0 ? 0 : entityCount),
           m_layers(layers), m_layerCount(layerCount < 0 ? 0 : layerCount),
           m_blocks(blocks), m_blockCount(blockCount < 0 ? 0 : blockCount),
@@ -1988,8 +1993,9 @@ public:
     // base class, so route through these thin helpers: drive whichever writer is
     // set. Exactly one of m_dxf / m_dwg is non-null (set by the ctor used).
     DRW::Version writerVersion() const {
-        // DWG write is always R2000 (AC1015); the DXF writer carries its own.
-        return m_dwg ? DRW::AC1015 : m_dxf->getVersion();
+        // DWG: return the version passed at construction (set by toDwgVersion).
+        // DXF: the dxfRW writer carries its own version; read it directly.
+        return m_dwg ? m_dwgVersion : m_dxf->getVersion();
     }
     void emitPoint(DRW_Point *e)        { if (m_dwg) m_dwg->writePoint(e);     else m_dxf->writePoint(e); }
     void emitLine(DRW_Line *e)          { if (m_dwg) m_dwg->writeLine(e);      else m_dxf->writeLine(e); }
@@ -2413,6 +2419,9 @@ private:
     // m_dwg. The emit*/table callbacks branch on whether m_dwg is non-null.
     dxfRW *m_dxf = nullptr;
     dwgRW *m_dwg = nullptr;
+    // DWG-only: the actual DRW::Version passed to dwgRW::write, so writerVersion()
+    // returns the correct tier for transparency/spline/dimension version gates.
+    DRW::Version m_dwgVersion = DRW::AC1015;
     const LCEntity *m_entities;
     int m_entityCount;
     const LCLayer *m_layers;
@@ -3334,7 +3343,24 @@ inline DRW::Version toDrwVersion(int v) {
     case LC_DXF_R2004: return DRW::AC1018;
     case LC_DXF_R2007: return DRW::AC1021;
     case LC_DXF_R2018: return DRW::AC1032;
+    case LC_DXF_R2010: return DRW::AC1024;
+    case LC_DXF_R2013: return DRW::AC1027;
     default:           return DRW::AC1015;
+    }
+}
+
+// Map the public LCDxfVersion enum onto the DWG-writable subset of DRW::Version.
+// libdxfrw's dwgRW::write accepts exactly AC1015/AC1018/AC1024/AC1027/AC1032.
+// Versions that have no dwgWriter (R12, R14, R2007/AC1021) and any unknown value
+// are clamped to AC1015 (R2000) to prevent a BAD_VERSION error on DWG save.
+inline DRW::Version toDwgVersion(int v) {
+    switch (v) {
+    case LC_DXF_R2000: return DRW::AC1015;   // R2000  — dwgWriter15
+    case LC_DXF_R2004: return DRW::AC1018;   // R2004  — dwgWriter18
+    case LC_DXF_R2010: return DRW::AC1024;   // R2010  — dwgWriter24
+    case LC_DXF_R2013: return DRW::AC1027;   // R2013  — dwgWriter27
+    case LC_DXF_R2018: return DRW::AC1032;   // R2018  — dwgWriter32
+    default:           return DRW::AC1015;   // R12/R14/R2007/unknown → clamp to R2000
     }
 }
 
@@ -3595,7 +3621,8 @@ extern "C" LCStatus lc_dwg_write(const char *path,
                                  const LCTextStyle *textStyles, int textStyleCount,
                                  const LCViewport *viewports, int viewportCount,
                                  const LCHeaderVar *headerVars, int headerVarCount) {
-    (void)version;   // DWG write is R2000-only; the arg is accepted for ABI symmetry.
+    // version is honoured: map to the DWG-writable subset (clamp non-DWG tiers to R2000).
+    const DRW::Version dwgVer = toDwgVersion(version);
     if (out_skipped != nullptr) {
         *out_skipped = 0;
     }
@@ -3613,18 +3640,19 @@ extern "C" LCStatus lc_dwg_write(const char *path,
         return LC_ERR_INVALID_PATH;
     }
     // The DWG counterpart of lc_dxf_write: same PODs, same WritingInterface, but
-    // driven through dwgRW (its dwgWriter15) at the only version it supports,
-    // R2000 (AC1015). try/catch keeps any exception from crossing the C boundary.
+    // driven through dwgRW (dispatches dwgWriter15/18/24/27/32 per dwgVer).
+    // try/catch keeps any exception from crossing the C boundary.
     try {
         dwgRW dwg(path);
-        WritingInterface iface(&dwg, entities, entityCount, layers, layerCount,
+        WritingInterface iface(&dwg, dwgVer,
+                               entities, entityCount, layers, layerCount,
                                blocks, blockCount, blockEntities, blockEntityCount,
                                header, dimStyles, dimStyleCount,
                                textStyles, textStyleCount,
                                viewports, viewportCount,
                                headerVars, headerVarCount);
         // bin is ignored by dwgRW (DWG is always binary); pass false for symmetry.
-        const bool ok = dwg.write(&iface, DRW::AC1015, /*bin=*/false);
+        const bool ok = dwg.write(&iface, dwgVer, /*bin=*/false);
         if (!ok) {
             return LC_ERR_WRITE_FAILED;
         }

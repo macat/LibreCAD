@@ -63,6 +63,10 @@ public enum DXFVersion: Int32, Sendable {
     case r2004 = 3
     case r2007 = 4
     case r2018 = 5
+    /// AutoCAD 2010 (AC1024). Added for versioned DWG write; DXF path also supports it.
+    case r2010 = 6
+    /// AutoCAD 2013 (AC1027). Added for versioned DWG write; DXF path also supports it.
+    case r2013 = 7
 }
 
 // MARK: - Errors
@@ -168,9 +172,11 @@ extension CADEngine {
 
     /// Writes `entities` + `layers` to a DWG file at `path` (overwriting it). The
     /// DWG counterpart of `writeEntities(...toPath:)`: SAME inputs and POD-build
-    /// path, but the bytes are encoded as a binary R2000 (AC1015) DWG via the
-    /// bridge's `lc_dwg_write` (libdxfrw `dwgRW`). DWG write is R2000-only, so the
-    /// `version` parameter is omitted here.
+    /// path, but the bytes are encoded as a binary DWG via the bridge's
+    /// `lc_dwg_write` (libdxfrw `dwgRW`). The `version` selects the DWG format
+    /// tier: R2000 (AC1015), R2004 (AC1018), R2010 (AC1024), R2013 (AC1027), or
+    /// R2018 (AC1032). Versions without a dedicated DWG writer (R12, R14, R2007)
+    /// are clamped to R2000 by the bridge.
     ///
     /// Round-trip scope (the honest state of libdxfrw's DWG writer): top-level
     /// entities of every supported kind, layer "0" + the standard tables, and
@@ -178,6 +184,9 @@ extension CADEngine {
     /// geometry is NOT written to DWG (the library's `defineBlock` makes empty
     /// blocks); for full block-content round-trip use DXF.
     ///
+    /// - Parameters:
+    ///   - version: DWG format version to write. Defaults to `.r2000` (AC1015).
+    ///             Non-DWG tiers (`.r12`, `.r14`, `.r2007`) clamp to `.r2000`.
     /// - Throws: `CADWriteError.invalidPath` for a null/empty path;
     ///   `CADWriteError.writeFailed` if libdxfrw cannot write the file.
     public func writeEntities(
@@ -190,7 +199,8 @@ extension CADEngine {
         textStyles: TextStyleTable = TextStyleTable(),
         layouts: [Layout] = [],
         tables: [TableObject] = [],
-        toDWGPath path: String
+        toDWGPath path: String,
+        version: DXFVersion = .r2000
     ) throws -> DXFWriteResult {
         try writeEntities(entities, layers: layers, blocks: blocks,
                           blockMembers: blockMembers,
@@ -198,7 +208,7 @@ extension CADEngine {
                           textStyles: textStyles,
                           layouts: layouts,
                           tables: tables,
-                          toPath: path, version: .r2000, writer: lc_dwg_write)
+                          toPath: path, version: version, writer: lc_dwg_write)
     }
 
     /// Shared write core for the DXF and DWG entry points. Builds the flat POD
