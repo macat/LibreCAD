@@ -1,0 +1,13 @@
+{
+  "_comment": "Hatch fill. HatchTool reads context.selected (the closed boundary), so the boundary MUST be selected BEFORE activating Hatch + the commit click. We draw a circle (id 1) as the closed boundary, select it, activate Hatch, then a single click fills it. currentHatchPattern is left nil => SOLID fill (proves the fill region renders). The fill appears as a filled disc; assert shows fillCount goes up and entityCount = 2 (circle + hatch). To show a PATTERNED hatch instead, add before activateTool: {\"op\":\"setOption\",\"field\":\"currentHatchPattern\",\"value\":\"ANSI31\"}.",
+  "space": "model",
+  "dpi": 150,
+  "actions": [
+    { "op": "addCircle", "center": [50, 50], "radius": 40 },
+    { "op": "selectAll" },
+    { "op": "activateTool", "tool": "hatch" },
+    { "op": "click", "at": [50, 50] },
+    { "op": "zoomToFit" },
+    { "op": "render", "assert": true }
+  ]
+}

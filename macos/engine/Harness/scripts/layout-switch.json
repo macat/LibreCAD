@@ -1,0 +1,19 @@
+{
+  "_comment": "Active-space switch: model space vs a paper layout. The Capture step scopes the ExportScene to the model's ACTIVE space (DrawingExporter.exportSpace(forActiveSpace:)), so switching the active space changes WHAT is rendered. We put one circle in MODEL space and a DIFFERENT rectangle (4 lines) in a paper layout 'Layout1', render MODEL (only the circle), then activate Layout1 and render PAPER (only the rectangle) — two distinct PNGs proving the space scoping. Outputs: layout-switch-model.png and layout-switch-paper.png (the wrapper's default single-PNG path is unused here because this scene renders twice with explicit paths).",
+  "space": "model",
+  "dpi": 150,
+  "actions": [
+    { "op": "addLayout", "name": "Layout1", "tabOrder": 0 },
+    { "op": "addCircle", "center": [50, 50], "radius": 40 },
+    { "op": "addLine", "from": [0, 0],   "to": [120, 0],   "space": "paper", "layout": "Layout1" },
+    { "op": "addLine", "from": [120, 0], "to": [120, 80],  "space": "paper", "layout": "Layout1" },
+    { "op": "addLine", "from": [120, 80],"to": [0, 80],    "space": "paper", "layout": "Layout1" },
+    { "op": "addLine", "from": [0, 80],  "to": [0, 0],     "space": "paper", "layout": "Layout1" },
+    { "op": "model" },
+    { "op": "zoomToFit" },
+    { "op": "render", "path": "macos/build/harness-shots/layout-switch-model.png", "assert": true },
+    { "op": "layout", "name": "Layout1" },
+    { "op": "zoomToFit" },
+    { "op": "render", "path": "macos/build/harness-shots/layout-switch-paper.png", "assert": true }
+  ]
+}

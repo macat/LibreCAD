@@ -1,0 +1,14 @@
+{
+  "_comment": "Aligned dimension over a horizontal segment. The aligned-dim tool takes THREE clicks: extension-origin 1, extension-origin 2, then the dimension-line location (commits on the 3rd). The dimension's extension lines, dimension line, arrowheads, and measurement TEXT are all part of the export scene, so they appear in the PNG. This scene is also the harness hang-smoke (it bears dimension glyph text, which exercises the font/glyph-fill path).",
+  "space": "model",
+  "dpi": 150,
+  "actions": [
+    { "op": "addLine", "from": [0, 0], "to": [120, 0] },
+    { "op": "activateTool", "tool": "alignedDim" },
+    { "op": "click", "at": [0, 0] },
+    { "op": "click", "at": [120, 0] },
+    { "op": "click", "at": [60, 35] },
+    { "op": "zoomToFit" },
+    { "op": "render", "assert": true }
+  ]
+}

@@ -143,16 +143,28 @@ extension ActionScene {
         switch op {
 
         // MARK: geometry helpers (direct entity add — no tool/modal needed)
+        // An optional "space":"paper" + "layout":"<name>" places the entity in a
+        // paper layout (the layout must already exist — create it with `addLayout`),
+        // so a layout-switch scene can put distinct geometry on the sheet.
         case "addLine":
             let a = try req("from", vector)
             let b = try req("to", vector)
             model.drawing.add(EntityRecord(id: EntityID(0),
-                kind: .line(LineData(start: a, end: b))))
+                kind: .line(LineData(start: a, end: b)),
+                space: entitySpace(step), layoutName: step.fields["layout"] as? String))
         case "addCircle":
             let c = try req("center", vector)
             let r = try req("radius", number)
             model.drawing.add(EntityRecord(id: EntityID(0),
-                kind: .circle(CircleData(center: c, radius: r))))
+                kind: .circle(CircleData(center: c, radius: r)),
+                space: entitySpace(step), layoutName: step.fields["layout"] as? String))
+
+        case "addLayout":
+            // Create a paper-space layout (pure value; no modal). No-op if it exists.
+            let name = try req("name", string)
+            let order = number(step.fields["tabOrder"]).map { Int($0) } ?? 0
+            let created = model.drawing.addLayout(Layout(name: name, tabOrder: order))
+            print("LCShot: addLayout '\(name)' -> \(created ? "created" : "already exists")")
 
         // MARK: tools
         case "activateTool":
@@ -203,14 +215,22 @@ extension ActionScene {
                 print("LCShot: constraint '\(kindName)' applied to \(ids.count) entities")
             }
         case "dimConstrain":
+            // Either a literal `value` (the value: overload) OR an `expr` that binds
+            // the dimension to a named parameter (the expression: overload) — the
+            // latter is how a parametric scene drives geometry from `param`/`cmd a=…`.
             let kindName = try req("kind", string)
             let ids = try req("ids", uint64Array).map { EntityID($0) }
-            let value = try req("value", number)
             guard let kind = DimensionalConstraintKind(rawValue: kindName) else {
                 throw LCShotError(message: "action #\(i): unknown dimensional constraint '\(kindName)'")
             }
-            let ok = model.addConstraint(kind, entities: ids, value: value)
-            print("LCShot: dimConstrain '\(kindName)' value=\(value) -> \(ok ? "applied" : "false (unsupported / wrong arity)")")
+            if let expr = step.fields["expr"] as? String {
+                let ok = model.addConstraint(kind, entities: ids, expression: expr)
+                print("LCShot: dimConstrain '\(kindName)' expr=\(expr) -> \(ok ? "applied" : "false (unsupported / wrong arity)")")
+            } else {
+                let value = try req("value", number)
+                let ok = model.addConstraint(kind, entities: ids, value: value)
+                print("LCShot: dimConstrain '\(kindName)' value=\(value) -> \(ok ? "applied" : "false (unsupported / wrong arity)")")
+            }
 
         // MARK: parameters
         case "param":
@@ -254,11 +274,12 @@ extension ActionScene {
         default:
             throw LCShotError(
                 message: "unknown or excluded action '\(op)' (action #\(i)). " +
-                         "Allowed verbs: addLine, addCircle, activateTool, click, value, " +
-                         "move, commit, cancel, backspace, select, selectAll, constrain, " +
-                         "dimConstrain, param, cmd, model, layout, space, zoomToFit, " +
-                         "setOption, render. Verbs needing a file/open/save panel are " +
-                         "deliberately excluded (they would hang the headless harness).",
+                         "Allowed verbs: addLine, addCircle, addLayout, activateTool, " +
+                         "click, value, move, commit, cancel, backspace, select, " +
+                         "selectAll, constrain, dimConstrain, param, cmd, model, layout, " +
+                         "space, zoomToFit, setOption, render. Verbs needing a file/" +
+                         "open/save panel are deliberately excluded (they would hang " +
+                         "the headless harness).",
                 exitCode: 3)
         }
     }
@@ -336,6 +357,11 @@ extension ActionScene {
         return nil
     }
     private static func string(_ v: Any?) -> String? { v as? String }
+    /// The `EntitySpace` a direct-add verb targets: `"space":"paper"` ⇒ `.paper`,
+    /// anything else (incl. absent) ⇒ `.model`.
+    private static func entitySpace(_ step: ActionStep) -> EntitySpace {
+        (step.fields["space"] as? String) == "paper" ? .paper : .model
+    }
     private static func boolValue(_ v: Any?) -> Bool? {
         if let b = v as? Bool { return b }
         if let n = v as? NSNumber { return n.boolValue }
