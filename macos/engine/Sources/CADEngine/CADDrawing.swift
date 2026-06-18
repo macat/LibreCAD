@@ -639,6 +639,21 @@ public final class CADDrawing {
     /// is a LATER wave.
     public private(set) var constraints = ConstraintTable()
 
+    /// The TABLE-OBJECT list (Wave 2b — engine, UNWIRED): the document's ACAD_TABLE-style
+    /// tables (`TableObject`), ADDITIVE document state — NOT a new `EntityKind` case
+    /// (the deliberate Wave 2b decision: adding an enum case is a serialized critical
+    /// section over ~28 exhaustive switches, so a table lives in a SEPARATE list, exactly
+    /// like `Layout.viewports` and the constraint table). Each `TableObject` carries its
+    /// own grid (`TableGeometry.materialize` produces its lines + cell text on demand);
+    /// the list is ORDERED (the array IS the order) and identity is by `TableObject.id`.
+    /// Mutated only through the undoable funnel (`mutateTables` and its `addTable` /
+    /// `removeTable` / `updateTable` helpers), mirroring the layer/block/layout/constraint
+    /// tables; carried by value so it snapshots cheaply for undo (ADR-002) and round-trips
+    /// through the Codable document payload. The render-collection seam (iterating
+    /// `drawing.tables` at resolve time in CanvasModel) + DXF persistence are LATER waves
+    /// (the wire-wave and Wave 6 respectively).
+    public private(set) var tables: [TableObject] = []
+
     /// The `UndoManager` mutations register with. Injected by the document layer
     /// (SwiftUI hands one in from `DocumentGroup`); nil == undo disabled.
     public weak var undoManager: UndoManager?
@@ -1081,6 +1096,66 @@ public final class CADDrawing {
         var changed = false
         mutateConstraints { changed = $0.setValue(id, value) }
         return changed
+    }
+
+    // MARK: - Table objects (value-snapshot undo of the whole table list)
+    //
+    // The table-object list (Wave 2b) mirrors the constraint/layout tables: a
+    // whole-list value-snapshot undo funnel (`mutateTables`) plus add / remove / update
+    // helpers keyed by `TableObject.id`. `[TableObject]` is a value type, so the undo
+    // snapshot is one array copy (ADR-002), and a no-op edit registers no undo. Tables
+    // are ADDITIVE document state (NOT an `EntityKind`), so — unlike entities — they are
+    // never referenced by the entity-`remove(...)` dangling-drop path.
+
+    /// The table with `id`, or `nil`.
+    public func table(_ id: UUID) -> TableObject? {
+        tables.first { $0.id == id }
+    }
+
+    /// Whether a table with `id` is present.
+    public func hasTable(_ id: UUID) -> Bool {
+        tables.contains { $0.id == id }
+    }
+
+    /// Whole-list table mutation with undo (the same value-snapshot scheme as
+    /// `mutateConstraints`/`mutateLayouts`). No-op edits don't pollute undo.
+    public func mutateTables(_ body: (inout [TableObject]) -> Void) {
+        let prior = tables
+        body(&tables)
+        guard tables != prior else { return }
+        registerUndo { drawing in
+            drawing.mutateTables { $0 = prior }
+        }
+    }
+
+    /// Appends a table object (undoable). No-op (no undo) if a table with the same id
+    /// already exists, so a double-add (e.g. an undo race) can't duplicate it. Returns
+    /// `true` if added.
+    @discardableResult
+    public func addTable(_ table: TableObject) -> Bool {
+        guard !hasTable(table.id) else { return false }
+        mutateTables { $0.append(table) }
+        return true
+    }
+
+    /// Removes the table with `id` (undoable). No-op (no undo) if absent. Returns `true`
+    /// if removed.
+    @discardableResult
+    public func removeTable(_ id: UUID) -> Bool {
+        guard hasTable(id) else { return false }
+        mutateTables { $0.removeAll { $0.id == id } }
+        return true
+    }
+
+    /// Replaces the table with the same id (undoable). No-op (no undo) if absent or the
+    /// value is unchanged. Returns `true` if a table was replaced. The single-table edit
+    /// path (resize a row/col, edit a cell, merge cells) goes through here.
+    @discardableResult
+    public func updateTable(_ table: TableObject) -> Bool {
+        guard let i = tables.firstIndex(where: { $0.id == table.id }) else { return false }
+        guard tables[i] != table else { return false }
+        mutateTables { $0[i] = table }
+        return true
     }
 
     // MARK: - Block mutations (value-snapshot undo of the whole BlockTable)
@@ -1976,7 +2051,8 @@ public final class CADDrawing {
         dimStyles newDimStyles: DimStyleTable = DimStyleTable(),
         textStyles newTextStyles: TextStyleTable = TextStyleTable(),
         layouts newLayouts: [Layout] = [],
-        constraints newConstraints: ConstraintTable = ConstraintTable()
+        constraints newConstraints: ConstraintTable = ConstraintTable(),
+        tables newTables: [TableObject] = []
     ) {
         entities = newEntities
         layers = newLayers
@@ -1987,6 +2063,11 @@ public final class CADDrawing {
         // callers (and a constraint-free drawing) are unchanged; a future Codable
         // document payload threads the loaded table here.
         constraints = newConstraints
+        // The TABLE-OBJECT list (Wave 2b). Defaults to empty so existing callers (and a
+        // table-free drawing) are unchanged; a future Codable document payload threads
+        // the loaded tables here (the render-collection wire-wave + DXF persistence are
+        // later waves).
+        tables = newTables
         // The STYLE (text-style) table so a TEXT/MTEXT entity's code-7 style name
         // resolves to the file's real font (the text-style round-trip read side).
         // Defaults to the standard table so existing callers are unchanged.
