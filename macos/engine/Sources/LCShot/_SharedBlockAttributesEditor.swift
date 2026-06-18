@@ -1,0 +1,1 @@
+../LibreCADmacOS/Sidebar/BlockAttributesEditor.swift

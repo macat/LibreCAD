@@ -1,0 +1,16 @@
+{
+  "_comment": "Parametric geometry driven by a named parameter. We define a=120 (cmd 'a=120' routes to a parameter assignment), draw two circles (ids 1 & 2) whose centers start 60 apart, FIX circle 1 (geometric .fix anchor so the solver moves the OTHER one), then bind a DIMENSIONAL distance constraint between the two centers to the expression 'a'. For a CIRCLE the distance constraint's point is its CENTER (Constraints.swift:45-46), so the solver translates circle 2 until the center-to-center distance equals a=120. The PNG shows the two circles separated by 120 (not the initial 60) — geometry sized by the parameter. NOTE: the dimensional-constraint glyph/value chip is canvas chrome and is NOT in the PNG; the proof is the re-solved separation.",
+  "space": "model",
+  "dpi": 150,
+  "actions": [
+    { "op": "cmd", "text": "a=120" },
+    { "op": "addCircle", "center": [0, 0], "radius": 15 },
+    { "op": "addCircle", "center": [60, 0], "radius": 15 },
+    { "op": "select", "ids": [1] },
+    { "op": "constrain", "kind": "fix", "ids": [1] },
+    { "op": "select", "ids": [1, 2] },
+    { "op": "dimConstrain", "kind": "distance", "ids": [1, 2], "expr": "a" },
+    { "op": "zoomToFit" },
+    { "op": "render", "assert": true }
+  ]
+}

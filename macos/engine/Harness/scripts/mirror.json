@@ -1,0 +1,16 @@
+{
+  "_comment": "Mirror-COPY. MirrorTool reads context.selected, so the geometry MUST be selected BEFORE activating Mirror + the two mirror-axis clicks; an empty selection no-ops every click. mirrorKeepOriginal defaults true => a COPY (original + reflection both remain). We draw an asymmetric L (two lines, ids 1 & 2), select all, then mirror across the vertical axis x=120 (axis points [120,-50]->[120,150]). After commit the entity count goes UP by the mirrored copies (assert: entityCount 4 = 2 originals + 2 copies); the two copies appear mirrored on the far side of x=120.",
+  "space": "model",
+  "dpi": 150,
+  "actions": [
+    { "op": "addLine", "from": [0, 0], "to": [80, 0] },
+    { "op": "addLine", "from": [0, 0], "to": [0, 50] },
+    { "op": "selectAll" },
+    { "op": "setOption", "field": "mirrorKeepOriginal", "value": true },
+    { "op": "activateTool", "tool": "mirror" },
+    { "op": "click", "at": [120, -50] },
+    { "op": "click", "at": [120, 150] },
+    { "op": "zoomToFit" },
+    { "op": "render", "assert": true }
+  ]
+}

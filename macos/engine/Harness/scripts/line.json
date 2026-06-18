@@ -1,0 +1,13 @@
+{
+  "_comment": "Tool-driven line: activate the Line tool and commit a segment with two clicks (the second click commits one segment; cancel ends the polyline run). Proves the tool path (activateTool -> click -> click -> cancel) commits real geometry to the drawing, which then appears in the PNG.",
+  "space": "model",
+  "dpi": 150,
+  "actions": [
+    { "op": "activateTool", "tool": "line" },
+    { "op": "click", "at": [0, 0] },
+    { "op": "click", "at": [100, 60] },
+    { "op": "cancel" },
+    { "op": "zoomToFit" },
+    { "op": "render", "assert": true }
+  ]
+}

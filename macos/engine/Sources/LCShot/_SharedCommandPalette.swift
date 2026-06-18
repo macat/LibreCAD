@@ -1,0 +1,1 @@
+../LibreCADmacOS/CommandPalette.swift

@@ -1,0 +1,1 @@
+../LibreCADmacOS/Sidebar/InspectorSummaries.swift

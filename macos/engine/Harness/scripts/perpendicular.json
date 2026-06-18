@@ -1,0 +1,13 @@
+{
+  "_comment": "Perpendicular GEOMETRIC constraint. IMPORTANT — the constraint GLYPH is canvas CHROME and is ABSENT from the export PNG (overlays are not in the export scene). Do NOT misread the missing glyph as 'broken'. The constraint is proven by the RE-SOLVED GEOMETRY: we draw two lines sharing the corner (0,0) that are NOT perpendicular (line 1 id=1 is horizontal 0,0->100,0; line 2 id=2 goes 0,0->70,40, ~30 degrees), then apply perpendicular to [1,2]. The solver rotates line 2 about the shared corner so the two lines now meet at 90 degrees (line 2 becomes vertical-ish, pointing up from the corner). Compare against the input angle to confirm.",
+  "space": "model",
+  "dpi": 150,
+  "actions": [
+    { "op": "addLine", "from": [0, 0], "to": [100, 0] },
+    { "op": "addLine", "from": [0, 0], "to": [70, 40] },
+    { "op": "select", "ids": [1, 2] },
+    { "op": "constrain", "kind": "perpendicular", "ids": [1, 2] },
+    { "op": "zoomToFit" },
+    { "op": "render", "assert": true }
+  ]
+}
