@@ -3638,6 +3638,13 @@ final class CanvasModel {
         if explicitGroup { undoManager.beginUndoGrouping() }
         defer { if explicitGroup { undoManager.endUndoGrouping() } }
 
+        // AUTO-CONSTRAIN (Lane A): the ids of LINE entities freshly added by this commit,
+        // collected as they are minted so an AutoConstrain pass can weld their corners +
+        // infer angles AFTER all adds land (so a multi-segment commit welds sibling
+        // segments too). Only genuine DRAWs (`adoptsCurrentProperties`) feed this — a
+        // DERIVE/CLONE (Copy/Array/Offset) must not auto-constrain its clones.
+        var autoConstrainCandidates: [EntityID] = []
+
         for edit in edits {
             switch edit {
             case .add(let record):
@@ -3692,6 +3699,14 @@ final class CanvasModel {
                     drawing.addEntityToBlock(name: editing, entityID: id)
                 }
 
+                // AUTO-CONSTRAIN candidate: a genuinely DRAWN line (not a clone, not a
+                // block member). Block members live inside a block's local frame and are
+                // drawn via inserts, not top-level constrainable geometry — exclude them.
+                if adoptsCurrentProperties, editingBlock == nil,
+                   case .line? = drawing.entity(id)?.kind {
+                    autoConstrainCandidates.append(id)
+                }
+
             case .replace(let id, let newKind):
                 // Preserve the entity's layer/pen/flags; swap only its geometry.
                 guard var record = drawing.entity(id) else { continue }
@@ -3715,6 +3730,14 @@ final class CanvasModel {
                 selection.remove(id)
             }
         }
+
+        // AUTO-CONSTRAIN on draw (Lane A): weld touching corners + infer angular
+        // constraints for the lines this commit just drew. Runs INSIDE the still-open
+        // undo group (the `defer` above closes it only at function exit), so the draw and
+        // every auto-constraint it spawns collapse into ONE ⌘Z. A no-op when the toggle is
+        // off or nothing line-shaped was drawn (byte-identical to the pre-feature path).
+        autoConstrain(newLineIDs: autoConstrainCandidates)
+
         modelDirty = true
         modelVersion &+= 1
     }
@@ -5905,6 +5928,322 @@ final class CanvasModel {
             let p0 = c.points[0], p1 = c.points[1]
             return (p0 == pa && p1 == pb) || (p0 == pb && p1 == pa)
         }
+    }
+
+    // MARK: - AutoConstrain on draw (AutoCAD AutoConstrain — Lane A)
+    //
+    // The OWNER'S #1 ask + the cure for "the rectangle falls apart": when the user
+    // DRAWS lines, automatically add VISIBLE constraints — weld touching corners with a
+    // COINCIDENT (the real fix: a perpendicular alone only pins the ANGLE, so the corner
+    // drifts when a grip is dragged), and infer the obvious angular relationship
+    // (HORIZONTAL / VERTICAL / PERPENDICULAR / PARALLEL). This runs at the single
+    // draw-commit choke point (`applyCommit`'s `.add` arm) so EVERY draw path (the live
+    // LineTool chain, the inline-text funnel, a future polyline tool) flows through it.
+    //
+    // SCOPE — LINES ONLY. The MVP `ConstraintSolver` parametrizes `.line`/`.circle`/
+    // `.point`; a POLYLINE endpoint does NOT resolve (`VariableLayout.resolvesPosition`
+    // returns false for it), so a constraint touching a polyline poisons its whole
+    // component to `.failed`. Welding polyline vertices therefore needs SOLVER work
+    // (CADEngine, NOT this lane's `CanvasModel`); auto-constrain skips polylines here and
+    // that capability is flagged as a follow-up rather than silently mis-welding.
+    //
+    // NEVER OVER-CONSTRAIN. Each inferred constraint is added TENTATIVELY and re-solved
+    // through the existing commit-with-resolve path; if the solve `.failed` OR moved the
+    // just-drawn geometry beyond tolerance, the constraint is REMOVED and we move on.
+    // Coincident welds are added FIRST (they are the cure and rarely conflict); the
+    // angular constraint is the one most likely to be dropped on a closed loop. All of
+    // this lands in the SAME undo group as the draw (the caller's `applyCommit` group is
+    // still open), so one ⌘Z reverts the draw AND its auto-constraints together.
+
+    /// `@AppStorage`/`UserDefaults` key gating AutoConstrain-on-draw. DEFAULTS TO ON
+    /// (the key is absent until a settings sheet first writes it; a missing value reads
+    /// as ON via the object-first read in `seedAutoConstrainFromAppSettings`). Lane D's
+    /// settings sheet binds an `@AppStorage(CanvasModel.autoConstrainOnDrawKey)` to the
+    /// SAME literal key. Lives here (a file this lane owns) beside the model's other
+    /// behavior flags; mirrors `CADCanvasController.showConstraintsKey`'s literal-key style.
+    static let autoConstrainOnDrawKey = "draw.autoConstrainOnDraw"
+
+    /// Angular tolerance (radians) for INFERRING an angular constraint — a segment within
+    /// this of an axis (H/V) or of 90°/0° to a connected neighbor (perpendicular/parallel)
+    /// gets that constraint. ~1° — generous enough for a hand-drawn "roughly square"
+    /// corner, tight enough not to mis-classify a deliberate slant.
+    static let autoConstrainAngleTolerance = 1.0 * .pi / 180.0
+
+    /// World-distance tolerance for WELDING two endpoints with a coincident. The dominant
+    /// draw paths land touching corners EXACTLY (the LineTool chains by copying the prior
+    /// `end` into the next `start`; an endpoint-snapped pick returns the exact endpoint),
+    /// so a small absolute tolerance catches every "drawn connected" corner without ever
+    /// joining lines that merely sit near each other. Absolute world units (NOT the old
+    /// `1e-3 · len` relative epsilon, which was too tight for a 10u line and too loose for
+    /// a 0.01u one) and NOT the view-scaled snap aperture (this seam has no live zoom).
+    static let autoConstrainWeldTolerance = 1.0e-6
+
+    /// LIVE AutoConstrain-on-draw flag, read at the `applyCommit` seam. Seeded ON from
+    /// `autoConstrainOnDrawKey` at init; a unit test flips this directly (no `UserDefaults`
+    /// touch). `@ObservationIgnored`: pure behavior state, never rendered.
+    @ObservationIgnored
+    var autoConstrainOnDraw: Bool = (UserDefaults.standard.object(forKey: CanvasModel.autoConstrainOnDrawKey) as? Bool) ?? true
+
+    /// Re-seeds `autoConstrainOnDraw` from a (possibly isolated) defaults store — the
+    /// hermetic seam mirroring `seedSnapSettingsFromAppSettings`. Production reads
+    /// `.standard` at init; a test seeds from its own suite without polluting `.standard`.
+    func seedAutoConstrainFromAppSettings(defaults: UserDefaults = .standard) {
+        autoConstrainOnDraw = (defaults.object(forKey: Self.autoConstrainOnDrawKey) as? Bool) ?? true
+    }
+
+    /// AUTO-CONSTRAIN the freshly-committed LINE entities `newLineIDs`: weld each of their
+    /// endpoints to a coincident EXISTING line endpoint (within `autoConstrainWeldTolerance`),
+    /// then infer ONE angular constraint per new line. Runs INSIDE the caller's open undo
+    /// group (the draw + its constraints are one ⌘Z) and is a no-op when the toggle is off.
+    ///
+    /// Welds first (the cure — they pin corners so an angular re-solve / later grip drag
+    /// keeps the corner joined), each tentatively (drop on a `.failed` solve or a beyond-
+    /// tolerance move). Then one angular constraint per line, same tentative discipline.
+    /// `coincidentExists` / a duplicate-id table guard keep it idempotent.
+    private func autoConstrain(newLineIDs: [EntityID]) {
+        guard autoConstrainOnDraw, !newLineIDs.isEmpty else { return }
+
+        // (1) WELD: for each endpoint of each new line, find the nearest EXISTING line
+        //     endpoint within the weld tolerance and pin them coincident. "Existing" =
+        //     any OTHER line in the drawing (including an earlier sibling in this same
+        //     multi-segment commit, since each was already `drawing.add`ed before this
+        //     pass runs — so a chained polyline-of-lines welds segment-to-segment too).
+        for newID in newLineIDs {
+            guard case .line(let nd)? = drawing.entity(newID)?.kind else { continue }
+            for newPoint in [EntityPoint.start, .end] {
+                let v = (newPoint == .start) ? nd.start : nd.end
+                guard let match = nearestExistingLineEndpoint(to: v, excluding: newID) else { continue }
+                let pa = ConstraintPoint(entityID: newID, point: newPoint)
+                let pb = match
+                guard !coincidentExists(pa, pb) else { continue }
+                tentativelyAdd(.coincident(pa, pb), seeds: [newID, pb.entityID])
+            }
+        }
+
+        // (2) ANGLE: one inferred angular constraint per new line, in priority order.
+        for newID in newLineIDs {
+            addInferredAngularConstraint(for: newID)
+        }
+    }
+
+    /// The nearest START/END of an EXISTING line (anything but `excluding`) to world point
+    /// `v`, within `autoConstrainWeldTolerance`, or `nil`. Ties resolve to the closest;
+    /// only `.line` entities are considered (the solver-weldable endpoint kind).
+    ///
+    /// TODO(perf): linear scan over `drawing.entities`. Fine for the single-segment
+    /// LineTool path (one or two new lines per commit); for a future BULK / multi-segment
+    /// polyline-draw path, query the quadtree by the tiny weld-tolerance box around `v`.
+    private func nearestExistingLineEndpoint(to v: Vector,
+                                             excluding: EntityID) -> ConstraintPoint? {
+        var best: (ConstraintPoint, Double)? = nil
+        for rec in drawing.entities where rec.id != excluding {
+            guard case .line(let d) = rec.kind else { continue }
+            for (pt, w) in [(EntityPoint.start, d.start), (.end, d.end)] {
+                let dist = v.distance(to: w)
+                guard dist <= Self.autoConstrainWeldTolerance else { continue }
+                if best == nil || dist < best!.1 {
+                    best = (ConstraintPoint(entityID: rec.id, point: pt), dist)
+                }
+            }
+        }
+        return best?.0
+    }
+
+    /// Infers ONE angular constraint for the new line `newID`, in PRIORITY order:
+    ///   1. HORIZONTAL  — segment ~axis-aligned to 0°/180°.
+    ///   2. VERTICAL    — segment ~axis-aligned to 90°/270°.
+    ///   3. PERPENDICULAR — to a COINCIDENT-connected neighbor line at ~90°.
+    ///   4. PARALLEL      — to a coincident-connected neighbor line at ~0°/180°.
+    /// At most one is added; each is tentative (dropped on over-constraint). H/V come
+    /// first because they pin the line to the WORLD frame (the strongest intent); the
+    /// relational ones only fire when the absolute ones don't and a welded neighbor exists.
+    private func addInferredAngularConstraint(for newID: EntityID) {
+        guard case .line(let d)? = drawing.entity(newID)?.kind else { return }
+        let len = d.start.distance(to: d.end)
+        guard len > Tolerance.distance else { return }   // degenerate: no direction
+        let tol = Self.autoConstrainAngleTolerance
+        let theta = (d.end - d.start).angle               // [0, 2π)
+
+        // 1 + 2: axis alignment (mod π — a segment and its reverse are the same line).
+        let angMod = theta.truncatingRemainder(dividingBy: .pi)        // [0, π)
+        if Self.angleNear(angMod, 0, tol: tol) || Self.angleNear(angMod, .pi, tol: tol) {
+            tentativelyAdd(.horizontal(line: newID), seeds: [newID]); return
+        }
+        if Self.angleNear(angMod, .pi / 2, tol: tol) {
+            tentativelyAdd(.vertical(line: newID), seeds: [newID]); return
+        }
+
+        // 3 + 4: relational to a COINCIDENT-connected neighbor line. Only neighbors the
+        // weld pass (or a prior corner) actually joined to `newID` qualify — we never
+        // relate two lines that don't share a corner.
+        for neighborID in coincidentNeighborLines(of: newID) {
+            guard case .line(let n)? = drawing.entity(neighborID)?.kind else { continue }
+            let nLen = n.start.distance(to: n.end)
+            guard nLen > Tolerance.distance else { continue }
+            let nTheta = (n.end - n.start).angle
+            let between = Self.acuteAngleBetween(theta, nTheta)        // [0, π/2]
+            if Self.angleNear(between, .pi / 2, tol: tol) {
+                tentativelyAdd(.perpendicular(line: newID, line: neighborID),
+                               seeds: [newID, neighborID]); return
+            }
+            if Self.angleNear(between, 0, tol: tol) {
+                tentativelyAdd(.parallel(line: newID, line: neighborID),
+                               seeds: [newID, neighborID]); return
+            }
+        }
+    }
+
+    /// The OTHER line ids joined to `id` by a COINCIDENT constraint (the corners the weld
+    /// pass — or a prior explicit coincident — pinned). Order is table order (stable).
+    private func coincidentNeighborLines(of id: EntityID) -> [EntityID] {
+        var out: [EntityID] = []
+        var seen = Set<EntityID>([id])
+        for c in drawing.constraints.constraints {
+            guard case .geometric(.coincident) = c.kind, c.references(id) else { continue }
+            for other in c.entityIDs where seen.insert(other).inserted {
+                if case .line? = drawing.entity(other)?.kind { out.append(other) }
+            }
+        }
+        return out
+    }
+
+    /// Adds `constraint` TENTATIVELY: register it, re-solve the components it touches, and
+    /// KEEP it only if the solve succeeded AND moved the seed geometry within tolerance;
+    /// otherwise REMOVE it (so an over/under-constrained add leaves the drawing exactly as
+    /// it was — the AutoCAD "don't over-constrain" rule). Runs in the caller's open undo
+    /// group. The `seeds` are the entities whose geometry must STAY PUT (the freshly drawn
+    /// line + any welded neighbor) — if a tentative angular constraint would splay them we
+    /// drop it. Returns whether the constraint was kept.
+    @discardableResult
+    private func tentativelyAdd(_ constraint: Constraint, seeds: Set<EntityID>) -> Bool {
+        // Snapshot the seed geometry so we can both detect a beyond-tolerance move and
+        // confirm the table actually accepted the add.
+        let before = seeds.reduce(into: [EntityID: EntityKind]()) { acc, id in
+            if let k = drawing.entity(id)?.kind { acc[id] = k }
+        }
+        // `addConstraint` keys on the constraint's fresh UUID, so it never rejects here on
+        // a duplicate (semantic weld-dedup is upstream via `coincidentExists`); the guard
+        // only defends the unreachable false (a UUID collision) — nothing to do then.
+        guard drawing.addConstraint(constraint) else { return false }
+
+        // Re-solve every component the constraint now touches. A `.failed` component
+        // writes nothing (clean revert) — but a constraint that POISONED a component to
+        // `.failed` must still be removed so it doesn't break the NEXT grip-drag re-solve.
+        let solveOK = resolveConstraints(touching: seeds)
+        _ = solveOK   // re-solve already applied any satisfiable motion; we verify below.
+
+        // KEEP only if the constraint is still satisfiable AND the seeds didn't splay.
+        if autoConstraintIsAcceptable(constraint, seeds: seeds, before: before) {
+            return true
+        }
+        drawing.removeConstraint(constraint.id)   // undoable; revert the tentative add
+        // Re-solve once more so any motion the rejected add caused is undone (the now-
+        // smaller constraint set re-satisfies the rest from the reverted geometry).
+        _ = resolveConstraints(touching: seeds)
+        return false
+    }
+
+    /// Whether a just-added auto-constraint should be KEPT: its connected components must
+    /// all still SOLVE (no `.failed`), no seed may have gone NaN, and the seed geometry
+    /// must not have moved beyond a generous tolerance from its pre-add state. A COINCIDENT
+    /// weld is always acceptable when it solves (welding is the whole point — it is allowed
+    /// to translate the new line onto the corner); only ANGULAR constraints are held to the
+    /// "didn't splay the seeds" bar.
+    private func autoConstraintIsAcceptable(_ constraint: Constraint,
+                                            seeds: Set<EntityID>,
+                                            before: [EntityID: EntityKind]) -> Bool {
+        // (a) Every component touching a seed must SOLVE, and no geometry may be non-finite.
+        for seed in seeds {
+            let component = drawing.constraints.connectedComponent(of: seed)
+            var ents: [EntityID: EntityKind] = [:]
+            for id in component { if let k = drawing.entity(id)?.kind { ents[id] = k } }
+            let cons = drawing.constraints.constraints(within: component)
+            guard !cons.isEmpty else { continue }
+            switch ConstraintSolver.solve(entities: ents, constraints: cons) {
+            case .failed:
+                return false
+            case .solved:
+                break
+            }
+        }
+        for id in seeds {
+            if let k = drawing.entity(id)?.kind, !Self.kindIsFinite(k) { return false }
+        }
+
+        // (b) A coincident weld is always kept when it solves (it may legitimately move
+        //     the new line onto the corner). An ANGULAR constraint must NOT have SPLAYED
+        //     the seeds — guard against an over-constraint that warps the drawing.
+        if case .geometric(.coincident) = constraint.kind { return true }
+
+        // The move-bound is RELATIVE to the geometry scale: snapping a near-axis / near-
+        // square segment is a rotation of at most the angle tolerance, so a seed endpoint
+        // moves by at most ~`L · sin(angleTol)`. We allow a generous multiple of that
+        // (rotation can pivot about the far end, doubling the near-end travel, and a welded
+        // neighbor may co-rotate) plus a tiny absolute floor for degenerate-length seeds.
+        // A move BEYOND this means the add fought another constraint and warped the drawing
+        // — drop it. The bound is computed from the LARGEST seed line so both the new line
+        // and its neighbor are covered by one threshold.
+        var maxSeedLen = 0.0
+        for (_, oldKind) in before {
+            if case .line(let l) = oldKind { maxSeedLen = Swift.max(maxSeedLen, l.start.distance(to: l.end)) }
+        }
+        let moveBound = Swift.max(Self.autoConstrainMinAngularMove,
+                                  maxSeedLen * sin(Self.autoConstrainAngleTolerance)
+                                      * Self.autoConstrainMoveSlack)
+        for (id, oldKind) in before {
+            guard let newKind = drawing.entity(id)?.kind else { return false }
+            if Self.maxEndpointShift(oldKind, newKind) > moveBound { return false }
+        }
+        return true
+    }
+
+    /// Headroom multiplier on the `L · sin(angleTol)` expected endpoint travel when judging
+    /// whether an inferred ANGULAR constraint SPLAYED its seeds. A rotation can pivot about
+    /// the far endpoint (so the near endpoint travels up to ~2× the half-rotation arc) and a
+    /// welded neighbor may co-rotate, so we allow several × the nominal travel before
+    /// declaring the add an over-constraint and dropping it.
+    static let autoConstrainMoveSlack = 4.0
+
+    /// Absolute floor on the angular move-bound, so a tiny / degenerate-length seed (whose
+    /// `L · sin(angleTol)` term is ~0) still tolerates float round-off from the re-solve.
+    static let autoConstrainMinAngularMove = 1.0e-6
+
+    /// Whether every coordinate of an entity kind is finite (a guard against an NaN/∞
+    /// solver result leaking into the drawing). Only the auto-weldable/solvable kinds
+    /// (line / circle / point) carry seed geometry here; anything else is trivially finite.
+    private static func kindIsFinite(_ k: EntityKind) -> Bool {
+        switch k {
+        case .line(let d):
+            return d.start.x.isFinite && d.start.y.isFinite && d.end.x.isFinite && d.end.y.isFinite
+        case .circle(let d):
+            return d.center.x.isFinite && d.center.y.isFinite && d.radius.isFinite
+        case .point(let d):
+            return d.position.x.isFinite && d.position.y.isFinite
+        default:
+            return true
+        }
+    }
+
+    /// The largest endpoint displacement between two LINE geometries (∞ if either side
+    /// isn't a line / they don't correspond) — the "did this constraint splay the seed"
+    /// metric. Compares start↔start and end↔end (auto-constraints never reorder endpoints).
+    private static func maxEndpointShift(_ a: EntityKind, _ b: EntityKind) -> Double {
+        guard case .line(let la) = a, case .line(let lb) = b else { return 0 }
+        return Swift.max(la.start.distance(to: lb.start), la.end.distance(to: lb.end))
+    }
+
+    /// Whether two angles (radians) are within `tol` of each other.
+    static func angleNear(_ x: Double, _ y: Double, tol: Double) -> Bool {
+        abs(x - y) <= tol
+    }
+
+    /// The ACUTE angle (in [0, π/2]) between two line directions `t1`, `t2` (radians) —
+    /// direction-agnostic (a line and its reverse are the same), so it folds the raw
+    /// difference into [0, π/2]. 0 ⇒ parallel, π/2 ⇒ perpendicular.
+    static func acuteAngleBetween(_ t1: Double, _ t2: Double) -> Double {
+        var d = abs(t1 - t2).truncatingRemainder(dividingBy: .pi)   // [0, π)
+        if d > .pi / 2 { d = .pi - d }                              // fold to [0, π/2]
+        return d
     }
 
     /// Removes the constraint with `id` (undoable). The geometry it WAS holding is left
