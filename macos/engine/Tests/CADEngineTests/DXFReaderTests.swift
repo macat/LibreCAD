@@ -83,6 +83,9 @@ struct DXFReaderTests {
             case .image:        t.image += 1
             // Wipeouts (DXF WIPEOUT) are imported as `.wipeout` (W3 wave).
             case .wipeout:      t.wipeout += 1
+            // MLINE (Wave 0): the reader does not import DXF MLINE yet (a later
+            // wave), so `.mline` never appears in these samples — count nothing.
+            case .mline:        break
             }
         }
         return t

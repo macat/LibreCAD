@@ -245,6 +245,7 @@ public enum EntityTransform {
         case .multileader(let ml):    return .multileader(transformMultiLeader(ml, t))
         case .image(let im):          return .image(transformImage(im, t))
         case .wipeout(let w):         return .wipeout(transformWipeout(w, t))
+        case .mline(let m):           return .mline(transformMLine(m, t))
         }
     }
 
@@ -288,6 +289,27 @@ public enum EntityTransform {
             boundary: w.boundary,
             clipMode: w.clipMode,
             frameVisible: w.frameVisible
+        )
+    }
+
+    // MARK: mline — every PATH vertex transforms (full affine). The element
+    //       `offset`s are world distances perpendicular to the path, so the uniform
+    //       scale factor is folded into the entity `scale` (the offsets themselves
+    //       are kept as authored — the element fan rides the transformed path). A
+    //       MIRROR flips the offset fan's side (the left normal of the reflected path
+    //       points the other way), so we SIGN-FLIP `scale` on a reflection — this is
+    //       the same sign-lock `effectiveOffsets` uses for a negative scale, so a
+    //       mirrored multiline's elements land on the geometrically correct side.
+    //       Justification + closed flag are size-independent and unchanged.
+
+    static func transformMLine(_ m: MLineData, _ t: Affine2D) -> MLineData {
+        let mirrorSign = t.isMirror ? -1.0 : 1.0
+        return MLineData(
+            vertices: m.vertices.map { t.apply($0) },
+            elements: m.elements,
+            justification: m.justification,
+            scale: m.scale * t.uniformScale * mirrorSign,
+            closed: m.closed
         )
     }
 

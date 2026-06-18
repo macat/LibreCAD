@@ -1488,6 +1488,160 @@ public struct WipeoutData: Sendable, Hashable, Codable {
     }
 }
 
+// MARK: - Multiline (MLINE) defining data (DXF MLINE / AcDbMline)
+
+/// How an `MLineData`'s element offsets are anchored to the drawn vertex `path`
+/// (DXF `MLINE` justification, group code 70 low bits / `DRW_MLine`):
+///
+/// - `.top`    — the path follows the element with the **largest** offset (the
+///               "top" line rides the vertices; every other element hangs below).
+/// - `.zero`   — the path follows the element offset `0` (the centerline rides the
+///               vertices). This is AutoCAD's default.
+/// - `.bottom` — the path follows the element with the **smallest** offset (the
+///               "bottom" line rides the vertices; every other element rises above).
+///
+/// Justification is applied as a uniform SHIFT of every element offset (so the
+/// chosen extreme lands on the path) and is computed from the element offsets at
+/// SCALE `1` — the `scale` (including a NEGATIVE scale, which mirrors the element
+/// fan across the path) is then applied on top. See `MLineData.justificationShift`.
+public enum MLineJustification: Int, Sendable, Hashable, Codable, CaseIterable {
+    /// The largest-offset element rides the vertex path (DXF justification 0).
+    case top = 0
+    /// The zero-offset centerline rides the vertex path (DXF justification 1).
+    case zero = 1
+    /// The smallest-offset element rides the vertex path (DXF justification 2).
+    case bottom = 2
+}
+
+/// One **line element** of a multiline (DXF `MLINE` element / an `MLSTYLE` element
+/// carried INLINE on the entity for this MVP — there is no separate `MLSTYLE`
+/// table yet). Each element is one parallel line drawn at a signed perpendicular
+/// `offset` from the multiline's vertex path.
+///
+/// - `offset`     — the signed perpendicular distance (world units, at SCALE `1`)
+///                  from the path to this element's line. Positive is to the LEFT
+///                  of the path direction (the path's left normal); negative is to
+///                  the right. The justification shift + the entity `scale` are
+///                  applied on top of this base offset at resolve time.
+/// - `colorIndex` — an OPTIONAL per-element AutoCAD Color Index (ACI) override
+///                  (round-trip only in this MVP — resolve draws every element in
+///                  the entity's resolved pen; honoring the per-element color is a
+///                  later wave). `nil` ⇒ the element uses the entity pen / BYLAYER.
+public struct MLineElement: Sendable, Hashable, Codable {
+    /// Signed perpendicular offset from the path (world units, at scale 1). `+` left.
+    public var offset: Double
+    /// Optional per-element ACI color override (round-trip only this MVP).
+    public var colorIndex: Int?
+
+    public init(offset: Double, colorIndex: Int? = nil) {
+        self.offset = offset
+        self.colorIndex = colorIndex
+    }
+
+    private enum CodingKeys: String, CodingKey { case offset, colorIndex }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        offset = try c.decodeIfPresent(Double.self, forKey: .offset) ?? 0
+        colorIndex = try c.decodeIfPresent(Int.self, forKey: .colorIndex)
+    }
+}
+
+/// `DRW_MLine` — a **multiline** (DXF `MLINE` / `AcDbMline`): N parallel line
+/// elements drawn along one shared vertex `path`, the way AutoCAD's `MLINE`
+/// command draws walls / multi-line borders. Per ADR-001 this is a value type
+/// holding ONLY the defining data; the drawn graphic (the N offset element lines,
+/// mitered at interior corners) is produced on demand by `resolve()` as a set of
+/// `ResolvedPolyline`s, never stored.
+///
+/// ## MVP scope (Wave 0 — the EntityKind critical section)
+/// The elements are carried **inline** on the entity (an `elements: [MLineElement]`
+/// each with an `offset` + optional color) rather than referenced from a separate
+/// `MLSTYLE` table — a real `MLSTYLE` table is a later wave and stays additive.
+/// Element ends are SQUARE (no start/end caps), there is NO fill between elements,
+/// and there is no `MLEDIT` (vertex-style join editing). Interior corners are
+/// MITERED; a near-180° reversal (a spike-prone corner) CLAMPS to a butt/bevel
+/// join so the miter never runs away to infinity.
+///
+/// ## Justification × scale sign-lock (pinned by a test)
+/// `justification` chooses which element rides the `path` by SHIFTING every element
+/// offset so the chosen extreme lands on the path (computed at SCALE `1` —
+/// `justificationShift`). The `scale` then multiplies the shifted offsets; a
+/// NEGATIVE scale mirrors the whole element fan across the path (flipping element
+/// order/side), which is the documented AutoCAD behavior and is locked by
+/// `effectiveOffsets`.
+public struct MLineData: Sendable, Hashable, Codable {
+    /// The ordered vertex path the elements are drawn parallel to. 2+ valid points
+    /// draw lines; 0/1 points (or all-coincident) draw nothing (degenerate-safe).
+    public var vertices: [Vector]
+    /// The inline parallel-line elements (each a signed offset + optional color).
+    /// Empty ⇒ nothing drawn (degenerate-safe).
+    public var elements: [MLineElement]
+    /// Which element rides the vertex path (top / zero / bottom).
+    public var justification: MLineJustification
+    /// Overall offset scale (DXF code 40). Multiplies every (shifted) element
+    /// offset; a NEGATIVE scale mirrors the element fan across the path.
+    public var scale: Double
+    /// Whether the path is closed (the last vertex joins back to the first, with a
+    /// mitered wrap corner). DXF `MLINE` "closed" flag (code 70 bit 2).
+    public var closed: Bool
+
+    public init(
+        vertices: [Vector],
+        elements: [MLineElement],
+        justification: MLineJustification = .zero,
+        scale: Double = 1,
+        closed: Bool = false
+    ) {
+        self.vertices = vertices
+        self.elements = elements
+        self.justification = justification
+        self.scale = scale
+        self.closed = closed
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case vertices, elements, justification, scale, closed
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // ADDITIVE back-compat: every field decodes via decodeIfPresent ?? default
+        // so a partial / future-extended MLINE JSON still decodes losslessly.
+        vertices = try c.decodeIfPresent([Vector].self, forKey: .vertices) ?? []
+        elements = try c.decodeIfPresent([MLineElement].self, forKey: .elements) ?? []
+        justification = try c.decodeIfPresent(MLineJustification.self, forKey: .justification) ?? .zero
+        scale = try c.decodeIfPresent(Double.self, forKey: .scale) ?? 1
+        closed = try c.decodeIfPresent(Bool.self, forKey: .closed) ?? false
+    }
+
+    /// The uniform offset SHIFT (at scale 1) the justification adds to every
+    /// element offset so the chosen extreme element rides the path:
+    /// - `.zero`   ⇒ `0` (offsets are used as authored; the `0` element is on path).
+    /// - `.top`    ⇒ `-max(offset)` (slides the fan DOWN so the top element is at 0).
+    /// - `.bottom` ⇒ `-min(offset)` (slides the fan UP so the bottom element is at 0).
+    /// Computed at scale 1 (the sign-lock applies `scale` afterward in
+    /// `effectiveOffsets`). No elements ⇒ `0`.
+    public var justificationShift: Double {
+        let offs = elements.map(\.offset)
+        guard let lo = offs.min(), let hi = offs.max() else { return 0 }
+        switch justification {
+        case .zero:   return 0
+        case .top:    return -hi
+        case .bottom: return -lo
+        }
+    }
+
+    /// The per-element EFFECTIVE signed offsets used by `resolve()`:
+    /// `(offset + justificationShift) * scale`. The `* scale` is the sign-lock — a
+    /// negative scale mirrors the element fan across the path (so the element that
+    /// rode the path under `.top` ends up on the far side). Order matches `elements`.
+    public var effectiveOffsets: [Double] {
+        let shift = justificationShift
+        return elements.map { ($0.offset + shift) * scale }
+    }
+}
+
 // MARK: - The entity-kind sum type
 
 /// The discriminated union of entity geometry. This is the **seed set** for the
@@ -1579,6 +1733,16 @@ public enum EntityKind: Sendable, Hashable, Codable {
     /// raster-image subclass in DXF, with no raster); behaves like `.solid`/`.image`
     /// for the areal/non-editable switches.
     case wipeout(WipeoutData)
+    /// A **multiline** (`DRW_MLine`, DXF `MLINE` / `AcDbMline`) — N parallel line
+    /// elements drawn along one shared vertex path (AutoCAD's `MLINE` command, used
+    /// for walls / multi-line borders). Its graphic (the N perpendicular-offset
+    /// element lines, mitered at interior corners with a near-180° clamp to avoid
+    /// runaway spikes) is produced on demand by `resolve()` as a set of
+    /// `ResolvedPolyline`s, never stored (ADR-001). The elements are carried INLINE
+    /// on the entity (offset + optional color) in this MVP — a separate `MLSTYLE`
+    /// table is a later wave. Not `indirect`: `MLineData` holds no nested
+    /// `EntityKind`. Behaves like a polyline for the path-vertex switches.
+    case mline(MLineData)
 }
 
 // MARK: - Per-entity flags

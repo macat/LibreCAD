@@ -217,7 +217,7 @@ public struct LengthenTool: Tool {
         // TODO(backlog): lengthen open polylines (the end segment) / open splines.
         case .circle, .polyline, .ellipse, .spline, .splinePoints, .point,
              .text, .mtext, .hatch, .solid, .dimension, .insert, .xline, .ray, .leader,
-             .multileader, .image, .wipeout:
+             .multileader, .image, .wipeout, .mline:
             return false
         }
     }
