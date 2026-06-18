@@ -1,24 +1,53 @@
 # Feature Gap Catalog — Upstream LibreCAD vs. our Swift app
 
-> ## ⚠️ AUDITED 2026-06-15 — most of this doc is STALE (the per-row table below was written 2026-06-12, pre-v4/v5)
-> A full code-level audit (decision-log 2026-06-15) found that v4 + v5 implemented the **vast majority** of the
-> `missing`/`partial`/P0/P1 rows below — **13 of 14 P0s are DONE**, plus most P1/P2. The `ToolKind` registry grew
-> ~29→~58; `EntityKind` gained insert/xline/ray/leader/image; `DimKind` gained ordinate/arcLength/angular3p.
-> **Treat the per-row statuses below as historical.** The authoritative "what's truly done" list is the
-> decision-log (2026-06-15 audit, Part C). The **genuinely-remaining gaps** as of 2026-06-15 are:
+> ## ⚠️ AUDITED 2026-06-18 — this catalog's per-row tables are HISTORICAL; the decision-log + README are authoritative
+> A full code-level audit on 2026-06-18 (with an adversarial verification pass) found that **all 14 documented P0
+> must-haves are DONE end-to-end**, with **one exception** (below). The 2026-06-12 per-row tables (sections 1–14)
+> and the old "Recommended implementation order (next ~10)" + "P0 list" further down are **HISTORICAL** — treat them
+> as a snapshot of the project ~5 feature-programs in the past. The authoritative "what shipped" record is
+> **`decision-log.md`** (newest-first); the current forward plan is **`next-features-roadmap.md`**; the doc map is
+> **`README.md`**.
 >
-> - **G1** per-type inline inspector geometry editors for the remaining kinds (ellipse/spline/polyline/hatch/solid/dim/insert/xline/ray/leader) — *in progress*
-> - **G2** scale-aware print preview + page setup + layout-correct PDF — *in progress*
-> - **G5** relative-zero explicit set / lock / reset UX — *in progress*
-> - **G6a** hatch boundary-arc bulge round-trip on DXF **write** (currently flattened) · **G6b** leader annotation authored as DXF hard-ref · **G6c** DXF version picker in Save UI
-> - **G4** distance-along-entity snap + manual middle/intersection snap overrides
-> - **G7** application Preferences window (`Settings {}` scene, ⌘,) — only the per-document settings sheet exists
-> - **G8** parts/symbol library browser, import-block-from-file, in-place block editing, block attributes (ATTDEF/ATTRIB)
-> - **Larger/deferred:** paper space & layouts, named views, UCS, GD&T/tolerance, spline node-editing, SVG/PDF import, app-prefs.
-> - **Save round-trip** of blocks + graphicVariables + dim styles on write — *being verified/fixed*
+> **THE ONE EXCEPTION (a real, actionable gap):** the interactive **Insert-a-block tool is PARTIAL, not done.**
+> Engine + DXF INSERT/MINSERT round-trip are complete, BUT there is **no GUI block-name picker**: `InsertTool` is
+> inert without a `blockName` (`InsertTool.swift:53,94,108-111`); `CanvasModel.beginInsert(name:)`
+> (`CanvasModel.swift:3899-3908`) has **zero View-layer callers** (only tests call it); the Insert tool's
+> `ToolOptionsBar` arm offers scale/rotation/MINSERT-array but **no block picker**; and the Blocks sidebar's
+> `.draggable(BlockDragItem)` (`BlocksSidebar.swift:94`) has no matching canvas
+> `.dropDestination(for: BlockDragItem.self)` (the canvas only handles `PartLibraryDragItem`) → a **dead drag**.
+> Existing/imported blocks ARE placeable via the F9 Blocks sidebar's "Insert at View Center", "Insert Block from
+> File…", and ⌘K — but **NOT** by interactive click-to-place. So pressing ⇧I / "Insert Block" and clicking
+> currently does nothing.
 >
-> Niche P2/P3 long-tail (construction-line draw submenu, move+rotate combined, layer-tree groups, user-font picker,
-> shortcuts editor, workspaces, about/welcome, CLI converters) remain deferred.
+> **Headline corrections — even the 2026-06-15 banner is now WRONG on these:**
+> - **G7** "app Preferences window missing" is **FALSE** — `Settings { AppSettingsView() }` (⌘,) exists with 5 panes
+>   (`LibreCADApp.swift:809`).
+> - **G6a** "hatch boundary-arc bulge flattened on write" is **FALSE** — `writeHatch` emits real `DRW_Arc` loop edges
+>   via `appendBulgeArcEdge` (`lcdxf.cpp:3069`).
+> - **G6c** DXF version picker + DWG versioned save — **DONE**.
+> - **G8** library browser / import-block-from-file / in-place block edit / ATTDEF–ATTRIB — **DONE**
+>   (`PartsLibraryPanel.swift`, `BlockVisibilityStatesPanel`, `BlockAttributesEditor`).
+> - Paper space & layouts + UCS — **DONE**.
+>
+> **Also DONE since the tables:** DIMSTYLE table + writer (DXF full; DWG-write is a no-op = lossy); hatch pattern
+> lines (`.pat`); MTEXT true multi-line write; dim text-height/arrow round-trip; `DimKind` ordinate/arcLength/
+> angular3p; INSERT entity + DXF; measure/info tools; zoom-window; Match-Properties; recent files; DocumentGroup;
+> stretch/lengthen/break/join/align; all circle/arc/line construction variants; perpendicular/tangent snap;
+> multi-select shared-property edit.
+>
+> **THE GENUINE REMAINING FRONTIER** (no longer table-stakes features — it's interop fidelity + test-infra):
+> 1. **Foreign-AutoCAD DWG/DXF fidelity verification** — every round-trip today is self-generated (our writer ↔ our
+>    reader); no real third-party sample lives in the repo.
+> 2. **GUI-chrome screenshot tier beyond LCShot** (LCShot's ceiling is committed-geometry-only).
+> 3. **Insert-tool block-picker wiring** (the exception above).
+> 4. **Multileader full `CONTEXT_DATA` DXF write** — currently geometry-light; drawn callouts don't survive a DXF
+>    round-trip.
+> 5. **Non-modal save-loss notice.**
+> 6. **Durable cross-session persistence** of tables + parametric constraints/parameters (DXF/DWG can't carry them).
+> 7. **DWG-write fidelity** (empty blocks; `writeDimstyles` no-op).
+> 8. **Per-type inline inspector geometry editors (G1)** + scale-aware print preview/page-setup (G2).
+>
+> See **`next-features-roadmap.md`** for the ranked plan.
 
 **Purpose:** a *prioritized backlog* of features that **upstream LibreCAD has and our
 native-macOS Swift port does NOT yet** (or only partially). This drives the build
@@ -56,6 +85,8 @@ For context, the current Swift surface:
   layers/inspector sidebar, Save/Save As to DXF.
 
 ---
+
+> **The tables in sections 1–14 below are the 2026-06-12 snapshot, kept for historical reference. For current status see the 2026-06-18 banner above + `decision-log.md`.**
 
 ## 1. Entities we lack
 
@@ -269,77 +300,20 @@ For context, the current Swift surface:
 
 ---
 
-## Gap counts by priority
+## Current status & next steps (2026-06-18)
 
-| Priority | Count | Meaning |
-|---|---|---|
-| **P0** | 14 | Core daily CAD; blocks a usable, interoperable app. |
-| **P1** | ~38 | Important; expected of a real CAD app. |
-| **P2** | ~30 | Nice-to-have / advanced. |
-| **P3** | ~17 | Niche / legacy / power-user. |
-| **Total** | **~99** distinct gap rows | Across 14 areas. |
+The original **14 P0 must-haves are all done** end-to-end — **except** the interactive
+Insert-tool block picker (see the 2026-06-18 banner at the top: engine + DXF INSERT/MINSERT
+round-trip ship, but there is no GUI block-name picker wired into `InsertTool` / the canvas).
+The prioritized **forward plan now lives in `next-features-roadmap.md`** — it's no longer about
+table-stakes features but about interop fidelity (foreign-AutoCAD DWG/DXF), DWG-write fidelity,
+multileader DXF, and test-infra. The four **owner-decision questions** flagged on 2026-06-12 are
+all **resolved**:
 
-**P0 list (the must-haves), by area:** INSERT entity (§1) · stretch (§3) · multi-select
-properties edit (§3/§13) · ortho restriction (§4) · relative-zero (§4) · typed coordinate
-entry (§5) · select-all/deselect (§6) · insert-a-block tool (§7) · layer visibility render
-filter (§8) · dimension styles / DIMSTYLE (§9) · spline DXF write (§10) · INSERT DXF
-read/write (§10) · DocumentGroup (§13) · drawing options sheet (§14).
+- **DocumentGroup vs WindowGroup** → shipped (native open/save/recents/autosave via DocumentGroup).
+- **DWG path** → wired and **versioned** (R2000/R2004/R2010/R2013/R2018 save picker).
+- **Hatch patterns vs solid** → implemented as `.pat` pattern-line families.
+- **Dimension model scope** → all three subtypes added (`DimKind` ordinate / arcLength / angular3p).
 
----
-
-## Recommended implementation order (next ~10, in order)
-
-Ordered by **value × unblocking-power × low risk**. Each line = next build wave.
-
-1. **Spline DXF write** (P0, M) — *data-loss bug*: splines drawn in-app vanish on
-   Save. Smallest fix with the worst consequence if skipped. Add `writeSpline`
-   mapping in `DXFWriter`. **Do first.**
-2. **Layer visibility render filter** (P0, S) — already a known bug (`backlog.md`):
-   the sidebar eye toggle doesn't hide pixels. Tiny renderer change
-   (`LineRenderer.rebuildLineInstancesIfNeeded` + `resolve()` skip hidden/frozen
-   layers). High user-visible payoff, low risk.
-3. **Ortho restriction (hold-⇧) + grid-snap UI toggle** (P0, S) — drawing straight
-   lines is table-stakes and currently impossible without manual coordinates.
-   Pure interaction-layer change in `CanvasModel`.
-4. **Select-all / deselect-all / invert** (P0/P1, S) — engine primitives already
-   exist; just wire ⌘A / ⌘⇧A actions + menu + invert. Quick daily win.
-5. **Relative-zero (set/lock) + typed coordinate entry (`@dx,dy`, `dist<angle`)**
-   (P0, M) — the precision-input backbone; unblocks accurate drawing and pairs with
-   ortho. Build the coordinate parser once; every draw tool benefits.
-6. **INSERT entity + Insert-a-block tool + DXF INSERT read/write** (P0, L) — the
-   keystone gap. Add `EntityKind.insert(InsertData)`, a resolve arm (transform block
-   members), the reader/writer mapping, and an insert tool. Unblocks symbol reuse,
-   library, block-explode, and real DXF round-trip. **Biggest single lever.**
-7. **Make the blocks sidebar live + create-block-from-selection** (P1, M) — rides on
-   #6: turn the read-only stub into insert/freeze/toggle, and add "group selection
-   into block." Completes the block loop.
-8. **Drawing options sheet (units / grid / paper / point style)** (P0, M) — every
-   serious drawing needs unit + grid configuration; currently hardcoded. Document
-   settings model + sheet.
-9. **Stretch + lengthen + break-at-point** (P0/P1, M) — fills the most-felt modify
-   gaps after the basics; crossing-window stretch especially. Engine has the
-   geometry kernels; needs the tools.
-10. **Dimension styles (DIMSTYLE table) + text-height/arrow round-trip** (P0, L) —
-    makes dimensions interoperate (text height/arrow currently reset on DXF
-    round-trip). Larger, so sequenced after the quicker wins; unblocks baseline/
-    continue/leader/tolerance later.
-
-**Reasoning for the ordering:** items 1–5 are *small, high-payoff, low-risk* fixes
-(two are outright bugs) that make the app feel like real CAD immediately. Items 6–7
-are the **INSERT/blocks keystone** — the single largest functional + interop lever,
-sequenced once the quick wins ship. Items 8–10 are larger systems (settings,
-advanced modify, dim styles) that benefit from the input/precision groundwork in
-1–5.
-
-## Owner decisions needed (flag)
-- **DocumentGroup vs WindowGroup** (§13): reintroducing `ReferenceFileDocument`
-  (native autosave/versions/recents) is P0 but was reverted after a launch crash.
-  Decide: invest in the off-main-safe document now, or defer and ship manual Save?
-- **DWG path** (§10): the C bridge gained DWG read/write (recent commits
-  `5315f0ce8`, `47972ec25`) but it's not surfaced in the Swift engine/app. Decide
-  whether to wire DWG in this round or keep DXF-only for now.
-- **Hatch patterns vs solid** (§1): pattern fills currently render solid. Decide
-  priority of a real `.pat` pattern-line generator vs. leaving solid for v1.
-- **Dimension model scope** (§1/§9): adding `DimKind.ordinate`/`.arc`/`.angular3p`
-  changes a frozen enum used across resolve/DXF — confirm we want all three now or
-  stage them.
+See **`next-features-roadmap.md`** for the ranked plan and **`decision-log.md`** for the
+chronological "what shipped" record.

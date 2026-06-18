@@ -3,13 +3,39 @@
 Tracked items from reviews/builders that are NOT merge-blockers but should be addressed in a polish
 pass or by the relevant downstream owner. Each cites its source.
 
+## Audit follow-ups (2026-06-18)
+Newly-found open items from the 2026-06-18 docs/state reconciliation audit.
+- **Insert tool block picker UNWIRED** — `InsertTool` is inert without a `blockName`
+  (`InsertTool.swift:53,94,108-111`); `CanvasModel.beginInsert(name:)` (`CanvasModel.swift:3899-3908`) has
+  ZERO View-layer callers (only tests), and the Insert ToolOptionsBar arm offers scale/rotation/MINSERT-array
+  but NO block picker. So interactive click-to-place Insert (⇧I) does nothing. Existing blocks are only
+  placeable via the Blocks-sidebar "Insert at View Center" / "Insert Block from File…" / ⌘K (view-center, not
+  interactive). **FIX:** add a block-name picker to the Insert tool options + a `beginInsert` View caller.
+  (High-value small wiring fix; see next-features-roadmap.) *(audit 2026-06-18)*
+- **Dead block drag-and-drop** — BlocksSidebar advertises `.draggable(BlockDragItem)`
+  (`BlocksSidebar.swift:94`) but the canvas only has `.dropDestination(for: PartLibraryDragItem.self)`
+  (`ContentView.swift:276`); there is NO `BlockDragItem` drop handler → dragging a sidebar block onto the
+  canvas is a no-op. **FIX:** add a `BlockDragItem` drop handler that begins an interactive insert at the
+  drop point. *(audit 2026-06-18)*
+- **Stale "UNWIRED" comments** — `InsertTool.swift` header (line 29) + class doc (45-46) say "intentionally
+  UNWIRED until that wave wires a ToolKind case" and `DimStyleManagerView.swift:28-31` says "UNWIRED" — both
+  are FALSE now (`ToolKind.insert` dispatches to `InsertTool`; `DimStyleManagerView` is wired). Fix the
+  comments. *(audit 2026-06-18)*
+- **Multi-select shared-property edit has no multi-record test** — `MultiCommonEditor` + the 2+-record
+  one-undo path have ZERO direct test coverage (all ~30 `applyInspectorEdits` call sites pass single-element
+  arrays). The engine is array-generic so it works, but the differentiating multi case is untested. (Also:
+  `feature-catalog.md:109/249` mislabel this P0 — handled in the catalog refresh.) *(audit 2026-06-18)*
+- **Relative-zero Lock menu item is static** — the View-menu Lock item is a static "Lock Relative Zero" label
+  with no checkmark / dynamic Lock↔Unlock title; lock state is surfaced only via the status-bar RelZero chip
+  (`CanvasModel.swift:3157/3165`). Minor UX polish. *(audit 2026-06-18)*
+
 ## Parity program — W1 follow-up NITs (text-style round-trip)
 - **Loaded-file re-save adds a benign `1071=1` on Standard** — `DXFReader` decodes libdxfrw's default stroke font "txt" to `.native(family:"txt")`, which `makeTextStyle` re-encodes WITH the TTF flag, so re-saving a *loaded* file gains a spurious `1071=1` on Standard. Functionally benign (code-3 name preserved; consistent with the dimStyle precedent) — but scope the "byte-identical" comment (DXFWriter.swift ~266-279) to new/in-memory drawings, OR decode a bare no-flag/no-extension name to a flag-free source. *(review-w1a NIT-1)*
 - **Partial 1071 fidelity** — reader extracts only TTF/bold/italic bits from code 1071; AutoCAD charset/pitch low-byte bits are dropped on round-trip. Acceptable (name is what renders); a raw-int `LCTextStyle.fontFamily` model field would be needed for full fidelity. *(review-w1a NIT-2)*
 - **Optional test** — add coverage for the loaded-file (non-default Standard) re-read path + the "txt"→native decode. *(review-w1a NIT-3)*
 
 ## Parity program — W3 Wipeout follow-up NITs
-- **clipMode doc contradiction** — engine doc (Entity.swift ~1390) says `clipMode 0 ⇒ mask interior`; vendored `drw_entities.h` says `0 ⇒ outside masked`. Engine always masks the interior (round-trips clipMode losslessly but ignores it for region selection) — reconcile the comment so a future reader doesn't assume `0` is honored. *(review-w3 NIT-1)*
+- ~~**clipMode doc contradiction** — engine doc (Entity.swift ~1390) says `clipMode 0 ⇒ mask interior`; vendored `drw_entities.h` says `0 ⇒ outside masked`. Engine always masks the interior (round-trips clipMode losslessly but ignores it for region selection) — reconcile the comment.~~ **DONE** — `Entity.swift:1429-1432` reconciled (always masks interior; flag carried for round-trip only). *(review-w3 NIT-1)*
 - **InspectorEditors.swift ~625 comment** says the wipeout boundary is "edited by grips/transform" but `EntityGrips` returns `[]` for `.wipeout` (transform-only this wave) — drop "grips". *(review-w3 NIT-2)*
 - **`LineRenderer.uploadWipeoutVertices`** re-stamps every wipeout vertex each frame even when `view.clearColor` is unchanged — gate on a color-change check (optional micro-perf; early-returns when no wipeout). *(review-w3 NIT-3)*
 - **Wipeout masking residual** — a stroke deliberately raised ABOVE a wipeout in draw order is still masked (single post-line render pass); true per-entity interleaving deferred. Also CG/SVG/PDF export draws the mask with its fallback color (not background-aware). *(W3 builder, documented)*
@@ -21,7 +47,7 @@ pass or by the relevant downstream owner. Each cites its source.
 - **Add XcodeGen `project.yml`** for the `.app` (deferred; SwiftPM + make-app.sh is the validated path now).
 
 ## Engine — document/layers/blocks (Phase 1C)
-- Fix `removeLayer` doc-label drift (`reassignTo:` vs the note's `reassigningEntitiesTo:`). *(review-document #1)*
+- ~~Fix `removeLayer` doc-label drift (`reassignTo:` vs the note's `reassigningEntitiesTo:`).~~ **DONE** — `CADDrawing.swift:987-991` consistent. *(review-document #1)*
 - Add tests: remove-active-layer (+reassign) and removeBlock(deletingContents:) + their undo. *(review-document #2)*
 - Decide **case-insensitive uniqueness** for layer/block names (DXF round-trip fidelity). *(review-document #3)*
 - `removeBlock(deletingContents:)` deletes shared member entities unconditionally — guard with
@@ -63,28 +89,41 @@ pass or by the relevant downstream owner. Each cites its source.
 - Test gaps: arc/ellipse window-vs-crossing, closed-loop-encloses-rect crossing, degenerate-entity snap NaN-safety. *(review-selectsnap nice-to-have)*
 
 ## DXF writer (text/solid/hatch fidelity)
-- **HATCH write uses edge (line) boundary loops, not polyline boundaries** — libdxfrw's `writeHatch`
+- ~~**HATCH write uses edge (line) boundary loops, not polyline boundaries** — libdxfrw's `writeHatch`
   has a `//RLZ: polyline boundary writeme` stub, so a polyline boundary path (type & 2) would emit no
-  geometry. We therefore write each loop as a chain of `DRW_Line` edges. Consequence: **boundary-arc
-  bulges are NOT preserved** across a write (each ring vertex's `bulge` is dropped; the boundary is
-  straight-segment only). A curved hatch boundary round-trips as its vertex polygon. Fix when
-  libdxfrw's polyline-boundary writer is implemented, or by emitting `DRW_Arc` edges for bulged
-  segments. *(ws-dxf-write-fidelity)*
-- **TEXT write emits single-line DXF TEXT, never MTEXT** — the POD model carries one insertion point +
-  the 72/73 alignment codes (which `DRW_Text` round-trips); an MTEXT read back as `.text` is written
-  as TEXT. Multi-line layout, MTEXT attachment-point alignment, and inline format codes are not
-  reconstructed (the reader already strips them). *(ws-dxf-write-fidelity)*
+  geometry. We therefore write each loop as a chain of `DRW_Line` edges. Consequence: boundary-arc
+  bulges are NOT preserved across a write (each ring vertex's `bulge` is dropped).~~ **DONE** both ways:
+  WRITE — `lcdxf.cpp:3069` `appendBulgeArcEdge()` emits a `DRW_Arc` edge for any nonzero-bulge segment;
+  READ — `lcdxf.cpp:1589` `appendBulgeArcVertex()` recovers each ARC edge as one bulged vertex. Commits
+  edcc7ca5a + 177d413a1/025ba14bc. **RESIDUAL:** ellipse/spline boundary edges are still flattened to
+  straight chords on write (`lcdxf.cpp:1324`) — arcs are preserved, but curved (ellipse/spline-bounded)
+  hatches still reopen as polygon approximations. *(ws-dxf-write-fidelity)*
+- ~~**TEXT write emits single-line DXF TEXT, never MTEXT** — an MTEXT read back as `.text` is written
+  as TEXT; multi-line layout, MTEXT attachment-point alignment, and inline format codes are not
+  reconstructed.~~ **DONE**: there is now a first-class `EntityKind.mtext` (`Entity.swift:1714`); WRITE —
+  `DXFWriter.swift:770-787` → `lcdxf.cpp` `writeMText` emits real `DRW_MText` (attachment 71, line-spacing
+  44/73, rect width 41). Commit f107dbe00. The TEXT→TEXT note now applies ONLY to entities that were
+  genuinely single-line TEXT. *(ws-dxf-write-fidelity)*
 - ~~**SPLINE / splinePoints write still skipped**~~ DONE: `writeSpline` added to the C bridge
   (`.spline` → control-point DXF SPLINE w/ degree+knots+weights+code-70 flags; `.splinePoints` →
   degree-2 SPLINE w/ control polygon + fit points). No longer counted as skipped. *(ws-dxf-write-fidelity)*
 - **DIMENSION read+write covers linear/aligned/radial/diametric/angular only** — the five
   `DimKind`-modelled variants round-trip (read: `addDim*` → `LC_ENT_DIMENSION` → `.dimension`; write:
-  `.dimension` → `DRW_Dim*`). DXF **ordinate** and **angular-3p** dimensions are NOT in the frozen
-  `DimKind`, so they still surface as a "DIMENSION" reader warning and are never written (dim_sample.dxf
-  has 6 ordinate dims that stay warnings). Add `DimKind.ordinate`/`.angular3p` + resolve arms first.
-  Also: the DIMENSION entity's **text height / arrow size live in DIMSTYLE, not on the entity**, so
+  `.dimension` → `DRW_Dim*`).
+  ~~DXF **ordinate** and **angular-3p** dimensions are NOT in the frozen `DimKind`, so they still surface
+  as a "DIMENSION" reader warning and are never written (dim_sample.dxf has 6 ordinate dims that stay
+  warnings). Add `DimKind.ordinate`/`.angular3p` + resolve arms first.~~ **DONE**: `DimKind.ordinate`
+  (`Entity.swift:826`) + `.angular3p` (`Entity.swift:843`) with the full read/write/resolve chain
+  (`lcdxf.cpp:1765`/`:1781` read, `:3293`/`:3302` write; `DXFReader.swift:868-883`;
+  `DXFWriter.swift:1447-1477`; `Resolve.swift:1926`/`:1933`). Commit 022ff732d — dim_sample's 6 ordinate
+  dims now import instead of warning.
+  ~~Also: the DIMENSION entity's **text height / arrow size live in DIMSTYLE, not on the entity**, so
   `DimData.textHeight`/`arrowSize` do NOT survive a DXF *round-trip* on WRITE (they reset to the resolve
-  defaults); carrying them on write needs a DIMSTYLE table writer.
+  defaults); carrying them on write needs a DIMSTYLE table writer.~~ **DONE**: `lcdxf.cpp:2344`
+  `writeDimstyles()` emits one `DRW_Dimstyle` per style, and per-entity overrides also survive via
+  `ACAD:DSTYLE` xdata (`lcdxf.cpp:3239-3250`). Commits 1e660df61 + 888bb2956. **CAVEAT:**
+  `writeDimstyles` starts with `if (m_dwg) return;` (`lcdxf.cpp:2345`) → DWG WRITE of named DIMSTYLE is a
+  no-op (named styles dropped on `.dwg` save; DXF is full).
   ~~**READ side: `addHeader`/`addDimStyle` were no-ops → every dim fell back to the 2.5 engine default**~~
   DONE (ws-dimstyle-header-read, DC.5): the bridge now reads the HEADER vars (`$INSUNITS`/`$LUNITS`/
   `$LUPREC`/`$AUNITS`/`$AUPREC`/`$DIMTXT`/`$DIMASZ`/`$DIMSCALE`/`$DIMLUNIT`/`$DIMDEC`) and the DIMSTYLE
@@ -106,8 +145,8 @@ pass or by the relevant downstream owner. Each cites its source.
 - Layer with ACI 256 silently → green instead of inheriting (rare/invalid edge). *(review-dxfread #1)*
 
 ## Coordinate / canvas (offset resolved)
-- Add a `worldToScreen ↔ worldToClip` consistency regression test (same world point → same screen pixel across sizes/backing/pan/zoom) — locks in the offset fix. (offset-fix3's intended test; agent was stopped before landing it.)
-- Remove (or keep env-gated) the `LC_DEBUG_COORDS` instrumentation in CADCanvasView once we're confident the offset stays fixed.
+- ~~Add a `worldToScreen ↔ worldToClip` consistency regression test (same world point → same screen pixel across sizes/backing/pan/zoom) — locks in the offset fix.~~ **DONE** — `CoordinateConsistencyTests.swift` asserts same world → same pixel across sizes/backing/pan/zoom + far-origin offset.
+- ~~Remove (or keep env-gated) the `LC_DEBUG_COORDS` instrumentation in CADCanvasView once we're confident the offset stays fixed.~~ **DONE** — zero hits across Sources; `CoordinateConsistencyTests` header documents the removal.
 
 ## Layers / rendering
 - ~~**Layer visibility render filter** (sidebar gap)~~ DONE (verified already-correct): `LineRenderer.packEntity` skips hidden/frozen-layer entities (lines AND fills) via `layers.layer(e.layer)?.isVisible==false`, and the sidebar eye toggle bumps `modelVersion` to re-cull. Extracted the predicate into GPU-free `RendererVisibility` + added `RendererVisibilityTests`. (ws-sidebar flag)

@@ -1,5 +1,7 @@
 # LibreCAD macOS — Architecture Health Report
 
+> **NOTE 2026-06-18:** the header metrics below (2614 tests, grade B) are from 2026-06-16 and are STALE — the suite is now 3999 tests. The R1–R10 structural findings are still the live reference; cross-check open/closed status against the decision-log.
+
 > Produced by the `architecture-review` workflow (13 read-only subsystem/cross-cutting reviewers →
 > synthesis → adversarial pressure-test). _2026-06-16, `native-macos @ 856618e9d`, 2614 tests._
 > **Overall grade: B.** The adversarial critic's verdict: **trustworthy with corrections** — the four

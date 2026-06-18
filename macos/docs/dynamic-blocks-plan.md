@@ -1,5 +1,7 @@
 # Dynamic Blocks — Full Authoring Program (native-macos)
 
+> **STATUS 2026-06-18:** DB-1 (visibility states) + DB-2 (stretch/flip parameters) SHIPPED (see decision-log 2026-06-16). DB-3/DB-4/DB-5 remain DEFERRED — this doc is kept as the reference for those remaining phases only.
+
 Owner chose **full authoring** (parameters / actions / grips). Authoritative feature spec:
 `macos/docs/block-features.md` §5–§13 + Appendix B. This plan refines `block-ux-plan.md` §7
 (DB-1..DB-5) into a buildable, file-grounded wave program. Read with `block-ux-plan.md` §0–§6
