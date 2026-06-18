@@ -59,14 +59,19 @@ enum LCShot {
 
     SCENE FORMAT — a JSON object:
       {
-        "space": "model" | "paper",     (optional; default model)
-        "layout": "<name>",             (optional; the paper layout to render)
         "dpi": 150,                     (optional; default 150)
         "background": "#RRGGBB",        (optional; default = CAD canvas dark bg)
         "actions": [ {"op":"...", ...}, ... ]
       }
-    See `ActionScript.swift` for the supported `op` verbs (allow-listed; any verb
-    needing a file/open/save panel is EXCLUDED so the headless path cannot hang).
+    (`space`/`layout` are accepted in the header but only pre-select MODEL space;
+    switch INTO a paper layout via the `addLayout` + `layout`/`space` ACTIONS, which
+    run after the layout exists.) See `ActionScript.swift` for the supported `op`
+    verbs (allow-listed; any verb needing a file/open/save panel is EXCLUDED so the
+    headless path cannot hang).
+
+    A constraint that the solver does not support (e.g. tangent/collinear) or that is
+    given the wrong entity arity is a NO-OP: the harness keeps exit 0 and prints a
+    `WARN:`-prefixed line on stdout, so silent no-ops are greppable rather than hidden.
     """
 
     /// Returns a process exit code (0 == success).

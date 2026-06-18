@@ -87,14 +87,15 @@ extension ActionScene {
         let model = CanvasModel(drawing: CADDrawing(),
                                 viewSize: CGSize(width: 1000, height: 750))
 
-        // Apply the header's initial space (before actions run, so geometry lands in
-        // the right space). A named layout is activated; otherwise model space.
-        if let layout = scene.layout, scene.space == "paper" {
-            model.activateLayout(name: layout)
-        } else if scene.space == "model" || scene.space == nil {
+        // The header's `space`/`layout` only pre-selects MODEL space (a fresh model
+        // is already in model space, so this is effectively a no-op kept for clarity).
+        // A `space:"paper"` header is deliberately NOT honored here: the layout does
+        // not exist yet at header time (it is created by an `addLayout` action), so a
+        // pre-action paper switch would silently degrade to model space. Scenes switch
+        // INTO paper space via the `addLayout` + `layout`/`space` ACTIONS instead —
+        // those run after the layout is created and are the correct, working path.
+        if scene.space == "model" || scene.space == nil {
             model.activateModel()
-        } else if scene.space == "paper" {
-            model.setActiveSpace(.paper, layoutName: scene.layout)
         }
 
         let dpi = scene.dpi ?? DrawingExporter.defaultRasterDPI
@@ -209,7 +210,9 @@ extension ActionScene {
             }
             let ok = model.addConstraint(kind, entities: ids)
             if !ok {
-                print("LCShot: constraint '\(kindName)' returned false " +
+                // No-op (unsupported kind / wrong arity). Exit stays 0; the `WARN:`
+                // prefix lets a coordinator grep stdout for silent constraint no-ops.
+                print("WARN: constraint '\(kindName)' returned false " +
                       "(unsupported by the solver, or wrong entity arity) — no-op")
             } else {
                 print("LCShot: constraint '\(kindName)' applied to \(ids.count) entities")
@@ -223,13 +226,15 @@ extension ActionScene {
             guard let kind = DimensionalConstraintKind(rawValue: kindName) else {
                 throw LCShotError(message: "action #\(i): unknown dimensional constraint '\(kindName)'")
             }
+            // A false return is a no-op (unsupported kind / wrong arity); exit stays 0
+            // and the line is prefixed `WARN:` so a coordinator can grep for no-ops.
             if let expr = step.fields["expr"] as? String {
                 let ok = model.addConstraint(kind, entities: ids, expression: expr)
-                print("LCShot: dimConstrain '\(kindName)' expr=\(expr) -> \(ok ? "applied" : "false (unsupported / wrong arity)")")
+                print("\(ok ? "LCShot" : "WARN"): dimConstrain '\(kindName)' expr=\(expr) -> \(ok ? "applied" : "false (unsupported / wrong arity) — no-op")")
             } else {
                 let value = try req("value", number)
                 let ok = model.addConstraint(kind, entities: ids, value: value)
-                print("LCShot: dimConstrain '\(kindName)' value=\(value) -> \(ok ? "applied" : "false (unsupported / wrong arity)")")
+                print("\(ok ? "LCShot" : "WARN"): dimConstrain '\(kindName)' value=\(value) -> \(ok ? "applied" : "false (unsupported / wrong arity) — no-op")")
             }
 
         // MARK: parameters
@@ -331,7 +336,8 @@ extension ActionScene {
         var s: Set<ToolKind> = []
         // Reference each by raw value so a renamed/removed case fails loudly at the
         // ToolKind(rawValue:) site rather than silently dropping an exclusion.
-        for raw in ["image", "createBlock", "insertBlock", "table"] {
+        // NOTE: block-insert's ToolKind case is `insert` (there is NO `insertBlock`).
+        for raw in ["image", "createBlock", "insert", "table"] {
             if let k = ToolKind(rawValue: raw) { s.insert(k) }
         }
         return s
