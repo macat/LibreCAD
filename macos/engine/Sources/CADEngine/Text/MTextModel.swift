@@ -130,6 +130,15 @@ public struct MTextData: Sendable, Hashable, Codable {
     /// is the parsed view; on write we re-emit from `paragraphs` when the user
     /// edited, else from `rawCode` (faithful passthrough).
     public var rawCode: String?
+    /// Wave 2a — the auto-updating FIELDS embedded in this MTEXT's run text. When
+    /// non-`nil`, the run text (`TextRun.text` across `paragraphs`) carries field
+    /// PLACEHOLDERS (`FieldEvaluator.placeholder(for:)`) and each `FieldRun.index`
+    /// names the token its placeholder displays; `resolve()` substitutes evaluated
+    /// values into each run before shaping when a `ResolveContext.fieldContext` is
+    /// supplied, else the runs shape verbatim. ADDITIVE: a record born without it —
+    /// and every old saved file — decodes to `nil` (no fields), so plain MTEXT is
+    /// byte-identical. `nil` vs `[]` both mean "no fields".                      [NEW]
+    public var fields: [FieldRun]?
 
     public init(
         position: Vector,
@@ -141,7 +150,8 @@ public struct MTextData: Sendable, Hashable, Codable {
         lineSpacingStyle: MTextLineSpacingStyle = .atLeast,
         lineSpacingFactor: Double = 1,
         paragraphs: [MTextParagraph] = [],
-        rawCode: String? = nil
+        rawCode: String? = nil,
+        fields: [FieldRun]? = nil
     ) {
         self.position = position
         self.height = height
@@ -153,5 +163,36 @@ public struct MTextData: Sendable, Hashable, Codable {
         self.lineSpacingFactor = lineSpacingFactor
         self.paragraphs = paragraphs
         self.rawCode = rawCode
+        self.fields = fields
+    }
+}
+
+// MARK: - Decodable (back-compat: tolerate a missing `fields` → nil)
+//
+// `fields` (Wave 2a) is ADDITIVE: an OLD saved MTEXT (encoded before fields existed)
+// has no `fields` key. A hand-written `init(from:)` (the `decodeIfPresent` pattern the
+// *Data structs use) decodes the absent key to `nil`, so old MTEXT loads byte-
+// identically and resolves unchanged. `encode(to:)` + Hashable/Equatable stay
+// synthesized (CodingKeys covers every field; Hashable auto-includes `fields`).
+extension MTextData {
+    private enum CodingKeys: String, CodingKey {
+        case position, height, rectWidth, rotation, styleName, attachment
+        case lineSpacingStyle, lineSpacingFactor, paragraphs, rawCode, fields
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        position = try c.decode(Vector.self, forKey: .position)
+        height = try c.decode(Double.self, forKey: .height)
+        rectWidth = try c.decodeIfPresent(Double.self, forKey: .rectWidth) ?? 0
+        rotation = try c.decodeIfPresent(Double.self, forKey: .rotation) ?? 0
+        styleName = try c.decodeIfPresent(String.self, forKey: .styleName)
+        attachment = try c.decodeIfPresent(MTextAttachment.self, forKey: .attachment) ?? .topLeft
+        lineSpacingStyle = try c.decodeIfPresent(MTextLineSpacingStyle.self, forKey: .lineSpacingStyle) ?? .atLeast
+        lineSpacingFactor = try c.decodeIfPresent(Double.self, forKey: .lineSpacingFactor) ?? 1
+        paragraphs = try c.decodeIfPresent([MTextParagraph].self, forKey: .paragraphs) ?? []
+        rawCode = try c.decodeIfPresent(String.self, forKey: .rawCode)
+        // ADDITIVE: old files (no `fields` key) decode to nil — plain MTEXT.
+        fields = try c.decodeIfPresent([FieldRun].self, forKey: .fields)
     }
 }
