@@ -119,6 +119,10 @@ enum AppSettings {
         /// `DXFExportVersion.rawValue` (String): the DXF format version a Save/Export
         /// writes (read off-main by `DXFDocumentCodec`, defaulting to R2000).
         static let dxfExportVersion = "app.general.dxfExportVersion"
+        /// `DWGExportVersion.rawValue` (String): the DWG format version a Save-As DWG
+        /// writes (read off-main by `DXFDocumentCodec`, defaulting to R2000 — the only
+        /// externally-blessed, broadly-compatible DWG tier).
+        static let dwgExportVersion = "app.general.dwgExportVersion"
 
         /// Appearance tab.
         /// `AppTheme.rawValue` (String): system / light / dark.
@@ -187,6 +191,9 @@ enum AppSettings {
         /// R2000 (AutoCAD 2000 / AC1015) — the broadly-compatible modern DXF the
         /// writer already defaults to, so an unset key preserves existing behavior.
         static let dxfExportVersion: DXFExportVersion = .r2000
+        /// R2000 (AutoCAD 2000 / AC1015) — the only externally-blessed DWG tier and
+        /// the writer's own default, so an unset key preserves existing behavior.
+        static let dwgExportVersion: DWGExportVersion = .r2000
 
         static let theme: AppTheme = .system
         /// Empty hex = "follow the theme palette" (do not override `CanvasTheme`).
@@ -275,6 +282,14 @@ enum AppSettings {
     /// reverts to the broadly-compatible default.
     static func dxfExportVersion(fromRaw raw: String) -> DXFExportVersion {
         DXFExportVersion(rawValue: raw) ?? Default.dxfExportVersion
+    }
+
+    /// Resolve a stored DWG-export version rawValue (String) back to a
+    /// `DWGExportVersion`, falling back to the default (R2000) for an unknown / blank /
+    /// legacy value. Defense-in-depth: even though the UI exposes only the 5 writable
+    /// DWG tiers, a corrupt/migrated key reverts to the broadly-compatible R2000.
+    static func dwgExportVersion(fromRaw raw: String) -> DWGExportVersion {
+        DWGExportVersion(rawValue: raw) ?? Default.dwgExportVersion
     }
 
     /// Resolve a stored snap mask back to a `SnapMode`. `.free` is the always-available
@@ -526,6 +541,49 @@ enum DXFExportVersion: String, CaseIterable, Sendable, Hashable {
     }
 }
 
+/// The DWG format version a Save-As DWG writes. Mirrors `DXFExportVersion` but
+/// exposes ONLY the tiers the DWG writer actually supports: R2000 / R2004 / R2010 /
+/// R2013 / R2018 — **no R2007, no R12/R14** (the library returns `BAD_VERSION` for
+/// those formats and the codec clamps them to R2000). Backed by a stable `rawValue`
+/// String so it persists to `UserDefaults` via `@AppStorage` and is read off-main
+/// by `DXFDocumentCodec`. R2000 is the default — the only externally-blessed tier.
+enum DWGExportVersion: String, CaseIterable, Sendable, Hashable {
+    /// AutoCAD 2000 (AC1015) — the broadly-compatible default; only DWG tier that
+    /// reliably imports in third-party tools.
+    case r2000
+    /// AutoCAD 2004 (AC1018).
+    case r2004
+    /// AutoCAD 2010 (AC1024).
+    case r2010
+    /// AutoCAD 2013 (AC1027).
+    case r2013
+    /// AutoCAD 2018 (AC1032).
+    case r2018
+
+    /// A short menu label for the Picker (matches `DXFExportVersion.label` style).
+    var label: String {
+        switch self {
+        case .r2000: return "R2000 (AC1015)"
+        case .r2004: return "R2004 (AC1018)"
+        case .r2010: return "R2010 (AC1024)"
+        case .r2013: return "R2013 (AC1027)"
+        case .r2018: return "R2018 (AC1032)"
+        }
+    }
+
+    /// The engine writer version this UI tier maps to. All five cases exist in
+    /// `DXFVersion` (Lane A: r2010=6, r2013=7 were added alongside the DWG writer).
+    var engineVersion: DXFVersion {
+        switch self {
+        case .r2000: return .r2000
+        case .r2004: return .r2004
+        case .r2010: return .r2010
+        case .r2013: return .r2013
+        case .r2018: return .r2018
+        }
+    }
+}
+
 // MARK: - The Preferences window view (SwiftUI; thin, decomposed per gotcha #2)
 
 #if canImport(SwiftUI)
@@ -570,6 +628,10 @@ private struct GeneralSettingsTab: View {
     // reads this SAME key off-main via `UserDefaults.standard` and threads it into the
     // engine writer; R2000 default = unchanged behavior.
     @AppStorage(AppSettings.Key.dxfExportVersion) private var dxfVersionRaw = AppSettings.Default.dxfExportVersion.rawValue
+    // READ-SITE (WIRED): the DWG version a Save-As DWG writes. `DXFDocumentCodec.data(from:)`
+    // reads this SAME key off-main and threads it into `writeEntities(toDWGPath:version:)`;
+    // R2000 default = unchanged behavior (only the 5 DWG-writable tiers are exposed).
+    @AppStorage(AppSettings.Key.dwgExportVersion) private var dwgVersionRaw = AppSettings.Default.dwgExportVersion.rawValue
 
     var body: some View {
         Form {
@@ -598,6 +660,13 @@ private struct GeneralSettingsTab: View {
                     }
                 }
                 Text("The DXF format version a Save/Export writes. R2000 is the broadly-compatible default; R12 maximizes import compatibility with older tools.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Picker("DWG save version", selection: $dwgVersionRaw) {
+                    ForEach(DWGExportVersion.allCases, id: \.self) { v in
+                        Text(v.label).tag(v.rawValue)
+                    }
+                }
+                Text("Some data may not round-trip to DWG (custom layers, block contents, viewports, parametric tables). Use DXF for full fidelity.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

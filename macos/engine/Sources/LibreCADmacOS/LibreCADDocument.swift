@@ -424,6 +424,25 @@ enum DXFDocumentCodec {
         return dxfVersion(fromRaw: raw)
     }
 
+    /// Resolves a stored DWG-export-version raw string to the engine `DXFVersion` the
+    /// DWG writer accepts. Mirrors `dxfVersion(fromRaw:)`. Clamps anything outside the
+    /// 5 DWG-writable tiers {r2000, r2004, r2010, r2013, r2018} to `.r2000` — defense-
+    /// in-depth even though the UI's `DWGExportVersion` picker excludes R2007/R12/R14.
+    /// PURE — no `UserDefaults`, no I/O — so it is fully unit-testable.
+    static func dwgVersion(fromRaw raw: String?) -> DXFVersion {
+        AppSettings.dwgExportVersion(fromRaw: raw ?? "").engineVersion
+    }
+
+    /// The DWG version the save path should write, resolved from the persisted
+    /// `app.general.dwgExportVersion` preference. Reads `UserDefaults.standard` off-main
+    /// (the codec runs on a background queue) and falls back to `.r2000` when the key is
+    /// unset/garbage. The defaults read is the ONLY side effect; the mapping itself is
+    /// the pure `dwgVersion(fromRaw:)` helper (which tests exercise directly).
+    static func resolvedDWGExportVersion() -> DXFVersion {
+        let raw = UserDefaults.standard.string(forKey: AppSettings.Key.dwgExportVersion)
+        return dwgVersion(fromRaw: raw)
+    }
+
     /// Serializes a `Sendable` payload to drawing bytes (DXF or DWG per `format`),
     /// OFF the main actor. Writes to a temp file through the shared engine actor's
     /// matching write path (path-only C API), reads the bytes back, then removes
@@ -447,9 +466,12 @@ enum DXFDocumentCodec {
         }
         // The DXF format version to write, resolved from the persisted Preference
         // (`app.general.dxfExportVersion`) off-main here on the codec's background queue;
-        // defaults to .r2000 (unchanged behavior) when unset. DWG is R2000-only (the
-        // library gap), so this only affects the .dxf branch below.
+        // defaults to .r2000 (unchanged behavior) when unset. Only affects the .dxf branch.
         let dxfVersion = resolvedDXFExportVersion()
+        // The DWG format version to write, resolved from `app.general.dwgExportVersion`.
+        // Exposes R2000/R2004/R2010/R2013/R2018 — the 5 tiers the DWG writer supports;
+        // R2007/R12/R14 are excluded from the UI picker and clamped to R2000 by the resolver.
+        let dwgVersion = resolvedDWGExportVersion()
         do {
             _ = try runBlocking {
                 switch format {
@@ -485,7 +507,10 @@ enum DXFDocumentCodec {
                         // TABLES persistence: same explode-to-LINE+TEXT path as DXF (the
                         // exploded records flow through the standard DWG entity writer).
                         tables: payload.tables,
-                        toDWGPath: tmp.path
+                        toDWGPath: tmp.path,
+                        // The user-chosen DWG version (Settings ▸ General ▸ Files);
+                        // .r2000 default keeps the prior hardcoded behavior.
+                        version: dwgVersion
                     )
                 }
             }
