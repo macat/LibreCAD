@@ -6,6 +6,12 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-18 — AUTOCAD CURSOR: hide the native pointer under the drawn crosshair — (`native-macos @ 1bcf4bf7e`, **4068 tests**, .app rebuilt)
+
+Owner: "the default mac cursor does not disappear — i see the cross, but also the native cursor. make it like autocad." Root cause: `refreshCrosshair()` set `toolCursor = show ? .crosshair : nil`, stacking the native `.crosshair` NSCursor ON TOP of the already-drawn full "spider" `CrosshairOverlayView` (default style `.full`) → a doubled cursor. Fix `1bcf4bf7e` (CADCanvasView.swift only, delegated builder): added a shared TRANSPARENT `FlippedMTKView.blankCursor` (16×16 empty NSImage, centered hotSpot) and swapped the assignment to `show ? FlippedMTKView.blankCursor : nil`. While a tool is active the OS pointer is now invisible over the canvas and the drawn crosshair is the only cursor (AutoCAD parity); the arrow returns in select mode. Kept the existing `addCursorRect`/`resetCursorRects` machinery (NOT `NSCursor.hide()`), so invisibility is confined to the canvas bounds and AppKit auto-restores the normal cursor off-canvas (sidebars/menus) — no global hidden-cursor footgun. 2 tests (blank-cursor size/hotspot + full transparency). **Verification ceiling:** live cursor visibility is AppKit chrome the headless suite + LCShot can't observe — owner does the visual check. Deferred/optional: a hand cursor during pan; showing the crosshair (with pickbox) in SELECT mode too for fuller AutoCAD parity. Not pushed.
+
+---
+
 ## 2026-06-18 — CONSTRAINTS UX FOLLOW-UP: glyphs floated off the geometry + manual over-constrain now rejected/flagged — (`native-macos @ bc94dab84`, **4066 tests**, .app rebuilt)
 
 Owner re-tested (2nd screenshot): auto-added coincident dots "nice", but "constraints just did not work" + "move the constraints a bit away from the object." Two fixes, each investigated→built→reviewed→gated.
