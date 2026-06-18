@@ -187,7 +187,7 @@ public enum EntityGrips {
         // insertion grip is intentionally omitted: mtext layout is owned by its
         // attachment + rect, not a single draggable point in this wave.)
         case .mtext, .hatch, .solid, .dimension, .insert,
-             .xline, .ray, .leader, .multileader, .image, .wipeout:
+             .xline, .ray, .leader, .multileader, .image, .wipeout, .mline:
             return []
         }
     }
@@ -331,7 +331,7 @@ public enum EntityGrips {
 
         // No per-point grips → not grip-editable.
         case .mtext, .hatch, .solid, .dimension, .insert,
-             .xline, .ray, .leader, .multileader, .image, .wipeout:
+             .xline, .ray, .leader, .multileader, .image, .wipeout, .mline:
             return nil
         }
     }

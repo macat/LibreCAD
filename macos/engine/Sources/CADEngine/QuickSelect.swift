@@ -87,6 +87,11 @@ public enum QuickSelectKind: String, Sendable, Hashable, CaseIterable, Codable {
         // alongside SOLIDs. A dedicated tag is a later wave's call (mirrors the
         // MLEADER→leader precedent above).
         case .wipeout:      return .solid
+        // MLINE maps to the `.polyline` tag (no new `QuickSelectKind` case): a
+        // multiline is N parallel lines along a vertex path, so it is quick-
+        // selectable alongside polylines. A dedicated tag is a later wave's call
+        // (mirrors the MLEADER→leader / WIPEOUT→solid precedents above).
+        case .mline:        return .polyline
         }
     }
 }

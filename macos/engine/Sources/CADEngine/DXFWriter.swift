@@ -923,6 +923,15 @@ private final class PODBuilder {
             let (wptr, wcount) = internPoints(d.boundary)
             e.vertices = wptr
             e.vertexCount = wcount
+
+        case .mline:
+            // Wave-0 STUB: the real DXF MLINE write arm (a bridge POD field set +
+            // `dxfRW::writeMLine` dispatch) is a LATER wave. Until the bridge gains
+            // `LC_ENT_MLINE`, mark it UNSUPPORTED so the C side counts it skipped (no
+            // bytes emitted), exactly like the interim WIPEOUT/MLEADER stubs were.
+            // The engine's own Codable document path still round-trips an MLINE
+            // losslessly (vertices + inline elements + justification/scale/closed).
+            e.kind = Int32(LC_ENT_UNSUPPORTED.rawValue)
         }
         return e
     }

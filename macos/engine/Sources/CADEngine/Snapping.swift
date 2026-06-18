@@ -518,6 +518,12 @@ public enum Snapping {
             // (mirroring the image's quad corners, but the boundary is an arbitrary
             // polygon, not just four corners).
             return d.worldBoundary.filter(\.valid)
+
+        case .mline(let d):
+            // The multiline's PATH vertices are its snappable endpoints/corners
+            // (treated like a polyline over the path — the offset element lines are
+            // derived geometry, so the path vertices are the defining snap points).
+            return d.vertices.filter(\.valid)
         }
     }
 
@@ -671,6 +677,19 @@ public enum Snapping {
             var mids: [Vector] = []
             for i in 0..<world.count {
                 mids.append((world[i] + world[(i + 1) % world.count]) * 0.5)
+            }
+            return mids.filter(\.valid)
+
+        case .mline(let d):
+            // The midpoint of each PATH segment (the multiline snaps like a polyline
+            // over its vertex path; the closing last→first edge is included ONLY when
+            // the multiline is closed).
+            let verts = d.vertices.filter(\.valid)
+            guard verts.count >= 2 else { return [] }
+            var mids: [Vector] = []
+            let segCount = d.closed ? verts.count : verts.count - 1
+            for i in 0..<segCount {
+                mids.append((verts[i] + verts[(i + 1) % verts.count]) * 0.5)
             }
             return mids.filter(\.valid)
         }

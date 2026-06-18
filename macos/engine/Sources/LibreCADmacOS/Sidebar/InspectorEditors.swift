@@ -227,6 +227,7 @@ struct GeometryEditor: View {
             case .mtext(let d):        mtextGeometryEditor(d)
             case .image(let d):        imageGeometryEditor(d)
             case .wipeout(let d):      wipeoutEditor(d)
+            case .mline(let d):        mlineEditor(d)
             }
         }
     }
@@ -640,6 +641,49 @@ struct GeometryEditor: View {
                 w.frameVisible = newValue
                 onCommit([replacing(.wipeout(w))])
             }
+        ))
+        .lineLimit(1)
+    }
+
+    // MARK: Multiline (read-mostly: counts + justification / scale / closed)
+    //
+    // A multiline's vertex path + element offsets are edited by grips/transform (a
+    // later wave); the inspector shows read-only counts (vertices, elements) plus the
+    // three editable style fields — justification (which element rides the path),
+    // overall offset scale (a negative scale mirrors the element fan), and whether
+    // the path is closed. Each commits through a pure `InspectorEdits` helper.
+
+    @ViewBuilder
+    private func mlineEditor(_ d: MLineData) -> some View {
+        LabeledContent("Vertices") {
+            Text("\(d.vertices.count)").foregroundStyle(.secondary)
+        }
+        .lineLimit(1)
+        LabeledContent("Elements") {
+            Text("\(d.elements.count)").foregroundStyle(.secondary)
+        }
+        .lineLimit(1)
+        Picker("Justification", selection: Binding(
+            get: { d.justification },
+            set: { onCommit([replacing(InspectorEdits.setMLineJustification(record.kind, $0))]) }
+        )) {
+            Text("Top").tag(MLineJustification.top)
+            Text("Zero").tag(MLineJustification.zero)
+            Text("Bottom").tag(MLineJustification.bottom)
+        }
+        .lineLimit(1)
+        LabeledContent("Scale") {
+            TextField("Scale", value: Binding(
+                get: { d.scale },
+                set: { onCommit([replacing(InspectorEdits.setMLineScale(record.kind, $0))]) }
+            ), format: .number)
+            .multilineTextAlignment(.trailing)
+            .frame(maxWidth: 80)
+        }
+        .lineLimit(1)
+        Toggle("Closed", isOn: Binding(
+            get: { d.closed },
+            set: { onCommit([replacing(InspectorEdits.setMLineClosed(record.kind, $0))]) }
         ))
         .lineLimit(1)
     }

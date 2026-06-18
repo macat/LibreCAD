@@ -543,6 +543,41 @@ public enum InspectorEdits {
         return .multileader(d)
     }
 
+    // MARK: - Multiline field edits (DRW_MLine, DXF MLINE)
+    //
+    // The multiline's read-mostly inspector edits its three style fields — which
+    // element rides the path (justification), the overall offset scale (a negative
+    // scale mirrors the element fan across the path), and whether the path is closed.
+    // Each is a pure `EntityKind -> EntityKind` `.replace` (no-op on a non-mline
+    // kind); the vertex path + element offsets are edited by grips/transform (a later
+    // wave), not here.
+
+    /// Sets an `.mline`'s justification (which element rides the vertex path),
+    /// keeping its vertices + elements + scale + closed flag. No-op on other kinds.
+    public static func setMLineJustification(_ kind: EntityKind, _ justification: MLineJustification) -> EntityKind {
+        guard case .mline(var d) = kind else { return kind }
+        d.justification = justification
+        return .mline(d)
+    }
+
+    /// Sets an `.mline`'s overall offset scale (a NEGATIVE scale mirrors the element
+    /// fan across the path — preserved, not clamped). A scale that rounds to exactly
+    /// `0` collapses every element onto the path, so it is floored to a tiny positive
+    /// value to keep the multiline visible. No-op on other kinds.
+    public static func setMLineScale(_ kind: EntityKind, _ scale: Double) -> EntityKind {
+        guard case .mline(var d) = kind else { return kind }
+        d.scale = abs(scale) < Tolerance.distance ? Tolerance.distance : scale
+        return .mline(d)
+    }
+
+    /// Sets/clears an `.mline`'s closed flag (closed joins the last vertex back to the
+    /// first with a mitered wrap corner). No-op on other kinds.
+    public static func setMLineClosed(_ kind: EntityKind, _ closed: Bool) -> EntityKind {
+        guard case .mline(var d) = kind else { return kind }
+        d.closed = closed
+        return .mline(d)
+    }
+
     // MARK: - Image field edits (RS_Image, DXF IMAGE)
 
     /// Replaces an `.image`'s insertion (lower-left) corner, keeping its u/v +

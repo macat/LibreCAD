@@ -372,7 +372,7 @@ public struct StretchTool: Tool {
             guard inside(d.base) else { return nil }
             return EntityKind.ray(d).transformed(by: t)
 
-        case .hatch, .dimension, .insert, .leader, .multileader, .image, .wipeout:
+        case .hatch, .dimension, .insert, .leader, .multileader, .image, .wipeout, .mline:
             // Best-effort whole-translate if ANY defining point is in-window; the
             // per-point stretch of these composite kinds is backlog. We translate
             // the whole entity (its boundary moves with the geometry it bounds). For
@@ -444,6 +444,9 @@ public struct StretchTool: Tool {
         case .wipeout(let w):
             // A wipeout's world boundary vertices are its stretch reference points.
             return w.worldBoundary.contains { inside($0) }
+        case .mline(let m):
+            // A multiline's path vertices are its stretch reference points.
+            return m.vertices.contains { inside($0) }
         default:
             return false
         }

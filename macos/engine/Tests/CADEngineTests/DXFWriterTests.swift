@@ -105,6 +105,10 @@ struct DXFWriterTests {
             case .multileader:  t.leader += 1
             case .image:        t.image += 1     // now written (DRW_Image + IMAGEDEF)
             case .wipeout:      t.wipeout += 1   // written (DRW_Image + AcDbWipeout)
+            // MLINE (Wave 0): DXF write is a later wave (stubbed UNSUPPORTED), and the
+            // reader does not import MLINE yet, so it never appears in these read-back
+            // samples — count nothing (it is not in the supported round-trip total).
+            case .mline:        break
             }
         }
         return t
@@ -868,8 +872,9 @@ struct DXFWriterTests {
              .spline, .splinePoints, .xline, .ray, .leader, .image,
              .wipeout: return true   // WIPEOUT is written (DRW_Image + AcDbWipeout)
         // MLEADER write is ML-W3 (the writer stubs `.multileader` to UNSUPPORTED for
-        // now), so it is NOT in the supported set yet.
-        case .multileader: return false
+        // now), so it is NOT in the supported set yet. MLINE (Wave 0) is likewise
+        // stubbed UNSUPPORTED — its real DXF write is a later wave.
+        case .multileader, .mline: return false
         }
     }
 }

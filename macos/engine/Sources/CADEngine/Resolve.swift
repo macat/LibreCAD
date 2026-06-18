@@ -1101,7 +1101,166 @@ extension EntityKind {
             // over the same boundary in the resolved pen when `frameVisible`, so the
             // wipeout is visible/selectable. Derived geometry, never stored.
             return Self.resolveWipeout(d, pen: pen, ctx: ctx)
+
+        case .mline(let d):
+            // Multiline → ONE `ResolvedPolyline` per element, each the path offset
+            // PERPENDICULAR by the element's effective (justification-shifted,
+            // scaled) signed distance, MITERED at interior corners (with a near-180°
+            // clamp to a butt join so a reversal spike never runs away). No fill, no
+            // caps in this MVP. Derived geometry, never stored (ADR-001).
+            return Self.resolveMLine(d, pen: pen, ctx: ctx)
         }
+    }
+
+    // MARK: - Multiline (MLINE) resolve (N mitered parallel element lines)
+
+    /// The cosine threshold beyond which an interior corner is treated as a near-180°
+    /// REVERSAL and the miter is CLAMPED to a butt join (the two segment-offset
+    /// points are emitted directly, no miter apex) so the miter length never blows up
+    /// toward infinity. `dot(dirIn, dirOut)` of the unit segment directions below this
+    /// (i.e. the turn angle exceeds ~175°) trips the clamp. Chosen at cos(175°) ≈
+    /// -0.9962 — sharp everyday corners (even acute 30–60° ones) still miter; only a
+    /// genuine fold-back degenerates to a bevel/butt.
+    static let mlineMiterReversalCos: Double = -0.9962
+
+    /// Resolves a multiline to one `ResolvedPolyline` per element (ADR-001: PURE).
+    /// Degenerate inputs (no elements, < 2 valid path vertices, or a path that
+    /// collapses to a point) resolve to empty geometry — never a crash. Each element
+    /// line is the path translated by its effective signed offset along the local
+    /// LEFT normal, with interior corners mitered (near-180° corners clamped).
+    static func resolveMLine(_ d: MLineData, pen: ResolvedPen, ctx: ResolveContext)
+        -> ResolvedGeometry
+    {
+        let verts = d.vertices.filter(\.valid)
+        guard verts.count >= 2, !d.elements.isEmpty else { return ResolvedGeometry() }
+
+        let offsets = d.effectiveOffsets   // (offset + justShift) * scale, in element order
+        var polylines: [ResolvedPolyline] = []
+        polylines.reserveCapacity(offsets.count)
+        for off in offsets {
+            let pts = Self.offsetPathMitered(verts, offset: off, closed: d.closed)
+            guard pts.count >= 2 else { continue }
+            polylines.append(ResolvedPolyline(points: pts, closed: d.closed, pen: pen))
+        }
+        return ResolvedGeometry(polylines: polylines)
+    }
+
+    /// Offsets a polyline `path` PERPENDICULARLY by the signed `offset` (positive =
+    /// to the LEFT of travel = the path's left normal), mitering at interior corners.
+    ///
+    /// At each interior vertex the two adjacent EDGE-offset lines are intersected to
+    /// find the miter apex; when the corner is a near-180° reversal (the incoming and
+    /// outgoing directions nearly anti-parallel, `dot < mlineMiterReversalCos`) the
+    /// miter is CLAMPED — the two per-edge offset points are emitted directly (a butt/
+    /// bevel join) so the apex never shoots off to infinity. `closed` mitres the
+    /// wrap-around corner between the last and first edges too. Coincident-vertex
+    /// edges are skipped so a repeated point never produces a NaN direction.
+    static func offsetPathMitered(_ path: [Vector], offset: Double, closed: Bool) -> [Vector] {
+        // Build the list of non-degenerate edges as (start, unitDir).
+        var pts = path
+        if closed, let f = pts.first, let l = pts.last, f.distance(to: l) < Tolerance.distance {
+            pts.removeLast()   // a closed path that repeats its first point: drop the dup
+        }
+        guard pts.count >= 2 else { return [] }
+
+        let n = pts.count
+        // Unit direction + left normal of the edge LEAVING vertex i (i → i+1).
+        // For an open path the last vertex has no leaving edge; for a closed path
+        // edge n-1 wraps n-1 → 0.
+        func edgeDir(_ i: Int) -> Vector? {
+            let j = (i + 1) % n
+            let v = pts[j] - pts[i]
+            let len = v.magnitude
+            guard len > Tolerance.distance else { return nil }
+            return v / len
+        }
+        // Left normal of a unit direction (rotate +90°): (dx, dy) → (-dy, dx).
+        func leftNormal(_ dir: Vector) -> Vector { Vector(-dir.y, dir.x) }
+
+        let edgeCount = closed ? n : n - 1
+        // Per-edge unit directions (nil for a collapsed edge).
+        var dirs: [Vector?] = []
+        dirs.reserveCapacity(edgeCount)
+        for i in 0..<edgeCount { dirs.append(edgeDir(i)) }
+
+        // The offset point for the START of edge `e` (= the offset of pts[e] along
+        // edge e's left normal) and the END of edge `e` (offset of pts[e+1]).
+        func offsetStart(_ e: Int) -> Vector? {
+            guard let dir = dirs[e] else { return nil }
+            return pts[e] + leftNormal(dir) * offset
+        }
+        func offsetEnd(_ e: Int) -> Vector? {
+            guard let dir = dirs[e] else { return nil }
+            return pts[(e + 1) % n] + leftNormal(dir) * offset
+        }
+
+        var out: [Vector] = []
+        out.reserveCapacity(n + 2)
+
+        // OPEN path: the first output point is the offset of the path start along the
+        // first valid edge; CLOSED path: the wrap corner is computed in the loop.
+        if !closed {
+            // Find the first valid edge to seed the start point.
+            if let firstEdge = (0..<edgeCount).first(where: { dirs[$0] != nil }),
+               let s = offsetStart(firstEdge) {
+                out.append(s)
+            }
+        }
+
+        // Interior corners: for an OPEN path, vertices 1..<n-1 (between two edges);
+        // for a CLOSED path, every vertex 0..<n (each between edge (i-1) and edge i).
+        let cornerRange = closed ? Array(0..<n) : Array(1..<(n - 1))
+        for v in cornerRange {
+            let inEdge = closed ? (v + edgeCount - 1) % edgeCount : v - 1
+            let outEdge = closed ? v : v
+            let dIn = dirs[inEdge]
+            let dOut = dirs[outEdge]
+            // If either adjacent edge collapsed, fall back to whichever offset point
+            // exists so the line stays continuous.
+            guard let din = dIn, let dout = dOut else {
+                if let p = offsetEnd(inEdge) ?? offsetStart(outEdge) { out.append(p) }
+                continue
+            }
+            let pIn = pts[v] + leftNormal(din) * offset     // end of in-edge offset line
+            let pOut = pts[v] + leftNormal(dout) * offset    // start of out-edge offset line
+            // Near-180° reversal → clamp to a butt/bevel join (emit both points).
+            if din.dot(dout) < mlineMiterReversalCos {
+                out.append(pIn)
+                out.append(pOut)
+                continue
+            }
+            // Miter apex: intersect the in-edge offset line (through pIn, dir din)
+            // with the out-edge offset line (through pOut, dir dout).
+            if let apex = Self.lineLineIntersection(p1: pIn, d1: din, p2: pOut, d2: dout) {
+                out.append(apex)
+            } else {
+                // Parallel offset lines (collinear edges): no corner, use one point.
+                out.append(pIn)
+            }
+        }
+
+        // OPEN path: the last output point is the offset of the path end along the
+        // last valid edge.
+        if !closed {
+            if let lastEdge = (0..<edgeCount).last(where: { dirs[$0] != nil }),
+               let e = offsetEnd(lastEdge) {
+                out.append(e)
+            }
+        }
+
+        return out
+    }
+
+    /// Intersection of two infinite lines, each given by a point + a unit direction.
+    /// Returns `nil` when the directions are (near) parallel (no unique crossing).
+    static func lineLineIntersection(p1: Vector, d1: Vector, p2: Vector, d2: Vector) -> Vector? {
+        // Solve p1 + t·d1 = p2 + s·d2 for t. Cross-product denominator d1 × d2.
+        let denom = d1.x * d2.y - d1.y * d2.x
+        guard abs(denom) > 1e-12 else { return nil }
+        let dx = p2.x - p1.x
+        let dy = p2.y - p1.y
+        let t = (dx * d2.y - dy * d2.x) / denom
+        return Vector(p1.x + t * d1.x, p1.y + t * d1.y)
     }
 
     // MARK: - Wipeout resolve (background-color mask fill + frame outline)
@@ -2593,6 +2752,25 @@ extension EntityKind {
             let world = d.worldBoundary.filter(\.valid)
             return world.isEmpty ? AABB(point: d.insertion.valid ? d.insertion : Vector(0, 0))
                                  : AABB(points: world)
+
+        case .mline(let d):
+            // Union of every element's mitered offset polyline (the offset lines can
+            // extend beyond the bare path vertices at the outer side of a corner). A
+            // degenerate multiline (no elements / < 2 valid path points) collapses to
+            // its first vertex (or the origin). Built from the SAME offset math the
+            // resolve uses so the box always contains the drawn geometry.
+            let verts = d.vertices.filter(\.valid)
+            guard verts.count >= 2, !d.elements.isEmpty else {
+                return AABB(point: verts.first ?? Vector(0, 0))
+            }
+            var all: [Vector] = []
+            for off in d.effectiveOffsets {
+                all.append(contentsOf: Self.offsetPathMitered(verts, offset: off, closed: d.closed))
+            }
+            // Always include the path vertices so a zero-offset / empty-offset element
+            // set still yields the path extent.
+            all.append(contentsOf: verts)
+            return all.isEmpty ? AABB(point: verts[0]) : AABB(points: all)
         }
     }
 
