@@ -385,10 +385,26 @@ private struct Lexer {
         let numStr = String(chars[start..<i])
         guard let value = Double(numStr) else { throw EvalError.syntax }
 
-        // Consume an optional unit-letter suffix (letters / `"` / `'` / `µ`).
-        // These are part of the literal's token but do not affect magnitude.
-        while let c = peek(), c.isLetter || c == "\"" || c == "'" || c == "µ" {
-            i += 1
+        // Consume an optional unit-letter suffix (letters / `"` / `'` / `µ`),
+        // allowing OPTIONAL whitespace between the number and the suffix so that
+        // `3.5cm` and `3.5 cm` lex identically (and agree with `parseAssignment`
+        // / `bareLiteralUnitToken`). The whitespace is only swallowed when a unit
+        // suffix actually follows — otherwise it's left for the next token so an
+        // expression like `3 + 4` is unaffected. The suffix is part of the
+        // literal's token but does not change the magnitude.
+        let isUnitChar: (Character) -> Bool = { $0.isLetter || $0 == "\"" || $0 == "'" || $0 == "µ" }
+        if let c = peek(), isUnitChar(c) {
+            // Adjacent suffix (`3.5cm`).
+            while let u = peek(), isUnitChar(u) { i += 1 }
+        } else if let c = peek(), c == " " || c == "\t" {
+            // Look past whitespace: only consume it (and the suffix) if a unit
+            // suffix immediately follows the whitespace; otherwise leave `i` put.
+            var j = i
+            while j < chars.count, chars[j] == " " || chars[j] == "\t" { j += 1 }
+            if j < chars.count, isUnitChar(chars[j]) {
+                i = j
+                while let u = peek(), isUnitChar(u) { i += 1 }
+            }
         }
         return .number(value)
     }

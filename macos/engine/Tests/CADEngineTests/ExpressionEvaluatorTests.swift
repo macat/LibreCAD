@@ -295,4 +295,36 @@ struct ExpressionEvaluatorTests {
         #expect(unit == .centimeter)
         #expect(near(value * unit.factorToMM, 35))   // 3.5 cm == 35 mm (caller's choice)
     }
+
+    @Test("Spaced and unspaced unit literals behave identically")
+    func spacedUnitEquivalence() throws {
+        // Regression: parseAssignment/bareLiteralUnitToken accepted a space before
+        // the unit suffix, but evaluate() used to reject `3.5 cm` with .syntax —
+        // the two disagreed. The lexer now consumes optional `whitespace + suffix`
+        // so both spellings parse, evaluate, and map identically.
+        for spelling in ["3.5cm", "3.5 cm", "3.5  cm"] {
+            let (value, token) = try ExpressionEvaluator.evaluateLiteralUnit(spelling)
+            #expect(near(value, 3.5), "value for \(spelling)")
+            #expect(token == "cm", "token for \(spelling)")
+            let unit = try #require(token.flatMap { DrawingUnit(unitToken: $0) })
+            #expect(near(value * unit.factorToMM, 35), "mm for \(spelling)")  // 3.5 cm == 35 mm
+        }
+        // Plain evaluate() must also accept the spaced form (no trailing-token error).
+        #expect(near(try ExpressionEvaluator.evaluate("22 mm"), 22))
+        #expect(near(try ExpressionEvaluator.evaluate("22mm"), 22))
+
+        // And the assignment path agrees end-to-end on the spaced form.
+        let parsed = try #require(ExpressionEvaluator.parseAssignment("a=22 mm"))
+        #expect(parsed.unit == "mm")
+        #expect(near(try ExpressionEvaluator.evaluate(parsed.expression), 22))
+    }
+
+    @Test("Whitespace before an operator is NOT swallowed as a unit")
+    func whitespaceBeforeOperatorUnaffected() throws {
+        // The optional-whitespace+suffix consumption must not break ordinary
+        // spaced arithmetic where a number is followed by space + operator.
+        #expect(near(try ExpressionEvaluator.evaluate("3 + 4"), 7))
+        #expect(near(try ExpressionEvaluator.evaluate("3 * 4"), 12))
+        #expect(near(try ExpressionEvaluator.evaluate("10 - 2 mm"), 8))   // suffix on 2nd literal
+    }
 }
