@@ -955,6 +955,17 @@ struct LibreCADApp: App {
             Button("Dimension Style Manager…") {
                 NSApp.sendAction(Selector(("dimStyleManagerAction:")), to: nil, from: nil)
             }
+
+            // Parameters Manager… (Lane L4, consumes the named-parameter engine + seam).
+            // Manages the drawing's NAMED PARAMETERS (the `ParameterTable`) and the
+            // parameter-driven dimensional constraints. Dispatched through the responder
+            // chain to the focused canvas, whose `@objc parametersManagerAction(_:)`
+            // (in the extension in THIS file) presents `ParametersManagerView(model:)`
+            // over the window's `CanvasModel` as an AppKit sheet (View-layer only —
+            // never reachable from a test). No standard chord.
+            Button("Parameters Manager…") {
+                NSApp.sendAction(Selector(("parametersManagerAction:")), to: nil, from: nil)
+            }
         }
     }
 
@@ -1420,6 +1431,33 @@ extension FlippedMTKView {
     @objc func dimStyleManagerAction(_ sender: Any?) {
         guard let controller, let window else { return }
         let host = NSHostingController(rootView: DimStyleManagerView(model: controller.model))
+        // Present as a document-modal sheet on the focused window. `presentAsSheet`
+        // retains `host` until it is dismissed (the manager's Done → `dismiss()`).
+        window.contentViewController?.presentAsSheet(host)
+    }
+}
+
+// MARK: - Parameters Manager responder-chain action (Lane L4 — consumes the param engine)
+//
+// The Tools ▸ Annotate ▸ Dimensions ▸ Parameters Manager… menu item dispatches via
+// `NSApp.sendAction(_:to:nil:from:)` to the focused canvas (`FlippedMTKView`). The
+// handler presents `ParametersManagerView(model:)` over the window's `CanvasModel` as
+// an AppKit SHEET, hosted in an `NSHostingController` and presented from the View layer
+// ONLY (the headless-modal trap — nothing a test reaches builds or presents it). The
+// manager edits the drawing's named parameters live + undoably through the CanvasModel
+// re-solve funnels, so the geometry a parameter drives re-solves as the user types. It
+// dismisses itself via its `@Environment(\.dismiss)` Done button; on dismiss we request
+// a redraw so any geometry the parameter edits moved repaints. The hosting controller
+// is retained for the sheet's lifetime by `presentAsSheet`.
+extension FlippedMTKView {
+
+    /// Tools ▸ … ▸ Parameters Manager… — present the L4 manager as a sheet.
+    @objc func parametersManagerAction(_ sender: Any?) {
+        guard let controller, let window else { return }
+        let model = controller.model
+        let host = NSHostingController(
+            rootView: ParametersManagerView(model: model)
+                .onDisappear { [weak controller] in controller?.requestRedraw() })
         // Present as a document-modal sheet on the focused window. `presentAsSheet`
         // retains `host` until it is dismissed (the manager's Done → `dismiss()`).
         window.contentViewController?.presentAsSheet(host)

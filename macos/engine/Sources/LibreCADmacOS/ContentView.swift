@@ -1152,7 +1152,10 @@ struct ContentView: View {
             },
             insertField: { token in
                 sendDocumentAction(Selector((Self.fieldInsertSelector(token))))
-            }
+            },
+            // Lane L4 — Parameters Manager… dispatches the SAME responder-chain selector
+            // its menu item fires (so ⌘K == the menu action; the sheet stays View-layer).
+            parametersManager: { sendDocumentAction(Selector(("parametersManagerAction:"))) }
         ))
     }
 

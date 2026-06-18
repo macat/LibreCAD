@@ -112,6 +112,11 @@ enum CommandRegistry {
         var applyGeometricConstraint: (GeometricConstraintKind) -> Void = { _ in }
         var applyDimensionalConstraint: (DimensionalConstraintKind) -> Void = { _ in }
         var insertField: (FieldToken) -> Void = { _ in }
+        // Lane L4 — the Parameters Manager… sheet. Fires the SAME responder-chain
+        // selector its menu item fires (so ⌘K == the menu action; the sheet stays in the
+        // View layer). Defaulted to an inert no-op so existing `Actions(...)` test stubs
+        // keep compiling — `ContentView.paletteCommands` supplies the real closure.
+        var parametersManager: () -> Void = {}
     }
 
     /// SF Symbol + shortcut hint for each tool, mirroring the toolbar/menu so the
@@ -272,6 +277,8 @@ enum CommandRegistry {
                            systemImage: "square.and.arrow.down.on.square", run: actions.importMergeDXF),
             PaletteCommand(id: "app.dimStyleManager", title: "Dimension Style Manager…",
                            systemImage: "ruler", run: actions.dimensionStyleManager),
+            PaletteCommand(id: "app.parametersManager", title: "Parameters Manager…",
+                           systemImage: "function", run: actions.parametersManager),
             PaletteCommand(id: "app.saveView", title: "Save View…",
                            systemImage: "bookmark", shortcut: "⌥⌘S", run: actions.saveNamedView),
             PaletteCommand(id: "app.restoreView", title: "Restore View…",
