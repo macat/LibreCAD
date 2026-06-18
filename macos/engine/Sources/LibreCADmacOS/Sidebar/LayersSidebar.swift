@@ -95,6 +95,11 @@ struct LayersSidebar: View {
     /// watches it via `onChange`; the value itself is meaningless (only its CHANGES matter).
     @State private var resetQuickSelect = false
 
+    /// The Constraints panel's "Selection only" filter state — surfaced in the panel HEADER
+    /// (a filter toggle) and read by the BODY (`ConstraintsSectionContent`). When on, the
+    /// panel lists only constraints referencing the current selection.
+    @State private var constraintsSelectionOnly = false
+
     var body: some View {
         SidebarPanelStack(panels: panels, config: $config)
             .frame(minWidth: 220, idealWidth: 260)
@@ -112,6 +117,23 @@ struct LayersSidebar: View {
             .onChange(of: model.drawing.layers.activeLayerName) { _, newActive in
                 if selectedLayer != newActive { selectedLayer = newActive }
             }
+            // View ▸ Show Constraints Panel (+ the ⌘K palette entry) post this so the
+            // Constraints panel — which defaults HIDDEN like Quick Select — un-hides +
+            // expands here on demand. Mirrors the `.lcShowConstraintsDidChange` live-apply
+            // pattern, but targets the panel layout config (not the glyph overlay flag).
+            .onReceive(NotificationCenter.default.publisher(for: .lcShowConstraintsPanel)) { _ in
+                revealConstraintsPanel()
+            }
+    }
+
+    /// Un-hides + expands the Constraints panel and persists the change — the View-menu /
+    /// ⌘K "Show Constraints Panel" target. Idempotent: if it is already visible + expanded
+    /// this writes back an equal config (no-op). Persistence flows through the existing
+    /// `onChange(of: config)` that mirrors into `@AppStorage`.
+    private func revealConstraintsPanel() {
+        var next = config.settingHidden(.constraints, false)
+        if next.isCollapsed(.constraints) { next = next.togglingCollapsed(.constraints) }
+        if next != config { config = next }
     }
 
     // MARK: - Panel descriptors
@@ -125,7 +147,8 @@ struct LayersSidebar: View {
             SidebarPanel(id: .layerStates, header: { layerStatesHeaderControls }, body: { layerStatesBody }),
             SidebarPanel(id: .blocks, header: { blocksHeaderControls }, body: { blocksBody }),
             SidebarPanel(id: .partsLibrary, header: { partsLibraryHeaderControls }, body: { partsLibraryBody }),
-            SidebarPanel(id: .quickSelect, header: { quickSelectHeaderControls }, body: { quickSelectBody })
+            SidebarPanel(id: .quickSelect, header: { quickSelectHeaderControls }, body: { quickSelectBody }),
+            SidebarPanel(id: .constraints, header: { constraintsHeaderControls }, body: { constraintsBody })
         ]
     }
 
@@ -401,6 +424,27 @@ struct LayersSidebar: View {
         QuickSelectSectionContent(model: model,
                                   controllerBox: controllerBox,
                                   resetTick: resetQuickSelect)
+    }
+
+    // MARK: Constraints panel (list / delete / filter-to-selection / click-to-select)
+
+    /// The Constraints header control: a "Selection only" filter toggle (a filter glyph
+    /// that fills when on). Binds the panel's `constraintsSelectionOnly` state, which the
+    /// body reads to scope the list to the current selection.
+    @ViewBuilder
+    private var constraintsHeaderControls: some View {
+        ConstraintsHeaderControls(selectionOnly: $constraintsSelectionOnly)
+    }
+
+    /// The Constraints body: the drawing's parametric constraints grouped by category with
+    /// per-row delete + click-to-select (delegated to `ConstraintsSectionContent`). Delete
+    /// funnels through `model.removeConstraint(id:)` (undoable); click-to-select through
+    /// `model.setSelection` (undo-free) and repaints the canvas / glyph overlay.
+    @ViewBuilder
+    private var constraintsBody: some View {
+        ConstraintsSectionContent(model: model,
+                                  controllerBox: controllerBox,
+                                  selectionOnly: constraintsSelectionOnly)
     }
 
     // MARK: - Layers selection / remove gating

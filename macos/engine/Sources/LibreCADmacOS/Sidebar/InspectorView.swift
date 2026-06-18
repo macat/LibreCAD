@@ -48,6 +48,10 @@ struct InspectorView: View {
             selectionSection
             // §14 ATTDEF authoring — only while a block is being edited (Block Editor).
             attributeDefsSection
+            // The parametric CONSTRAINTS on the current selection (list + per-row delete) —
+            // the same delete capability the Constraints sidebar panel exposes, surfaced
+            // here so a selected entity's constraints are editable in place.
+            constraintsSection
             propertyPainterSection
             snapGridSection
             toolOptionsSection
@@ -371,6 +375,91 @@ struct InspectorView: View {
                 }
                 .disabled(!avail.canReset)
                 .help("Make the selection inherit each layer's pen again")
+            }
+        }
+    }
+
+    // MARK: Constraints on the selection (list + per-row delete)
+
+    /// The PARAMETRIC CONSTRAINTS referencing the current selection, listed with a per-row
+    /// trash button — the same headline "delete" capability the Constraints sidebar panel
+    /// exposes, surfaced in the Inspector for the selected entity. Hidden entirely when the
+    /// selection has no (visible) constraints, so it never adds an empty section. Delete
+    /// funnels through the undoable `model.removeConstraint(id:)` (one ⌘Z restores it) +
+    /// a redraw so the glyph overlay drops the badge.
+    @ViewBuilder
+    private var constraintsSection: some View {
+        let constraints = selectionConstraints
+        if !constraints.isEmpty {
+            Section("Constraints") {
+                ForEach(constraints) { c in
+                    inspectorConstraintRow(c)
+                }
+            }
+        }
+    }
+
+    /// The non-inferred constraints referencing ANY selected entity, de-duplicated by id and
+    /// kept in stable table order. Built from `model.constraints(for:)` over each selected id
+    /// (a constraint spanning two selected entities appears once). Inferred (hidden) ones are
+    /// excluded — they have no user-visible glyph, so deleting one the user never made would
+    /// confuse (matches the sidebar panel + the overlay).
+    private var selectionConstraints: [Constraint] {
+        let ids = model.selection.ids
+        guard !ids.isEmpty else { return [] }
+        var seen = Set<UUID>()
+        var out: [Constraint] = []
+        // Iterate the whole table once (stable order) and keep the ones referencing the
+        // selection — cheaper + more stable than concatenating per-id `constraints(for:)`
+        // results, and `constraints(for:)` is itself a table filter.
+        for c in model.allConstraints
+        where !c.inferred && c.entityIDs.contains(where: { ids.contains($0) }) {
+            if seen.insert(c.id).inserted { out.append(c) }
+        }
+        return out
+    }
+
+    /// One Inspector constraint row: the glyph + kind name + reference description, the
+    /// driven value for a dimensional kind, and a trailing trash button. Uses the same pure
+    /// `ConstraintListModel` text helpers + `ConstraintGlyph` mark the sidebar panel uses, so
+    /// the two read identically.
+    @ViewBuilder
+    private func inspectorConstraintRow(_ c: Constraint) -> some View {
+        HStack(spacing: DS.Space.sm) {
+            Text(ConstraintGlyph.label(for: c.kind))
+                .font(.callout.weight(.semibold))
+                .frame(width: DS.Size.rowIcon, alignment: .center)
+                .foregroundStyle(DS.Palette.accent)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: DS.Space.xs) {
+                    Text(ConstraintListModel.displayName(for: c.kind))
+                        .font(DS.Font.rowLabel)
+                    if let value = ConstraintListModel.valueDescription(for: c) {
+                        Text(value)
+                            .font(DS.Font.rowValue)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .lineLimit(1)
+                Text(ConstraintListModel.referenceDescription(for: c))
+                    .font(DS.Font.hint)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: DS.Space.xs)
+            Button {
+                if model.removeConstraint(id: c.id) { requestRedraw() }
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .help("Delete this constraint (⌘Z restores it)")
+        }
+        .contextMenu {
+            Button(role: .destructive) {
+                if model.removeConstraint(id: c.id) { requestRedraw() }
+            } label: {
+                Label("Delete Constraint", systemImage: "trash")
             }
         }
     }

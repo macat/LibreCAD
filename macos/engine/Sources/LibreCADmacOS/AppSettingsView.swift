@@ -89,6 +89,19 @@ extension Notification.Name {
     /// width) changes, so open canvases force a repaint and the renderer re-reads
     /// `RenderPrefs` on its next `draw(in:)`.
     static let lcRenderPrefsDidChange = Notification.Name("lc.renderPrefsDidChange")
+    /// Posted when the Preferences ▸ Constraints "Auto-constrain while drawing" toggle
+    /// changes (Lane C completes Lane D's deferred live-apply), so an ALREADY-OPEN window
+    /// re-seeds `CanvasModel.autoConstrainOnDraw` from the persisted flag — not only on the
+    /// next window. The canvas observes it in `CADCanvasView.registerLiveApplyObservers`.
+    static let lcAutoConstrainDidChange = Notification.Name("lc.autoConstrainDidChange")
+    /// Posted by View ▸ "Show Constraints Panel" + the ⌘K palette entry to REVEAL the
+    /// Constraints SIDEBAR panel (which defaults HIDDEN, like Quick Select). `LayersSidebar`
+    /// observes this and un-hides + expands the panel in its persisted layout config. This is
+    /// distinct from `.lcShowConstraintsDidChange` (the on-canvas glyph-overlay toggle): this
+    /// targets the sidebar PANEL, not the overlay. Defined HERE (not in `CADCanvasView.swift`)
+    /// because `CommandPalette.swift` references it and the LCShot target compiles
+    /// `CommandPalette.swift` + symlinks THIS file but not `CADCanvasView.swift`.
+    static let lcShowConstraintsPanel = Notification.Name("lc.showConstraintsPanel")
 }
 
 // MARK: - Pure settings model (testable, no SwiftUI/AppKit)
@@ -884,33 +897,31 @@ struct SnapSettingRow {
 /// `CanvasModel.seedAutoConstrainFromAppSettings`), matching `@AppStorage`'s `true` default
 /// here, so the pane and the model agree on a fresh install.
 ///
-/// LIVE-APPLY (deferred): this toggle persists immediately and is honored by every NEW
-/// window (each `CanvasModel` seeds `autoConstrainOnDraw` from this key at construction) and
-/// by new documents. It does NOT yet flip ALREADY-OPEN windows, because — unlike the
-/// appearance / render / show-constraints prefs — there is no canvas-side observer that
-/// re-seeds `CanvasModel.autoConstrainOnDraw` on a notification. Adding one would require
-/// editing `CADCanvasView`/`CanvasModel` (the lane that owns the canvas), which this lane
-/// does not own; so live-apply-to-open-windows is intentionally left as a follow-up — see
-/// the NOTE on `ConstraintsSettingsTab.autoConstrainOnDraw`.
+/// LIVE-APPLY (Lane C — now WIRED for open windows): this toggle persists immediately and is
+/// honored by every NEW window (each `CanvasModel` seeds `autoConstrainOnDraw` from this key
+/// at construction) AND, since Lane C, by ALREADY-OPEN windows — the toggle's `.onChange`
+/// posts `.lcAutoConstrainDidChange`, which `CADCanvasView.registerLiveApplyObservers`
+/// observes to call `model.seedAutoConstrainFromAppSettings()`. This mirrors the
+/// `.lcShowConstraintsDidChange` live-apply pattern (Lane D had deferred it as a cross-lane
+/// follow-up; Lane C, which touches the canvas wiring, completed it).
 private struct ConstraintsSettingsTab: View {
-    // READ-SITE (WIRED for NEW windows): `CanvasModel` seeds its live `autoConstrainOnDraw`
-    // flag from this SAME key at `init` (and via `seedAutoConstrainFromAppSettings`), so a
-    // window opened after a change honors it. Binds `CanvasModel.autoConstrainOnDrawKey`
-    // directly (NOT a re-declared literal) so there is exactly one key for the model + UI.
-    //
-    // NOTE (live-apply follow-up, NOT this lane's files): an ALREADY-OPEN drawing keeps the
-    // value it seeded at construction until reopened — there is no notification this pane can
-    // post that any current canvas observer re-seeds `autoConstrainOnDraw` from. Wiring open-
-    // window live-apply (a `.lcAutoConstrainDidChange` post here + a matching observer in
-    // `CADCanvasView.registerLiveApplyObservers` that calls
-    // `model.seedAutoConstrainFromAppSettings()` + redraw) belongs to the canvas-owning lane,
-    // mirroring the `.lcShowConstraintsDidChange` pattern.
+    // READ-SITE (WIRED for NEW + OPEN windows): `CanvasModel` seeds its live
+    // `autoConstrainOnDraw` flag from this SAME key at `init` (and via
+    // `seedAutoConstrainFromAppSettings`), so a window opened after a change honors it; the
+    // `.onChange` below additionally re-seeds open windows. Binds
+    // `CanvasModel.autoConstrainOnDrawKey` directly (NOT a re-declared literal) so there is
+    // exactly one key for the model + UI.
     @AppStorage(CanvasModel.autoConstrainOnDrawKey) private var autoConstrainOnDraw = true
 
     var body: some View {
         Form {
             Section("AutoConstrain") {
                 Toggle("Auto-constrain while drawing", isOn: $autoConstrainOnDraw)
+                    // Live-apply to ALREADY-OPEN windows: the canvas observer re-seeds each
+                    // open model's `autoConstrainOnDraw` from the freshly-persisted flag.
+                    .onChange(of: autoConstrainOnDraw) { _, _ in
+                        NotificationCenter.default.post(name: .lcAutoConstrainDidChange, object: nil)
+                    }
                 Text("Automatically welds touching endpoints (coincident) and infers horizontal / vertical / perpendicular / parallel constraints as you draw.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -918,7 +929,7 @@ private struct ConstraintsSettingsTab: View {
                 inferredKindsNote
             }
             Section {
-                Text("Applies to windows opened after changing this setting; an already-open drawing keeps its current behavior until reopened.")
+                Text("Applies immediately to every open drawing and to windows opened later.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

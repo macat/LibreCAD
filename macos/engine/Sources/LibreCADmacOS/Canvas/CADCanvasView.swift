@@ -604,6 +604,10 @@ extension Notification.Name {
     /// controller observes this in `registerLiveApplyObservers`). Mirrors the
     /// `.lcCanvasAppearanceDidChange` / `.lcRenderPrefsDidChange` live-apply pattern.
     static let lcShowConstraintsDidChange = Notification.Name("lc.showConstraintsDidChange")
+    // NOTE: `.lcShowConstraintsPanel` (reveal the Constraints SIDEBAR panel) + the Lane C
+    // `.lcAutoConstrainDidChange` live both in `AppSettingsView.swift` alongside the other
+    // `.lc*` names — they are referenced by `CommandPalette.swift`, which the LCShot target
+    // also compiles (and LCShot symlinks `AppSettingsView.swift` but NOT this file).
 }
 
 extension CADCanvasController {
@@ -950,7 +954,26 @@ final class CADCanvasController {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.applyShowConstraintsChange() }
         }
-        prefObservers.tokens = [appearanceToken, renderToken, constraintsToken]
+        // Lane C (completes Lane D's deferred follow-up): the Preferences ▸ Constraints
+        // "Auto-constrain while drawing" toggle posts this so an ALREADY-OPEN window re-seeds
+        // its `CanvasModel.autoConstrainOnDraw` from the freshly-persisted flag — not only on
+        // the next window. The handler reads the flag FRESH from `UserDefaults` via the
+        // model's `seedAutoConstrainFromAppSettings()`. No redraw needed: the flag only gates
+        // FUTURE draw commits (it changes no committed pixels), so nothing on screen changes.
+        let autoConstrainToken = center.addObserver(
+            forName: .lcAutoConstrainDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.applyAutoConstrainChange() }
+        }
+        prefObservers.tokens = [appearanceToken, renderToken, constraintsToken, autoConstrainToken]
+    }
+
+    /// Re-seed THIS open window's `CanvasModel.autoConstrainOnDraw` from the persisted
+    /// Preferences flag (see `registerLiveApplyObservers`). No-op until the view is attached.
+    /// No redraw: the flag only affects FUTURE draw commits, not anything already on screen.
+    private func applyAutoConstrainChange() {
+        guard view != nil else { return }
+        model.seedAutoConstrainFromAppSettings()
     }
 
     /// Re-apply the persisted "Show Constraints" flag to THIS open window's constraint

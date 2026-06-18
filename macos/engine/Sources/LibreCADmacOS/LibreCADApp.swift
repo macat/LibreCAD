@@ -471,6 +471,19 @@ struct LibreCADApp: App {
                     .onChange(of: showConstraints) { _, _ in
                         NotificationCenter.default.post(name: .lcShowConstraintsDidChange, object: nil)
                     }
+                // View ▸ Show Constraints Panel (⌃⌘K) — REVEALS the Constraints sidebar
+                // panel (list / delete / filter-to-selection / click-to-select). The panel
+                // defaults HIDDEN (a power-user panel, like Quick Select), reachable from the
+                // sidebar's ⋯ Customize menu; this item + the ⌘K palette entry surface it
+                // directly. Posts `.lcShowConstraintsPanel`, which `LayersSidebar` observes to
+                // un-hide + expand the panel (distinct from the "Show Constraints" overlay
+                // toggle above). Always available (no focused value): it just un-hides a
+                // panel in whatever window is focused. ⌃⌘K is free — the menus use ⌘ / ⌥⌘
+                // chords and ⌘K is the command palette, so a ⌃⌘ chord never collides.
+                Button("Show Constraints Panel") {
+                    NotificationCenter.default.post(name: .lcShowConstraintsPanel, object: nil)
+                }
+                .keyboardShortcut("k", modifiers: [.control, .command])
                 // View ▸ Zoom Window (⇧⌘Z is taken by Redo; use ⌥⌘Z) — arm the
                 // transient drag-box zoom: the next drag draws a box, releasing zooms
                 // to fit it (F23). Routed through the responder chain to the focused

@@ -262,6 +262,16 @@ enum CommandRegistry {
             // entity-property panel is "Inspector" everywhere). It still toggles the pane.
             PaletteCommand(id: "app.toggleInspector", title: "Inspector",
                            systemImage: "sidebar.trailing", run: actions.toggleInspector),
+            // Show Constraints Panel — REVEALS the Constraints sidebar panel (list / delete
+            // / filter-to-selection / click-to-select). The panel defaults HIDDEN (a
+            // power-user panel like Quick Select); this entry (and the View ▸ Show
+            // Constraints Panel menu item) surface it. It posts `.lcShowConstraintsPanel`
+            // DIRECTLY — `LayersSidebar` observes it and un-hides + expands the panel — so no
+            // `Actions` closure / `ContentView` wiring is needed (the notification IS the
+            // wire, mirroring the View-menu item). The post is thread-safe.
+            PaletteCommand(id: "app.showConstraintsPanel", title: "Show Constraints Panel",
+                           systemImage: "ruler",
+                           run: { NotificationCenter.default.post(name: .lcShowConstraintsPanel, object: nil) }),
             // Titled "Show Grid" to MATCH the View ▸ Show Grid menu item: the palette's
             // matcher is a strict case-insensitive SUBSEQUENCE, so a "Toggle Grid" title
             // returned ZERO hits when the user typed the menu wording "Show Grid". (The

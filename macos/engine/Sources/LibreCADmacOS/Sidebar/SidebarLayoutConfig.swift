@@ -52,6 +52,13 @@ enum SidebarPanelID: String, Codable, CaseIterable, Hashable, Sendable {
     /// config from an older build. Defaults to HIDDEN (a power-user panel surfaced via the
     /// ⋯ Customize menu), so it does not crowd a fresh sidebar.
     case quickSelect
+    /// The Constraints panel (the drawing's parametric constraints: list / delete / filter
+    /// to selection / click-to-select — the owner's ask #3, "add gui to handle them").
+    /// Newly added — `reconciled` appends it to any stored config from an older build.
+    /// Defaults to HIDDEN (a power-user panel surfaced via the ⋯ Customize menu + the
+    /// View ▸ Show Constraints Panel item + the ⌘K palette), so it does not crowd a fresh
+    /// sidebar — matching `quickSelect`.
+    case constraints
 
     /// The default header title for this panel id (used when constructing a descriptor
     /// and as a stable, localizable-later label).
@@ -62,6 +69,7 @@ enum SidebarPanelID: String, Codable, CaseIterable, Hashable, Sendable {
         case .blocks:       return "Blocks"
         case .partsLibrary: return "Parts Library"
         case .quickSelect:  return "Quick Select"
+        case .constraints:  return "Constraints"
         }
     }
 
@@ -73,6 +81,7 @@ enum SidebarPanelID: String, Codable, CaseIterable, Hashable, Sendable {
         case .blocks:       return "square.on.square"
         case .partsLibrary: return "books.vertical"
         case .quickSelect:  return "line.3.horizontal.decrease.circle"
+        case .constraints:  return "ruler"
         }
     }
 }
@@ -107,10 +116,10 @@ struct SidebarLayoutConfig: Codable, Equatable, Sendable {
 
     /// Panels that start HIDDEN on a fresh install (and when a newly-added id of this set
     /// is absorbed into an older stored config). These are power-user panels surfaced via
-    /// the ⋯ Customize menu rather than crowding a default sidebar — currently just Quick
-    /// Select. A panel NOT in this set defaults to visible + expanded (the established
-    /// behavior for every prior panel).
-    static let defaultHiddenIDs: Set<SidebarPanelID> = [.quickSelect]
+    /// the ⋯ Customize menu rather than crowding a default sidebar — Quick Select and the
+    /// Constraints panel. A panel NOT in this set defaults to visible + expanded (the
+    /// established behavior for every prior panel).
+    static let defaultHiddenIDs: Set<SidebarPanelID> = [.quickSelect, .constraints]
 
     /// The built-in default layout: every panel in its canonical declaration order, all
     /// expanded; visible EXCEPT the `defaultHiddenIDs` power-user panels (which start
