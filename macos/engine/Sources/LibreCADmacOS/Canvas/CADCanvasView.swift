@@ -550,6 +550,31 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
     }
 }
 
+// MARK: - "Show Constraints" persisted toggle (wire-wave 2)
+
+extension Notification.Name {
+    /// Posted by the View ▸ "Show Constraints" menu toggle when the persisted flag
+    /// changes, so every OPEN canvas window flips its constraint glyph overlay live (the
+    /// controller observes this in `registerLiveApplyObservers`). Mirrors the
+    /// `.lcCanvasAppearanceDidChange` / `.lcRenderPrefsDidChange` live-apply pattern.
+    static let lcShowConstraintsDidChange = Notification.Name("lc.showConstraintsDidChange")
+}
+
+extension CADCanvasController {
+    /// The `UserDefaults`/`@AppStorage` key backing the View ▸ "Show Constraints" toggle.
+    /// A literal key (the app's `@AppStorage` overlay-visibility flags use literal keys);
+    /// the menu binds an `@AppStorage(CADCanvasController.showConstraintsKey)` to it.
+    static let showConstraintsKey = "view.showConstraints"
+
+    /// Whether the constraint glyph overlay is enabled, read FRESH from `UserDefaults`.
+    /// DEFAULTS TO ON: the key is absent until the user first toggles it, and a missing
+    /// `bool(forKey:)` returns `false`, so we treat "no stored value" as `true` by reading
+    /// the object first (nil ⇒ default ON). The menu writes the SAME key via `@AppStorage`.
+    static var showConstraintsEnabled: Bool {
+        (UserDefaults.standard.object(forKey: showConstraintsKey) as? Bool) ?? true
+    }
+}
+
 // MARK: - Interaction controller (bridges events → CanvasModel + redraw)
 
 /// Owns the live interaction state for one canvas: the model, the renderer, the
@@ -704,6 +729,15 @@ final class CADCanvasController {
     /// move / pan / zoom.
     private(set) var trackingOverlay: TrackingOverlayView?
 
+    /// The READ-ONLY PARAMETRIC-CONSTRAINT GLYPH overlay (wire-wave 2, a subview of the
+    /// MTKView). Draws a small badge near each constrained entity (∥ / ⊥ / H / V / • /
+    /// lock / ↔ / R). It NEVER intercepts a click (its `hitTest` returns `nil`) and never
+    /// mutates the document — pure chrome, like `UCSAxisOverlayView`. Its `isShowingGlyphs`
+    /// is driven from the persisted "Show Constraints" toggle (default ON; see
+    /// `showConstraintsEnabled`), and it is `refresh()`ed on every repaint so the badges
+    /// track pan/zoom and constraint add/remove.
+    private(set) var constraintGlyphs: ConstraintGlyphOverlayView?
+
     func attach(view: FlippedMTKView, renderer: LineRenderer) {
         self.view = view
         self.renderer = renderer
@@ -735,6 +769,19 @@ final class CADCanvasController {
         marqueeView.autoresizingMask = [.width, .height]
         view.addSubview(marqueeView)
         marqueeOverlay = marqueeView
+
+        // Float the read-only CONSTRAINT GLYPH overlay (wire-wave 2) above the marquee
+        // and below the interactive gizmo / grips, so the badges read over geometry but
+        // the gizmo/grip handles paint over them and a click on a handle still wins. It
+        // is fully click-through (its `hitTest` returns `nil`), so select / draw / pan
+        // fall straight through — it only paints. Its visibility tracks the persisted
+        // "Show Constraints" toggle (default ON); `refresh()` is driven from `redraw()`.
+        let constraintGlyphView = ConstraintGlyphOverlayView(model: model)
+        constraintGlyphView.frame = view.bounds
+        constraintGlyphView.autoresizingMask = [.width, .height]
+        constraintGlyphView.isShowingGlyphs = Self.showConstraintsEnabled
+        view.addSubview(constraintGlyphView)
+        constraintGlyphs = constraintGlyphView
 
         // Float the transform gizmo over the canvas. It is transparent to clicks
         // that are NOT on a handle (its `hitTest` returns nil there), so normal
@@ -848,7 +895,24 @@ final class CADCanvasController {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.applyRenderPrefsChange() }
         }
-        prefObservers.tokens = [appearanceToken, renderToken]
+        // wire-wave 2: the View ▸ "Show Constraints" toggle posts this so an ALREADY-OPEN
+        // window flips its constraint glyph overlay live (not only on the next repaint /
+        // window). The handler re-reads the persisted flag FRESH from `UserDefaults` and
+        // drives the overlay's `isShowingGlyphs` + a redraw.
+        let constraintsToken = center.addObserver(
+            forName: .lcShowConstraintsDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.applyShowConstraintsChange() }
+        }
+        prefObservers.tokens = [appearanceToken, renderToken, constraintsToken]
+    }
+
+    /// Re-apply the persisted "Show Constraints" flag to THIS open window's constraint
+    /// glyph overlay and repaint (see `registerLiveApplyObservers`). No-op until attached.
+    private func applyShowConstraintsChange() {
+        guard view != nil, let constraintGlyphs else { return }
+        constraintGlyphs.isShowingGlyphs = Self.showConstraintsEnabled
+        redraw()
     }
 
     /// Re-apply the canvas background / grid color overrides to THIS open window and
@@ -985,6 +1049,11 @@ final class CADCanvasController {
         // Keep the UCS axis gizmo anchored at the (panned/zoomed) world origin (its
         // anchor is `worldToScreen(0,0)`, which moves when the viewport does).
         ucsAxis?.refresh()
+        // Keep the constraint glyph badges glued to the (panned/zoomed) constrained
+        // entities (each badge anchors at `worldToScreen(entityCenter)`), and pick up a
+        // constraint add/remove (the overlay reads `model.allConstraints` each draw). The
+        // overlay early-returns when hidden or there are no constraints, so this is cheap.
+        constraintGlyphs?.refresh()
         // Live dimensional feedback: show ONLY while dynamic input is on AND a draw tool is
         // active (the overlay's provider also blanks between operations), then re-anchor it
         // to the (panned/zoomed) cursor + endpoints on every repaint (its points are

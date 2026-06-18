@@ -5334,6 +5334,230 @@ final class CanvasModel {
         drawing.constraints.constraints
     }
 
+    // MARK: - Wire-wave 2 — selection-driven constraint creation (Constrain menu / ⌘K)
+    //
+    // The Constrain menu (LibreCADApp) + ⌘K palette call these on the CURRENT
+    // selection. They turn the selection `Set` into a STABLE-ordered entity list
+    // (by draw order, so a 2-entity constraint is reproducible run-to-run) and
+    // forward to the engine `addConstraint` funnels above (arity-validated, undoable,
+    // re-solved immediately as ONE undo group). On an arity failure they post a status
+    // message instead of crashing (the menu can stay enabled; the verb is a safe
+    // no-op). DIMENSIONAL constraints LOCK THE CURRENT MEASURED VALUE (the present
+    // distance/radius computed from the live geometry) — no modal prompt this wave
+    // (editing the driven value is a deferred follow-up).
+
+    /// The current selection's entity ids in STABLE draw order (the order they appear
+    /// in `drawing.entities`), so a two-entity constraint built from the selection is
+    /// reproducible regardless of `Set` iteration order. Block members are not special-
+    /// cased here (a constraint references whatever the user selected).
+    var orderedSelectionIDs: [EntityID] {
+        let selected = selection.ids
+        guard !selected.isEmpty else { return [] }
+        return drawing.entities.map(\.id).filter { selected.contains($0) }
+    }
+
+    /// Applies a GEOMETRIC constraint of `kind` to the CURRENT SELECTION (the Constrain
+    /// menu / ⌘K entry point). Returns whether it was added; on an arity/kind failure it
+    /// posts a status message and returns `false` (no crash, no mutation).
+    @discardableResult
+    func applyGeometricConstraintToSelection(_ kind: GeometricConstraintKind) -> Bool {
+        let ids = orderedSelectionIDs
+        guard addConstraint(kind, entities: ids) else {
+            flashStatus(Self.constraintFailureMessage(geometric: kind, count: ids.count))
+            return false
+        }
+        return true
+    }
+
+    /// Applies a DIMENSIONAL constraint of `kind` to the CURRENT SELECTION, LOCKING the
+    /// value currently measured from the selected geometry (distance between the two
+    /// selected entities' `.start` points; the selected circle's radius). No modal — the
+    /// present value is captured and driven. Returns whether it was added; on an arity/
+    /// kind failure it posts a status message and returns `false`.
+    @discardableResult
+    func applyDimensionalConstraintToSelection(_ kind: DimensionalConstraintKind) -> Bool {
+        let ids = orderedSelectionIDs
+        guard let value = currentDimensionalValue(kind, entities: ids),
+              addConstraint(kind, entities: ids, value: value) else {
+            flashStatus(Self.constraintFailureMessage(dimensional: kind, count: ids.count))
+            return false
+        }
+        return true
+    }
+
+    /// The value to LOCK for a dimensional constraint of `kind` over `entities`, measured
+    /// from the live geometry RIGHT NOW (so applying the constraint pins the shape exactly
+    /// where it already is). Returns `nil` when the selection arity / kind is wrong, so the
+    /// caller rejects it (and the engine funnel would too).
+    ///
+    ///  • distance → 2 entities; the gap between their `.start` points (line start / point
+    ///    position / circle center).
+    ///  • radius   → 1 CIRCLE; its current radius.
+    private func currentDimensionalValue(_ kind: DimensionalConstraintKind,
+                                         entities: [EntityID]) -> Double? {
+        switch kind {
+        case .distance:
+            guard entities.count == 2,
+                  let a = startPoint(of: entities[0]),
+                  let b = startPoint(of: entities[1]) else { return nil }
+            return a.distance(to: b)
+        case .radius:
+            guard entities.count == 1,
+                  case .circle(let c)? = drawing.entity(entities[0])?.kind else { return nil }
+            return c.radius
+        case .horizontalDistance, .verticalDistance, .diameter, .angle:
+            return nil   // declared but solver-unsupported (rejected up front)
+        }
+    }
+
+    /// The world position of an entity's `.start` characteristic point — a line's START,
+    /// a point's position, a circle's center — matching how the constraint solver resolves
+    /// `EntityPoint.start`. `nil` for an absent entity or a kind with no such point.
+    private func startPoint(of id: EntityID) -> Vector? {
+        switch drawing.entity(id)?.kind {
+        case .line(let l):   return l.start
+        case .point(let p):  return p.position
+        case .circle(let c): return c.center
+        default:             return nil
+        }
+    }
+
+    /// A short, human status message for a rejected GEOMETRIC constraint (wrong arity or
+    /// an unsupported kind). Names the required selection so the user can fix it.
+    private static func constraintFailureMessage(geometric kind: GeometricConstraintKind,
+                                                 count: Int) -> String {
+        guard kind.isSolverSupported else {
+            return "“\(kind.rawValue.capitalized)” constraint is not supported yet."
+        }
+        let need: String
+        switch kind {
+        case .horizontal, .vertical, .fix: need = "one entity"
+        case .parallel, .perpendicular:    need = "two lines"
+        case .coincident:                  need = "two entities"
+        default:                           need = "a valid selection"
+        }
+        return "Select \(need) for a \(kind.rawValue) constraint (selected \(count))."
+    }
+
+    /// A short, human status message for a rejected DIMENSIONAL constraint.
+    private static func constraintFailureMessage(dimensional kind: DimensionalConstraintKind,
+                                                 count: Int) -> String {
+        guard kind.isSolverSupported else {
+            return "“\(kind.rawValue.capitalized)” constraint is not supported yet."
+        }
+        switch kind {
+        case .distance: return "Select two entities for a distance constraint (selected \(count))."
+        case .radius:   return "Select one circle for a radius constraint (selected \(count))."
+        default:        return "Select a valid object for a \(kind.rawValue) constraint."
+        }
+    }
+
+    /// Posts a transient message into the status HUD (the same `toolStatus` surface the
+    /// active tool's prompt uses). Bumps `modelVersion` so the observing status bar
+    /// repaints. Used for non-fatal arity failures (the menu/palette stays enabled; the
+    /// verb degrades to a status note rather than a crash).
+    func flashStatus(_ message: String) {
+        toolStatus = message
+        modelVersion &+= 1
+    }
+
+    // MARK: - Wire-wave 2 — FIELDS live values (Insert-Field + live resolve)
+
+    /// The live `FieldContext` for resolving auto-updating TEXT/MTEXT fields (Wave 2a
+    /// FIELDS). Built FRESH each call so `.date` fields reflect the present time:
+    ///   • `date`       = `Date()` (the current time).
+    ///   • `layoutName` = the active layout name, or `"Model"` in model space.
+    ///   • `fileName`   = `nil` for now (DEFERRED — the live document URL is not reachable
+    ///                    from the model layer; a `.fileName` field renders as "####" until
+    ///                    a later wave threads the document name in). See the report.
+    /// Threaded into `renderResolveContext()` (and the renderer, once it routes through
+    /// it) so inserted fields substitute their live value before shaping.
+    func makeFieldContext() -> FieldContext {
+        FieldContext(date: Date(),
+                     layoutName: activeLayout ?? "Model",
+                     fileName: nil)
+    }
+
+    /// A resolve context for RENDERING that carries the live `FieldContext` (so field-
+    /// bearing text shapes its evaluated value, not the zero-width placeholder). Mirrors
+    /// `drawing.makeResolveContext` but injects `makeFieldContext()`. The renderer should
+    /// build its context through this so on-canvas fields show live values; CanvasModel's
+    /// own resolve sites that need field substitution call it too.
+    func renderResolveContext(tessellationTolerance: Double = 0.05,
+                              annotationScale: Double = 1.0) -> ResolveContext {
+        drawing.makeResolveContext(tessellationTolerance: tessellationTolerance,
+                                   annotationScale: annotationScale,
+                                   fieldContext: makeFieldContext())
+    }
+
+    /// Appends an auto-updating field `token` to the SELECTED single TEXT/MTEXT entity
+    /// (the Insert ▸ Field menu / ⌘K entry point), through the SAME undoable kind-commit
+    /// funnel the Inspector's "Insert Field" affordance uses (`InspectorEdits.appendField`
+    /// → `replaceEntityKind`). Returns whether a field was appended; a no-op (false) when
+    /// the selection is not exactly one TEXT/MTEXT entity (the menu posts a status note).
+    @discardableResult
+    func appendFieldToSelectedText(_ token: FieldToken) -> Bool {
+        guard selection.ids.count == 1, let id = selection.ids.first,
+              let record = drawing.entity(id) else {
+            flashStatus("Select one text or mtext object to insert a field.")
+            return false
+        }
+        switch record.kind {
+        case .text, .mtext:
+            replaceEntityKind(id, InspectorEdits.appendField(to: record.kind, token: token))
+            return true
+        default:
+            flashStatus("Insert Field needs a text or mtext object selected.")
+            return false
+        }
+    }
+
+    /// Whether the GEOMETRIC constraint `kind` could apply to the current selection's
+    /// cardinality (a cheap menu-enablement predicate — does NOT validate kinds/entity
+    /// shape, which the engine funnel does). Lets the Constrain menu disable items that
+    /// can't possibly apply to what's selected.
+    func canApplyGeometricConstraint(_ kind: GeometricConstraintKind) -> Bool {
+        let n = selection.ids.count
+        switch kind {
+        case .horizontal, .vertical, .fix:                 return n == 1
+        case .parallel, .perpendicular, .coincident:       return n == 2
+        default:                                           return false
+        }
+    }
+
+    /// Whether the DIMENSIONAL constraint `kind` could apply to the current selection's
+    /// cardinality (menu-enablement predicate; the engine funnel does the full check).
+    func canApplyDimensionalConstraint(_ kind: DimensionalConstraintKind) -> Bool {
+        let n = selection.ids.count
+        switch kind {
+        case .distance: return n == 2
+        case .radius:   return n == 1
+        default:        return false
+        }
+    }
+
+    /// Whether the GeometricConstraintKind / DimensionalConstraintKind is solver-supported
+    /// (re-exported so the menu builder can read it without importing the engine type).
+    func isConstraintSupported(_ kind: GeometricConstraintKind) -> Bool { kind.isSolverSupported }
+    func isConstraintSupported(_ kind: DimensionalConstraintKind) -> Bool { kind.isSolverSupported }
+
+    /// Whether the AppKit responder-chain handlers should treat the field-insert verb as
+    /// available (exactly one TEXT/MTEXT entity selected). Lets the Insert-Field menu / its
+    /// `validateUserInterfaceItem` reflect applicability without re-deriving the predicate.
+    var canInsertFieldIntoSelection: Bool {
+        guard selection.ids.count == 1, let id = selection.ids.first else { return false }
+        switch drawing.entity(id)?.kind {
+        case .text, .mtext: return true
+        default:            return false
+        }
+    }
+
+    /// Whether the "Show Constraints" glyph overlay should currently draw anything — i.e.
+    /// the document HAS constraints (the overlay's own visibility toggle is the AppStorage
+    /// flag the mount drives). Lets the menu/overlay short-circuit when there is nothing
+    /// to show.
+    var hasConstraints: Bool { !drawing.constraints.constraints.isEmpty }
+
     /// Whether `t` is within numeric tolerance of the identity transform (a drag
     /// that did not actually move/scale/rotate anything). Used to drop a zero-effect
     /// gizmo drag so it never registers an undo step.
