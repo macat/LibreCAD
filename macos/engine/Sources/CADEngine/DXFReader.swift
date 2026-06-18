@@ -665,9 +665,53 @@ extension CADEngine {
             // array; the clip mode ← wipeoutClipMode (code 290). No path/raster.
             return mapWipeout(e)
 
+        case Int32(LC_ENT_MLINE.rawValue):
+            // DXF MLINE (AcDbMline) → `.mline`. The path vertices come from the flat
+            // array (codes 10/11); scale ← mlineScale (code 40); justification ←
+            // mlineJustification (code 70: 0 top / 1 zero / 2 bottom, identical to the
+            // engine raw value); closed ← mlineClosed (code 71 bit 0). The per-element
+            // offsets + colors come from the bridge's mlineElement* arrays (decoded
+            // from our "LIBRECAD" XDATA element table, or synthesized as evenly-spaced
+            // defaults for a FOREIGN MLINE so it still imports as a real `.mline`).
+            return mapMLine(e)
+
         default: // LC_ENT_UNSUPPORTED (incl. ordinate/3p DIMENSION) and anything else
             return nil
         }
+    }
+
+    /// Maps a flattened MLINE POD to `MLineData`: the vertex path (the flat vertex
+    /// array, bulge ignored), the scale/justification/closed scalars, and the inline
+    /// element list (offsets + optional ACI colors) from the bridge's `mlineElement*`
+    /// arrays. A color of `mlineColorNone` decodes to `nil` (no per-element override).
+    /// A degenerate MLINE (no vertices / no elements) still maps to a valid `.mline`
+    /// (resolve draws nothing).
+    ///
+    /// `mlineColorNone` mirrors the C bridge's `LC_MLINE_COLOR_NONE` (== `Int32.min`).
+    /// It is restated here rather than imported because that C macro expands via
+    /// `INT32_MIN` and so is not a Swift-importable constant; the two MUST stay equal.
+    private static let mlineColorNone: Int32 = Int32.min
+    private static func mapMLine(_ e: LCEntity) -> EntityKind? {
+        let pathVerts = vertices(e).map(\.point)
+        var elements: [MLineElement] = []
+        if let offBase = e.mlineElementOffsets, e.mlineElementCount > 0 {
+            let n = Int(e.mlineElementCount)
+            let offs = UnsafeBufferPointer(start: offBase, count: n)
+            let cols = e.mlineElementColors.map { UnsafeBufferPointer(start: $0, count: n) }
+            for i in 0..<n {
+                let raw = cols?[i] ?? mlineColorNone
+                let colorIndex = (raw == mlineColorNone) ? nil : Int(raw)
+                elements.append(MLineElement(offset: offs[i], colorIndex: colorIndex))
+            }
+        }
+        let justification = MLineJustification(rawValue: Int(e.mlineJustification)) ?? .zero
+        return .mline(MLineData(
+            vertices: pathVerts,
+            elements: elements,
+            justification: justification,
+            scale: e.mlineScale != 0 ? e.mlineScale : 1,
+            closed: e.mlineClosed != 0
+        ))
     }
 
     /// Maps a flattened WIPEOUT POD to `WipeoutData`: the placement frame (insertion
