@@ -30,6 +30,11 @@ let package = Package(
         // Additive: the scale benchmark harness (perf profiling). Not part of the
         // app or the test suite — run explicitly via `swift run ... CADBench`.
         .executable(name: "CADBench", targets: ["CADBench"]),
+        // Additive: the GUI screenshot harness (LCShot). Drives a headless
+        // CanvasModel and renders the canvas to a PNG so a feature's COMMITTED
+        // geometry can be visually verified from bash. Not part of the app or the
+        // test suite — run explicitly via `swift run ... LCShot <scene.json> <out.png>`.
+        .executable(name: "LCShot", targets: ["LCShot"]),
     ],
     targets: [
         // MARK: - C++ bridge over libdxfrw, exposed as a plain C module.
@@ -118,6 +123,24 @@ let package = Package(
             name: "CADBench",
             dependencies: ["CADEngine"],
             path: "Sources/CADBench",
+            swiftSettings: swift6
+        ),
+
+        // MARK: - GUI screenshot harness (additive; render-to-PNG).
+        //
+        // A standalone executable that drives a HEADLESS `CanvasModel` from a JSON
+        // action script and renders the resulting drawing's COMMITTED geometry to a
+        // PNG via the SAME panel-free / device-free export path the `RasterExport`
+        // tests use (`ExportSceneBuilder.build` → `DrawingExporter.rasterData`). It
+        // reaches the app-module `CanvasModel`/`DrawingExporter` via `_Shared*.swift`
+        // symlinks (the SAME zero-drift pattern the test + CADBench targets use), so
+        // it never makes `CADEngine` depend on the app. It is NOT a test target, so
+        // `swift test` never runs it. Run it explicitly:
+        //     swift run --package-path macos/engine --disable-sandbox LCShot <scene.json> <out.png>
+        .executableTarget(
+            name: "LCShot",
+            dependencies: ["CADEngine"],
+            path: "Sources/LCShot",
             swiftSettings: swift6
         ),
 
