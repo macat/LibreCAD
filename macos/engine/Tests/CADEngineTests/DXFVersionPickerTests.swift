@@ -229,21 +229,22 @@ struct DXFVersionPickerACADVerTests {
         }
     }
 
-    @Test("choosing R2018 writes a modern post-R2000 header (libdxfrw caps the DXF token at AC1021/R2007)")
+    @Test("choosing R2018 writes a modern post-R2000 header (vendored libdxfrw now emits the true AC1032/R2018 DXF token)")
     func r2018WritesModernHeader() throws {
-        // The bridge maps the R2018 tier to DRW::AC1032 (see toDrwVersion in lcdxf.cpp), but
-        // libdxfrw's *DXF text writer* emits its highest fully-supported release token for that
-        // request — observed as AC1021 (AutoCAD 2007), NOT AC1032. That is a vendored-library
-        // limitation in the writer, not a wiring defect: our side correctly threads the chosen
-        // version through to the writer. The contract this test pins is the user-visible one —
-        // selecting R2018 produces a DISTINCT, newer header than the R2000/R12 defaults, so the
-        // preference demonstrably changed the output — while documenting the library's cap.
+        // The bridge maps the R2018 tier to DRW::AC1032 (see toDrwVersion in lcdxf.cpp).
+        // UPSTREAM SYNC (#2603, "DWG round 3"): libdxfrw's DXF text writer previously
+        // capped the emitted $ACADVER token at AC1021 (AutoCAD 2007) regardless of the
+        // requested version; the rewritten writer now emits the TRUE AC1032 token for an
+        // R2018 request. The former cap (and this test's old AC1021 expectation) is gone —
+        // the cap-documenting comment foretold exactly this update. The contract this test
+        // pins is the user-visible one: selecting R2018 produces a DISTINCT, newer header
+        // than the R2000/R12 defaults, and now the most-modern token the tier maps to.
         try withStoredVersion("r2018") {
             let data = try DXFDocumentCodec.data(from: makeLinePayload(), format: .dxf)
             let token = acadToken(in: data)
-            #expect(token == "AC1021",
-                    "R2018 currently emits AC1021 via libdxfrw's DXF writer (was \(token ?? "nil")); update this if the vendored writer gains true AC1032 output")
-            // Regardless of the library cap, the R2018 selection must NOT collapse to the
+            #expect(token == "AC1032",
+                    "R2018 now emits the true AC1032 token via the rewritten libdxfrw DXF writer (was \(token ?? "nil"))")
+            // Regardless of the token, the R2018 selection must NOT collapse to the
             // R2000 / R12 defaults — i.e. the preference genuinely reached the writer.
             #expect(token != "AC1015", "R2018 must not silently fall back to the R2000 default")
             #expect(token != "AC1009", "R2018 must not silently fall back to R12")

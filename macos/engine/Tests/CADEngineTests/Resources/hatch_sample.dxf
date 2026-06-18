@@ -1,6 +1,8 @@
 999
 Minimal R2000 DXF fixture: one LINE plus one solid-fill HATCH with a single
+999
 edge (line) boundary loop (a 10x10 square). Crafted for the DXF-write round-trip
+999
 test (dim_sample.dxf carries MTEXT + SOLID but no HATCH). GPLv2-or-later.
 0
 SECTION

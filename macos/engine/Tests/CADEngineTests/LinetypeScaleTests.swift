@@ -196,13 +196,16 @@ struct LinetypeScaleTests {
         #expect(line.pen.linetypeScale == 1)
     }
 
-    @Test("DOCUMENTED vendored-lib gap: the writer DOES NOT emit code 48 (regression)")
-    func writeOmitsCode48() async throws {
-        // Stock libdxfrw's `dxfRW::writeEntity` writes color/lineweight/transparency
-        // but NOT code 48, so a per-entity scale set in the app is dropped on a .dxf
-        // write. Pin that documented limit so a future libdxfrw bump can't silently
-        // change it (mirrors EntityTransparencyTests.dxfR2000OmitsCode440). The
-        // drawing-wide $LTSCALE still carries the document (see the round-trip below).
+    @Test("the writer now emits a per-entity code 48 (linetype scale) and it round-trips")
+    func writeEmitsCode48() async throws {
+        // UPSTREAM SYNC (#2603, "DWG round 3"): `dxfRW::writeEntity` now emits code 48
+        // (per-entity linetype scale) for a non-default scale on post-R12 versions
+        // (`if (version > AC1009 && ent->ltypeScale != 1.0) writeDouble(48, …)`).
+        // This CLOSES the formerly-documented gap (the old test pinned "writer does
+        // NOT emit code 48"). The bridge was already forward-prepared: it sets
+        // ent.ltypeScale on write and reads src.ltypeScale into Pen.linetypeScale on
+        // read, so a per-entity scale now survives a .dxf round-trip. Pin the new,
+        // correct behavior — emission AND round-trip.
         let rec = EntityRecord(
             id: EntityID(1),
             pen: Pen(lineColor: .explicit(.white), lineType: .dashed, linetypeScale: 3),
@@ -215,13 +218,18 @@ struct LinetypeScaleTests {
         // Scope to the ENTITIES section: code 48 (right-aligned to width 3 → " 48")
         // ALSO appears in the DIMSTYLE table ($DIMTM, libdxfrw.cpp), so a whole-file
         // contains() would false-positive. Slice out the ENTITIES…ENDSEC block and
-        // assert the per-entity LINE carries no code-48 group there.
+        // assert the per-entity LINE carries the code-48 group there now.
         let entities = entitiesSection(text)
         #expect(!entities.isEmpty, "could not locate the ENTITIES section")
-        #expect(!entities.contains("\n 48\n"),
-                "writeEntity unexpectedly emitted a per-entity code 48")
-        // Sanity: the dashed LINE itself IS present in that section.
+        #expect(entities.contains("\n 48\n"),
+                "writeEntity should now emit a per-entity code 48 for a non-default scale")
         #expect(entities.contains("LINE"))
+        // The scale survives the round-trip back into Pen.linetypeScale.
+        let result = try await CADEngine.shared.readEntities(dxfPath: path)
+        let line = try #require(
+            result.records.first { if case .line = $0.kind { return true }; return false })
+        #expect(abs(line.pen.linetypeScale - 3) < 1e-9,
+                "per-entity linetype scale (code 48) must round-trip")
     }
 
     /// Returns the text from the `ENTITIES` group to the first following `ENDSEC`

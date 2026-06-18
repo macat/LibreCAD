@@ -290,16 +290,18 @@ struct SaveRoundTripTests {
         #expect(back.layers.layer(named: "WALLS") == nil,
                 "DWG unexpectedly wrote a custom layer — libdxfrw gained DWG LAYER-table write; promote the DXF-only layer/block/dim-style asserts to DWG too")
 
-        //  - R4b generic header vars are ALSO a DWG gap: libdxfrw's dwgWriter15 emits
-        //    its own DEFAULT header and does NOT honor the DRW_Header.vars we add, so
-        //    the document-settings vars ($GRIDMODE/$GRIDUNIT/$PDMODE/$PDSIZE/$ANGBASE/
-        //    $ANGDIR/$PINSBASE) come back at their defaults on a DWG round-trip (they
-        //    DO round-trip on DXF — the primary full-fidelity format). Pinned here so a
-        //    future libdxfrw DWG header-write upgrade is noticed. The non-default values
-        //    we set in makeFullPayload regress to the engine/file defaults on DWG:
+        //  - R4b generic header vars on DWG: UPSTREAM SYNC (#2603, "DWG round 3") gave
+        //    the DWG writer a full standard variable-header encoder (drw_header.cpp
+        //    encodeDwg now writes $PDMODE/$PDSIZE/$ANGBASE/$ANGDIR/$PINSBASE etc. and
+        //    the reader reads them back), so those now ROUND-TRIP on DWG.
+        //    $GRIDMODE remains a DWG gap — it is not part of the DWG variable header
+        //    (in DWG it is a per-VPORT setting, not a global header var), so the DWG
+        //    writer still does not carry it; it regresses to the default on a DWG
+        //    round-trip (it DOES round-trip on DXF). Pin both: the now-closed $PDMODE
+        //    and the still-open $GRIDMODE.
         #expect(back.graphicVariables.gridOn == true,
-                "DWG unexpectedly preserved $GRIDMODE — libdxfrw gained DWG header-var write; promote the DXF-only R4b header-var asserts to DWG too")
-        #expect(back.graphicVariables.pointDisplayMode.rawMode == 0,
-                "DWG unexpectedly preserved $PDMODE — libdxfrw gained DWG header-var write; promote the DXF-only R4b header-var asserts to DWG too")
+                "DWG unexpectedly preserved $GRIDMODE — libdxfrw gained DWG GRIDMODE write; promote the DXF-only $GRIDMODE assert to DWG too")
+        #expect(back.graphicVariables.pointDisplayMode.rawMode == PointDisplayMode.cross.rawMode,
+                "$PDMODE should now round-trip on DWG (#2603 added the DWG variable-header encoder)")
     }
 }

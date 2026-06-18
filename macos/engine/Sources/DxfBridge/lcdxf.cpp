@@ -35,6 +35,23 @@
 
 #include <map>             // DWG block name -> block_record handle (INSERT resolve)
 
+// ---------------------------------------------------------------------------
+// libdxfrw integer-typedef compatibility shim (upstream #2603 / "DWG round 3").
+//
+// #2603 deleted libdxfrw's old d-prefixed integer typedefs (dint8/16/32/64,
+// duint8/16/32/64) from drw_base.h and migrated the whole library to fixed-width
+// <cstdint> names. This bridge still spells a handful of those old names. They
+// were exact aliases of the fixed-width types on every platform we target
+// (dint32 == signed int == std::int32_t; duint8 == unsigned char == std::uint8_t;
+// etc.), so re-introducing them here — scoped to this one bridge TU, touching no
+// vendored file — is byte-identical and keeps the bridge readable. If/when these
+// few sites are migrated to std::int*_t directly, this block can be deleted.
+using dint16  = std::int16_t;
+using dint32  = std::int32_t;
+using duint8  = std::uint8_t;
+using duint16 = std::uint16_t;
+using duint32 = std::uint32_t;
+
 /**
  * The owned result handle. Holds the flat POD arrays handed to Swift plus the
  * backing pools that keep their borrowed pointers alive:
@@ -900,8 +917,11 @@ public:
         // Attachment point (code 71) is parsed into textgen by DRW_Text::parseCode.
         e.mtextAttachment = data.textgen >= 1 && data.textgen <= 9 ? data.textgen : 1;
         e.mtextLineSpacingFactor = data.interlin;  // code 44
-        // Line-spacing style (code 73) lands in alignV for MTEXT (1 at-least, 2 exact).
-        e.mtextLineSpacingStyle = (data.alignV == 2) ? 2 : 1;
+        // Line-spacing style (code 73): 1=at-least, 2=exact. Upstream #2603 gave
+        // DRW_MText a dedicated `linespacingStyle` field + parseCode case 73 (it
+        // formerly fell through to DRW_Text::parseCode and landed in `alignV`).
+        // Read from the new field; default to 1 (at-least) for anything else.
+        e.mtextLineSpacingStyle = (data.linespacingStyle == 2) ? 2 : 1;
         e.textValue = intern(data.text);
         e.styleName = intern(data.style);
         pushEntity(e);
@@ -996,6 +1016,12 @@ public:
     void addDimAngular(const DRW_DimAngular *data) override { emitDimAngular(data); }
     void addDimAngular3P(const DRW_DimAngular3p *data) override { emitDimAngular3P(data); }
     void addDimOrdinate(const DRW_DimOrdinate *data) override { emitDimOrdinate(data); }
+    // ARC_DIMENSION (arc-length dimension) — new mandatory hook added by upstream
+    // #2603. The engine has no DimArc entity model (no EntityKind case), so this is
+    // a no-op: behavior-equivalent to before the sync, when libdxfrw did not parse
+    // ARC_DIMENSION at all and we never received it. (Override is required so the
+    // class is concrete.)
+    void addDimArc(const DRW_DimArc *data) override { (void)data; }
     void addLeader(const DRW_Leader *data) override { emitLeader(data); }
     void addMLeader(const DRW_MLeader *data) override { emitMLeader(data); }
     void addHatch(const DRW_Hatch *data) override { emitHatch(data); }
@@ -2370,6 +2396,9 @@ public:
     void addDimAngular(const DRW_DimAngular *data) override { (void)data; }
     void addDimAngular3P(const DRW_DimAngular3p *data) override { (void)data; }
     void addDimOrdinate(const DRW_DimOrdinate *data) override { (void)data; }
+    // ARC_DIMENSION hook added by upstream #2603 — required override; the writer
+    // never produces a DRW_DimArc (the engine has no such entity), so no-op.
+    void addDimArc(const DRW_DimArc *data) override { (void)data; }
     void addLeader(const DRW_Leader *data) override { (void)data; }
     void addMLeader(const DRW_MLeader *data) override { (void)data; }
     void addHatch(const DRW_Hatch *data) override { (void)data; }
@@ -2980,11 +3009,11 @@ private:
         // valid 1..9 (TopLeft..BottomRight) range; default TopLeft.
         t.textgen = (e.mtextAttachment >= 1 && e.mtextAttachment <= 9)
                         ? e.mtextAttachment : DRW_MText::TopLeft;
-        // Line-spacing style (code 73) lives in alignV for MTEXT (1 at-least, 2 exact);
-        // the line-spacing factor (code 44) in interlin.
-        t.alignV = (e.mtextLineSpacingStyle == 2)
-                       ? static_cast<DRW_Text::VAlign>(2)
-                       : static_cast<DRW_Text::VAlign>(1);
+        // Line-spacing style (code 73): 1=at-least, 2=exact. Upstream #2603 added a
+        // dedicated DRW_MText.linespacingStyle field, and writeMText now emits code 73
+        // from it (formerly it was overloaded onto alignV). Set the new field so the
+        // chosen style round-trips; the factor (code 44) goes in interlin.
+        t.linespacingStyle = (e.mtextLineSpacingStyle == 2) ? 2 : 1;
         t.interlin = (e.mtextLineSpacingFactor > 0) ? e.mtextLineSpacingFactor : 1.0;
         emitMText(&t);
     }

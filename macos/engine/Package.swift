@@ -36,7 +36,7 @@ let package = Package(
         .target(
             name: "DxfBridge",
             path: "Sources/DxfBridge",
-            // Sources are listed explicitly: our shim plus the 23 libdxfrw
+            // Sources are listed explicitly: our shim plus the 28 libdxfrw
             // translation units (reached through the `libdxfrw` symlink). DWG
             // example/test trees are excluded by simply not listing them.
             sources: [
@@ -49,12 +49,23 @@ let package = Package(
                 "libdxfrw/drw_objects.cpp",
                 "libdxfrw/libdwgr.cpp",
                 "libdxfrw/libdxfrw.cpp",
-                // libdxfrw/src/intern/*.cpp (16)
+                // libdxfrw/src/intern/*.cpp (21)
                 "libdxfrw/intern/drw_dbg.cpp",
                 "libdxfrw/intern/drw_textcodec.cpp",
                 "libdxfrw/intern/dwgbuffer.cpp",
                 "libdxfrw/intern/dwgbufferw.cpp",
                 "libdxfrw/intern/dwgwriter15.cpp",
+                // Upstream #2603 ("DWG round 3") split the post-R2004 DWG writers
+                // into their own TUs (dwgWriter18/24/27/32) — dwgWriter27/32 derive
+                // from dwgWriter24 which derives from dwgWriter18, and libdwgr.cpp's
+                // vtables reference them — plus a proxy-graphic decoder used by the
+                // DWG reader and dxfRW::processRawEntity. They must be compiled or
+                // the bridge fails to link.
+                "libdxfrw/intern/dwgwriter18.cpp",
+                "libdxfrw/intern/dwgwriter24.cpp",
+                "libdxfrw/intern/dwgwriter27.cpp",
+                "libdxfrw/intern/dwgwriter32.cpp",
+                "libdxfrw/intern/proxygraphicdecoder.cpp",
                 "libdxfrw/intern/dwgreader.cpp",
                 "libdxfrw/intern/dwgreader15.cpp",
                 "libdxfrw/intern/dwgreader18.cpp",
