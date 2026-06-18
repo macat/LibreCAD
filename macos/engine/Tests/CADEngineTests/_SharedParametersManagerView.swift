@@ -1,1 +1,0 @@
-../../Sources/LibreCADmacOS/Sidebar/ParametersManagerView.swift

@@ -4,19 +4,22 @@
 //
 //  Headless tests for the PARAMETERS MANAGER's pure naming/validation logic
 //  (`ParameterNaming`) and its constraint-kind label helper. These exercise ONLY the
-//  side-effect-free value logic reached via the `_SharedParametersManagerView.swift`
-//  symlink — they NEVER construct or present `ParametersManagerView` (presenting a
-//  SwiftUI sheet from a headless test is the modal trap that hangs the suite). Mirrors
-//  the `DimStyleNaming` tests.
+//  side-effect-free value logic reached via the `_SharedParameterNaming.swift` symlink
+//  (the pure, SwiftUI-free file — NOT the view), so the test never drags the SwiftUI
+//  view or the app module into the CADEngine test target and never constructs/presents
+//  `ParametersManagerView` (presenting a SwiftUI sheet from a headless test is the modal
+//  trap that hangs the suite). Mirrors the `DimStyleNaming` tests + the `_Shared*`
+//  convention: the symlinked source compiles INTO this target, so `ParameterNaming` is
+//  referenced directly with only `Foundation` + `@testable import CADEngine`.
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //
 //  Copyright (C) 2026 LibreCAD macOS contributors.
 //
 
+import Foundation
 import Testing
-import CADEngine
-@testable import LibreCADmacOS
+@testable import CADEngine
 
 @Suite("Parameters Manager — naming validation (pure)")
 struct ParametersManagerNamingTests {

@@ -63,6 +63,8 @@ struct CommandPaletteParityTests {
         "app.importMergeDXF", "app.dimStyleManager",
         "app.saveView", "app.restoreView",
         "app.insertBlockFromFile", "app.saveBlockToFile", "app.newLayout",
+        // Lane L4 — Parameters Manager sheet (menu + ⌘K):
+        "app.parametersManager",
     ]
 
     @Test("the curated app-action roster is all present in the palette")
