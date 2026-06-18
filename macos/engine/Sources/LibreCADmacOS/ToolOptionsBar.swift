@@ -100,6 +100,8 @@ struct ToolOptionsBar: View {
              .offset, .rotate, .mirror, .lineConstruction,
              // Lane-M surfaced tool modes: Polyline-Edit action + XLine direction lock.
              .polylineEdit, .xline,
+             // Wire-wave-1: MULTILINE justification + scale.
+             .mline,
              // Block INSERT placement options: scale / rotation / MINSERT array.
              .insert:
             return true
@@ -477,6 +479,25 @@ struct ToolOptionsBar: View {
             if model.xlineModeIndex == 3 {
                 numberField("Angle°", value: degreesBinding($model.xlineAngle), width: DS.Field.narrow)
             }
+
+        // MARK: Wire-wave-1 — Multiline justification + scale
+        case .mline:
+            // MLINE justification: which element rides the clicked vertex path — Top /
+            // Zero (centerline) / Bottom. `MLineJustification` is an Int-raw Hashable
+            // enum, so it binds directly as a Picker tag. Applied IN PLACE (settable var).
+            Picker("Justification", selection: $model.mlineJustification) {
+                Text("Top").tag(MLineJustification.top)
+                Text("Zero").tag(MLineJustification.zero)
+                Text("Bottom").tag(MLineJustification.bottom)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .labelsHidden()
+            .onChange(of: model.mlineJustification) { _, _ in apply() }
+            Divider().frame(height: DS.Size.barDivider)
+            // MLINE scale: the overall offset multiplier (DXF 40). A negative scale
+            // mirrors the element fan across the path. Applied IN PLACE.
+            numberField("Scale", value: $model.mlineScale, width: DS.Field.narrow)
 
         // MARK: Block Insert — scale / rotation / MINSERT array
         case .insert:

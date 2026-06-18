@@ -92,7 +92,8 @@ struct ToolKindWiringTests {
             .revcloud,                                             // parity-program W2 (annotate — UNWIRED)
             .lineConstruction,                                     // parity-program W2 (modify — UNWIRED)
             .wipeout,                                              // parity-program W3 (draw — WIPEOUT EntityKind)
-            .mline,                                                // parity-program W (draw — MLINE, UNWIRED)
+            .mline,                                                // parity-program W (draw — MLINE)
+            .table,                                                // wire-wave-1 (draw — TABLE insert)
         ]
         #expect(Set(ToolKind.allCases) == expected,
                 "ToolKind.allCases (\(ToolKind.allCases)) != expected roster")
@@ -343,6 +344,40 @@ struct ToolKindWiringTests {
                 "a freshly-minted LineConstructionTool must default to .perpendicularFoot")
     }
 
+    /// The wire-wave-1 MULTILINE wiring addition: `.mline` maps to the title "Multiline"
+    /// and mints a non-nil `MLineTool` whose own title matches. A freshly-minted tool
+    /// carries the STANDARD-like default style (`.top` justification, scale `1`), which
+    /// the options-bar config (mlineJustification / mlineScale) overrides via
+    /// `CanvasModel.applyToolConfig` (exercised in `WireWaveConfigTests`).
+    @Test func mlineKindIsWiredWithMatchingTitle() {
+        #expect(ToolKind.mline.title == "Multiline")
+        let tool = ToolKind.mline.makeTool()
+        #expect(tool != nil, "ToolKind.mline minted a nil Tool")
+        #expect(tool?.title == "Multiline")
+        let ml = tool as? MLineTool
+        #expect(ml != nil, "ToolKind.mline did not mint an MLineTool")
+        #expect(ml?.justification == .top, "a fresh MLineTool defaults to .top justification")
+        #expect(ml?.scale == 1, "a fresh MLineTool defaults to scale 1")
+    }
+
+    /// The wire-wave-1 TABLE wiring addition: `.table` maps to the title "Table" and
+    /// mints a non-nil `TableTool` whose own title matches. A freshly-minted tool carries
+    /// NO pending request (nothing is placed until a point is committed) and the default
+    /// 3×3 grid size — guarding the "request captured on commit, not on mint" contract
+    /// the app's apply path (`CanvasModel.applyPendingTableInsertionIfAny`) relies on.
+    @Test func tableKindIsWiredWithMatchingTitle() {
+        #expect(ToolKind.table.title == "Table")
+        let tool = ToolKind.table.makeTool()
+        #expect(tool != nil, "ToolKind.table minted a nil Tool")
+        #expect(tool?.title == "Table")
+        let tt = tool as? TableTool
+        #expect(tt != nil, "ToolKind.table did not mint a TableTool")
+        #expect(tt?.pendingTable == nil,
+                "a freshly-minted TableTool must have no pending table")
+        #expect(tt?.rows == TableTool.defaultRows && tt?.cols == TableTool.defaultCols,
+                "a freshly-minted TableTool must carry the default grid size")
+    }
+
     /// `.image` shares no keyboard chord with another kind. Image takes ⇧Y (bare Y is
     /// unassigned, ⌥Y is Ray), so it adds cleanly to the chord set guarded by
     /// `toolShortcutsAreUnique` above. This focused check documents the chosen chord.
@@ -520,7 +555,8 @@ struct ToolKindWiringTests {
         .ellipse, .polygon, .spline, .hatch, .image,
         .xline, .ray, .insert, .viewport,
         .wipeout,   // parity-program W3 (masking polygon — grouped so it's not orphaned)
-        .mline,     // parity-program W (multiline — UNWIRED; grouped so it's not orphaned)
+        .mline,     // parity-program W (multiline — grouped so it's not orphaned)
+        .table,     // wire-wave-1 (table insert — grouped so it's not orphaned)
     ]
 
     /// The Modify group roster — transforms + edit-under-cursor + blocks

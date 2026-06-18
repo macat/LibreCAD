@@ -214,6 +214,13 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     /// `.mline` drawn as N parallel mitered element lines (the AutoCAD MLINE). Reuses
     /// the existing `EntityKind.mline`; built UNWIRED (surfaced in a later wire-wave).
     case mline
+    // --- Wire-wave-1 (tables) tool ---
+    /// The Table insert tool (`TableTool`) — click ONE point to place a DEFAULT empty
+    /// `rows × cols` grid (the AutoCAD TABLE). A table is NOT an `EntityKind` (it lives
+    /// in `CADDrawing.tables`, off the enum), so this tool records a `TableObject`
+    /// REQUEST the app applies via the undoable `CADDrawing.addTable` (the same
+    /// non-`ToolEdit` request/apply path `.createBlock` uses for the block table).
+    case table
     // Append new draw tools here (one `case` per tool) — see the collision note.
 
     /// A short title for the UI (toolbar button / menu).
@@ -279,6 +286,7 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .lineConstruction: return "Line Construction"
         case .wipeout:         return "Wipeout"
         case .mline:           return "Multiline"
+        case .table:           return "Table"
         // Append a title arm per new case.
         }
     }
@@ -382,6 +390,11 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         // the default STANDARD-like style; the wire-wave pushes the options-bar
         // justification/scale onto it via `CanvasModel.applyToolConfig`.
         case .mline:           return MLineTool()
+        // Wire-wave-1: Table insert tool. Mints a fresh `TableTool` (default 3×3 grid).
+        // Like `.createBlock`, its result is NOT a `ToolEdit` (a table is not an
+        // `EntityKind`) — the tool records a `TableObject` the app adds via the undoable
+        // `CADDrawing.addTable` after the run finishes (see CanvasModel.handleToolInput).
+        case .table:           return TableTool()
         // Append a `case <kind>: return <Name>Tool()` arm per new tool.
         }
     }

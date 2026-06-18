@@ -687,6 +687,14 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             packViewportContents(layout.viewports, ctx: ctx, origin: origin, layers: layers)
         }
 
+        // Wire-wave-1: TABLES. Tables are NOT entities (they live in `drawing.tables`,
+        // off `EntityKind`), so the entity pack above never touches them. Pack each
+        // active-space table's materialized geometry — grid lines + cell text shaped
+        // through the shared TextShaper — into the SAME line/fill scratch the entities
+        // use, so a placed table appears on the canvas. The model scopes the set to
+        // model space (the MVP), so this is empty on a paper layout / in a block edit.
+        packTables(origin: origin)
+
         uploadLineInstances(instanceScratch)
         uploadFillVertices(fillScratch)
         builtModelVersion = model.modelVersion
@@ -739,6 +747,38 @@ final class LineRenderer: NSObject, MTKViewDelegate {
                                                          into: &instanceScratch)
                     }
                 }
+            }
+        }
+    }
+
+    /// Packs every active-space TABLE's materialized geometry (Wire-wave-1). A table is
+    /// NOT an `EntityRecord` (it lives in `drawing.tables`, off `EntityKind`), so the
+    /// per-entity pack never sees it; this draws the grid lines + the cell text (already
+    /// shaped through the shared `TextShaper` by `CanvasModel.tableRenderGeometry`) via
+    /// the SAME line/fill packing the entities use. The model returns an EMPTY set
+    /// outside model space / inside a block-edit session (the MVP keeps tables in model
+    /// space), so a paper layout packs no tables — consistent with the entity space gate.
+    private func packTables(origin: Vector) {
+        let geometries = model.tableRenderGeometry()
+        guard !geometries.isEmpty else { return }
+        let halfWidthPx = renderPrefs.lineHalfWidthPx(backingScale: backingScale)
+        // Light-mode auto-invert: flip near-white "automatic color" to near-black so the
+        // table stays legible on a light canvas (identity in dark mode) — matching
+        // `packEntity`. The table's default pen is non-white, so this is the identity for
+        // its grid; it matters only if a future table pen resolves near-white.
+        let identity: (SIMD4<Float>) -> SIMD4<Float> = { $0 }
+        let colorTransform: (SIMD4<Float>) -> SIMD4<Float> =
+            OverlayStyle.invertNearWhiteEntities ? RendererGeometry.autoInvertWhite : identity
+        for geo in geometries {
+            for poly in geo.polylines {
+                RendererGeometry.appendInstances(for: poly, renderOrigin: origin,
+                                                 halfWidthPx: halfWidthPx,
+                                                 backingScale: backingScale,
+                                                 colorTransform: colorTransform,
+                                                 into: &instanceScratch)
+            }
+            for fill in geo.fills {
+                RendererGeometry.appendFillVertices(for: fill, renderOrigin: origin, into: &fillScratch)
             }
         }
     }
