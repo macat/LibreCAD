@@ -37,9 +37,13 @@ final class ConstraintTableTests: XCTestCase {
     func testSolverSupportedFlags() {
         XCTAssertTrue(Constraint.coincident(.init(entityID: id(1)), .init(entityID: id(2))).isSolverSupported)
         XCTAssertTrue(Constraint.radius(circle: id(1), value: 5).isSolverSupported)
-        // Declared-but-unimplemented kinds report unsupported.
+        // Lane B implemented these — they now report SUPPORTED.
+        XCTAssertTrue(Constraint(kind: .dimensional(.angle), points: []).isSolverSupported)
+        XCTAssertTrue(Constraint(kind: .geometric(.collinear), points: []).isSolverSupported)
+        XCTAssertTrue(Constraint(kind: .geometric(.concentric), points: []).isSolverSupported)
+        // tangent + symmetric remain DECLARED-but-unimplemented (out of Lane B scope).
         XCTAssertFalse(Constraint(kind: .geometric(.tangent), points: []).isSolverSupported)
-        XCTAssertFalse(Constraint(kind: .dimensional(.angle), points: []).isSolverSupported)
+        XCTAssertFalse(Constraint(kind: .geometric(.symmetric), points: []).isSolverSupported)
     }
 
     // MARK: - Table add / remove / replace / setValue

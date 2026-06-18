@@ -279,7 +279,10 @@ final class ConstraintGlyphOverlayView: NSView {
     private static func anchorWorld(_ c: Constraint, model: CanvasModel) -> Vector? {
         func pt(_ p: ConstraintPoint) -> Vector? { worldPoint(p, model: model) }
         switch c.kind {
-        case .geometric(.perpendicular), .geometric(.parallel):
+        case .geometric(.perpendicular), .geometric(.parallel),
+             .geometric(.collinear), .dimensional(.angle):
+            // Two lines: anchor at their INTERSECTION (the corner / vertex); parallel /
+            // collinear lines have no intersection → the 4-endpoint mean.
             guard c.points.count >= 4,
                   let a1 = pt(c.points[0]), let a2 = pt(c.points[1]),
                   let b1 = pt(c.points[2]), let b2 = pt(c.points[3])
@@ -293,16 +296,28 @@ final class ConstraintGlyphOverlayView: NSView {
             return p
 
         case .dimensional(.distance),
-             .geometric(.horizontal), .geometric(.vertical):
+             .dimensional(.horizontalDistance), .dimensional(.verticalDistance),
+             .geometric(.horizontal), .geometric(.vertical),
+             .geometric(.concentric):
+            // A measured / related PAIR: anchor at the midpoint of the two points (for
+            // concentric, the two near-coincident centers — the shared center).
             guard c.points.count >= 2, let p0 = pt(c.points[0]), let p1 = pt(c.points[1])
             else { return fallbackCenter(c, model: model) }
             return Vector((p0.x + p1.x) / 2, (p0.y + p1.y) / 2)
 
-        case .dimensional(.radius):
+        case .dimensional(.radius), .dimensional(.diameter):
             guard let id = c.points.first?.entityID,
                   let center = pt(ConstraintPoint(entityID: id, point: .center))
             else { return fallbackCenter(c, model: model) }
             return center
+
+        case .geometric(.equal):
+            // Two lines (4 points) → mean of the four endpoints; two circulars (2 points)
+            // → midpoint of the two centers. Either way, the mean of the resolved points.
+            let pts = c.points.compactMap(pt)
+            guard !pts.isEmpty else { return fallbackCenter(c, model: model) }
+            let sx = pts.reduce(0) { $0 + $1.x }, sy = pts.reduce(0) { $0 + $1.y }
+            return Vector(sx / Double(pts.count), sy / Double(pts.count))
 
         default:
             return fallbackCenter(c, model: model)
@@ -320,8 +335,10 @@ final class ConstraintGlyphOverlayView: NSView {
             case .end:    return d.end
             case .center: return Vector((d.start.x + d.end.x) / 2, (d.start.y + d.end.y) / 2)
             }
-        case .circle(let d): return d.center
-        case .point(let d):  return d.position
+        case .circle(let d):  return d.center
+        case .arc(let d):     return d.center
+        case .ellipse(let d): return d.center
+        case .point(let d):   return d.position
         default:
             let box = rec.boundingBox()
             return box.isEmpty ? nil : box.center

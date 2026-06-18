@@ -108,9 +108,12 @@ public enum GeometricConstraintKind: String, Sendable, Hashable, Codable, CaseIt
     /// containing it returns `.failed(.unsupported)` from the solver.
     public var isSolverSupported: Bool {
         switch self {
-        case .coincident, .horizontal, .vertical, .parallel, .perpendicular, .fix:
+        case .coincident, .horizontal, .vertical, .parallel, .perpendicular, .fix,
+             .collinear, .concentric, .equal:
             return true
-        case .collinear, .tangent, .equal, .concentric, .symmetric:
+        // `tangent` + `symmetric` stay DECLARED but unimplemented (Lane B left them out
+        // of scope as the two hard ones); a component containing one fails `.unsupported`.
+        case .tangent, .symmetric:
             return false
         }
     }
@@ -138,10 +141,9 @@ public enum DimensionalConstraintKind: String, Sendable, Hashable, Codable, Case
     /// Whether the solver implements this kind in the MVP.
     public var isSolverSupported: Bool {
         switch self {
-        case .distance, .radius:
+        case .distance, .radius,
+             .horizontalDistance, .verticalDistance, .diameter, .angle:
             return true
-        case .horizontalDistance, .verticalDistance, .diameter, .angle:
-            return false
         }
     }
 }
@@ -163,7 +165,13 @@ public enum DimensionalConstraintKind: String, Sendable, Hashable, Codable, Case
 ///  - fix:               [p]                      (the anchored point) — for a
 ///                       whole-segment fix, pass both endpoints [start, end]
 ///  - distance:          [pA, pB]                 (the measured pair)
-///  - radius/diameter:   [c]  where `c.point == .center` of the circle
+///  - radius/diameter:   [c]  where `c.point == .center` of the circle/arc
+///  - collinear:         [l1Start, l1End, l2Start, l2End]  (two lines, like parallel)
+///  - concentric:        [cA, cB]  where each `.point == .center` (two circles/arcs)
+///  - equal:             [aStart, aEnd, bStart, bEnd] for two LINES (length-equal), or
+///                       [cA, cB] for two CIRCULAR entities (radius-equal, each .center)
+///  - horizontalDistance/verticalDistance: [pA, pB]  (the measured pair; Δx / Δy)
+///  - angle:             [l1Start, l1End, l2Start, l2End]  (two lines, included angle)
 public struct Constraint: Sendable, Hashable, Codable, Identifiable {
 
     /// A constraint's discriminator — geometric (valueless) or dimensional (driven).
@@ -344,6 +352,63 @@ public struct Constraint: Sendable, Hashable, Codable, Identifiable {
         Constraint(kind: .dimensional(.radius),
                    points: [ConstraintPoint(entityID: id, point: .center)],
                    value: value)
+    }
+
+    // MARK: Convenience constructors (Lane B — declared kinds now implemented)
+
+    /// A collinear constraint between lines `a` and `b` (same infinite line: equal
+    /// direction AND zero offset). `points` mirror `parallel` — both lines' endpoints.
+    public static func collinear(line a: EntityID, line b: EntityID) -> Constraint {
+        Constraint(kind: .geometric(.collinear), points: lineEndpoints(a) + lineEndpoints(b))
+    }
+
+    /// A concentric constraint between circular entities `a` and `b` (their centers
+    /// coincide). Each point names the `.center` of its entity.
+    public static func concentric(_ a: EntityID, _ b: EntityID) -> Constraint {
+        Constraint(kind: .geometric(.concentric),
+                   points: [ConstraintPoint(entityID: a, point: .center),
+                            ConstraintPoint(entityID: b, point: .center)])
+    }
+
+    /// An equal constraint between two LINES (equal length). `points` mirror `parallel`.
+    public static func equal(line a: EntityID, line b: EntityID) -> Constraint {
+        Constraint(kind: .geometric(.equal), points: lineEndpoints(a) + lineEndpoints(b))
+    }
+
+    /// An equal constraint between two CIRCULAR entities (equal radius). Each point
+    /// names the `.center` of its entity (the solver reads the radius slot beside it).
+    public static func equal(circle a: EntityID, circle b: EntityID) -> Constraint {
+        Constraint(kind: .geometric(.equal),
+                   points: [ConstraintPoint(entityID: a, point: .center),
+                            ConstraintPoint(entityID: b, point: .center)])
+    }
+
+    /// An angle constraint driving the included angle (radians) between lines `a` and
+    /// `b` to `value`. `points` mirror `parallel` — both lines' endpoints.
+    public static func angle(line a: EntityID, line b: EntityID, value: Double) -> Constraint {
+        Constraint(kind: .dimensional(.angle),
+                   points: lineEndpoints(a) + lineEndpoints(b), value: value)
+    }
+
+    /// A diameter constraint driving circle/arc `id`'s diameter (2·r) to `value`.
+    public static func diameter(circle id: EntityID, value: Double) -> Constraint {
+        Constraint(kind: .dimensional(.diameter),
+                   points: [ConstraintPoint(entityID: id, point: .center)],
+                   value: value)
+    }
+
+    /// A horizontal-distance constraint driving Δx (b.x − a.x) between points `a`/`b`
+    /// to `value`.
+    public static func horizontalDistance(_ a: ConstraintPoint, _ b: ConstraintPoint,
+                                          value: Double) -> Constraint {
+        Constraint(kind: .dimensional(.horizontalDistance), points: [a, b], value: value)
+    }
+
+    /// A vertical-distance constraint driving Δy (b.y − a.y) between points `a`/`b`
+    /// to `value`.
+    public static func verticalDistance(_ a: ConstraintPoint, _ b: ConstraintPoint,
+                                        value: Double) -> Constraint {
+        Constraint(kind: .dimensional(.verticalDistance), points: [a, b], value: value)
     }
 
     // MARK: Parameter binding (Lane L1, additive — solver still reads only `value`)

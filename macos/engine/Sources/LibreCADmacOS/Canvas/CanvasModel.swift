@@ -5749,10 +5749,49 @@ final class CanvasModel {
             guard entities.count == 2 else { return false }
             constraint = .coincident(ConstraintPoint(entityID: entities[0], point: .start),
                                      ConstraintPoint(entityID: entities[1], point: .start))
-        case .collinear, .tangent, .equal, .concentric, .symmetric:
-            return false   // declared but solver-unsupported (rejected up front)
+        case .collinear:
+            guard entities.count == 2,
+                  isLineEntity(entities[0]), isLineEntity(entities[1]) else { return false }
+            constraint = .collinear(line: entities[0], line: entities[1])
+        case .concentric:
+            guard entities.count == 2,
+                  hasCenterEntity(entities[0]), hasCenterEntity(entities[1]) else { return false }
+            constraint = .concentric(entities[0], entities[1])
+        case .equal:
+            guard entities.count == 2 else { return false }
+            if isLineEntity(entities[0]), isLineEntity(entities[1]) {
+                constraint = .equal(line: entities[0], line: entities[1])
+            } else if hasRadiusEntity(entities[0]), hasRadiusEntity(entities[1]) {
+                constraint = .equal(circle: entities[0], circle: entities[1])
+            } else {
+                return false   // must be a same-family pair (two lines or two circles/arcs)
+            }
+        case .tangent, .symmetric:
+            return false   // declared but solver-unsupported (Lane B left out of scope)
         }
         return commitConstraint(constraint, touching: Set(entities))
+    }
+
+    /// Whether `id` is a LINE entity (for line-family constraints: collinear / equal).
+    private func isLineEntity(_ id: EntityID) -> Bool {
+        if case .line = drawing.entity(id)?.kind { return true }
+        return false
+    }
+
+    /// Whether `id` carries a CENTER (circle / arc / ellipse — for concentric).
+    private func hasCenterEntity(_ id: EntityID) -> Bool {
+        switch drawing.entity(id)?.kind {
+        case .circle, .arc, .ellipse: return true
+        default:                      return false
+        }
+    }
+
+    /// Whether `id` carries a single RADIUS (circle / arc — for equal-radius / diameter).
+    private func hasRadiusEntity(_ id: EntityID) -> Bool {
+        switch drawing.entity(id)?.kind {
+        case .circle, .arc: return true
+        default:            return false
+        }
     }
 
     /// Creates a DIMENSIONAL constraint of `kind` over `entities` driven to `value`,
@@ -5779,8 +5818,23 @@ final class CanvasModel {
             guard entities.count == 1 else { return false }
             guard case .circle = drawing.entity(entities[0])?.kind else { return false }
             constraint = .radius(circle: entities[0], value: value)
-        case .horizontalDistance, .verticalDistance, .diameter, .angle:
-            return false   // declared but solver-unsupported
+        case .diameter:
+            guard entities.count == 1, hasRadiusEntity(entities[0]) else { return false }
+            constraint = .diameter(circle: entities[0], value: value)
+        case .angle:
+            guard entities.count == 2,
+                  isLineEntity(entities[0]), isLineEntity(entities[1]) else { return false }
+            constraint = .angle(line: entities[0], line: entities[1], value: value)
+        case .horizontalDistance:
+            guard entities.count == 2 else { return false }
+            constraint = .horizontalDistance(ConstraintPoint(entityID: entities[0], point: .start),
+                                             ConstraintPoint(entityID: entities[1], point: .start),
+                                             value: value)
+        case .verticalDistance:
+            guard entities.count == 2 else { return false }
+            constraint = .verticalDistance(ConstraintPoint(entityID: entities[0], point: .start),
+                                           ConstraintPoint(entityID: entities[1], point: .start),
+                                           value: value)
         }
         return commitConstraint(constraint, touching: Set(entities))
     }
@@ -5821,7 +5875,10 @@ final class CanvasModel {
             guard case .circle = drawing.entity(entities[0])?.kind else { return false }
             constraint = .radius(circle: entities[0], expression: trimmed, value: value)
         case .horizontalDistance, .verticalDistance, .diameter, .angle:
-            return false   // declared but solver-unsupported
+            // Now solver-supported (Lane B), but NOT parameter-driven via this seam yet
+            // (no UI authors a bound expression for them). The value overload above
+            // handles them by locking the current measured value.
+            return false
         }
         return commitConstraint(constraint, touching: Set(entities))
     }
@@ -6347,8 +6404,46 @@ final class CanvasModel {
             guard entities.count == 1,
                   case .circle(let c)? = drawing.entity(entities[0])?.kind else { return nil }
             return c.radius
-        case .horizontalDistance, .verticalDistance, .diameter, .angle:
-            return nil   // declared but solver-unsupported (rejected up front)
+        case .diameter:
+            // 2·r of a circle OR arc — the present diameter.
+            guard entities.count == 1, let r = circularRadius(of: entities[0]) else { return nil }
+            return 2.0 * r
+        case .angle:
+            // The present included angle (radians) between the two selected lines.
+            guard entities.count == 2,
+                  let a = lineDirectionAngle(of: entities[0]),
+                  let b = lineDirectionAngle(of: entities[1]) else { return nil }
+            return a - b
+        case .horizontalDistance:
+            // Present Δx between the two `.start` points.
+            guard entities.count == 2,
+                  let a = startPoint(of: entities[0]),
+                  let b = startPoint(of: entities[1]) else { return nil }
+            return b.x - a.x
+        case .verticalDistance:
+            // Present Δy between the two `.start` points.
+            guard entities.count == 2,
+                  let a = startPoint(of: entities[0]),
+                  let b = startPoint(of: entities[1]) else { return nil }
+            return b.y - a.y
+        }
+    }
+
+    /// The direction angle (radians, `atan2(Δy, Δx)`) of a line entity's start→end
+    /// vector, or `nil` if `id` is not a line. Mirrors how the solver derives θ for the
+    /// `angle` constraint (so locking the current value pins the present geometry).
+    private func lineDirectionAngle(of id: EntityID) -> Double? {
+        guard case .line(let l)? = drawing.entity(id)?.kind else { return nil }
+        return atan2(l.end.y - l.start.y, l.end.x - l.start.x)
+    }
+
+    /// The radius of a circle OR an arc, or `nil` for any other kind. Backs the diameter
+    /// constraint's current-value lock.
+    private func circularRadius(of id: EntityID) -> Double? {
+        switch drawing.entity(id)?.kind {
+        case .circle(let c): return c.radius
+        case .arc(let a):    return a.radius
+        default:             return nil
         }
     }
 
@@ -6373,10 +6468,13 @@ final class CanvasModel {
         }
         let need: String
         switch kind {
-        case .horizontal, .vertical, .fix: need = "one entity"
-        case .parallel, .perpendicular:    need = "two lines"
-        case .coincident:                  need = "two entities"
-        default:                           need = "a valid selection"
+        case .horizontal, .vertical, .fix:    need = "one entity"
+        case .parallel, .perpendicular,
+             .collinear:                      need = "two lines"
+        case .concentric:                     need = "two circles, arcs or ellipses"
+        case .equal:                          need = "two lines or two circles/arcs"
+        case .coincident:                     need = "two entities"
+        default:                              need = "a valid selection"
         }
         return "Select \(need) for a \(kind.rawValue) constraint (selected \(count))."
     }
@@ -6390,7 +6488,12 @@ final class CanvasModel {
         switch kind {
         case .distance: return "Select two entities for a distance constraint (selected \(count))."
         case .radius:   return "Select one circle for a radius constraint (selected \(count))."
-        default:        return "Select a valid object for a \(kind.rawValue) constraint."
+        case .diameter: return "Select one circle or arc for a diameter constraint (selected \(count))."
+        case .angle:    return "Select two lines for an angle constraint (selected \(count))."
+        case .horizontalDistance:
+            return "Select two entities for a horizontal-distance constraint (selected \(count))."
+        case .verticalDistance:
+            return "Select two entities for a vertical-distance constraint (selected \(count))."
         }
     }
 
@@ -6462,8 +6565,10 @@ final class CanvasModel {
         let n = selection.ids.count
         switch kind {
         case .horizontal, .vertical, .fix:                 return n == 1
-        case .parallel, .perpendicular, .coincident:       return n == 2
-        default:                                           return false
+        case .parallel, .perpendicular, .coincident,
+             .collinear, .concentric, .equal:             return n == 2
+        // tangent + symmetric stay unsupported (Lane B out of scope).
+        case .tangent, .symmetric:                         return false
         }
     }
 
@@ -6472,9 +6577,8 @@ final class CanvasModel {
     func canApplyDimensionalConstraint(_ kind: DimensionalConstraintKind) -> Bool {
         let n = selection.ids.count
         switch kind {
-        case .distance: return n == 2
-        case .radius:   return n == 1
-        default:        return false
+        case .distance, .horizontalDistance, .verticalDistance, .angle: return n == 2
+        case .radius, .diameter:                                        return n == 1
         }
     }
 

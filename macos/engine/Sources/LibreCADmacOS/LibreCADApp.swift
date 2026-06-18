@@ -1026,12 +1026,19 @@ struct LibreCADApp: App {
             constrainItem("Vertical",      "applyVerticalConstraintAction:")
             constrainItem("Parallel",      "applyParallelConstraintAction:")
             constrainItem("Perpendicular", "applyPerpendicularConstraintAction:")
+            constrainItem("Collinear",     "applyCollinearConstraintAction:")
+            constrainItem("Concentric",    "applyConcentricConstraintAction:")
+            constrainItem("Equal",         "applyEqualConstraintAction:")
             constrainItem("Fix",           "applyFixConstraintAction:")
 
             Divider()
             // Dimensional — LOCK the current measured value (no modal this wave).
-            constrainItem("Distance (lock current)", "applyDistanceConstraintAction:")
-            constrainItem("Radius (lock current)",   "applyRadiusConstraintAction:")
+            constrainItem("Distance (lock current)",            "applyDistanceConstraintAction:")
+            constrainItem("Radius (lock current)",              "applyRadiusConstraintAction:")
+            constrainItem("Diameter (lock current)",            "applyDiameterConstraintAction:")
+            constrainItem("Angle (lock current)",               "applyAngleConstraintAction:")
+            constrainItem("Horizontal Distance (lock current)", "applyHorizontalDistanceConstraintAction:")
+            constrainItem("Vertical Distance (lock current)",   "applyVerticalDistanceConstraintAction:")
         }
     }
 
@@ -1571,6 +1578,12 @@ extension FlippedMTKView {
     @objc func applyParallelConstraintAction(_ sender: Any?) { applyGeometric(.parallel) }
     /// Constrain ▸ Perpendicular — make the two selected lines perpendicular.
     @objc func applyPerpendicularConstraintAction(_ sender: Any?) { applyGeometric(.perpendicular) }
+    /// Constrain ▸ Collinear — put the two selected lines on the same infinite line.
+    @objc func applyCollinearConstraintAction(_ sender: Any?) { applyGeometric(.collinear) }
+    /// Constrain ▸ Concentric — share the centers of the two selected circles/arcs.
+    @objc func applyConcentricConstraintAction(_ sender: Any?) { applyGeometric(.concentric) }
+    /// Constrain ▸ Equal — equalize the two selected lines' lengths or two radii.
+    @objc func applyEqualConstraintAction(_ sender: Any?) { applyGeometric(.equal) }
     /// Constrain ▸ Fix — anchor the single selected entity's DOFs.
     @objc func applyFixConstraintAction(_ sender: Any?) { applyGeometric(.fix) }
 
@@ -1578,6 +1591,14 @@ extension FlippedMTKView {
     @objc func applyDistanceConstraintAction(_ sender: Any?) { applyDimensional(.distance) }
     /// Constrain ▸ Radius — lock the current radius of the selected circle.
     @objc func applyRadiusConstraintAction(_ sender: Any?) { applyDimensional(.radius) }
+    /// Constrain ▸ Diameter — lock the current diameter of the selected circle/arc.
+    @objc func applyDiameterConstraintAction(_ sender: Any?) { applyDimensional(.diameter) }
+    /// Constrain ▸ Angle — lock the current included angle between the two selected lines.
+    @objc func applyAngleConstraintAction(_ sender: Any?) { applyDimensional(.angle) }
+    /// Constrain ▸ Horizontal Distance — lock the current Δx between the two selected points.
+    @objc func applyHorizontalDistanceConstraintAction(_ sender: Any?) { applyDimensional(.horizontalDistance) }
+    /// Constrain ▸ Vertical Distance — lock the current Δy between the two selected points.
+    @objc func applyVerticalDistanceConstraintAction(_ sender: Any?) { applyDimensional(.verticalDistance) }
 
     /// Shared funnel: apply a GEOMETRIC constraint to the focused canvas's selection,
     /// redrawing on success so the glyph badge + any re-solved geometry repaint.

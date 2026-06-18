@@ -247,6 +247,250 @@ final class ConstraintSolverTests: XCTestCase {
         XCTAssertEqual(d.start.y, d.end.y, accuracy: tol)
     }
 
+    // MARK: - Lane B: collinear
+
+    func testCollinearPullsTwoLinesOntoOneLine() {
+        // Fix line A on the X axis (0,0)->(10,0). Line B is offset and rotated; making
+        // it collinear must drive it onto the X axis (its endpoints' Y → 0, direction
+        // horizontal). Pin B's start so it has a free end to rotate/translate-by-angle.
+        let a = id(1), b = id(2)
+        let entities: [EntityID: EntityKind] = [
+            a: .line(LineData(start: Vector(0, 0), end: Vector(10, 0))),
+            b: .line(LineData(start: Vector(2, 3), end: Vector(9, 5)))
+        ]
+        let constraints = [
+            Constraint.fix(line: a),
+            Constraint.collinear(line: a, line: b)
+        ]
+        let r = ConstraintSolver.solve(entities: entities, constraints: constraints)
+        guard let bd = solvedLine(r, b) else { return }
+        // Both endpoints land on the infinite line of A (the X axis → y == 0).
+        XCTAssertEqual(bd.start.y, 0, accuracy: 1e-5)
+        XCTAssertEqual(bd.end.y, 0, accuracy: 1e-5)
+        // And B is parallel to A (horizontal → equal endpoint Y, already checked) — the
+        // direction residual also holds: the line did not collapse.
+        XCTAssertGreaterThan(bd.start.distance(to: bd.end), 1e-3)
+    }
+
+    func testCollinearIsSolverSupported() {
+        XCTAssertTrue(GeometricConstraintKind.collinear.isSolverSupported)
+        XCTAssertTrue(Constraint.collinear(line: id(1), line: id(2)).isSolverSupported)
+    }
+
+    func testCollinearWithFreeSecondLineAndLargeOffsetConverges() {
+        // Regression for the LCShot finding: a FULLY-FREE second line at a LARGE offset
+        // must still converge to full tolerance (the two-endpoint offset formulation; the
+        // earlier angle+single-offset form stalled above tolerance here).
+        let a = id(1), b = id(2)
+        let entities: [EntityID: EntityKind] = [
+            a: .line(LineData(start: Vector(0, 0), end: Vector(100, 0))),     // X axis, fixed
+            b: .line(LineData(start: Vector(0, 40), end: Vector(80, 70)))     // far + tilted, FREE
+        ]
+        let constraints = [
+            Constraint.fix(line: a),
+            Constraint.collinear(line: a, line: b)
+        ]
+        let r = ConstraintSolver.solve(entities: entities, constraints: constraints)
+        guard let bd = solvedLine(r, b) else { return }
+        XCTAssertEqual(bd.start.y, 0, accuracy: 1e-6)
+        XCTAssertEqual(bd.end.y, 0, accuracy: 1e-6)
+        XCTAssertGreaterThan(bd.start.distance(to: bd.end), 1.0)   // not collapsed
+    }
+
+    // MARK: - Lane B: concentric
+
+    func testConcentricSnapsCircleCentersTogether() {
+        // Fix circle A at (5,5); make B concentric → B's center moves onto (5,5), its
+        // radius untouched (concentric pins only the center).
+        let a = id(1), b = id(2)
+        let entities: [EntityID: EntityKind] = [
+            a: .circle(CircleData(center: Vector(5, 5), radius: 3)),
+            b: .circle(CircleData(center: Vector(20, 1), radius: 8))
+        ]
+        let constraints = [
+            Constraint.fix(ConstraintPoint(entityID: a, point: .center)),
+            Constraint.concentric(a, b)
+        ]
+        let r = ConstraintSolver.solve(entities: entities, constraints: constraints)
+        guard let bd = solvedCircle(r, b) else { return }
+        XCTAssertEqual(bd.center.x, 5, accuracy: tol)
+        XCTAssertEqual(bd.center.y, 5, accuracy: tol)
+        XCTAssertEqual(bd.radius, 8, accuracy: tol)   // radius unchanged
+    }
+
+    func testConcentricCircleOntoRigidArc() {
+        // An arc is a RIGID anchor whose center the solver can READ; a circle made
+        // concentric with it moves onto the arc's center.
+        let arc = id(1), c = id(2)
+        let entities: [EntityID: EntityKind] = [
+            arc: .arc(ArcData(center: Vector(-4, 7), radius: 2, startAngle: 0, endAngle: .pi)),
+            c: .circle(CircleData(center: Vector(10, 10), radius: 5))
+        ]
+        let r = ConstraintSolver.solve(entities: entities,
+                                       constraints: [Constraint.concentric(arc, c)])
+        guard let cd = solvedCircle(r, c) else { return }
+        XCTAssertEqual(cd.center.x, -4, accuracy: tol)
+        XCTAssertEqual(cd.center.y, 7, accuracy: tol)
+    }
+
+    // MARK: - Lane B: equal
+
+    func testEqualEqualizesTwoLineLengths() {
+        // Fix line A length 10; make B equal → B's length becomes 10 (start pinned so
+        // only its far end moves out along its own direction).
+        let a = id(1), b = id(2)
+        let entities: [EntityID: EntityKind] = [
+            a: .line(LineData(start: Vector(0, 0), end: Vector(10, 0))),   // length 10
+            b: .line(LineData(start: Vector(0, 5), end: Vector(3, 5)))     // length 3
+        ]
+        let constraints = [
+            Constraint.fix(line: a),
+            Constraint.fix(ConstraintPoint(entityID: b, point: .start)),
+            Constraint.equal(line: a, line: b)
+        ]
+        let r = ConstraintSolver.solve(entities: entities, constraints: constraints)
+        guard let bd = solvedLine(r, b) else { return }
+        XCTAssertEqual(bd.start.distance(to: bd.end), 10, accuracy: tol)
+    }
+
+    func testEqualEqualizesTwoRadii() {
+        // Fix circle A radius 7; make B equal → B's radius becomes 7.
+        let a = id(1), b = id(2)
+        let entities: [EntityID: EntityKind] = [
+            a: .circle(CircleData(center: Vector(0, 0), radius: 7)),
+            b: .circle(CircleData(center: Vector(30, 0), radius: 2))
+        ]
+        let constraints = [
+            Constraint.fix(ConstraintPoint(entityID: a, point: .center)),
+            // Pin A's radius implicitly via radius constraint so A stays 7, then equalize.
+            Constraint.radius(circle: a, value: 7),
+            Constraint.equal(circle: a, circle: b)
+        ]
+        let r = ConstraintSolver.solve(entities: entities, constraints: constraints)
+        guard let bd = solvedCircle(r, b) else { return }
+        XCTAssertEqual(bd.radius, 7, accuracy: tol)
+    }
+
+    // MARK: - Lane B: angle
+
+    func testAngleDrivesTwoLinesToSetIncludedAngle() {
+        // Fix A on the X axis; pin B's start; drive the included angle to 90° → B becomes
+        // perpendicular to A (its direction dot A's == 0).
+        let a = id(1), b = id(2)
+        let entities: [EntityID: EntityKind] = [
+            a: .line(LineData(start: Vector(0, 0), end: Vector(10, 0))),
+            b: .line(LineData(start: Vector(0, 0), end: Vector(5, 1)))    // shallow angle now
+        ]
+        let constraints = [
+            Constraint.fix(line: a),
+            Constraint.fix(ConstraintPoint(entityID: b, point: .start)),
+            Constraint.angle(line: a, line: b, value: .pi / 2)
+        ]
+        let r = ConstraintSolver.solve(entities: entities, constraints: constraints)
+        guard let bd = solvedLine(r, b) else { return }
+        let adir = Vector(10, 0)
+        let bdir = bd.end - bd.start
+        // 90° between them ⇒ dot == 0.
+        XCTAssertEqual(adir.dot(bdir), 0, accuracy: 1e-4)
+    }
+
+    func testAngleDrivesToThirtyDegrees() {
+        let a = id(1), b = id(2)
+        let entities: [EntityID: EntityKind] = [
+            a: .line(LineData(start: Vector(0, 0), end: Vector(10, 0))),
+            b: .line(LineData(start: Vector(0, 0), end: Vector(5, 5)))
+        ]
+        let target = Double.pi / 6   // 30°
+        let constraints = [
+            Constraint.fix(line: a),
+            Constraint.fix(ConstraintPoint(entityID: b, point: .start)),
+            Constraint.angle(line: a, line: b, value: target)
+        ]
+        let r = ConstraintSolver.solve(entities: entities, constraints: constraints)
+        guard let bd = solvedLine(r, b) else { return }
+        let aAngle = 0.0   // A is along the X axis
+        let bAngle = atan2(bd.end.y - bd.start.y, bd.end.x - bd.start.x)
+        // The solver's wrap-safe residual is sin((θA − θB) − value) == 0 (the included
+        // angle θA−θB equals the target mod π — a line pair's antipodal ambiguity).
+        XCTAssertEqual(sin((aAngle - bAngle) - target), 0, accuracy: 1e-4)
+    }
+
+    // MARK: - Lane B: diameter
+
+    func testDiameterDrivesCircleDiameter() {
+        let cid = id(1)
+        let entities: [EntityID: EntityKind] = [
+            cid: .circle(CircleData(center: Vector(0, 0), radius: 2))
+        ]
+        let r = ConstraintSolver.solve(entities: entities,
+                                       constraints: [Constraint.diameter(circle: cid, value: 9)])
+        guard let d = solvedCircle(r, cid) else { return }
+        XCTAssertEqual(d.radius, 4.5, accuracy: tol)   // diameter 9 ⇒ radius 4.5
+    }
+
+    // MARK: - Lane B: horizontalDistance / verticalDistance
+
+    func testHorizontalDistanceDrivesDeltaX() {
+        // Fix P1 at origin; drive Δx(P1→P2) to 12 → P2.x == 12 (its Y free to stay put
+        // under min-displacement).
+        let p1 = id(1), p2 = id(2)
+        let entities: [EntityID: EntityKind] = [
+            p1: .point(PointData(position: Vector(0, 0))),
+            p2: .point(PointData(position: Vector(3, 4)))
+        ]
+        let constraints = [
+            Constraint.fix(ConstraintPoint(entityID: p1, point: .start)),
+            Constraint.horizontalDistance(ConstraintPoint(entityID: p1, point: .start),
+                                          ConstraintPoint(entityID: p2, point: .start), value: 12)
+        ]
+        let r = ConstraintSolver.solve(entities: entities, constraints: constraints)
+        guard let p2d = solvedPoint(r, p2) else { return }
+        XCTAssertEqual(p2d.position.x, 12, accuracy: tol)
+        XCTAssertEqual(p2d.position.y, 4, accuracy: 1e-4)   // Y barely moves (regularizer)
+    }
+
+    func testVerticalDistanceDrivesDeltaY() {
+        let p1 = id(1), p2 = id(2)
+        let entities: [EntityID: EntityKind] = [
+            p1: .point(PointData(position: Vector(0, 0))),
+            p2: .point(PointData(position: Vector(3, 4)))
+        ]
+        let constraints = [
+            Constraint.fix(ConstraintPoint(entityID: p1, point: .start)),
+            Constraint.verticalDistance(ConstraintPoint(entityID: p1, point: .start),
+                                        ConstraintPoint(entityID: p2, point: .start), value: -6)
+        ]
+        let r = ConstraintSolver.solve(entities: entities, constraints: constraints)
+        guard let p2d = solvedPoint(r, p2) else { return }
+        XCTAssertEqual(p2d.position.y, -6, accuracy: tol)
+        XCTAssertEqual(p2d.position.x, 3, accuracy: 1e-4)
+    }
+
+    // MARK: - Lane B: all new kinds are now solver-supported (no .unsupported)
+
+    func testNewKindsAreSolverSupported() {
+        // The 7 Lane B kinds report supported; tangent + symmetric stay unsupported.
+        for g in [GeometricConstraintKind.collinear, .concentric, .equal] {
+            XCTAssertTrue(g.isSolverSupported, "\(g) should be supported")
+        }
+        for d in [DimensionalConstraintKind.angle, .diameter, .horizontalDistance, .verticalDistance] {
+            XCTAssertTrue(d.isSolverSupported, "\(d) should be supported")
+        }
+        XCTAssertFalse(GeometricConstraintKind.tangent.isSolverSupported)
+        XCTAssertFalse(GeometricConstraintKind.symmetric.isSolverSupported)
+    }
+
+    func testDiameterConstraintDoesNotShortCircuitUnsupported() {
+        // A diameter constraint must NOT return .failed(.unsupported) anymore — it solves.
+        let cid = id(1)
+        let entities: [EntityID: EntityKind] = [
+            cid: .circle(CircleData(center: Vector(0, 0), radius: 1))
+        ]
+        let r = ConstraintSolver.solve(entities: entities,
+                                       constraints: [Constraint.diameter(circle: cid, value: 6)])
+        if case .failed(.unsupported) = r { XCTFail("diameter should be supported now") }
+    }
+
     // MARK: - FAILURE classifications
 
     func testUnsupportedConstraintFails() {

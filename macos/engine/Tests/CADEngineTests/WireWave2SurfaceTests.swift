@@ -229,9 +229,13 @@ struct WireWave2EnablementTests {
     func unsupportedReported() {
         let m = W2.model(CADDrawing())
         #expect(m.isConstraintSupported(.parallel))
-        #expect(!m.isConstraintSupported(.tangent))
         #expect(m.isConstraintSupported(.distance))
-        #expect(!m.isConstraintSupported(.angle))
+        // Lane B implemented angle (and collinear/concentric/equal/diameter/H-V dist).
+        #expect(m.isConstraintSupported(.angle))
+        #expect(m.isConstraintSupported(.collinear))
+        // tangent + symmetric remain out of scope → still unsupported.
+        #expect(!m.isConstraintSupported(.tangent))
+        #expect(!m.isConstraintSupported(.symmetric))
     }
 
     @Test("field-insert applicability needs exactly one TEXT/MTEXT entity")

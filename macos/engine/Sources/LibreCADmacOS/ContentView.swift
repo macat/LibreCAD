@@ -1169,10 +1169,13 @@ struct ContentView: View {
         case .vertical:      return "applyVerticalConstraintAction:"
         case .parallel:      return "applyParallelConstraintAction:"
         case .perpendicular: return "applyPerpendicularConstraintAction:"
+        case .collinear:     return "applyCollinearConstraintAction:"
+        case .concentric:    return "applyConcentricConstraintAction:"
+        case .equal:         return "applyEqualConstraintAction:"
         case .fix:           return "applyFixConstraintAction:"
-        // Only the MVP kinds are surfaced in the palette; map the rest to Fix's handler
-        // defensively (never reached — no palette entry builds them).
-        case .collinear, .tangent, .equal, .concentric, .symmetric:
+        // tangent + symmetric stay solver-unsupported (Lane B out of scope) and are not
+        // surfaced in the palette; map them to Fix's handler defensively (never reached).
+        case .tangent, .symmetric:
             return "applyFixConstraintAction:"
         }
     }
@@ -1180,10 +1183,12 @@ struct ContentView: View {
     /// The responder-chain selector name for a DIMENSIONAL constraint kind.
     private static func dimensionalConstraintSelector(_ kind: DimensionalConstraintKind) -> String {
         switch kind {
-        case .distance: return "applyDistanceConstraintAction:"
-        case .radius:   return "applyRadiusConstraintAction:"
-        case .horizontalDistance, .verticalDistance, .diameter, .angle:
-            return "applyDistanceConstraintAction:"   // not surfaced; defensive default
+        case .distance:           return "applyDistanceConstraintAction:"
+        case .radius:             return "applyRadiusConstraintAction:"
+        case .diameter:           return "applyDiameterConstraintAction:"
+        case .angle:              return "applyAngleConstraintAction:"
+        case .horizontalDistance: return "applyHorizontalDistanceConstraintAction:"
+        case .verticalDistance:   return "applyVerticalDistanceConstraintAction:"
         }
     }
 

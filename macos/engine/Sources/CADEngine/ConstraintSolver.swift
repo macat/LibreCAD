@@ -461,11 +461,31 @@ struct VariableLayout {
         case .line(let d):
             registerLine(id: id, data: d, base: base, fix: fix)
         case .circle(let d):
-            // (cx, cy, r); a rigid fix anchors cx,cy (radius can still be driven).
+            // (cx, cy, r); fixing the circle's center anchors cx,cy (the radius stays a
+            // free DOF a radius/equal constraint can still drive). A circle's only
+            // characteristic point IS its center, so ANY non-free fix (`.rigid` for the
+            // whole entity, or a `.center`-point fix which resolves to `.pinStart`) locks
+            // the center — mirroring how a point honors `.pinStart`/`.pinEnd`/`.rigid`.
             fullValues.append(contentsOf: [d.center.x, d.center.y, d.radius])
-            let lock = (fix == .rigid)
+            let lock = (fix != .free)
             anchored.append(contentsOf: [lock, lock, false])
             addEntity(id: id, kind: kind, base: base, width: 3, line: nil)
+        case .arc(let d):
+            // (cx, cy, r) like a circle, but ANCHORED — an arc is a RIGID anchor in the
+            // MVP (the solver never emits arc geometry; `unpackAll` skips it). Storing its
+            // center+radius as anchored slots lets concentric / equal / diameter / radius
+            // READ them (a circle can move to be concentric with, or equal-radius to, a
+            // fixed arc), with no DOFs contributed and no SolvedGeometry/EntityKind change.
+            fullValues.append(contentsOf: [d.center.x, d.center.y, d.radius])
+            anchored.append(contentsOf: [true, true, true])
+            addEntity(id: id, kind: kind, base: base, width: 0, line: nil)
+        case .ellipse(let d):
+            // Center as anchored slots (a RIGID anchor, like an arc) so concentric can
+            // READ an ellipse's center. No radius slot (an ellipse has two radii — equal/
+            // diameter don't apply to it), no DOFs contributed, no geometry emitted.
+            fullValues.append(contentsOf: [d.center.x, d.center.y])
+            anchored.append(contentsOf: [true, true])
+            addEntity(id: id, kind: kind, base: base, width: 0, line: nil)
         case .point(let d):
             fullValues.append(contentsOf: [d.position.x, d.position.y])
             let lock = (fix == .rigid || fix == .pinStart || fix == .pinEnd)
@@ -537,7 +557,8 @@ struct VariableLayout {
         switch s.kind {
         case .line:
             return nil
-        case .circle:
+        case .circle, .arc, .ellipse:
+            // Circle / arc / ellipse all store (cx, cy) at the block base (the center).
             return p.point == .center || p.point == .start ? (s.base, s.base + 1) : nil
         case .point:
             return p.point == .end ? nil : (s.base, s.base + 1)
@@ -551,12 +572,26 @@ struct VariableLayout {
     func resolvesPosition(_ p: ConstraintPoint) -> Bool {
         guard let s = byID[p.entityID] else { return false }
         switch s.kind {
-        case .line:   return p.point == .start || p.point == .end
-        case .circle: return p.point == .center || p.point == .start
-        case .point:  return p.point != .end
-        default:      return false
+        case .line:                  return p.point == .start || p.point == .end
+        case .circle, .arc, .ellipse: return p.point == .center || p.point == .start
+        case .point:                 return p.point != .end
+        default:                     return false
         }
     }
+
+    /// Whether `id` carries a readable CENTER (a circle / arc / ellipse). Backs the
+    /// concentric validation (`canBuild`).
+    func hasCenter(_ id: EntityID) -> Bool {
+        guard let s = byID[id] else { return false }
+        switch s.kind {
+        case .circle, .arc, .ellipse: return true
+        default:                      return false
+        }
+    }
+
+    /// Whether `id` carries a readable RADIUS slot (a circle or arc). Backs the equal /
+    /// diameter validation. (An ellipse has no single radius, so it is excluded.)
+    func hasRadius(_ id: EntityID) -> Bool { radiusIndex(of: id) != nil }
 
     /// The DERIVED (x,y) of a line endpoint from a FULL `values` vector.
     func endpoint(of id: EntityID, which: EntityPoint, values: [Double]) -> (Double, Double) {
@@ -594,10 +629,15 @@ struct VariableLayout {
         return values[lp.thetaSlot]
     }
 
-    /// The FULL-vector slot of a circle's RADIUS, or `nil` if `id` is not a circle.
+    /// The FULL-vector slot of a circle's or arc's RADIUS, or `nil` otherwise. (Both a
+    /// circle and an arc store the radius at block base + 2; an arc's slot is anchored,
+    /// so it reads as a constant — fine for equal / diameter against a rigid arc.)
     func radiusIndex(of id: EntityID) -> Int? {
-        guard let s = byID[id], case .circle = s.kind else { return nil }
-        return s.base + 2
+        guard let s = byID[id] else { return nil }
+        switch s.kind {
+        case .circle, .arc: return s.base + 2
+        default:            return nil
+        }
     }
 
     /// Whether `id` is a known, registered entity.
@@ -676,14 +716,17 @@ enum ResidualBuilder {
             case .horizontal, .vertical:       return 1
             case .parallel, .perpendicular:    return 1
             case .fix:                         return 0     // handled by anchoring
-            case .collinear, .tangent, .equal, .concentric, .symmetric:
+            case .collinear:                   return 2     // angle-equal + zero offset
+            case .concentric:                  return 2     // Δcenter (dx, dy)
+            case .equal:                       return 1     // ΔL  (lines)  or  Δr  (circles)
+            case .tangent, .symmetric:
                 return 0                                     // unsupported (rejected earlier)
             }
         case .dimensional(let d):
             switch d {
             case .distance, .radius:           return 1
             case .horizontalDistance, .verticalDistance, .diameter, .angle:
-                return 0                                     // unsupported (rejected earlier)
+                return 1
             }
         }
     }
@@ -706,16 +749,46 @@ enum ResidualBuilder {
             return layout.lineParam(of: c.points[0].entityID) != nil
                 && c.points[0].entityID == c.points[1].entityID
 
-        case .geometric(.parallel), .geometric(.perpendicular):
+        case .geometric(.parallel), .geometric(.perpendicular),
+             .geometric(.collinear), .dimensional(.angle):
+            // Two lines: four endpoints, each pair naming the SAME line.
             guard c.points.count >= 4 else { return false }
             return layout.lineParam(of: c.points[0].entityID) != nil
                 && layout.lineParam(of: c.points[2].entityID) != nil
                 && c.points[0].entityID == c.points[1].entityID
                 && c.points[2].entityID == c.points[3].entityID
 
-        case .dimensional(.radius):
+        case .geometric(.concentric):
+            // Two entities that each carry a CENTER (circle / arc / ellipse).
+            guard c.points.count >= 2 else { return false }
+            return layout.hasCenter(c.points[0].entityID)
+                && layout.hasCenter(c.points[1].entityID)
+
+        case .geometric(.equal):
+            // A SAME-FAMILY pair: two lines (length-equal) OR two circular entities
+            // (radius-equal). Reject a mixed pair.
+            if c.points.count >= 4,
+               layout.lineParam(of: c.points[0].entityID) != nil,
+               layout.lineParam(of: c.points[2].entityID) != nil,
+               c.points[0].entityID == c.points[1].entityID,
+               c.points[2].entityID == c.points[3].entityID {
+                return true                               // two lines
+            }
+            if c.points.count == 2,
+               layout.hasRadius(c.points[0].entityID),
+               layout.hasRadius(c.points[1].entityID) {
+                return true                               // two circles/arcs
+            }
+            return false
+
+        case .dimensional(.radius), .dimensional(.diameter):
             guard let first = c.points.first else { return false }
             return layout.radiusIndex(of: first.entityID) != nil
+
+        case .dimensional(.horizontalDistance), .dimensional(.verticalDistance):
+            guard c.points.count >= 2 else { return false }
+            return layout.resolvesPosition(c.points[0])
+                && layout.resolvesPosition(c.points[1])
 
         default:
             return false   // unsupported kinds are rejected before this is reached
@@ -770,9 +843,84 @@ enum ResidualBuilder {
                 out.append(values[ri] - c.value)
             }
 
+        case .geometric(.collinear):
+            // Two lines on the SAME infinite line. Equivalent to "both of line-2's
+            // endpoints lie on line-1's infinite line" — if BOTH endpoints are on the
+            // line, the whole segment is, which IMPLIES equal direction too. Using both
+            // endpoints (rather than an angle residual + one offset) is far better
+            // conditioned for a FREE line: each residual directly drives an endpoint onto
+            // the line (no flat-gradient angle term whose tiny error a long lever arm
+            // amplifies into a residual that stalls above tolerance).
+            //   residual_k = signed perpendicular distance of line-2 endpoint_k to the
+            //   infinite line through line-1's anchor A with direction u1 = (P_k − A) × u1.
+            let l1 = c.points[0].entityID, l2 = c.points[2].entityID
+            let t1 = layout.angleValue(of: l1, values: values) ?? 0
+            let a = layout.endpoint(of: l1, which: .start, values: values)
+            let ux = cos(t1), uy = sin(t1)
+            let ps = layout.endpoint(of: l2, which: .start, values: values)
+            let pe = layout.endpoint(of: l2, which: .end, values: values)
+            out.append((ps.0 - a.0) * uy - (ps.1 - a.1) * ux)   // start on line 1
+            out.append((pe.0 - a.0) * uy - (pe.1 - a.1) * ux)   // end on line 1
+
+        case .geometric(.concentric):
+            // Centers coincide: c2 − c1 == 0 (dx, dy).
+            let ca = position(c.points[0], values, layout)
+            let cb = position(c.points[1], values, layout)
+            out.append(cb.0 - ca.0)
+            out.append(cb.1 - ca.1)
+
+        case .geometric(.equal):
+            if c.points.count >= 4 {
+                // Two LINES: equal length. L is a line DOF (half-length for a free line,
+                // full length for a pinned one); equal half-length ⇔ equal length.
+                let la = lineLength(c.points[0].entityID, values, layout)
+                let lb = lineLength(c.points[2].entityID, values, layout)
+                out.append(la - lb)
+            } else {
+                // Two CIRCULAR entities: equal radius.
+                let ra = layout.radiusIndex(of: c.points[0].entityID).map { values[$0] } ?? 0
+                let rb = layout.radiusIndex(of: c.points[1].entityID).map { values[$0] } ?? 0
+                out.append(ra - rb)
+            }
+
+        case .dimensional(.angle):
+            // Included angle between two lines driven to `value` (radians). Wrap-safe:
+            // residual = sin(Δθ − value), zero ⇔ Δθ ≡ value (mod π for an unsigned line
+            // pair — sin makes ±value and value±π all valid, matching a line's antipodal
+            // direction ambiguity).
+            let t1 = layout.angleValue(of: c.points[0].entityID, values: values) ?? 0
+            let t2 = layout.angleValue(of: c.points[2].entityID, values: values) ?? 0
+            out.append(sin((t1 - t2) - c.value))
+
+        case .dimensional(.diameter):
+            if let ri = layout.radiusIndex(of: c.points[0].entityID) {
+                out.append(2.0 * values[ri] - c.value)
+            }
+
+        case .dimensional(.horizontalDistance):
+            // Δx between the two points driven to `value`: (x2 − x1) − value.
+            let pa = position(c.points[0], values, layout)
+            let pb = position(c.points[1], values, layout)
+            out.append((pb.0 - pa.0) - c.value)
+
+        case .dimensional(.verticalDistance):
+            // Δy between the two points driven to `value`: (y2 − y1) − value.
+            let pa = position(c.points[0], values, layout)
+            let pb = position(c.points[1], values, layout)
+            out.append((pb.1 - pa.1) - c.value)
+
         default:
             return   // unsupported (rejected earlier)
         }
+    }
+
+    /// The CURRENT length of a line from the FULL vector: |end − start| derived from its
+    /// endpoints (robust whether the line is free or pinned — both store endpoints).
+    private static func lineLength(_ id: EntityID, _ values: [Double], _ layout: VariableLayout) -> Double {
+        let s = layout.endpoint(of: id, which: .start, values: values)
+        let e = layout.endpoint(of: id, which: .end, values: values)
+        let dx = e.0 - s.0, dy = e.1 - s.1
+        return (dx * dx + dy * dy).squareRoot()
     }
 
     /// The (x, y) WORLD position of a constraint-point from the FULL vector — a line

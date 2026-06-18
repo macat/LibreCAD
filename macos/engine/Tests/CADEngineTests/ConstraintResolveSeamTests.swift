@@ -323,6 +323,238 @@ struct ConstraintCreatePathTests {
     }
 }
 
+// MARK: - Lane B — the 7 newly-implemented constraint kinds (create path + selection)
+
+@MainActor
+@Suite("Lane B constraint seam — collinear / concentric / equal / angle / diameter / H-V dist")
+struct LaneBConstraintCreateTests {
+
+    private static func arc(_ c: Vector, _ r: Double, id: UInt64 = 0) -> EntityRecord {
+        EntityRecord(id: EntityID(id),
+                     kind: .arc(ArcData(center: c, radius: r, startAngle: 0, endAngle: .pi)))
+    }
+
+    // --- collinear ---
+
+    @Test("addConstraint(collinear) puts two lines on one line")
+    func collinearApplies() throws {
+        let drawing = CADDrawing()
+        let a = drawing.add(Fix.line(Vector(0, 0), Vector(10, 0)))     // X axis
+        let b = drawing.add(Fix.line(Vector(2, 4), Vector(9, 6)))      // offset + tilted
+        let m = Fix.model(drawing)
+        #expect(m.addConstraint(.fix, entities: [a]))
+        #expect(m.addConstraint(.collinear, entities: [a, b]))
+        let ends = try #require(Fix.ends(m, b))
+        #expect(abs(ends.start.y) < 1e-4 && abs(ends.end.y) < 1e-4, "B lands on the X axis")
+        #expect(m.allConstraints.count == 2)
+    }
+
+    @Test("collinear rejects a non-line / wrong-arity selection")
+    func collinearRejects() throws {
+        let drawing = CADDrawing()
+        let a = drawing.add(Fix.line(Vector(0, 0), Vector(10, 0)))
+        let c = drawing.add(Fix.circle(Vector(0, 0), 5))
+        let m = Fix.model(drawing)
+        #expect(!m.addConstraint(.collinear, entities: [a]))          // needs 2
+        #expect(!m.addConstraint(.collinear, entities: [a, c]))       // circle not a line
+        #expect(m.allConstraints.isEmpty)
+    }
+
+    // --- concentric ---
+
+    @Test("addConstraint(concentric) snaps a circle onto a fixed circle's center")
+    func concentricApplies() throws {
+        let drawing = CADDrawing()
+        let a = drawing.add(Fix.circle(Vector(5, 5), 3))
+        let b = drawing.add(Fix.circle(Vector(20, 1), 8))
+        let m = Fix.model(drawing)
+        #expect(m.addConstraint(.fix, entities: [a]))
+        #expect(m.addConstraint(.concentric, entities: [a, b]))
+        guard case .circle(let bc)? = m.drawing.entity(b)?.kind else {
+            Issue.record("b not a circle"); return
+        }
+        #expect(abs(bc.center.x - 5) < 1e-6 && abs(bc.center.y - 5) < 1e-6)
+        #expect(abs(bc.radius - 8) < 1e-6, "radius unchanged by concentric")
+    }
+
+    @Test("concentric accepts a circle + arc pair, rejects two lines")
+    func concentricArcAndReject() throws {
+        let drawing = CADDrawing()
+        let arc = drawing.add(Self.arc(Vector(-4, 7), 2))
+        let c = drawing.add(Fix.circle(Vector(10, 10), 5))
+        let l = drawing.add(Fix.line(Vector(0, 0), Vector(1, 1)))
+        let m = Fix.model(drawing)
+        #expect(m.addConstraint(.concentric, entities: [arc, c]))    // arc has a center
+        guard case .circle(let cc)? = m.drawing.entity(c)?.kind else {
+            Issue.record("c not a circle"); return
+        }
+        #expect(abs(cc.center.x - (-4)) < 1e-6 && abs(cc.center.y - 7) < 1e-6)
+        #expect(!m.addConstraint(.concentric, entities: [l, l]))     // lines have no center
+    }
+
+    // --- equal (lines and circles) ---
+
+    @Test("addConstraint(equal) equalizes two line lengths")
+    func equalLines() throws {
+        let drawing = CADDrawing()
+        let a = drawing.add(Fix.line(Vector(0, 0), Vector(10, 0)))    // len 10
+        let b = drawing.add(Fix.line(Vector(0, 5), Vector(3, 5)))     // len 3
+        let m = Fix.model(drawing)
+        #expect(m.addConstraint(.fix, entities: [a]))
+        #expect(m.addConstraint(.equal, entities: [a, b]))
+        let ends = try #require(Fix.ends(m, b))
+        #expect(abs(ends.start.distance(to: ends.end) - 10) < 1e-5)
+    }
+
+    @Test("addConstraint(equal) equalizes two radii; rejects a mixed pair")
+    func equalCirclesAndMixedReject() throws {
+        let drawing = CADDrawing()
+        let a = drawing.add(Fix.circle(Vector(0, 0), 7))
+        let b = drawing.add(Fix.circle(Vector(30, 0), 2))
+        let line = drawing.add(Fix.line(Vector(0, 0), Vector(5, 0)))
+        let m = Fix.model(drawing)
+        #expect(m.addConstraint(.fix, entities: [a]))
+        #expect(m.addConstraint(.radius, entities: [a], value: 7))    // hold A at 7
+        #expect(m.addConstraint(.equal, entities: [a, b]))
+        guard case .circle(let bc)? = m.drawing.entity(b)?.kind else {
+            Issue.record("b not a circle"); return
+        }
+        #expect(abs(bc.radius - 7) < 1e-5)
+        // A mixed line+circle pair is not a same-family equal → rejected.
+        #expect(!m.addConstraint(.equal, entities: [a, line]))
+    }
+
+    // --- angle (dimensional, locks the current measured value) ---
+
+    @Test("addConstraint(angle) creates an angle constraint over two lines with the value")
+    func angleAppliesWithValue() throws {
+        let drawing = CADDrawing()
+        let a = drawing.add(Fix.line(Vector(0, 0), Vector(10, 0)))
+        let b = drawing.add(Fix.line(Vector(0, 0), Vector(5, 1)))
+        let c = drawing.add(Fix.circle(Vector(0, 0), 5))
+        let m = Fix.model(drawing)
+        #expect(m.addConstraint(.angle, entities: [a, b], value: .pi / 2))
+        let added = try #require(m.allConstraints.first { $0.kind == .dimensional(.angle) })
+        #expect(abs(added.value - Double.pi / 2) < 1e-9)
+        #expect(added.points.count == 4, "two lines → four endpoints")
+        // A non-line in the pair is rejected.
+        #expect(!m.addConstraint(.angle, entities: [a, c], value: .pi / 4))
+        #expect(m.allConstraints.count == 1)
+    }
+
+    @Test("angle constraint via selection LOCKS the current measured included angle")
+    func angleLocksCurrentViaSelection() throws {
+        let drawing = CADDrawing()
+        let a = drawing.add(Fix.line(Vector(0, 0), Vector(10, 0)))    // angle 0
+        let b = drawing.add(Fix.line(Vector(0, 0), Vector(0, 5)))     // angle 90°
+        let m = Fix.model(drawing)
+        #expect(m.setSelection([a, b]))
+        #expect(m.applyDimensionalConstraintToSelection(.angle))
+        let added = try #require(m.allConstraints.first { $0.kind == .dimensional(.angle) })
+        // Locked value is the current included angle θA − θB = 0 − (π/2) = −π/2.
+        #expect(abs(added.value - (-Double.pi / 2)) < 1e-6)
+    }
+
+    @Test("angle rejects a non-line selection")
+    func angleRejectsNonLines() throws {
+        let drawing = CADDrawing()
+        let c = drawing.add(Fix.circle(Vector(0, 0), 5))
+        let l = drawing.add(Fix.line(Vector(0, 0), Vector(1, 0)))
+        let m = Fix.model(drawing)
+        #expect(m.setSelection([c, l]))
+        #expect(!m.applyDimensionalConstraintToSelection(.angle))
+        #expect(m.toolStatus.contains("angle"))   // a human failure note posted
+        #expect(m.allConstraints.isEmpty)
+    }
+
+    // --- diameter ---
+
+    @Test("addConstraint(diameter) drives a circle's diameter")
+    func diameterApplies() throws {
+        let drawing = CADDrawing()
+        let c = drawing.add(Fix.circle(Vector(3, 4), 2))
+        let m = Fix.model(drawing)
+        #expect(m.addConstraint(.diameter, entities: [c], value: 9))
+        guard case .circle(let circ)? = m.drawing.entity(c)?.kind else {
+            Issue.record("not a circle"); return
+        }
+        #expect(abs(circ.radius - 4.5) < 1e-6, "diameter 9 ⇒ radius 4.5")
+    }
+
+    @Test("diameter via selection locks the current diameter; rejects a line")
+    func diameterLocksCurrentAndRejects() throws {
+        let drawing = CADDrawing()
+        let c = drawing.add(Fix.circle(Vector(0, 0), 6))   // diameter 12
+        let l = drawing.add(Fix.line(Vector(0, 0), Vector(5, 0)))
+        let m = Fix.model(drawing)
+        #expect(m.setSelection([c]))
+        #expect(m.applyDimensionalConstraintToSelection(.diameter))
+        let added = try #require(m.allConstraints.first { $0.kind == .dimensional(.diameter) })
+        #expect(abs(added.value - 12) < 1e-6)   // locked the present diameter
+        // A line has no diameter → rejected.
+        #expect(m.setSelection([l]))
+        #expect(!m.applyDimensionalConstraintToSelection(.diameter))
+    }
+
+    // --- horizontalDistance / verticalDistance ---
+
+    @Test("addConstraint(horizontalDistance) drives Δx")
+    func horizontalDistanceApplies() throws {
+        let drawing = CADDrawing()
+        let p1 = drawing.add(Fix.point(Vector(0, 0)))
+        let p2 = drawing.add(Fix.point(Vector(3, 4)))
+        let m = Fix.model(drawing)
+        #expect(m.addConstraint(.fix, entities: [p1]))
+        #expect(m.addConstraint(.horizontalDistance, entities: [p1, p2], value: 12))
+        guard case .point(let pd)? = m.drawing.entity(p2)?.kind else {
+            Issue.record("p2 not a point"); return
+        }
+        #expect(abs(pd.position.x - 12) < 1e-6)
+    }
+
+    @Test("H/V distance via selection lock the present Δx / Δy")
+    func hvDistanceLockCurrent() throws {
+        let drawing = CADDrawing()
+        let p1 = drawing.add(Fix.point(Vector(1, 2)))
+        let p2 = drawing.add(Fix.point(Vector(9, 7)))   // Δx 8, Δy 5
+        let m = Fix.model(drawing)
+        #expect(m.setSelection([p1, p2]))
+        // Both H and V distance lock from the SAME (unchanged) selection.
+        #expect(m.applyDimensionalConstraintToSelection(.horizontalDistance))
+        let h = try #require(m.allConstraints.first { $0.kind == .dimensional(.horizontalDistance) })
+        #expect(abs(h.value - 8) < 1e-6)
+        #expect(m.applyDimensionalConstraintToSelection(.verticalDistance))
+        let v = try #require(m.allConstraints.first { $0.kind == .dimensional(.verticalDistance) })
+        #expect(abs(v.value - 5) < 1e-6)
+    }
+
+    @Test("H/V distance reject a single-entity selection")
+    func hvDistanceArity() throws {
+        let drawing = CADDrawing()
+        let p1 = drawing.add(Fix.point(Vector(0, 0)))
+        let m = Fix.model(drawing)
+        #expect(m.setSelection([p1]))
+        #expect(!m.applyDimensionalConstraintToSelection(.horizontalDistance))
+        #expect(!m.applyDimensionalConstraintToSelection(.verticalDistance))
+        #expect(m.allConstraints.isEmpty)
+    }
+
+    // --- the new kinds are supported (no .unsupported funnel rejection) ---
+
+    @Test("Lane B kinds report solver-supported; tangent + symmetric still do not")
+    func laneBSupportedFlags() {
+        #expect(GeometricConstraintKind.collinear.isSolverSupported)
+        #expect(GeometricConstraintKind.concentric.isSolverSupported)
+        #expect(GeometricConstraintKind.equal.isSolverSupported)
+        #expect(DimensionalConstraintKind.angle.isSolverSupported)
+        #expect(DimensionalConstraintKind.diameter.isSolverSupported)
+        #expect(DimensionalConstraintKind.horizontalDistance.isSolverSupported)
+        #expect(DimensionalConstraintKind.verticalDistance.isSolverSupported)
+        #expect(!GeometricConstraintKind.tangent.isSolverSupported)
+        #expect(!GeometricConstraintKind.symmetric.isSolverSupported)
+    }
+}
+
 // MARK: - Glyph overlay (pure helpers — read-only display)
 
 @Suite("Wave-3 constraint seam — glyph overlay layout")
