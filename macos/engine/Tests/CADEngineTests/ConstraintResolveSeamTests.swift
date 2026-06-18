@@ -340,7 +340,7 @@ struct ConstraintGlyphLayoutTests {
         #expect(ConstraintGlyph.label(for: .dimensional(.radius)) == "R")
     }
 
-    @Test("placements anchor each badge at the first entity's projected center")
+    @Test("placements anchor each badge at the constraint's feature point")
     func placementAnchors() {
         let e1 = EntityID(1)
         let e2 = EntityID(2)
@@ -348,31 +348,36 @@ struct ConstraintGlyphLayoutTests {
             Constraint.horizontal(line: e1),
             Constraint.radius(circle: e2, value: 5),
         ]
-        // World center lookup: e1 at (10,0), e2 at (0,20).
-        let centers: [EntityID: Vector] = [e1: Vector(10, 0), e2: Vector(0, 20)]
+        // Per-CONSTRAINT anchor: the horizontal at (10,0), the radius at (0,20).
         // Identity-ish projection: world (x,y) → screen (x, y) for an easy assert.
         let places = ConstraintGlyphLayout.placements(
             for: cons,
-            worldCenter: { centers[$0] },
+            worldAnchor: { c in
+                switch c.kind {
+                case .geometric(.horizontal): return Vector(10, 0)
+                case .dimensional(.radius):   return Vector(0, 20)
+                default:                      return nil
+                }
+            },
             worldToScreen: { CGPoint(x: $0.x, y: $0.y) })
 
         #expect(places.count == 2)
         #expect(places[0].label == "H")
-        #expect(places[0].anchor == CGPoint(x: 10, y: 0))   // first stack on e1, no offset
+        #expect(places[0].anchor == CGPoint(x: 10, y: 0))   // first at this spot, no offset
         #expect(places[1].label == "R")
         #expect(places[1].anchor == CGPoint(x: 0, y: 20))
     }
 
-    @Test("co-anchored badges fan out by the stack step")
+    @Test("badges sharing a screen spot fan out by the stack step")
     func coAnchoredStacking() {
         let e1 = EntityID(1)
         let cons = [
             Constraint.horizontal(line: e1),
-            Constraint.fix(line: e1),     // SAME first entity → stacked
+            Constraint.fix(line: e1),     // SAME anchor point → stacked
         ]
         let places = ConstraintGlyphLayout.placements(
             for: cons,
-            worldCenter: { _ in Vector(5, 5) },
+            worldAnchor: { _ in Vector(5, 5) },   // both land at the same spot
             worldToScreen: { CGPoint(x: $0.x, y: $0.y) })
         #expect(places.count == 2)
         #expect(places[0].anchor == CGPoint(x: 5, y: 5))
@@ -380,13 +385,27 @@ struct ConstraintGlyphLayoutTests {
         #expect(places[1].anchor == CGPoint(x: 5, y: 5 - ConstraintGlyphLayout.stackStep))
     }
 
-    @Test("a constraint whose first entity has no center is skipped")
-    func skipsMissingCenter() {
+    @Test("a constraint whose anchor doesn't resolve is skipped")
+    func skipsMissingAnchor() {
         let cons = [Constraint.horizontal(line: EntityID(1))]
         let places = ConstraintGlyphLayout.placements(
             for: cons,
-            worldCenter: { _ in nil },     // no resolvable center
+            worldAnchor: { _ in nil },     // no resolvable anchor
             worldToScreen: { CGPoint(x: $0.x, y: $0.y) })
         #expect(places.isEmpty)
+    }
+
+    @Test("a perpendicular badge anchors at the lines' intersection (the corner)")
+    func perpendicularAnchorsAtCorner() {
+        // Line A horizontal along y=0; line B vertical along x=4. They meet at (4,0) —
+        // the corner — even though the segments don't physically touch there.
+        let aS = Vector(0, 0), aE = Vector(10, 0)
+        let bS = Vector(4, 3), bE = Vector(4, 9)
+        let x = ConstraintGlyphLayout.lineIntersection(aS, aE, bS, bE)
+        #expect(x?.x == 4)
+        #expect(x?.y == 0)
+        // Parallel lines have no corner.
+        #expect(ConstraintGlyphLayout.lineIntersection(Vector(0, 0), Vector(10, 0),
+                                                       Vector(0, 5), Vector(10, 5)) == nil)
     }
 }

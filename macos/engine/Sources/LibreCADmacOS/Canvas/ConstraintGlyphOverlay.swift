@@ -29,11 +29,13 @@
 //  change) is the later wire-wave, exactly like the sibling overlays.
 //
 //  ## Placement
-//  A constraint's badge is anchored at the SCREEN point of the bounding-box CENTER of
-//  its FIRST referenced entity, nudged by a small per-constraint stack offset so
-//  multiple constraints on one entity don't overprint. Using the bounding-box center
-//  (rather than resolving an exact endpoint) keeps the overlay trivially read-only and
-//  GPU-free; the badge points AT the entity it constrains, which is the legibility goal.
+//  A constraint's badge sits at the SCREEN point of its geometric FEATURE, so it reads
+//  where the user expects: a perpendicular/parallel pair anchors at the lines'
+//  INTERSECTION (the CORNER); coincident/fix at the constrained point; distance at the
+//  midpoint of its two points; horizontal/vertical at the line midpoint; radius at the
+//  circle center (`anchorWorld`). Badges that land on the same spot fan out by a small
+//  stack offset (keyed on the quantized screen anchor) so they don't overprint. The
+//  overlay stays read-only + GPU-free.
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //
@@ -106,24 +108,25 @@ enum ConstraintGlyphLayout {
     /// same anchor entity, so multiple constraints on one entity don't overprint.
     static let stackStep: CGFloat = 16
 
-    /// The screen badge placements for `constraints`. For each constraint, the FIRST
-    /// referenced entity's world center is looked up via `worldCenter`, projected with
-    /// `worldToScreen`, then offset UPWARD (toward smaller screen-y) by a per-entity
-    /// running stack index so co-anchored badges fan out. A constraint whose first
-    /// entity has no resolvable center (deleted / empty bounds) is skipped.
+    /// The screen badge placements for `constraints`. Each constraint's WORLD anchor —
+    /// its geometric FEATURE (e.g. the CORNER where two perpendicular lines meet) — is
+    /// looked up via `worldAnchor`, projected with `worldToScreen`, then offset UPWARD
+    /// (toward smaller screen-y) by a running stack index keyed on the QUANTIZED screen
+    /// anchor so badges sharing a spot fan out instead of overprinting. A constraint with
+    /// no resolvable anchor (deleted entity / empty bounds) is skipped.
     static func placements(
         for constraints: [Constraint],
-        worldCenter: (EntityID) -> Vector?,
+        worldAnchor: (Constraint) -> Vector?,
         worldToScreen: (Vector) -> CGPoint
     ) -> [ConstraintGlyphPlacement] {
         var out: [ConstraintGlyphPlacement] = []
-        var stackByAnchor: [EntityID: Int] = [:]
+        var stackByKey: [Int64: Int] = [:]
         for c in constraints {
-            guard let first = c.entityIDs.first,
-                  let center = worldCenter(first) else { continue }
-            let stack = stackByAnchor[first, default: 0]
-            stackByAnchor[first] = stack + 1
-            let base = worldToScreen(center)
+            guard let world = worldAnchor(c) else { continue }
+            let base = worldToScreen(world)
+            let key = Self.anchorKey(base)
+            let stack = stackByKey[key, default: 0]
+            stackByKey[key] = stack + 1
             let anchor = CGPoint(x: base.x, y: base.y - CGFloat(stack) * stackStep)
             out.append(ConstraintGlyphPlacement(
                 constraintID: c.id,
@@ -131,6 +134,25 @@ enum ConstraintGlyphLayout {
                 anchor: anchor))
         }
         return out
+    }
+
+    /// Quantizes a screen anchor (to ~half a badge) so genuinely co-located badges
+    /// (e.g. two constraints at the same corner) stack instead of overprinting.
+    private static func anchorKey(_ p: CGPoint) -> Int64 {
+        Int64((p.x / 8).rounded()) &* 100_003 &+ Int64((p.y / 8).rounded())
+    }
+
+    /// Intersection of the two INFINITE lines (a1→a2) and (b1→b2) — the CORNER where a
+    /// perpendicular/parallel pair meets — or nil when they are (near-)parallel. Pure
+    /// math, kept here so it is unit-testable.
+    static func lineIntersection(_ a1: Vector, _ a2: Vector,
+                                 _ b1: Vector, _ b2: Vector) -> Vector? {
+        let d1x = a2.x - a1.x, d1y = a2.y - a1.y
+        let d2x = b2.x - b1.x, d2y = b2.y - b1.y
+        let denom = d1x * d2y - d1y * d2x
+        guard abs(denom) > 1e-9 else { return nil }
+        let t = ((b1.x - a1.x) * d2y - (b1.y - a1.y) * d2x) / denom
+        return Vector(a1.x + t * d1x, a1.y + t * d1y)
     }
 }
 
@@ -206,11 +228,7 @@ final class ConstraintGlyphOverlayView: NSView {
         let viewport = model.viewport
         let placements = ConstraintGlyphLayout.placements(
             for: model.allConstraints,
-            worldCenter: { [model] id in
-                guard let rec = model.drawing.entity(id) else { return nil }
-                let box = rec.boundingBox()
-                return box.isEmpty ? nil : box.center
-            },
+            worldAnchor: { [model] c in Self.anchorWorld(c, model: model) },
             worldToScreen: { viewport.worldToScreen($0) })
 
         let textAttrs: [NSAttributedString.Key: Any] = [
@@ -242,4 +260,75 @@ final class ConstraintGlyphOverlayView: NSView {
             attributed.draw(at: textOrigin)
         }
     }
+
+    // MARK: Anchor placement (badge sits at the constraint's geometric FEATURE)
+
+    /// The WORLD point a constraint's badge anchors at — its geometric feature, so it
+    /// reads where the user expects rather than floating by one entity:
+    ///  • perpendicular / parallel (two lines) → the lines' INTERSECTION (the CORNER).
+    ///    Truly parallel lines have no intersection → midpoint of the four endpoints.
+    ///  • coincident / fix → the constrained point itself.
+    ///  • distance → the midpoint of the two points.
+    ///  • horizontal / vertical → the constrained line's midpoint.
+    ///  • radius → the circle's center.
+    ///  • anything else → the first entity's bounding-box center (fallback).
+    private static func anchorWorld(_ c: Constraint, model: CanvasModel) -> Vector? {
+        func pt(_ p: ConstraintPoint) -> Vector? { worldPoint(p, model: model) }
+        switch c.kind {
+        case .geometric(.perpendicular), .geometric(.parallel):
+            guard c.points.count >= 4,
+                  let a1 = pt(c.points[0]), let a2 = pt(c.points[1]),
+                  let b1 = pt(c.points[2]), let b2 = pt(c.points[3])
+            else { return fallbackCenter(c, model: model) }
+            if let x = ConstraintGlyphLayout.lineIntersection(a1, a2, b1, b2) { return x }  // the corner
+            return Vector((a1.x + a2.x + b1.x + b2.x) / 4,
+                          (a1.y + a2.y + b1.y + b2.y) / 4)              // parallel: 4-pt mean
+
+        case .geometric(.coincident), .geometric(.fix):
+            guard let p = c.points.first.flatMap(pt) else { return fallbackCenter(c, model: model) }
+            return p
+
+        case .dimensional(.distance),
+             .geometric(.horizontal), .geometric(.vertical):
+            guard c.points.count >= 2, let p0 = pt(c.points[0]), let p1 = pt(c.points[1])
+            else { return fallbackCenter(c, model: model) }
+            return Vector((p0.x + p1.x) / 2, (p0.y + p1.y) / 2)
+
+        case .dimensional(.radius):
+            guard let id = c.points.first?.entityID,
+                  let center = pt(ConstraintPoint(entityID: id, point: .center))
+            else { return fallbackCenter(c, model: model) }
+            return center
+
+        default:
+            return fallbackCenter(c, model: model)
+        }
+    }
+
+    /// The world coordinate a `ConstraintPoint` names: a line's start/end/midpoint, a
+    /// circle's center, a point's position; else the entity's bbox center.
+    private static func worldPoint(_ p: ConstraintPoint, model: CanvasModel) -> Vector? {
+        guard let rec = model.drawing.entity(p.entityID) else { return nil }
+        switch rec.kind {
+        case .line(let d):
+            switch p.point {
+            case .start:  return d.start
+            case .end:    return d.end
+            case .center: return Vector((d.start.x + d.end.x) / 2, (d.start.y + d.end.y) / 2)
+            }
+        case .circle(let d): return d.center
+        case .point(let d):  return d.position
+        default:
+            let box = rec.boundingBox()
+            return box.isEmpty ? nil : box.center
+        }
+    }
+
+    /// The first entity's bbox center (legacy fallback when a feature point can't resolve).
+    private static func fallbackCenter(_ c: Constraint, model: CanvasModel) -> Vector? {
+        guard let first = c.entityIDs.first, let rec = model.drawing.entity(first) else { return nil }
+        let box = rec.boundingBox()
+        return box.isEmpty ? nil : box.center
+    }
+
 }
