@@ -888,7 +888,8 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             // hatch are unaffected — they are not annotative this round).
             let ctx = model.drawing.makeResolveContext(
                 tessellationTolerance: tolerance,
-                annotationScale: model.annotationScale)
+                annotationScale: model.annotationScale,
+                fieldContext: model.makeFieldContext())
             cachedResolveContext = ctx
             resolveContextVersion = model.modelVersion
             return ctx
