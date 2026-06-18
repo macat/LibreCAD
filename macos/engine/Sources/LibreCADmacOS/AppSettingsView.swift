@@ -601,6 +601,8 @@ struct AppSettingsView: View {
                 .tabItem { Label("Appearance", systemImage: "paintpalette") }
             SnappingSettingsTab()
                 .tabItem { Label("Snapping", systemImage: "scope") }
+            ConstraintsSettingsTab()
+                .tabItem { Label("Constraints", systemImage: "ruler") }
             RenderingSettingsTab()
                 .tabItem { Label("Rendering", systemImage: "wand.and.rays") }
             TextSettingsTab()
@@ -865,6 +867,86 @@ struct SnapSettingRow {
         SnapSettingRow(label: "Parallel", mode: .parallel),
         SnapSettingRow(label: "Grid", mode: .grid),
     ]
+}
+
+// MARK: Constraints tab
+
+/// Constraints: the AutoConstrain-on-draw policy (AutoCAD's "Constraint Settings ▸
+/// AutoConstrain"). The single toggle gates whether freshly-drawn geometry is auto-welded
+/// + auto-inferred (coincident corners + H/V/perpendicular/parallel) as you draw.
+///
+/// KEY OWNERSHIP: the backing key is `CanvasModel.autoConstrainOnDrawKey`
+/// (`"draw.autoConstrainOnDraw"`, in the `draw.*` namespace — it predates this pane and
+/// lives beside the model's other behavior flags). This pane binds the SAME constant via
+/// `@AppStorage` rather than redefining the literal — both the model (which reads it at
+/// `init` / via `seedAutoConstrainFromAppSettings`) and this toggle share one source of
+/// truth. Default ON: a missing key reads as ON (the object-first read in
+/// `CanvasModel.seedAutoConstrainFromAppSettings`), matching `@AppStorage`'s `true` default
+/// here, so the pane and the model agree on a fresh install.
+///
+/// LIVE-APPLY (deferred): this toggle persists immediately and is honored by every NEW
+/// window (each `CanvasModel` seeds `autoConstrainOnDraw` from this key at construction) and
+/// by new documents. It does NOT yet flip ALREADY-OPEN windows, because — unlike the
+/// appearance / render / show-constraints prefs — there is no canvas-side observer that
+/// re-seeds `CanvasModel.autoConstrainOnDraw` on a notification. Adding one would require
+/// editing `CADCanvasView`/`CanvasModel` (the lane that owns the canvas), which this lane
+/// does not own; so live-apply-to-open-windows is intentionally left as a follow-up — see
+/// the NOTE on `ConstraintsSettingsTab.autoConstrainOnDraw`.
+private struct ConstraintsSettingsTab: View {
+    // READ-SITE (WIRED for NEW windows): `CanvasModel` seeds its live `autoConstrainOnDraw`
+    // flag from this SAME key at `init` (and via `seedAutoConstrainFromAppSettings`), so a
+    // window opened after a change honors it. Binds `CanvasModel.autoConstrainOnDrawKey`
+    // directly (NOT a re-declared literal) so there is exactly one key for the model + UI.
+    //
+    // NOTE (live-apply follow-up, NOT this lane's files): an ALREADY-OPEN drawing keeps the
+    // value it seeded at construction until reopened — there is no notification this pane can
+    // post that any current canvas observer re-seeds `autoConstrainOnDraw` from. Wiring open-
+    // window live-apply (a `.lcAutoConstrainDidChange` post here + a matching observer in
+    // `CADCanvasView.registerLiveApplyObservers` that calls
+    // `model.seedAutoConstrainFromAppSettings()` + redraw) belongs to the canvas-owning lane,
+    // mirroring the `.lcShowConstraintsDidChange` pattern.
+    @AppStorage(CanvasModel.autoConstrainOnDrawKey) private var autoConstrainOnDraw = true
+
+    var body: some View {
+        Form {
+            Section("AutoConstrain") {
+                Toggle("Auto-constrain while drawing", isOn: $autoConstrainOnDraw)
+                Text("Automatically welds touching endpoints (coincident) and infers horizontal / vertical / perpendicular / parallel constraints as you draw.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Inferred constraints") {
+                inferredKindsNote
+            }
+            Section {
+                Text("Applies to windows opened after changing this setting; an already-open drawing keeps its current behavior until reopened.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    /// A brief read-only list of the constraint kinds AutoConstrain-on-draw infers, so the
+    /// user knows exactly what the toggle does. Disabled (dimmed) when the toggle is off.
+    @ViewBuilder
+    private var inferredKindsNote: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            inferredKindRow("Coincident", detail: "welds endpoints that touch")
+            inferredKindRow("Horizontal / Vertical", detail: "snaps near-axis segments")
+            inferredKindRow("Perpendicular", detail: "for near-90° connected corners")
+            inferredKindRow("Parallel", detail: "for near-collinear connected segments")
+        }
+        .font(.caption)
+        .foregroundStyle(autoConstrainOnDraw ? .secondary : Color.secondary.opacity(0.5))
+    }
+
+    /// One "Kind — what it does" row of the inferred-kinds note.
+    @ViewBuilder
+    private func inferredKindRow(_ kind: String, detail: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(kind).fontWeight(.medium)
+            Text("— \(detail)")
+        }
+    }
 }
 
 // MARK: Rendering tab
