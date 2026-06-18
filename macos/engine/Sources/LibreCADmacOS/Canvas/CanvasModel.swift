@@ -3581,13 +3581,25 @@ final class CanvasModel {
         if explicitGroup { undoManager.beginUndoGrouping() }
         defer { if explicitGroup { undoManager.endUndoGrouping() } }
 
+        var edited: Set<EntityID> = []
         for record in records {
             guard drawing.contains(record.id) else { continue }
             drawing.replace(record)                 // undoable; preserves id
+            edited.insert(record.id)
             let box = record.boundingBox()
             if box.isEmpty { quadtree.remove(record.id) }
             else { quadtree.update(record.id, bounds: box) }
         }
+        // PARAMETRIC RE-SOLVE SEAM (Wave 3): after the user-driven edit lands, re-solve
+        // the connected component(s) of any edited entity that participates in a
+        // constraint, so dependent geometry follows (a dragged grip / changed property
+        // pulls coupled entities into a satisfied configuration). The solve's
+        // `drawing.replace` calls register into the SAME open undo group as the edits
+        // above (we are still inside `explicitGroup` here, before the `defer` closes it,
+        // and in the live app the whole inspector commit is one run-loop event), so a
+        // single ⌘Z reverts BOTH the edit AND the re-solve. CHEAP early-out when no
+        // constraint touches the edit (the common case).
+        resolveConstraints(touching: edited)
         modelDirty = true
         modelVersion &+= 1
     }
@@ -5001,7 +5013,238 @@ final class CanvasModel {
     func commitMovedGrip(_ record: EntityRecord) -> Bool {
         guard let current = drawing.entity(record.id), current != record else { return false }
         applyInspectorEdits([record])   // undoable .replace; index-synced; GPU dirty
+        // NB: the parametric re-solve is driven INSIDE `applyInspectorEdits` (the single
+        // chokepoint both the grip overlay and the Inspector route through), so a
+        // grip-edited constrained entity pulls its coupled geometry along in the same
+        // undo group with no extra call here.
         return true
+    }
+
+    // MARK: - Parametric constraints (Wave 3 — APP seam: re-solve + create/remove)
+    //
+    // The engine pieces (the `ConstraintTable` on `CADDrawing`, the undoable
+    // `addConstraint`/`removeConstraint`/`editConstraint` funnels, and the pure
+    // `ConstraintSolver`) already exist and are unit-tested. This is the APP seam that
+    // makes constraints actually DRIVE geometry: after a user edit (grip drag or
+    // Inspector property change) the connected component(s) of any constrained edited
+    // entity are re-solved and the satisfied geometry applied — or, on a solver
+    // failure, NOTHING is written (a clean revert, never a partial). A selection-based
+    // create path (`addConstraint`) validates arity, registers the constraint, and
+    // re-solves so it takes effect immediately; all in ONE undo group. The menu/toolbar
+    // that invokes these on the current selection is the later wire-wave.
+
+    /// RE-SOLVES the parametric constraints that touch `ids` and applies the satisfied
+    /// geometry. For every edited id that actually participates in a constraint, the
+    /// id's CONNECTED COMPONENT (every entity transitively coupled to it by shared
+    /// constraints) is gathered, the constraints within that component are collected,
+    /// and `ConstraintSolver.solve` is run:
+    ///   • `.solved` → each entity's new geometry is folded back via the undoable
+    ///     `drawing.replace` (layer/pen/flags preserved) and the quadtree updated.
+    ///   • `.failed` → NOTHING is written for that component (a clean REVERT — never a
+    ///     partial / garbage write; the user's edit stands, the dependents don't move).
+    ///
+    /// CHEAP EARLY-OUT: if the table is empty, or none of `ids` is referenced by any
+    /// constraint, this returns immediately having touched nothing (the common case —
+    /// most edits are to unconstrained geometry).
+    ///
+    /// UNDO GROUPING (critic fix): this method does NOT open its own undo group — its
+    /// `drawing.replace` calls register into whatever group is currently open. The two
+    /// callers each own the group: `applyInspectorEdits` calls this INSIDE its
+    /// `explicitGroup` (so an edit + its re-solve are ONE ⌘Z), and `addConstraint`
+    /// wraps the constraint-add + this call in one group. Never call this bare expecting
+    /// its own undo step.
+    ///
+    /// Returns whether any geometry was changed (false on early-out or a no-op solve).
+    @discardableResult
+    func resolveConstraints(touching ids: Set<EntityID>) -> Bool {
+        // (0) Early-out: no constraints at all, or none of the edited ids is constrained.
+        guard !drawing.constraints.isEmpty, !ids.isEmpty else { return false }
+        let constrained = drawing.constraints.referencedEntityIDs
+        let seeds = ids.filter { constrained.contains($0) }
+        guard !seeds.isEmpty else { return false }
+
+        // (1) Union the connected components of every constrained seed (one entity can
+        //     pull on many; processing a component once handles all its members). A
+        //     `processed` set skips re-solving a component already covered by an earlier
+        //     seed in the same edit.
+        var processed: Set<EntityID> = []
+        var changedAny = false
+        for seed in seeds where !processed.contains(seed) {
+            let component = drawing.constraints.connectedComponent(of: seed)
+            processed.formUnion(component)
+
+            // (2) Gather the component's live geometry (keyed by id) + the constraints
+            //     that lie entirely within it (the solver's two inputs). A constraint
+            //     referencing a now-missing entity is skipped defensively.
+            var entities: [EntityID: EntityKind] = [:]
+            for id in component {
+                if let rec = drawing.entity(id) { entities[id] = rec.kind }
+            }
+            guard !entities.isEmpty else { continue }
+            let constraints = drawing.constraints.constraints(within: component)
+            guard !constraints.isEmpty else { continue }
+
+            // (3) Solve. On failure, write NOTHING for this component (clean revert).
+            switch ConstraintSolver.solve(entities: entities, constraints: constraints) {
+            case .failed:
+                continue
+            case .solved(let geometry):
+                if applySolvedGeometry(geometry) { changedAny = true }
+            }
+        }
+        return changedAny
+    }
+
+    /// Folds solver output back into the drawing through the undoable `drawing.replace`
+    /// (preserving each entity's layer/pen/flags — only its geometry `kind` changes) and
+    /// keeps the quadtree in sync. Skips an entity whose geometry is unchanged (so a
+    /// no-op solve never pushes a spurious undo step) or that has gone missing. Returns
+    /// whether anything actually changed.
+    @discardableResult
+    private func applySolvedGeometry(_ geometry: [EntityID: SolvedGeometry]) -> Bool {
+        var changed = false
+        for (id, solved) in geometry {
+            guard var record = drawing.entity(id) else { continue }
+            let newKind: EntityKind
+            switch solved {
+            case .line(let d):   newKind = .line(d)
+            case .circle(let d): newKind = .circle(d)
+            case .point(let d):  newKind = .point(d)
+            }
+            guard record.kind != newKind else { continue }   // no-op: don't pollute undo
+            record.kind = newKind
+            drawing.replace(record)                           // undoable; preserves id
+            let box = record.boundingBox()
+            if box.isEmpty { quadtree.remove(id) } else { quadtree.update(id, bounds: box) }
+            changed = true
+        }
+        return changed
+    }
+
+    // MARK: Create / remove (selection-based; the wire-wave calls these)
+
+    /// Creates a GEOMETRIC constraint of `kind` over `entities` (the current selection),
+    /// validating the selection ARITY for the kind, registering it undoably, then
+    /// re-solving so it takes effect immediately — all in ONE undo group (the
+    /// constraint-add + the resulting geometry move revert together). Returns `false`
+    /// (adding nothing) if the arity is wrong for the kind or an entity is missing.
+    ///
+    /// Arity (matches the solver's `points` ordering in `Constraint`):
+    ///   • horizontal / vertical / fix → exactly 1 entity
+    ///   • parallel / perpendicular    → exactly 2 entities (treated as lines)
+    ///   • coincident                  → exactly 2 entities (their `.start` points pinned)
+    ///   • collinear/tangent/equal/concentric/symmetric → rejected (solver-unsupported)
+    @discardableResult
+    func addConstraint(_ kind: GeometricConstraintKind, entities: [EntityID]) -> Bool {
+        guard kind.isSolverSupported else { return false }
+        guard entities.allSatisfy({ drawing.contains($0) }) else { return false }
+        let constraint: Constraint
+        switch kind {
+        case .horizontal:
+            guard entities.count == 1 else { return false }
+            constraint = .horizontal(line: entities[0])
+        case .vertical:
+            guard entities.count == 1 else { return false }
+            constraint = .vertical(line: entities[0])
+        case .fix:
+            guard entities.count == 1 else { return false }
+            // Fix the whole entity: both endpoints of a line, else its sole point.
+            if case .line = drawing.entity(entities[0])?.kind {
+                constraint = .fix(line: entities[0])
+            } else {
+                constraint = .fix(ConstraintPoint(entityID: entities[0], point: .start))
+            }
+        case .parallel:
+            guard entities.count == 2 else { return false }
+            constraint = .parallel(line: entities[0], line: entities[1])
+        case .perpendicular:
+            guard entities.count == 2 else { return false }
+            constraint = .perpendicular(line: entities[0], line: entities[1])
+        case .coincident:
+            guard entities.count == 2 else { return false }
+            constraint = .coincident(ConstraintPoint(entityID: entities[0], point: .start),
+                                     ConstraintPoint(entityID: entities[1], point: .start))
+        case .collinear, .tangent, .equal, .concentric, .symmetric:
+            return false   // declared but solver-unsupported (rejected up front)
+        }
+        return commitConstraint(constraint, touching: Set(entities))
+    }
+
+    /// Creates a DIMENSIONAL constraint of `kind` over `entities` driven to `value`,
+    /// validating arity, registering it undoably, then re-solving immediately — all in
+    /// ONE undo group. Returns `false` if the arity/value is wrong or unsupported.
+    ///
+    /// Arity:
+    ///   • distance → exactly 2 entities (their `.start` points), a finite `value`
+    ///   • radius   → exactly 1 CIRCLE, a finite `value`
+    ///   • horizontalDistance/verticalDistance/diameter/angle → rejected (unsupported)
+    @discardableResult
+    func addConstraint(_ kind: DimensionalConstraintKind, entities: [EntityID],
+                       value: Double) -> Bool {
+        guard kind.isSolverSupported, value.isFinite else { return false }
+        guard entities.allSatisfy({ drawing.contains($0) }) else { return false }
+        let constraint: Constraint
+        switch kind {
+        case .distance:
+            guard entities.count == 2 else { return false }
+            constraint = .distance(ConstraintPoint(entityID: entities[0], point: .start),
+                                   ConstraintPoint(entityID: entities[1], point: .start),
+                                   value: value)
+        case .radius:
+            guard entities.count == 1 else { return false }
+            guard case .circle = drawing.entity(entities[0])?.kind else { return false }
+            constraint = .radius(circle: entities[0], value: value)
+        case .horizontalDistance, .verticalDistance, .diameter, .angle:
+            return false   // declared but solver-unsupported
+        }
+        return commitConstraint(constraint, touching: Set(entities))
+    }
+
+    /// Registers `constraint` undoably AND re-solves the geometry it now constrains, in
+    /// ONE undo group (a single ⌘Z reverts both the add and any geometry it moved).
+    /// Shared tail of the two `addConstraint` overloads. Returns whether the constraint
+    /// was added (the table rejects a duplicate id, but a freshly-minted one never is).
+    @discardableResult
+    private func commitConstraint(_ constraint: Constraint, touching ids: Set<EntityID>) -> Bool {
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+
+        guard drawing.addConstraint(constraint) else { return false }   // undoable
+        resolveConstraints(touching: ids)   // apply immediately, same undo group
+        modelDirty = true
+        modelVersion &+= 1
+        return true
+    }
+
+    /// Removes the constraint with `id` (undoable). The geometry it WAS holding is left
+    /// where it is (removing a constraint frees DOFs but doesn't move anything) — the
+    /// engine-level undoable `removeConstraint`. Returns whether a constraint was removed.
+    @discardableResult
+    func removeConstraint(id: UUID) -> Bool {
+        // One undo step for the removal (same `explicitGroup` rationale as the other
+        // funnels: groups-by-event in the live app, explicit group under tests so the
+        // engine's `registerUndo` always has an open group to register into).
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+        guard drawing.removeConstraint(id) else { return false }   // undoable
+        modelDirty = true
+        modelVersion &+= 1
+        return true
+    }
+
+    // MARK: Read accessors (the Inspector / overlay query these)
+
+    /// Every constraint that references `entityID`, in table order (for an Inspector
+    /// "constraints on this entity" list and the glyph overlay's per-entity badge).
+    func constraints(for entityID: EntityID) -> [Constraint] {
+        drawing.constraints.referencing(entityID)
+    }
+
+    /// The whole constraint list, in stable insertion order (the overlay iterates this).
+    var allConstraints: [Constraint] {
+        drawing.constraints.constraints
     }
 
     /// Whether `t` is within numeric tolerance of the identity transform (a drag
