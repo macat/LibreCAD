@@ -47,11 +47,26 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
 
     override var acceptsFirstResponder: Bool { true }
 
-    /// The cursor to show over the canvas while a tool is active (the CAD crosshair),
-    /// or `nil` for the default arrow (select mode). Set by the controller's
-    /// `refreshCrosshair`; consumed by `resetCursorRects`. Driving the system cursor
+    /// A fully transparent cursor used to HIDE the native macOS pointer over the canvas
+    /// while the drawn "spider" crosshair overlay is shown — so the user sees ONLY the
+    /// drawn crosshair (AutoCAD parity), not the OS pointer on top of it. It's a 16×16
+    /// empty `NSImage` (nothing drawn → fully transparent) with a centered hotSpot so the
+    /// invisible cursor's hit point still lands where the user expects. Built lazily once
+    /// and shared (cursors are immutable + reusable).
+    static let blankCursor: NSCursor = {
+        let image = NSImage(size: NSSize(width: 16, height: 16))
+        // Nothing is drawn into `image`, so it stays fully transparent.
+        return NSCursor(image: image, hotSpot: NSPoint(x: 8, y: 8))
+    }()
+
+    /// The cursor to show over the canvas while a tool is active, or `nil` for the default
+    /// arrow (select mode). Set by the controller's `refreshCrosshair`; consumed by
+    /// `resetCursorRects`. While the crosshair overlay is shown this is the TRANSPARENT
+    /// `blankCursor`, so the native pointer is hidden and the drawn crosshair is the only
+    /// cursor (AutoCAD parity); the arrow returns in select mode. Driving the system cursor
     /// through the cursor-rect machinery (vs `NSCursor.set()`) keeps it correct across
-    /// window activation, tracking, and resize — AppKit re-applies it automatically.
+    /// window activation, tracking, and resize — AppKit re-applies it automatically, and it
+    /// is confined to the canvas bounds so the normal cursor returns off-canvas.
     var toolCursor: NSCursor?
 
     /// Installs `toolCursor` (if any) over the whole canvas, so the pointer becomes a
@@ -1005,11 +1020,13 @@ final class CADCanvasController {
 
     /// Shows/hides + repaints the CAD crosshair overlay to match the current mode:
     /// visible while a drawing/edit tool is active (`model.crosshairVisible`), hidden
-    /// in select mode. Also swaps the system cursor over the canvas — the tighter
-    /// `.crosshair` arrow while a tool is active (so the pointer reinforces the mode,
-    /// HIG: "make the current mode obvious"), the normal arrow in select mode, via
-    /// the view's cursor-rect machinery. Called after any tool change and on every
-    /// cursor move.
+    /// in select mode. Also swaps the system cursor over the canvas — while the crosshair
+    /// overlay is shown we install a TRANSPARENT cursor (`FlippedMTKView.blankCursor`) so
+    /// the native pointer is HIDDEN and the drawn "spider" crosshair is the only cursor
+    /// the user sees (AutoCAD parity, vs the old behavior of a native cross drawn on top of
+    /// the overlay); the normal arrow returns in select mode. Driven through the view's
+    /// cursor-rect machinery, so off the canvas (sidebars/menus/title bar) the normal cursor
+    /// returns automatically. Called after any tool change and on every cursor move.
     func refreshCrosshair() {
         guard let crosshair else { return }
         let show = model.crosshairVisible
@@ -1018,7 +1035,7 @@ final class CADCanvasController {
         // Drive the system cursor over the canvas through the cursor-rect machinery:
         // set the desired cursor on the view + invalidate so `resetCursorRects` runs.
         if let v = view {
-            v.toolCursor = show ? .crosshair : nil
+            v.toolCursor = show ? FlippedMTKView.blankCursor : nil
             v.window?.invalidateCursorRects(for: v)
         }
     }
