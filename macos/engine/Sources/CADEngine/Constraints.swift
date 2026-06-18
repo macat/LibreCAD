@@ -206,19 +206,35 @@ public struct Constraint: Sendable, Hashable, Codable, Identifiable {
     /// of this flag) — it is purely a DISPLAY hint: the glyph overlay skips inferred
     /// constraints (no badge). Default `false` (an explicit, user-visible constraint).
     public var inferred: Bool
+    /// The PARAMETER-DRIVING source expression for a `.dimensional` constraint, or
+    /// `nil` (the default) for a pure-literal constraint (Lane L1, additive — exactly
+    /// mirroring `inferred`).
+    ///
+    /// SEMANTICS (the solver never changes — it reads ONLY `value`):
+    ///   • `expression == nil` ⇒ a PURE-LITERAL constraint — today's byte-identical
+    ///     path: `value` IS the literal the user dialed in (e.g. distance 22).
+    ///   • `expression != nil` ⇒ a PARAMETER-DRIVEN constraint — `expression` is the
+    ///     SOURCE text in parameter terms ("width", "width/2"), and `value` is the
+    ///     LAST EVALUATED CACHE of that expression (written by a later evaluator lane).
+    ///     The solver STILL reads only the numeric `value`, unchanged — the expression
+    ///     is the authoring/recompute source, not solver input.
+    /// Conventionally `nil` for a `.geometric` constraint (no driven value to drive).
+    public var expression: String?
 
     public init(
         id: UUID = UUID(),
         kind: Kind,
         points: [ConstraintPoint],
         value: Double = 0,
-        inferred: Bool = false
+        inferred: Bool = false,
+        expression: String? = nil
     ) {
         self.id = id
         self.kind = kind
         self.points = points
         self.value = value
         self.inferred = inferred
+        self.expression = expression
     }
 
     // MARK: Derived
@@ -245,7 +261,7 @@ public struct Constraint: Sendable, Hashable, Codable, Identifiable {
 
     // MARK: Codable (additive back-compat)
 
-    private enum CodingKeys: String, CodingKey { case id, kind, points, value, inferred }
+    private enum CodingKeys: String, CodingKey { case id, kind, points, value, inferred, expression }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -259,6 +275,12 @@ public struct Constraint: Sendable, Hashable, Codable, Identifiable {
         // `inferred` is additive-tolerant: a payload written before the flag existed
         // (an old file) decodes to `false` — every prior constraint was user-explicit.
         inferred = try c.decodeIfPresent(Bool.self, forKey: .inferred) ?? false
+        // `expression` is additive-tolerant: a payload written before this field
+        // existed (an old file) decodes to `nil` — every prior constraint was a
+        // pure-literal one (the literal-path byte-identical guarantee). A `nil`
+        // expression is ALSO not encoded (the optional is omitted by the encoder), so
+        // a pure-literal constraint's payload stays byte-identical to before.
+        expression = try c.decodeIfPresent(String.self, forKey: .expression)
     }
 
     // MARK: Convenience constructors (the MVP set the tools/tests build through)
@@ -322,6 +344,40 @@ public struct Constraint: Sendable, Hashable, Codable, Identifiable {
         Constraint(kind: .dimensional(.radius),
                    points: [ConstraintPoint(entityID: id, point: .center)],
                    value: value)
+    }
+
+    // MARK: Parameter binding (Lane L1, additive — solver still reads only `value`)
+
+    /// Returns a COPY of this constraint bound to the parameter-driving source
+    /// `expression`, carrying `value` as the last-evaluated cache of that expression
+    /// (Lane L1). Pass `expression: nil` to UNBIND back to a pure-literal constraint
+    /// (then `value` is the literal). Geometric constraints have no driven value, so
+    /// binding one is meaningless but harmless (the solver ignores both fields). The
+    /// solver is UNCHANGED — it reads only `value`; the expression is the recompute
+    /// source an evaluator lane updates `value` from.
+    public func driven(by expression: String?, value: Double? = nil) -> Constraint {
+        var copy = self
+        copy.expression = expression
+        if let value { copy.value = value }
+        return copy
+    }
+
+    /// A distance constraint DRIVEN by the parameter-source `expression` (Lane L1),
+    /// with `value` the last-evaluated cache of that expression. The solver reads only
+    /// `value`; `expression` is the authoring/recompute source. (Convenience for the
+    /// evaluator/UI lanes that author parameter-bound dimensions.)
+    public static func distance(_ a: ConstraintPoint, _ b: ConstraintPoint,
+                                expression: String, value: Double) -> Constraint {
+        Constraint(kind: .dimensional(.distance), points: [a, b],
+                   value: value, expression: expression)
+    }
+
+    /// A radius constraint on circle `id` DRIVEN by the parameter-source `expression`
+    /// (Lane L1), with `value` the last-evaluated cache. The solver reads only `value`.
+    public static func radius(circle id: EntityID, expression: String, value: Double) -> Constraint {
+        Constraint(kind: .dimensional(.radius),
+                   points: [ConstraintPoint(entityID: id, point: .center)],
+                   value: value, expression: expression)
     }
 
     /// The `[start, end]` constraint-point pair for a line entity.

@@ -678,6 +678,21 @@ public final class CADDrawing {
     /// is a LATER wave.
     public private(set) var constraints = ConstraintTable()
 
+    /// The NAMED-PARAMETER table (Lane L1 — engine, UNWIRED). User variables a
+    /// dimensional `Constraint` can be DRIVEN by (`ParameterTable`), ADDITIVE document
+    /// state — NOT a new `EntityKind` case (the parameter set is a separate list,
+    /// exactly like the constraint table + `Layout.viewports`). Mutated only through
+    /// the undoable funnel (`mutateParameters` and its `addParameter`/`removeParameter`/
+    /// `updateParameter` helpers), mirroring the constraint table; carried by value so
+    /// it snapshots cheaply for undo (ADR-002) and round-trips through the Codable
+    /// document payload. The table is a DUMB STORE — it does NOT evaluate expressions;
+    /// a later app-seam lane runs the evaluator over it and writes each parameter's
+    /// `value` cache + the referencing constraints' cached `value`. Deleting a
+    /// parameter FREEZES every referencing constraint's `expression` to its last
+    /// literal value (see `removeParameter`), so no constraint is left dangling on a
+    /// gone parameter (RENAME is deferred to v1: delete + recreate).
+    public private(set) var parameters = ParameterTable()
+
     /// The TABLE-OBJECT list (Wave 2b — engine, UNWIRED): the document's ACAD_TABLE-style
     /// tables (`TableObject`), ADDITIVE document state — NOT a new `EntityKind` case
     /// (the deliberate Wave 2b decision: adding an enum case is a serialized critical
@@ -1135,6 +1150,133 @@ public final class CADDrawing {
         var changed = false
         mutateConstraints { changed = $0.setValue(id, value) }
         return changed
+    }
+
+    // MARK: - Named parameters (value-snapshot undo of the whole table)
+    //
+    // The parameter table (Lane L1) mirrors the constraint table: a whole-table
+    // value-snapshot undo funnel (`mutateParameters`) plus add / remove / update
+    // helpers. `ParameterTable` is a value type, so the undo snapshot is one struct
+    // copy (ADR-002), and a no-op edit registers no undo. Parameters are a DUMB STORE
+    // here — no expression evaluation (a later app-seam lane owns that). DELETING a
+    // parameter FREEZES every referencing constraint (clears its `expression` to nil,
+    // keeping the cached `value` as the literal) in the SAME undo group, so no
+    // constraint dangles on a gone parameter — cloning the entity-remove
+    // dangling-drop hook's "register multiple undo steps that one ⌘Z reverts" pattern.
+    // RENAME is DEFERRED (v1: delete + recreate); no cross-list re-pointing here.
+
+    /// Whole-table parameter mutation with undo (the same value-snapshot scheme as
+    /// `mutateConstraints`/`mutateLayerStates`). No-op edits don't pollute undo.
+    public func mutateParameters(_ body: (inout ParameterTable) -> Void) {
+        let prior = parameters
+        body(&parameters)
+        guard parameters != prior else { return }
+        registerUndo { drawing in
+            drawing.mutateParameters { $0 = prior }
+        }
+    }
+
+    /// Adds a named parameter (undoable). No-op (no undo) if a parameter with the same
+    /// id already exists OR its name (case-insensitively) is taken — names are the
+    /// reference key and must be unique (the table rejects the dup). Returns `true` if
+    /// added.
+    @discardableResult
+    public func addParameter(_ parameter: Parameter) -> Bool {
+        var added = false
+        mutateParameters { added = $0.add(parameter) }
+        return added
+    }
+
+    /// Replaces the parameter with the same id (undoable). No-op (no undo, returns
+    /// `false`) if absent, UNCHANGED (byte-identical value), or the new name collides
+    /// with a DIFFERENT parameter (the table rejects the rename). Returns `true` only
+    /// if a parameter was actually updated — mirroring `updateTable`'s no-op guard.
+    /// (This is the edit path the evaluator/UI lanes use to write a parameter's
+    /// expression / value.)
+    @discardableResult
+    public func updateParameter(_ parameter: Parameter) -> Bool {
+        guard let current = parameters.parameter(parameter.id), current != parameter else { return false }
+        var updated = false
+        mutateParameters { updated = $0.replace(parameter) }
+        return updated
+    }
+
+    /// Removes the parameter with `id` (undoable). Before removing it, every
+    /// dimensional `Constraint` whose `expression` references the parameter (by NAME,
+    /// case-insensitively — or whose expression mentions the name as a whole-word
+    /// token) is FROZEN: its `expression` is cleared to `nil` (so it becomes a
+    /// pure-literal constraint again) while its cached `value` is KEPT as the literal.
+    /// The freeze + the parameter removal register their undo within the SAME undo
+    /// group, so one ⌘Z reverts the whole action (matching the entity-remove
+    /// dangling-drop pattern). No-op (no undo) if `id` is absent. Returns `true` if a
+    /// parameter was removed.
+    @discardableResult
+    public func removeParameter(_ id: UUID) -> Bool {
+        guard let removed = parameters.parameter(id) else { return false }
+        // FREEZE every referencing constraint FIRST (a separate undoable step, so it
+        // reverses together with the removal inside the caller's undo group). A no-op
+        // (no constraint references the parameter) registers nothing via the
+        // `mutateConstraints` funnel's unchanged-guard.
+        freezeConstraintsReferencing(parameterNamed: removed.name)
+        return removeParameter(named: removed.name) != nil
+    }
+
+    /// Removes the parameter NAMED `name` (case-insensitive; undoable), freezing every
+    /// referencing constraint's expression first (see `removeParameter(_:)`). Returns
+    /// the removed parameter's id, or `nil` if absent.
+    @discardableResult
+    public func removeParameter(named name: String) -> UUID? {
+        guard parameters.contains(named: name) else { return nil }
+        freezeConstraintsReferencing(parameterNamed: name)
+        var removedID: UUID?
+        mutateParameters { removedID = $0.remove(named: name) }
+        return removedID
+    }
+
+    /// FREEZES every dimensional constraint whose `expression` references the parameter
+    /// `name` (case-insensitive whole-word token): clears its `expression` to `nil`
+    /// (it becomes a pure-literal constraint) while KEEPING its cached `value` as the
+    /// frozen literal. ONE undoable `mutateConstraints` pass; a no-op (nothing
+    /// references the name) registers nothing. The solver is unaffected either way —
+    /// it always read only `value`.
+    private func freezeConstraintsReferencing(parameterNamed name: String) {
+        let toFreeze = constraints.constraints.filter { c in
+            guard let expr = c.expression else { return false }
+            return Self.expression(expr, references: name)
+        }
+        guard !toFreeze.isEmpty else { return }
+        mutateConstraints { table in
+            for c in toFreeze {
+                var frozen = c
+                frozen.expression = nil          // become pure-literal; keep `value`
+                table.replace(frozen)
+            }
+        }
+    }
+
+    /// Whether the source `expression` references the parameter `name` as a WHOLE-WORD
+    /// identifier token (case-insensitive), so "a" matches `a*2` but not `area` or
+    /// `data`. A simple identifier-boundary scan (an identifier char is a letter,
+    /// digit, or `_`); sufficient for the freeze decision without a full parser (the
+    /// evaluator lane owns real parsing). An empty `name` never matches. `nonisolated`
+    /// — it touches no actor state (a pure string scan), so the freeze path + tests can
+    /// call it synchronously off the main actor.
+    nonisolated static func expression(_ expression: String, references name: String) -> Bool {
+        guard !name.isEmpty else { return false }
+        let haystack = Array(expression.lowercased())
+        let needle = Array(name.lowercased())
+        func isIdentifierChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
+        var i = 0
+        while i <= haystack.count - needle.count {
+            if Array(haystack[i ..< i + needle.count]) == needle {
+                let beforeOK = i == 0 || !isIdentifierChar(haystack[i - 1])
+                let afterIdx = i + needle.count
+                let afterOK = afterIdx == haystack.count || !isIdentifierChar(haystack[afterIdx])
+                if beforeOK && afterOK { return true }
+            }
+            i += 1
+        }
+        return false
     }
 
     // MARK: - Table objects (value-snapshot undo of the whole table list)
@@ -2091,6 +2233,7 @@ public final class CADDrawing {
         textStyles newTextStyles: TextStyleTable = TextStyleTable(),
         layouts newLayouts: [Layout] = [],
         constraints newConstraints: ConstraintTable = ConstraintTable(),
+        parameters newParameters: ParameterTable = ParameterTable(),
         tables newTables: [TableObject] = []
     ) {
         entities = newEntities
@@ -2102,6 +2245,11 @@ public final class CADDrawing {
         // callers (and a constraint-free drawing) are unchanged; a future Codable
         // document payload threads the loaded table here.
         constraints = newConstraints
+        // The NAMED-PARAMETER table (Lane L1). Defaults to empty so existing callers
+        // (and a parameter-free drawing) are unchanged; a future Codable document
+        // payload threads the loaded table here (the evaluator + UI seams are later
+        // lanes). The table is a dumb store — load does not evaluate expressions.
+        parameters = newParameters
         // The TABLE-OBJECT list (Wave 2b). Defaults to empty so existing callers (and a
         // table-free drawing) are unchanged; a future Codable document payload threads
         // the loaded tables here (the render-collection wire-wave + DXF persistence are
