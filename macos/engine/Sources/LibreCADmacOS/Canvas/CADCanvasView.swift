@@ -47,36 +47,103 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
 
     override var acceptsFirstResponder: Bool { true }
 
-    /// A fully transparent cursor used to HIDE the native macOS pointer over the canvas
-    /// while the drawn "spider" crosshair overlay is shown — so the user sees ONLY the
-    /// drawn crosshair (AutoCAD parity), not the OS pointer on top of it. It's a 16×16
-    /// empty `NSImage` (nothing drawn → fully transparent) with a centered hotSpot so the
-    /// invisible cursor's hit point still lands where the user expects. Built lazily once
-    /// and shared (cursors are immutable + reusable).
-    static let blankCursor: NSCursor = {
-        let image = NSImage(size: NSSize(width: 16, height: 16))
-        // Nothing is drawn into `image`, so it stays fully transparent.
-        return NSCursor(image: image, hotSpot: NSPoint(x: 8, y: 8))
-    }()
-
-    /// The cursor to show over the canvas while a tool is active, or `nil` for the default
-    /// arrow (select mode). Set by the controller's `refreshCrosshair`; consumed by
-    /// `resetCursorRects`. While the crosshair overlay is shown this is the TRANSPARENT
-    /// `blankCursor`, so the native pointer is hidden and the drawn crosshair is the only
-    /// cursor (AutoCAD parity); the arrow returns in select mode. Driving the system cursor
-    /// through the cursor-rect machinery (vs `NSCursor.set()`) keeps it correct across
-    /// window activation, tracking, and resize — AppKit re-applies it automatically, and it
-    /// is confined to the canvas bounds so the normal cursor returns off-canvas.
+    /// The cursor to show over the canvas, or `nil` for the default arrow. Set by the
+    /// controller and consumed by `resetCursorRects`. Today it is ALWAYS `nil`: the
+    /// AutoCAD crosshair is NOT installed via a cursor rect — a cursor rect on this view
+    /// is shadowed by the transparent click-through OVERLAY SUBVIEWS stacked on top
+    /// (CrosshairOverlayView, the gizmo, marquee/hover, UCS axis), so AppKit resolves the
+    /// frontmost overlay's (absent) cursor and shows the default arrow regardless. Hiding
+    /// the native pointer under the drawn crosshair is therefore done with the
+    /// layering-independent `NSCursor.hide()`/`unhide()` (see `reconcileCursorHidden`),
+    /// not a cursor rect. `toolCursor` is kept only for a possible future per-tool arrow
+    /// in select mode; while it stays `nil` the select-mode arrow is the system default.
     var toolCursor: NSCursor?
 
-    /// Installs `toolCursor` (if any) over the whole canvas, so the pointer becomes a
-    /// CAD crosshair while a tool is active and reverts to the arrow in select mode.
+    /// Installs `toolCursor` (if any) over the whole canvas. With `toolCursor == nil`
+    /// (today's only value) this is a no-op and the default arrow shows in select mode.
     /// `invalidateCursorRects(for:)` (called by the controller on a mode change) makes
     /// AppKit re-run this.
     override func resetCursorRects() {
         super.resetCursorRects()
         if let cursor = toolCursor {
             addCursorRect(bounds, cursor: cursor)
+        }
+    }
+
+    // MARK: - AutoCAD cursor: hide the native pointer under the drawn crosshair
+    //
+    // While a drawing/edit tool is active the canvas draws its own "spider" crosshair
+    // overlay; the native macOS pointer must be HIDDEN so the user sees ONLY the drawn
+    // crosshair (AutoCAD parity). A transparent cursor RECT cannot achieve this — the
+    // transparent click-through overlay subviews stacked on top shadow this view's cursor
+    // rect (the frontmost view at the pointer wins), so AppKit shows the default arrow.
+    // Instead we use `NSCursor.hide()`/`unhide()`, which are LAYERING-INDEPENDENT (they
+    // hide the system pointer regardless of which subview is frontmost).
+    //
+    // `hide`/`unhide` are REFERENCE-COUNTED, so the single risk is an imbalance leaving
+    // the pointer stuck invisible. We make it bulletproof with ONE source of truth
+    // (`cursorHidden`, at most ONE outstanding hide) reconciled idempotently through a
+    // single guarded `reconcileCursorHidden()`, plus force-unhide on EVERY teardown path
+    // (window removal, deinit, exit) so the pointer is never left hidden when the canvas
+    // goes away.
+
+    /// THE single source of truth: whether THIS view currently holds an outstanding
+    /// `NSCursor.hide()`. At most one is ever outstanding (the reconciler is idempotent),
+    /// so the matching `unhide()` always balances it exactly. Never set directly outside
+    /// `reconcileCursorHidden` / the teardown force-unhide.
+    private var cursorHidden = false
+
+    /// Whether the pointer is currently inside the canvas bounds, tracked via
+    /// `mouseEntered`/`mouseExited` (the tracking area already has `.mouseEnteredAndExited`).
+    /// One of the three inputs to `cursorShouldBeHidden`.
+    private var mouseInsideCanvas = false
+
+    /// A tiny, actor-free holder for this view's window key-state observer tokens
+    /// (`didBecomeKey`/`didResignKey`). Block-based observers are not weakly dropped by
+    /// NotificationCenter, so they must be removed explicitly; keeping them in a
+    /// `nonisolated` reference type lets the box's OWN `deinit` remove them off any actor
+    /// (the `@MainActor` view's `deinit` is `nonisolated` and cannot touch a non-`Sendable`
+    /// `[NSObjectProtocol]` stored property — mirrors this file's `PrefObserverBox`).
+    private final class WindowKeyObserverBox {
+        var tokens: [NSObjectProtocol] = []
+        deinit {
+            for token in tokens { NotificationCenter.default.removeObserver(token) }
+        }
+    }
+
+    /// The box owning this view's window key-state observers. Registered when the view
+    /// moves to a window and removed when it leaves one, so switching apps/windows reveals
+    /// the pointer and returning re-hides it.
+    private let windowKeyObservers = WindowKeyObserverBox()
+
+    /// The single guarded reconciler: brings the actual hide state in line with what the
+    /// pure predicate says it should be. Idempotent — calling it repeatedly is harmless,
+    /// and because `cursorHidden` gates both branches there is at most ONE outstanding
+    /// `hide()` and its `unhide()` always balances exactly. Safe to call from any
+    /// transition (enter/exit, crosshair change, window key change, teardown).
+    func reconcileCursorHidden() {
+        let want = cursorShouldBeHidden(
+            mouseInsideCanvas: mouseInsideCanvas,
+            crosshairVisible: controller?.model.crosshairVisible ?? false,
+            windowIsKey: window?.isKeyWindow ?? false)
+        if want && !cursorHidden {
+            NSCursor.hide()
+            cursorHidden = true
+        } else if !want && cursorHidden {
+            NSCursor.unhide()
+            cursorHidden = false
+        }
+    }
+
+    /// TEARDOWN SAFETY: force the pointer back to visible if THIS view is holding the
+    /// hide, regardless of the predicate. Called on every path where the canvas/window is
+    /// going away (`viewWillMove(toWindow: nil)`, `deinit`) so the pointer is NEVER left
+    /// stuck hidden. Balanced: it only `unhide()`s when `cursorHidden` is true, then clears
+    /// the flag, so it can never over-unhide.
+    private func forceUnhideCursor() {
+        if cursorHidden {
+            NSCursor.unhide()
+            cursorHidden = false
         }
     }
 
@@ -110,6 +177,68 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
             userInfo: nil
         )
         addTrackingArea(area)
+    }
+
+    // MARK: - Window lifecycle (AutoCAD cursor key-state tracking + teardown safety)
+
+    /// React to the canvas's WINDOW becoming/resigning key so switching apps/windows
+    /// reveals the native pointer (and returning re-hides it under the crosshair). We
+    /// (re)register the observers when the view moves to a NEW window and tear them down
+    /// when it leaves one. TEARDOWN SAFETY: when the new window is `nil` (the canvas is
+    /// going away) force-unhide first, so the pointer is never left stuck hidden.
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        // Leaving the current window: drop its key-state observers and reveal the pointer.
+        removeWindowKeyObservers()
+        if newWindow == nil {
+            mouseInsideCanvas = false
+            forceUnhideCursor()
+        }
+    }
+
+    /// After the move completes, register key-state observers for the new window (if any)
+    /// and reconcile once (the window may already be key with the pointer inside).
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        registerWindowKeyObservers()
+        reconcileCursorHidden()
+    }
+
+    /// Observe `didBecomeKey`/`didResignKey` for THIS view's window: a resign reveals the
+    /// native pointer (so another app/window shows its own cursor), a become re-hides it
+    /// under the crosshair if the pointer is back inside. Scoped to this window via the
+    /// notification `object` so other windows' key changes don't churn this view.
+    private func registerWindowKeyObservers() {
+        guard windowKeyObservers.tokens.isEmpty, let window else { return }
+        let center = NotificationCenter.default
+        let resign = center.addObserver(
+            forName: NSWindow.didResignKeyNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reconcileCursorHidden() }
+        }
+        let become = center.addObserver(
+            forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reconcileCursorHidden() }
+        }
+        windowKeyObservers.tokens = [resign, become]
+    }
+
+    /// Remove the window key-state observers (on window change). Block observers are not
+    /// weakly dropped by NotificationCenter, so this explicit removal is required.
+    private func removeWindowKeyObservers() {
+        for token in windowKeyObservers.tokens { NotificationCenter.default.removeObserver(token) }
+        windowKeyObservers.tokens = []
+    }
+
+    deinit {
+        // TEARDOWN SAFETY: the view is going away. The window key-state observers are
+        // removed by `WindowKeyObserverBox.deinit` (it owns its tokens, off any actor —
+        // the `@MainActor` view's `deinit` is `nonisolated` and cannot touch them). If
+        // this view still holds the cursor hide, force the native pointer back to visible
+        // so it is NEVER left stuck hidden. `cursorHidden` is a `Bool` (Sendable) so it is
+        // reachable here; `NSCursor.unhide()` is thread-safe; the flag guards balance.
+        if cursorHidden { NSCursor.unhide() }
     }
 
     // MARK: Event routing — all in the flipped (top-left, Y-down) space.
@@ -146,7 +275,20 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
         controller?.mouseMoved(to: locationInView(event))
     }
 
+    /// The pointer entered the canvas — record it and reconcile, so the native pointer
+    /// is hidden under the drawn crosshair when a tool is active + the window is key.
+    /// (The tracking area already requests `.mouseEnteredAndExited`.)
+    override func mouseEntered(with event: NSEvent) {
+        mouseInsideCanvas = true
+        reconcileCursorHidden()
+    }
+
     override func mouseExited(with event: NSEvent) {
+        // The pointer left the canvas — reveal the native pointer again (off-canvas the
+        // crosshair isn't drawn) BEFORE forwarding, so it is never left hidden over the
+        // sidebar / menu bar / title bar.
+        mouseInsideCanvas = false
+        reconcileCursorHidden()
         controller?.mouseExited()
     }
 
@@ -1020,23 +1162,27 @@ final class CADCanvasController {
 
     /// Shows/hides + repaints the CAD crosshair overlay to match the current mode:
     /// visible while a drawing/edit tool is active (`model.crosshairVisible`), hidden
-    /// in select mode. Also swaps the system cursor over the canvas — while the crosshair
-    /// overlay is shown we install a TRANSPARENT cursor (`FlippedMTKView.blankCursor`) so
-    /// the native pointer is HIDDEN and the drawn "spider" crosshair is the only cursor
-    /// the user sees (AutoCAD parity, vs the old behavior of a native cross drawn on top of
-    /// the overlay); the normal arrow returns in select mode. Driven through the view's
-    /// cursor-rect machinery, so off the canvas (sidebars/menus/title bar) the normal cursor
-    /// returns automatically. Called after any tool change and on every cursor move.
+    /// in select mode. Also reconciles the native macOS pointer's visibility over the
+    /// canvas — while the crosshair overlay is shown AND the pointer is inside the canvas
+    /// AND the window is key, the native pointer is HIDDEN (via `NSCursor.hide()` in the
+    /// view's `reconcileCursorHidden`) so the drawn "spider" crosshair is the only cursor
+    /// the user sees (AutoCAD parity); the normal arrow returns in select mode / off-canvas /
+    /// when the app is inactive. Hiding is done with `NSCursor.hide()` rather than a cursor
+    /// RECT because the transparent click-through overlay subviews shadow this view's cursor
+    /// rect (which is why the earlier transparent-cursor attempt never worked). Called after
+    /// any tool change and on every cursor move, so a crosshair-visibility change re-hides /
+    /// re-reveals the pointer immediately (the pointer may already be inside the canvas).
     func refreshCrosshair() {
         guard let crosshair else { return }
         let show = model.crosshairVisible
         crosshair.isHidden = !show
         if show { crosshair.refresh() }
-        // Drive the system cursor over the canvas through the cursor-rect machinery:
-        // set the desired cursor on the view + invalidate so `resetCursorRects` runs.
+        // Select mode keeps the system arrow (toolCursor stays nil; the AutoCAD crosshair
+        // is the drawn overlay, not a cursor rect). The native pointer is hidden/revealed
+        // by the view's balanced reconciler, which re-reads `model.crosshairVisible`.
         if let v = view {
-            v.toolCursor = show ? FlippedMTKView.blankCursor : nil
-            v.window?.invalidateCursorRects(for: v)
+            v.toolCursor = nil
+            v.reconcileCursorHidden()
         }
     }
 

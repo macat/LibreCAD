@@ -2,29 +2,28 @@
 //  AutoCADCursorTests.swift
 //  CADEngineTests
 //
-//  Tests the AutoCAD-style canvas cursor recipe. While the drawn "spider" crosshair
-//  overlay is shown, `CADCanvasController.refreshCrosshair()` installs a fully
-//  TRANSPARENT `NSCursor` (`FlippedMTKView.blankCursor`) over the canvas through the
-//  cursor-rect machinery, so the native macOS pointer is hidden and the user sees ONLY
-//  the drawn crosshair (AutoCAD parity), not the OS pointer drawn on top of it.
+//  Tests the AutoCAD-style canvas cursor DECISION PREDICATE. While a drawing/edit tool
+//  is active the canvas draws its own "spider" crosshair overlay, and the native macOS
+//  pointer must be HIDDEN so the user sees ONLY the drawn crosshair (AutoCAD parity).
 //
-//  WHY this test mirrors the recipe instead of reading `FlippedMTKView.blankCursor`
-//  directly: `blankCursor` is a `static let` on `FlippedMTKView`, which lives in
-//  `CADCanvasView.swift`. That file's dependency closure (GizmoOverlayView,
-//  MarqueeHoverOverlayView, the whole controller graph, …) is far too large to compile
-//  into the test target via a `_Shared*` symlink without dragging in a dozen more
-//  files. So this suite asserts the exact construction recipe `blankCursor` uses — a
-//  16×16 empty `NSImage` (nothing drawn → fully transparent) wrapped in an `NSCursor`
-//  with a centered hotSpot — which is the property that actually matters (the pointer
-//  is invisible). The EXISTENCE and correctness of `FlippedMTKView.blankCursor` itself
-//  is enforced by the production build + a code review of the one-line swap; keep this
-//  recipe in lockstep with the `static let blankCursor` definition in
-//  `CADCanvasView.swift`.
+//  The earlier approach (a transparent cursor RECT on the MTKView) did NOT work: the
+//  transparent click-through OVERLAY SUBVIEWS stacked on top (crosshair / gizmo /
+//  marquee / UCS axis) shadow this view's cursor rect — AppKit resolves the FRONTMOST
+//  view's (absent) cursor and shows the default arrow regardless. So the production code
+//  now hides the pointer with the layering-independent `NSCursor.hide()`/`unhide()`,
+//  gated by the pure `cursorShouldBeHidden(...)` predicate and balanced by a single
+//  guarded reconciler on `FlippedMTKView`.
 //
-//  NOT verifiable headlessly (owner's final visual check): the on-screen invisibility
-//  is live AppKit chrome driven by `addCursorRect`/`resetCursorRects` against a real
-//  window + tracking area, which neither the headless test suite nor LCShot (committed
-//  geometry only — no cursor/overlay chrome) can observe.
+//  WHAT THIS SUITE COVERS: the pure predicate's truth table — the part that is testable
+//  HEADLESSLY. The predicate lives in `CanvasCursorVisibility.swift` (app module),
+//  symlinked into this target as `_SharedCanvasCursorVisibility.swift` (it is tiny +
+//  dependency-free, unlike `CADCanvasView.swift`, whose dependency closure is far too
+//  large to symlink whole).
+//
+//  NOT verifiable headlessly (owner's final visual check): the on-screen invisibility is
+//  live AppKit chrome driven by `NSCursor.hide()`/`unhide()` against a real window +
+//  tracking area, which neither the headless test suite nor LCShot (committed geometry
+//  only — no cursor/overlay chrome) can observe.
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //
@@ -32,61 +31,55 @@
 //
 
 import Testing
-import Foundation
-import AppKit
 @testable import CADEngine
 
-@MainActor
-@Suite("AutoCAD cursor — transparent blank cursor recipe")
+@Suite("AutoCAD cursor — hide-decision predicate truth table")
 struct AutoCADCursorTests {
 
-    /// Builds an `NSCursor` exactly the way `FlippedMTKView.blankCursor` does (16×16
-    /// empty image, centered hotSpot). Kept in lockstep with that `static let`.
-    private func makeBlankCursorMirror() -> NSCursor {
-        let image = NSImage(size: NSSize(width: 16, height: 16))
-        return NSCursor(image: image, hotSpot: NSPoint(x: 8, y: 8))
+    // The pointer is hidden (so the drawn crosshair is the only cursor) ONLY when all
+    // three inputs are true: the pointer is inside the canvas, a tool is active
+    // (crosshair visible), and the window is key. Any false → the native pointer shows.
+
+    @Test("hidden only when inside + crosshair-visible + window-key (all three)")
+    func allThreeTrueHides() {
+        #expect(cursorShouldBeHidden(
+            mouseInsideCanvas: true, crosshairVisible: true, windowIsKey: true) == true)
     }
 
-    @Test("blank cursor is 16×16 with a centered hotspot")
-    func sizeAndHotspot() {
-        let cursor = makeBlankCursorMirror()
-        #expect(cursor.image.size == NSSize(width: 16, height: 16))
-        #expect(cursor.hotSpot == NSPoint(x: 8, y: 8))
+    @Test("pointer OUTSIDE the canvas never hides (sidebar / menu bar / title bar)")
+    func outsideShows() {
+        #expect(cursorShouldBeHidden(
+            mouseInsideCanvas: false, crosshairVisible: true, windowIsKey: true) == false)
     }
 
-    @Test("blank cursor image is fully transparent (nothing drawn → invisible pointer)")
-    func isTransparent() throws {
-        let cursor = makeBlankCursorMirror()
-        // Rasterize the cursor image and assert every pixel has zero alpha — i.e. the
-        // pointer the OS would draw over the canvas is invisible.
-        let rep = try #require(
-            NSBitmapImageRep(
-                bitmapDataPlanes: nil,
-                pixelsWide: 16,
-                pixelsHigh: 16,
-                bitsPerSample: 8,
-                samplesPerPixel: 4,
-                hasAlpha: true,
-                isPlanar: false,
-                colorSpaceName: .deviceRGB,
-                bytesPerRow: 0,
-                bitsPerPixel: 0
-            )
-        )
-        let ctx = try #require(NSGraphicsContext(bitmapImageRep: rep))
-        let saved = NSGraphicsContext.current
-        NSGraphicsContext.current = ctx
-        cursor.image.draw(in: NSRect(x: 0, y: 0, width: 16, height: 16))
-        NSGraphicsContext.current = saved
+    @Test("select mode (no crosshair) never hides — the arrow stays")
+    func selectModeShows() {
+        #expect(cursorShouldBeHidden(
+            mouseInsideCanvas: true, crosshairVisible: false, windowIsKey: true) == false)
+    }
 
-        var maxAlpha = 0
-        for y in 0..<rep.pixelsHigh {
-            for x in 0..<rep.pixelsWide {
-                let color = rep.colorAt(x: x, y: y)
-                let alpha = Int(((color?.alphaComponent ?? 0) * 255).rounded())
-                maxAlpha = max(maxAlpha, alpha)
+    @Test("app/window not key never hides — switching away reveals the pointer")
+    func inactiveWindowShows() {
+        #expect(cursorShouldBeHidden(
+            mouseInsideCanvas: true, crosshairVisible: true, windowIsKey: false) == false)
+    }
+
+    /// Exhaustive truth table: hidden iff (inside && crosshair && key). Guards against a
+    /// stray `||`, a dropped term, or an inverted input regressing the predicate.
+    @Test("full truth table — hidden iff inside AND crosshair AND key")
+    func fullTruthTable() {
+        for inside in [false, true] {
+            for crosshair in [false, true] {
+                for key in [false, true] {
+                    let expected = inside && crosshair && key
+                    #expect(
+                        cursorShouldBeHidden(
+                            mouseInsideCanvas: inside,
+                            crosshairVisible: crosshair,
+                            windowIsKey: key) == expected,
+                        "inside=\(inside) crosshair=\(crosshair) key=\(key)")
+                }
             }
         }
-        #expect(maxAlpha == 0)
     }
 }
