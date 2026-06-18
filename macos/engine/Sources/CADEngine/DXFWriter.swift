@@ -153,6 +153,7 @@ extension CADEngine {
         dimStyles: DimStyleTable = DimStyleTable(),
         textStyles: TextStyleTable = TextStyleTable(),
         layouts: [Layout] = [],
+        tables: [TableObject] = [],
         toPath path: String,
         version: DXFVersion = .r2000
     ) throws -> DXFWriteResult {
@@ -161,6 +162,7 @@ extension CADEngine {
                           graphicVariables: graphicVariables, dimStyles: dimStyles,
                           textStyles: textStyles,
                           layouts: layouts,
+                          tables: tables,
                           toPath: path, version: version, writer: lc_dxf_write)
     }
 
@@ -187,6 +189,7 @@ extension CADEngine {
         dimStyles: DimStyleTable = DimStyleTable(),
         textStyles: TextStyleTable = TextStyleTable(),
         layouts: [Layout] = [],
+        tables: [TableObject] = [],
         toDWGPath path: String
     ) throws -> DXFWriteResult {
         try writeEntities(entities, layers: layers, blocks: blocks,
@@ -194,6 +197,7 @@ extension CADEngine {
                           graphicVariables: graphicVariables, dimStyles: dimStyles,
                           textStyles: textStyles,
                           layouts: layouts,
+                          tables: tables,
                           toPath: path, version: .r2000, writer: lc_dwg_write)
     }
 
@@ -209,6 +213,7 @@ extension CADEngine {
         dimStyles: DimStyleTable,
         textStyles: TextStyleTable,
         layouts: [Layout],
+        tables: [TableObject],
         toPath path: String,
         version: DXFVersion,
         writer: (
@@ -252,6 +257,26 @@ extension CADEngine {
                let annotationPOD = builder.multiLeaderAnnotationPOD(d, from: record) {
                 entityPODs.append(annotationPOD)
             }
+        }
+        // TABLES persistence (final wave) — EXPLODE on write. libdxfrw drops ACAD_TABLE
+        // on READ (a confirmed dead-end), and a `TableObject` is ADDITIVE document state
+        // (NOT an `EntityKind`), so there is no DXF table entity to author. Instead each
+        // `TableObject` is materialized to its renderable geometry (grid → LINE segments,
+        // each non-empty cell → TEXT) and those EXPLODED records flow through the SAME
+        // `.line` / `.text` POD mapping every loose entity uses — zero new POD machinery,
+        // zero vendored libdxfrw edit. CAVEAT (documented on `DXFTableExploder` + in the
+        // decision log): because only the exploded geometry reaches disk, a table SAVED
+        // to .dxf and REOPENED comes back as loose LINEs + TEXT, NOT a re-editable
+        // `TableObject`. The editable table model survives in-session (and through the
+        // document payload snapshot — undo / autosave), but is exploded on a pure-DXF
+        // reopen here AND in AutoCAD / LibreCAD (which is the point — they see real geometry).
+        if !tables.isEmpty {
+            // Mint ids above the highest existing entity id so the exploded records never
+            // collide with a loose entity's id (the ids are transient — DXF re-mints on
+            // read — but uniqueness keeps the in-memory POD model well-formed).
+            let baseID = (entities.map(\.id.rawValue).max() ?? 0) + 1
+            let exploded = DXFTableExploder.explode(tables, startingRawID: baseID)
+            for record in exploded { entityPODs.append(builder.makeEntity(record)) }
         }
         let layerPODs = layers.layers.map { builder.makeLayer($0) }
         // The HEADER var POD (units + $DIM* incl. ext-line offsets) + the DIMSTYLE
@@ -387,11 +412,17 @@ public func writeDrawing(
     // Paper-space P3: the layout table (with each layout's viewports) so a Save
     // persists viewports as DXF VIEWPORT entities.
     let layouts = drawing.layouts
+    // TABLES persistence (final wave): the table-object list so a Save EXPLODES each
+    // `TableObject` to LINE + TEXT geometry on disk (see `DXFTableExploder` / the
+    // writer's table-explode block). Defaults empty so a table-free drawing is
+    // byte-identical to before.
+    let tables = drawing.tables
     return try await CADEngine.shared.writeEntities(
         entities, layers: layers, blocks: blocks, blockMembers: blockMembers,
         graphicVariables: graphicVariables, dimStyles: dimStyles,
         textStyles: textStyles,
         layouts: layouts,
+        tables: tables,
         toPath: path, version: version
     )
 }
@@ -1709,5 +1740,100 @@ enum MTextEncoder {
             return String(Int(v.rounded()))
         }
         return String(v)
+    }
+}
+
+// MARK: - Table explode (the TABLES → LINE + TEXT DXF persistence path)
+
+/// Explodes `TableObject`s into loose `EntityRecord`s (LINE for each grid segment,
+/// TEXT for each non-empty cell) so the DXF writer can persist them through its
+/// existing `.line` / `.text` POD mapping — NO new `EntityKind`, NO vendored libdxfrw
+/// edit (the writer just appends these records to the entity list before the POD build).
+///
+/// ## Why explode (the honest caveat)
+/// A `TableObject` is ADDITIVE document state, not a DXF entity, and libdxfrw DROPS the
+/// real `ACAD_TABLE` entity on READ (a confirmed dead-end), so there is no faithful
+/// table entity to author. The geometry the materializer (`TableGeometry`) draws —
+/// the grid lines and the placed cell text — IS the table's visible form, so writing
+/// THAT is what makes a saved table show correctly on reopen, here AND in AutoCAD /
+/// LibreCAD. The unavoidable trade-off: because only the exploded geometry reaches
+/// disk, a table SAVED to .dxf and REOPENED comes back as loose LINEs + TEXT, NOT a
+/// re-editable `TableObject`. The editable table model is preserved WITHIN a session
+/// (and through the document payload snapshot — undo / autosave), but exploded on a
+/// pure-DXF reopen. A native re-editable-table round-trip would need a non-DXF sidecar
+/// or an XDATA reconstruction (deferred, out of scope for this wave).
+///
+/// Pure value functions (no I/O, no actor) so they unit-test headlessly.
+public enum DXFTableExploder {
+
+    /// The pen the exploded records carry. `.byLayer` so the LINEs/TEXT inherit the
+    /// target layer's color/width on re-read — the conventional DXF default for
+    /// geometry with no explicit override (and what AutoCAD/LibreCAD expect). A
+    /// `TableObject` carries no pen/layer of its own (it is not an `EntityRecord`), so
+    /// inherit-by-layer is the safe, non-surprising choice.
+    static let explodePen: Pen = .byLayer
+
+    /// The layer the exploded records land on. `TableObject` has no layer field, so the
+    /// exploded geometry goes on the conventional default layer "0" (`LayerID.zero`).
+    static let explodeLayer: LayerID = .zero
+
+    /// Explodes `tables` into loose LINE + TEXT records, minting unique ids starting at
+    /// `startingRawID` (the caller passes one above the drawing's highest entity id so
+    /// the records never collide with a loose entity). Each table contributes, in order:
+    /// one `.line` record per materialized grid segment, then one `.text` record per
+    /// non-empty / non-covered cell. A degenerate table (0 rows/cols), or one with
+    /// borders hidden and no text, contributes nothing.
+    public static func explode(_ tables: [TableObject], startingRawID: UInt64) -> [EntityRecord] {
+        var out: [EntityRecord] = []
+        var nextID = startingRawID
+        func mintID() -> EntityID {
+            defer { nextID &+= 1 }
+            return EntityID(nextID)
+        }
+        for table in tables {
+            out.append(contentsOf: explode(table, mintID: mintID))
+        }
+        return out
+    }
+
+    /// Explodes ONE table into its LINE + TEXT records, drawing fresh ids from `mintID`.
+    /// Factored out so a single-table caller (and the tests) can explode in isolation.
+    static func explode(_ table: TableObject, mintID: () -> EntityID) -> [EntityRecord] {
+        var out: [EntityRecord] = []
+        // Materialize through the SHARED materializer (the same geometry the renderer
+        // draws): grid → 2-point `ResolvedPolyline`s, cells → placed `TextData`. The
+        // materializer's `pen` only tags the grid `ResolvedPolyline`s (which we discard
+        // — we re-pen each emitted LINE with `explodePen`), so the default pen is fine.
+        let m = TableGeometry.materialize(table)
+
+        // 1. Grid → one LINE per 2-point segment. The materializer always emits 2-point
+        //    open segments (outer border edges + interior separators), so a polyline →
+        //    LINE conversion is just start = points[0], end = points[1]. A defensive
+        //    multi-point polyline (should not occur) is split into consecutive segments.
+        for poly in m.lines {
+            let pts = poly.points
+            guard pts.count >= 2 else { continue }
+            for i in 0..<(pts.count - 1) {
+                out.append(EntityRecord(
+                    id: mintID(),
+                    layer: explodeLayer,
+                    pen: explodePen,
+                    kind: .line(LineData(start: pts[i], end: pts[i + 1]))))
+            }
+        }
+
+        // 2. Cells → one TEXT per placed cell text. The materializer already built the
+        //    `TextData` with the cell's world anchor, height, rotation, alignment and the
+        //    table's font style name — exactly what `.text` serializes — so we wrap it
+        //    verbatim. (Empty / covered cells produced no `PlacedCellText`, so they are
+        //    already absent here.)
+        for placed in m.cellTexts {
+            out.append(EntityRecord(
+                id: mintID(),
+                layer: explodeLayer,
+                pen: explodePen,
+                kind: .text(placed.text)))
+        }
+        return out
     }
 }

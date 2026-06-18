@@ -75,6 +75,18 @@ struct DXFPayload: Sendable, Equatable {
     /// their viewports to disk via the bridge writer; DWG viewport write + multi-layout
     /// DXF remain follow-ups.)
     var layouts: [Layout]
+    /// The TABLE-OBJECT list (`TableObject`) — ADDITIVE document state (NOT an
+    /// `EntityKind`), the editable ACAD_TABLE-style grids. Carried so the in-session
+    /// model's `drawing.tables` SURVIVES the document snapshot/restore (undo +
+    /// autosave-via-payload). Symmetric to `layouts`/`dimStyles`.
+    ///
+    /// PURE-DXF CAVEAT (the documented limit): on a Save the writer EXPLODES each table
+    /// to loose LINE + TEXT geometry (libdxfrw drops the real ACAD_TABLE on read — a
+    /// confirmed dead-end), so a table SAVED to .dxf and REOPENED from disk comes back
+    /// as loose LINEs + TEXT, NOT a re-editable `TableObject` — `payload(from:)` always
+    /// decodes `tables` to `[]` (the read path has no table source). The editable model
+    /// rides ONLY this in-session payload; it is exploded on a pure-DXF reopen.
+    var tables: [TableObject]
 
     init(
         entities: [EntityRecord] = [],
@@ -82,7 +94,8 @@ struct DXFPayload: Sendable, Equatable {
         blocks: BlockTable = BlockTable(),
         graphicVariables: GraphicVariables = GraphicVariables(),
         dimStyles: DimStyleTable = DimStyleTable(),
-        layouts: [Layout] = []
+        layouts: [Layout] = [],
+        tables: [TableObject] = []
     ) {
         self.entities = entities
         self.layers = layers
@@ -90,6 +103,7 @@ struct DXFPayload: Sendable, Equatable {
         self.graphicVariables = graphicVariables
         self.dimStyles = dimStyles
         self.layouts = layouts
+        self.tables = tables
     }
 
     /// An empty drawing for File ▸ New: no entities, the default layer table
@@ -172,7 +186,12 @@ extension CADDrawing {
             blocks: payload.blocks,
             graphicVariables: payload.graphicVariables,
             dimStyles: payload.dimStyles,
-            layouts: payload.layouts
+            layouts: payload.layouts,
+            // Restore the in-session TABLE-OBJECT list (it rides the payload, not the DXF
+            // bytes — see `DXFPayload.tables`). On a FRESH file open this is `[]` (the DXF
+            // read path has no table source); on an undo/autosave snapshot-restore it is
+            // the live tables, so an edited table survives the round-trip in-session.
+            tables: payload.tables
         )
         return drawing
     }
@@ -188,7 +207,11 @@ extension CADDrawing {
             blocks: blocks,
             graphicVariables: graphicVariables,
             dimStyles: dimStyles,
-            layouts: layouts
+            layouts: layouts,
+            // Capture the live TABLE-OBJECT list so the in-session model's tables ride the
+            // payload (undo / autosave). On a SAVE the codec explodes them to LINE + TEXT
+            // (see `DXFDocumentCodec.data`); within the session they survive verbatim.
+            tables: tables
         )
     }
 }
@@ -355,6 +378,12 @@ enum DXFDocumentCodec {
                         // Paper-space P3: persist each layout's viewports as DXF
                         // VIEWPORT entities (symmetric to the read path).
                         layouts: payload.layouts,
+                        // TABLES persistence: the writer EXPLODES each `TableObject` to
+                        // loose LINE + TEXT geometry on disk (libdxfrw drops ACAD_TABLE,
+                        // so there is no real table entity to author). The exploded
+                        // geometry is visible on reopen here AND in AutoCAD / LibreCAD,
+                        // but comes back as loose lines + text (NOT a re-editable table).
+                        tables: payload.tables,
                         toPath: tmp.path,
                         // The user-chosen DXF version (Settings ▸ General ▸ Files);
                         // .r2000 default keeps the prior hardcoded behavior.
@@ -369,6 +398,9 @@ enum DXFDocumentCodec {
                         // DWG has no VIEWPORT write path (the library gap); the
                         // layouts are passed for symmetry but viewports aren't written.
                         layouts: payload.layouts,
+                        // TABLES persistence: same explode-to-LINE+TEXT path as DXF (the
+                        // exploded records flow through the standard DWG entity writer).
+                        tables: payload.tables,
                         toDWGPath: tmp.path
                     )
                 }
