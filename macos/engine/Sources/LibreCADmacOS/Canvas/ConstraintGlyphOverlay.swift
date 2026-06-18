@@ -29,13 +29,17 @@
 //  change) is the later wire-wave, exactly like the sibling overlays.
 //
 //  ## Placement
-//  A constraint's badge sits at the SCREEN point of its geometric FEATURE, so it reads
-//  where the user expects: a perpendicular/parallel pair anchors at the lines'
-//  INTERSECTION (the CORNER); coincident/fix at the constrained point; distance at the
-//  midpoint of its two points; horizontal/vertical at the line midpoint; radius at the
-//  circle center (`anchorWorld`). Badges that land on the same spot fan out by a small
-//  stack offset (keyed on the quantized screen anchor) so they don't overprint. The
-//  overlay stays read-only + GPU-free.
+//  A constraint's badge anchors at its geometric FEATURE, so it reads where the user
+//  expects: a perpendicular/parallel pair at the lines' INTERSECTION (the CORNER);
+//  coincident/fix at the constrained point; distance at the midpoint of its two points;
+//  horizontal/vertical at the line midpoint; radius at the circle center (`anchorWorld`).
+//  The badge is then floated a small CONSTANT on-screen GAP (`offsetGap`) OFF that feature
+//  along an OUTWARD direction (`outwardWorld` — perpendicular to a line for H/V/⊥/∥, the
+//  outward corner bisector for a coincident vertex, up-right for a center) so it sits
+//  BESIDE the geometry rather than ON it. The gap is applied in SCREEN space after the
+//  world→screen projection, so it is a constant on-screen distance at any zoom. Badges
+//  that still land on the same spot fan out by a small stack offset (keyed on the
+//  quantized screen anchor) so they don't overprint. The overlay stays read-only + GPU-free.
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //
@@ -108,32 +112,72 @@ enum ConstraintGlyphLayout {
     /// same anchor entity, so multiple constraints on one entity don't overprint.
     static let stackStep: CGFloat = 16
 
+    /// The constant on-screen GAP (in points, ~one badge size) a badge is floated OFF
+    /// its feature so it sits BESIDE the geometry rather than on top of it. Applied in
+    /// SCREEN space (after the world→screen projection) so the gap is the same at any
+    /// zoom. The brief's "a bit away from the object" — a badge-size worth.
+    static let offsetGap: CGFloat = 18
+
     /// The screen badge placements for `constraints`. Each constraint's WORLD anchor —
     /// its geometric FEATURE (e.g. the CORNER where two perpendicular lines meet) — is
-    /// looked up via `worldAnchor`, projected with `worldToScreen`, then offset UPWARD
-    /// (toward smaller screen-y) by a running stack index keyed on the QUANTIZED screen
-    /// anchor so badges sharing a spot fan out instead of overprinting. A constraint with
-    /// no resolvable anchor (deleted entity / empty bounds) is skipped.
+    /// looked up via `worldAnchor` and projected with `worldToScreen`. The badge is then
+    /// floated a constant `offsetGap` of SCREEN points OFF the feature, along the OUTWARD
+    /// direction `worldOutward` returns for that constraint (perpendicular to a line for
+    /// H/V/⊥/∥, the outward corner bisector for a coincident vertex, up-right for a
+    /// center) so it sits beside the object instead of overlapping it. The outward
+    /// direction is supplied in WORLD space and projected to screen here, so the gap
+    /// stays a constant on-screen distance regardless of zoom. Finally a running stack
+    /// index keyed on the QUANTIZED screen anchor nudges badges that still share a spot
+    /// UPWARD so they fan out instead of overprinting. A constraint with no resolvable
+    /// anchor (deleted entity / empty bounds) is skipped. When `worldOutward` returns nil
+    /// (or is omitted) the badge keeps its old on-feature placement.
     static func placements(
         for constraints: [Constraint],
         worldAnchor: (Constraint) -> Vector?,
-        worldToScreen: (Vector) -> CGPoint
+        worldToScreen: (Vector) -> CGPoint,
+        worldOutward: (Constraint) -> Vector? = { _ in nil }
     ) -> [ConstraintGlyphPlacement] {
         var out: [ConstraintGlyphPlacement] = []
         var stackByKey: [Int64: Int] = [:]
         for c in constraints {
             guard let world = worldAnchor(c) else { continue }
             let base = worldToScreen(world)
-            let key = Self.anchorKey(base)
+            // Float the badge a constant SCREEN gap off the feature along the outward
+            // direction. Project both the anchor and a stepped-along-the-direction world
+            // point, then normalize the resulting SCREEN delta so the gap is zoom-stable
+            // (and correct even under a flipped / non-uniform world→screen map).
+            let gapped = Self.offset(base: base, world: world,
+                                     outward: worldOutward(c), worldToScreen: worldToScreen)
+            let key = Self.anchorKey(gapped)
             let stack = stackByKey[key, default: 0]
             stackByKey[key] = stack + 1
-            let anchor = CGPoint(x: base.x, y: base.y - CGFloat(stack) * stackStep)
+            let anchor = CGPoint(x: gapped.x, y: gapped.y - CGFloat(stack) * stackStep)
             out.append(ConstraintGlyphPlacement(
                 constraintID: c.id,
                 label: ConstraintGlyph.label(for: c.kind),
                 anchor: anchor))
         }
         return out
+    }
+
+    /// Floats `base` (the feature's SCREEN point) by `offsetGap` screen points along the
+    /// screen-space image of the world `outward` direction. Returns `base` unchanged when
+    /// there is no usable direction (nil / zero / degenerate projection) — preserving the
+    /// old on-feature placement. The direction is normalized in SCREEN space, so the gap
+    /// is a constant on-screen distance at every zoom level.
+    static func offset(base: CGPoint, world: Vector, outward: Vector?,
+                       worldToScreen: (Vector) -> CGPoint) -> CGPoint {
+        guard let dir = outward, dir.valid else { return base }
+        let len = (dir.x * dir.x + dir.y * dir.y).squareRoot()
+        guard len > 1e-12 else { return base }
+        // A tiny world step along the direction, projected, gives the SCREEN direction.
+        let stepped = Vector(world.x + dir.x / len, world.y + dir.y / len)
+        let sp = worldToScreen(stepped)
+        var dx = sp.x - base.x, dy = sp.y - base.y
+        let slen = (dx * dx + dy * dy).squareRoot()
+        guard slen > 1e-9 else { return base }
+        dx /= slen; dy /= slen
+        return CGPoint(x: base.x + dx * offsetGap, y: base.y + dy * offsetGap)
     }
 
     /// Quantizes a screen anchor (to ~half a badge) so genuinely co-located badges
@@ -233,7 +277,8 @@ final class ConstraintGlyphOverlayView: NSView {
         let placements = ConstraintGlyphLayout.placements(
             for: visibleConstraints,
             worldAnchor: { [model] c in Self.anchorWorld(c, model: model) },
-            worldToScreen: { viewport.worldToScreen($0) })
+            worldToScreen: { viewport.worldToScreen($0) },
+            worldOutward: { [model] c in Self.outwardWorld(c, model: model) })
 
         let textAttrs: [NSAttributedString.Key: Any] = [
             .font: Self.badgeFont,
@@ -321,6 +366,112 @@ final class ConstraintGlyphOverlayView: NSView {
 
         default:
             return fallbackCenter(c, model: model)
+        }
+    }
+
+    // MARK: Outward offset direction (badge floats a screen GAP off the feature)
+
+    /// The WORLD-space OUTWARD direction a constraint's badge is floated along (a constant
+    /// screen gap, projected + normalized in screen space by `ConstraintGlyphLayout`) so it
+    /// sits BESIDE the geometry rather than on it. Returns an UNNORMALIZED direction (only
+    /// its bearing matters); nil keeps the old on-feature placement:
+    ///  • horizontal / vertical (one line) → PERPENDICULAR to the line direction (the +normal,
+    ///    flipped to point away from the drawing's overall centroid when cheap), so the badge
+    ///    floats just OFF the line midpoint.
+    ///  • perpendicular / parallel / collinear / angle (two lines) → away from the CORNER toward
+    ///    the outward direction of the two segments (so the badge clears the vertex region).
+    ///  • coincident / fix → the OUTWARD bisector of the two meeting segments (away from the
+    ///    corner interior) so the badge doesn't cover the corner.
+    ///  • concentric / radius / diameter (a center) → a fixed UP-RIGHT nudge off the center.
+    ///  • anything else → up-right (a stable default).
+    private static func outwardWorld(_ c: Constraint, model: CanvasModel) -> Vector? {
+        func pt(_ p: ConstraintPoint) -> Vector? { worldPoint(p, model: model) }
+        let upRight = Vector(1, 1)
+        switch c.kind {
+        case .geometric(.horizontal), .geometric(.vertical):
+            // One line: the badge floats off the midpoint along the line's +normal,
+            // flipped to point away from the drawing centroid so it tends OUTWARD.
+            guard c.points.count >= 2, let a = pt(c.points[0]), let b = pt(c.points[1])
+            else { return upRight }
+            let dir = Vector(b.x - a.x, b.y - a.y)
+            guard dir.magnitude > 1e-9 else { return upRight }
+            let normal = Vector(-dir.y, dir.x)             // +90° rotation of the line dir
+            let mid = Vector((a.x + b.x) / 2, (a.y + b.y) / 2)
+            return outwardified(normal, at: mid, model: model)
+
+        case .geometric(.perpendicular), .geometric(.parallel),
+             .geometric(.collinear), .dimensional(.angle):
+            // Two lines: float away from the corner, summing the two outward segment
+            // directions (each pointing from the shared vertex toward the segment).
+            return cornerOutward(c, model: model) ?? upRight
+
+        case .geometric(.coincident), .geometric(.fix):
+            // A meeting vertex of (up to) two segments: the OUTWARD bisector — away from
+            // the interior the two segments span.
+            return cornerOutward(c, model: model) ?? upRight
+
+        default:
+            // Centers (radius/diameter/concentric) and every other kind: a fixed up-right
+            // nudge off the anchor is enough to clear the geometry.
+            return upRight
+        }
+    }
+
+    /// Flips `dir` so it points AWAY from the drawing's overall centroid when that is cheap
+    /// to know, giving a consistent "outward" side for a free perpendicular (otherwise the
+    /// raw +normal). Keeps `dir` if the centroid is unavailable / degenerate.
+    private static func outwardified(_ dir: Vector, at anchor: Vector, model: CanvasModel) -> Vector {
+        let box = model.drawing.boundingBox()
+        guard !box.isEmpty else { return dir }
+        let center = box.center
+        let away = Vector(anchor.x - center.x, anchor.y - center.y)
+        guard away.magnitude > 1e-9 else { return dir }
+        // If the +normal points back toward the centroid, flip it to point away.
+        return (dir.x * away.x + dir.y * away.y) < 0 ? Vector(-dir.x, -dir.y) : dir
+    }
+
+    /// The OUTWARD direction at a shared CORNER: for each of the constraint's first two
+    /// points, the far endpoint of that point's owning line gives the segment direction
+    /// FROM the vertex; the badge floats along the NEGATIVE sum of those unit directions
+    /// (i.e. the outward corner bisector, away from the interior the segments enclose).
+    /// nil when fewer than one usable segment resolves.
+    private static func cornerOutward(_ c: Constraint, model: CanvasModel) -> Vector? {
+        var interior = Vector(0, 0)
+        var found = 0
+        for p in c.points.prefix(2) {
+            guard let from = worldPoint(p, model: model),
+                  let far = farEndpoint(of: p, model: model) else { continue }
+            let seg = Vector(far.x - from.x, far.y - from.y)
+            let len = seg.magnitude
+            guard len > 1e-9 else { continue }
+            interior = Vector(interior.x + seg.x / len, interior.y + seg.y / len)
+            found += 1
+        }
+        guard found > 0 else { return nil }
+        // Outward = away from the segments' interior. If the two are collinear-opposite
+        // (interior ~0), fall back to one segment's left-normal so the badge still clears.
+        if interior.magnitude > 1e-9 {
+            return Vector(-interior.x, -interior.y)
+        }
+        for p in c.points.prefix(2) {
+            if let from = worldPoint(p, model: model),
+               let far = farEndpoint(of: p, model: model) {
+                let seg = Vector(far.x - from.x, far.y - from.y)
+                if seg.magnitude > 1e-9 { return Vector(-seg.y, seg.x) }
+            }
+        }
+        return nil
+    }
+
+    /// The OTHER endpoint of the LINE a constraint point names (its `start` ↔ `end`),
+    /// giving the segment's far end from that vertex. nil for a non-line entity.
+    private static func farEndpoint(of p: ConstraintPoint, model: CanvasModel) -> Vector? {
+        guard let rec = model.drawing.entity(p.entityID), case .line(let d) = rec.kind
+        else { return nil }
+        switch p.point {
+        case .start:  return d.end
+        case .end:    return d.start
+        case .center: return nil                 // a midpoint has no single "far" end
         }
     }
 
