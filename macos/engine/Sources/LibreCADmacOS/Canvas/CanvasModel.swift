@@ -852,6 +852,19 @@ final class CanvasModel {
     /// via `beginInsert(name:)`.
     var pendingInsertBlockName: String?
 
+    /// PARAMETRIC AUTO-BIND (Lane L2): the dimensional constraint KIND currently "in
+    /// flight" on the selection — set when the user starts a Distance/Radius dimensional
+    /// constraint that is awaiting a value. While this is non-nil, a `name=value` line on
+    /// the command line not only creates the parameter but AUTO-BINDS a dimensional
+    /// constraint of this kind to the just-created parameter over the CURRENT selection
+    /// (`interpretCommandLine` → `addConstraint(_:entities:expression:)`), so the dimension
+    /// is parameter-driven rather than a frozen literal. `nil` ⇒ no constraint awaiting a
+    /// value (a `name=value` line then just defines/updates the parameter). Set via
+    /// `beginDimensionalConstraint(_:)`; cleared once consumed (or on cancel). The
+    /// mid-line-DRAW dynamic-input binding (binding a length as a segment is rubber-banded)
+    /// is a deferred follow-up beyond this CanvasModel selection flow.
+    var pendingDimensionalConstraint: DimensionalConstraintKind?
+
     // MARK: Insert tool placement options (Tool Options bar — INSERT scale / rotation / array)
 
     /// Insert tool: whether the placement scale is UNIFORM (one factor applied to both
@@ -3384,6 +3397,19 @@ final class CanvasModel {
             }
         }
 
+        // 3.5) A PARAMETER ASSIGNMENT (`a=22`, `b=a*2`, `w=22mm`) — checked AFTER the
+        //      coordinate route (so `10,20` / `@5,5` never reach here — they have no `=`
+        //      and `parseAssignment` rejects them anyway) and BEFORE the tool route (so a
+        //      parameter line is never mis-read as a command). `parseAssignment` only fires
+        //      on a valid identifier LHS, so `2=5` / `key=val`→syntax / a bare `=` all
+        //      return `nil` and fall through. On a hit we CREATE/UPDATE the parameter and —
+        //      if a dimensional constraint is in flight on the selection — AUTO-BIND it to
+        //      the parameter, all in ONE undo group, then return `.handled` (NEVER falling
+        //      through to tool parsing).
+        if let (name, expression, _) = ExpressionEvaluator.parseAssignment(trimmed) {
+            return handleParameterAssignment(name: name, expression: expression, echo: trimmed)
+        }
+
         // 4) A recognized tool command name — the View activates (handles `.image` modal).
         if let kind = ToolSuggester.resolve(command: trimmed) {
             recordCommandBarUse(kind)
@@ -3397,6 +3423,56 @@ final class CanvasModel {
         lastCommandError = message
         appendTranscript(.error, message)
         return .error(message)
+    }
+
+    /// Handles a parsed `name = expression` command-line assignment (Lane L2): creates or
+    /// updates the user parameter `name` through the re-solving funnel, and — if a
+    /// dimensional constraint is IN FLIGHT on the selection (`pendingDimensionalConstraint`)
+    /// — AUTO-BINDS a dimensional constraint of that kind to the new parameter over the
+    /// current selection, all in ONE undo group. Always returns `.handled` (a parameter
+    /// line never falls through to tool parsing) and echoes a readout into the transcript.
+    private func handleParameterAssignment(name: String, expression: String,
+                                           echo: String) -> CommandLineResult {
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+
+        // Define / update the parameter (re-solving any geometry it already drives).
+        setParameterExpression(name: name, expression: expression)
+
+        // AUTO-BIND: if a dimensional constraint is awaiting a value, create it bound to
+        // this parameter over the current selection (in the SAME undo group). On an arity
+        // failure the parameter still stands; we just don't bind (and clear the pending
+        // flag either way so a stale request doesn't linger).
+        var boundNote = ""
+        if let kind = pendingDimensionalConstraint {
+            let ids = orderedSelectionIDs
+            if addConstraint(kind, entities: ids, expression: name) {
+                boundNote = " → \(kind.rawValue) constraint bound"
+            }
+            pendingDimensionalConstraint = nil
+        }
+
+        lastCommandError = nil
+        let value = drawing.parameters.parameter(named: name)?.value
+        let valueText = value.map { Self.transcriptCoord($0) } ?? expression
+        appendTranscript(.output, "\(name) = \(valueText)\(boundNote)")
+        return .handled
+    }
+
+    /// Marks a DIMENSIONAL constraint of `kind` as "in flight" on the current selection,
+    /// so the NEXT `name=value` command-line assignment AUTO-BINDS the dimension to that
+    /// parameter (see `pendingDimensionalConstraint`). The View/menu calls this when the
+    /// user picks "Distance"/"Radius" and is prompted for a value (which they may type as a
+    /// parameter assignment). `cancelDimensionalConstraint()` clears it without binding.
+    func beginDimensionalConstraint(_ kind: DimensionalConstraintKind) {
+        pendingDimensionalConstraint = kind
+    }
+
+    /// Clears any pending dimensional-constraint auto-bind request (the user cancelled or
+    /// the flow ended without a parameter assignment).
+    func cancelDimensionalConstraint() {
+        pendingDimensionalConstraint = nil
     }
 
     /// Format a resolved world point for the transcript `.output` readout: each axis at
@@ -5157,6 +5233,17 @@ final class CanvasModel {
     /// Returns whether any geometry was changed (false on early-out or a no-op solve).
     @discardableResult
     func resolveConstraints(touching ids: Set<EntityID>) -> Bool {
+        // (−1) PARAMETER CACHE-FRESHNESS CHOKE POINT (Lane L2): before solving, refresh
+        //      every parameter-DRIVEN constraint's cached `value` from the current
+        //      parameter table. This is THE single place a re-solve learns about an
+        //      edited parameter — so an edited `w` flows into every `expression == w`
+        //      constraint and then into the geometry below, in the caller's undo group.
+        //      It does NOT open its own group (the caller owns it) and never writes a
+        //      bad/cyclic value (it keeps the last-good cache instead — never NaN to the
+        //      solver). It registers undo via `editConstraint`, coalescing into the same
+        //      ⌘Z as the edit + the re-solve.
+        recomputeParameterDrivenValues()
+
         // (0) Early-out: no constraints at all, or none of the edited ids is constrained.
         guard !drawing.constraints.isEmpty, !ids.isEmpty else { return false }
         let constrained = drawing.constraints.referencedEntityIDs
@@ -5219,6 +5306,377 @@ final class CanvasModel {
             changed = true
         }
         return changed
+    }
+
+    // MARK: - Parameter re-eval → re-solve SEAM (Lane L2)
+    //
+    // This is the glue that makes NAMED PARAMETERS actually DRIVE geometry. The engine
+    // pieces already exist: the `ParameterTable` on `CADDrawing` (undoable
+    // add/update/remove), the additive `Constraint.expression` (nil = pure literal; the
+    // SOLVER reads only `value`), and the pure `ExpressionEvaluator` (topo + cycle-safe).
+    // What was missing — and lives HERE — is:
+    //   • a cache-freshness CHOKE POINT (`recomputeParameterDrivenValues`) that, at the
+    //     top of every re-solve, re-evaluates the whole parameter table and writes each
+    //     parameter-driven constraint's fresh `value` (keeping the last-good value on a
+    //     bad/cyclic expression — never NaN to the solver);
+    //   • edit→re-solve FUNNELS (`setParameterExpression` / `setParameterValue` /
+    //     `setConstraintExpression` / `removeParameterAndResolve`) that wrap a parameter/
+    //     binding edit AND the geometry it drives in ONE undo group (one ⌘Z reverts both);
+    //   • UNIT CONVERSION at this seam (`evaluatedValue(forExpression:)`): a literal that
+    //     carries a unit token (`22mm`) is converted to the drawing's unit here — the pure
+    //     evaluator stays unit-naive (it only REPORTS the token).
+
+    /// CACHE-FRESHNESS CHOKE POINT: re-evaluates the whole parameter table and writes the
+    /// freshly-evaluated `value` onto EVERY constraint with a non-nil `expression`. Called
+    /// at the TOP of `resolveConstraints(touching:)` so a parameter edit propagates into
+    /// the geometry within the SAME undo group the caller already opened.
+    ///
+    /// • Builds a name→value symbol map by evaluating the parameter table topologically
+    ///   (`ExpressionEvaluator.evaluateTable`), then writing each parameter's own fresh
+    ///   `value` back (so the Parameters UI / persistence see the live cache). UNIT-bearing
+    ///   bare literals (`22mm`) are converted to the drawing's unit via
+    ///   `evaluatedValue(forExpression:)`, and the converted magnitude is what propagates
+    ///   to dependents (`h = w/2` uses the converted `w`).
+    /// • For every constraint whose `expression != nil`, re-evaluates that expression
+    ///   against the symbol map (+ unit conversion) and writes the result through the
+    ///   undoable `drawing.editConstraint(_:value:)` (so the solver — which reads ONLY
+    ///   `value` — sees the new driven number).
+    /// • ROBUSTNESS: a parameter expression that is cyclic / syntactically bad / references
+    ///   an unknown name leaves that parameter's (and any dependent constraint's) LAST-GOOD
+    ///   `value` untouched — NEVER a NaN written into the solver. A whole-table cycle falls
+    ///   back to a per-name best-effort pass so the good parameters still refresh.
+    ///
+    /// Does NOT open its own undo group (the caller owns it) and does NOT bump
+    /// `modelDirty`/`modelVersion` (the caller's re-solve / edit already does). A no-op
+    /// (no parameters AND no parameter-driven constraints) returns having touched nothing.
+    func recomputeParameterDrivenValues() {
+        let params = drawing.parameters.parameters
+        let drivenConstraints = drawing.constraints.constraints.filter { $0.expression != nil }
+        // Cheap early-out: nothing references a parameter/expression at all.
+        guard !params.isEmpty || !drivenConstraints.isEmpty else { return }
+
+        // (1) Resolve the parameter symbol map (name → unit-converted value), keeping the
+        //     last-good cache for any parameter that fails to evaluate.
+        let symbols = resolvedParameterSymbols(params)
+
+        // (2) Write each parameter's fresh value back (so the table cache stays live for
+        //     the Parameters UI / persistence). Skips unchanged / failed ones.
+        for p in params {
+            guard let fresh = symbols[p.name.lowercased()], fresh.isFinite,
+                  p.value != fresh else { continue }
+            var updated = p
+            updated.value = fresh
+            drawing.updateParameter(updated)   // undoable; no-op guard inside
+        }
+
+        // (3) Re-evaluate each parameter-driven CONSTRAINT and write its fresh `value`.
+        for c in drivenConstraints {
+            guard let expr = c.expression,
+                  let fresh = evaluatedValue(forExpression: expr, symbols: symbols),
+                  fresh.isFinite else { continue }   // bad/cyclic → keep last-good value
+            drawing.editConstraint(c.id, value: fresh)   // undoable; no-op + non-dim guard
+        }
+    }
+
+    /// Resolves the parameter table to a `[lowercasedName: value]` symbol map with UNIT
+    /// CONVERSION applied at this seam. Tries a whole-table topological evaluation first
+    /// (the fast path); if that fails (a cycle / bad expression anywhere), falls back to a
+    /// best-effort per-parameter pass so the GOOD parameters still refresh and only the
+    /// offenders keep their last-good cache.
+    ///
+    /// For a bare unit-literal parameter (`w = 22mm`) the magnitude the evaluator returns
+    /// is converted to the drawing's unit HERE, and the converted value is what seeds
+    /// dependents — so `h = w/2` is computed from the converted `w`. A parameter whose
+    /// own value can't be resolved contributes its LAST-GOOD `value` to the map (so it
+    /// neither vanishes nor poisons dependents with NaN).
+    private func resolvedParameterSymbols(_ params: [Parameter]) -> [String: Double] {
+        // Seed every name with its last-good cached value (the fallback the map always has).
+        var symbols: [String: Double] = [:]
+        for p in params { symbols[p.name.lowercased()] = p.value }
+        guard !params.isEmpty else { return symbols }
+
+        // Build the evaluator table, substituting a bare unit-literal expression with its
+        // already-unit-converted numeric so the conversion propagates transitively (the
+        // pure evaluator is unit-naive; it would otherwise yield the raw magnitude).
+        var table: [String: String] = [:]
+        for p in params {
+            let key = p.name.lowercased()
+            if let converted = unitConvertedLiteral(p.expression) {
+                table[key] = String(converted)             // pre-converted literal
+            } else {
+                table[key] = lowercasedIdentifiers(in: p.expression)
+            }
+        }
+
+        // Fast path: a clean whole-table topo evaluation.
+        if let resolved = try? ExpressionEvaluator.evaluateTable(table) {
+            for (name, value) in resolved where value.isFinite { symbols[name] = value }
+            return symbols
+        }
+
+        // Fallback: a bad/cyclic table. Evaluate name-by-name over the accumulating map;
+        // each success refreshes that name, each failure keeps its last-good value. A few
+        // passes let non-cyclic dependents resolve once their inputs are known.
+        for _ in 0..<max(1, params.count) {
+            var progressed = false
+            for p in params {
+                let key = p.name.lowercased()
+                guard let value = try? ExpressionEvaluator.evaluate(table[key] ?? "", symbols: symbols),
+                      value.isFinite, symbols[key] != value else { continue }
+                symbols[key] = value
+                progressed = true
+            }
+            if !progressed { break }
+        }
+        return symbols
+    }
+
+    /// Lower-cases the identifier tokens in `expr` so a reference resolves against the
+    /// lower-cased symbol map (parameter names are case-insensitive). Numbers / operators
+    /// pass through unchanged. A token-boundary scan (identifier char = letter/digit/`_`),
+    /// mirroring `CADDrawing.expression(_:references:)`'s definition of an identifier.
+    private func lowercasedIdentifiers(in expr: String) -> String {
+        var out = ""
+        out.reserveCapacity(expr.count)
+        var inIdent = false
+        for ch in expr {
+            let isIdent = ch.isLetter || ch.isNumber || ch == "_"
+            if isIdent {
+                // An identifier STARTS at a letter/underscore; a number is not lowered
+                // anyway (Character.lowercased() is a no-op for digits), so a uniform
+                // lowercasing of identifier runs is safe and cheap.
+                inIdent = true
+                out.append(contentsOf: ch.lowercased())
+            } else {
+                inIdent = false
+                out.append(ch)
+            }
+            _ = inIdent
+        }
+        return out
+    }
+
+    /// Whether the source `expression` references the parameter `name` as a WHOLE-WORD
+    /// identifier token (case-insensitive) — so "a" matches `a*2` but not `area`/`data`.
+    /// A local twin of the engine's `CADDrawing.expression(_:references:)` (which is
+    /// module-internal, so unreachable from the app module); kept byte-equivalent so the
+    /// re-solve seeds and the engine's delete-freeze agree on what "references" means.
+    private func expression(_ expression: String, references name: String) -> Bool {
+        guard !name.isEmpty else { return false }
+        let haystack = Array(expression.lowercased())
+        let needle = Array(name.lowercased())
+        guard !needle.isEmpty, haystack.count >= needle.count else { return false }
+        func isIdentifierChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
+        var i = 0
+        while i <= haystack.count - needle.count {
+            if Array(haystack[i ..< i + needle.count]) == needle {
+                let beforeOK = i == 0 || !isIdentifierChar(haystack[i - 1])
+                let afterIdx = i + needle.count
+                let afterOK = afterIdx == haystack.count || !isIdentifierChar(haystack[afterIdx])
+                if beforeOK && afterOK { return true }
+            }
+            i += 1
+        }
+        return false
+    }
+
+    /// Evaluates `expr` against `symbols` (lower-cased identifiers) with UNIT CONVERSION
+    /// applied for a bare unit-literal (`22mm`). Returns the value in the drawing's unit,
+    /// or `nil` on any syntax/name/cycle failure (the caller then keeps the last-good
+    /// cache — never writing NaN to the solver).
+    private func evaluatedValue(forExpression expr: String, symbols: [String: Double]) -> Double? {
+        // A bare unit literal converts directly (no name resolution needed).
+        if let converted = unitConvertedLiteral(expr) { return converted }
+        return try? ExpressionEvaluator.evaluate(lowercasedIdentifiers(in: expr), symbols: symbols)
+    }
+
+    /// If `expr` is a bare top-level numeric literal carrying a UNIT TOKEN (`22mm`,
+    /// `-3.5 cm`), returns its magnitude CONVERTED to the drawing's unit (the UNIT BOUNDARY
+    /// the pure evaluator deliberately leaves to this app seam). Returns `nil` when `expr`
+    /// is not a bare unit literal (a plain number, an expression in parameter terms, or an
+    /// unrecognized token) — the caller then evaluates it the ordinary way.
+    ///
+    /// CONVERSION: the literal's unit token maps to a `DrawingUnit` via
+    /// `DrawingUnit(unitToken:)`; the magnitude is converted from that unit to
+    /// `drawing.drawingUnit` (`$INSUNITS`) via `factorToMM` (`DrawingUnit.convert`). An
+    /// unrecognized token (no `DrawingUnit`) means we can't honor it as a unit, so the
+    /// bare MAGNITUDE is returned (better than dropping the value); `none`/`millimeter`
+    /// drawings convert by the natural factor.
+    private func unitConvertedLiteral(_ expr: String) -> Double? {
+        guard let (value, token) = try? ExpressionEvaluator.evaluateLiteralUnit(expr),
+              let token, !token.isEmpty else { return nil }
+        guard let src = DrawingUnit(unitToken: token) else { return value }   // unknown token → raw
+        return DrawingUnit.convert(value, from: src, to: drawing.drawingUnit)
+    }
+
+    // MARK: Parameter edit → re-solve funnels (one undo group each)
+
+    /// Creates-or-updates the user parameter `name` with source `expression` AND re-solves
+    /// every component its driven constraints touch — ALL in ONE undo group (one ⌘Z reverts
+    /// the parameter edit AND the geometry it moved). This is the parametric mirror of
+    /// `commitConstraints`: the parameter mutation + the recompute + the geometry re-solve
+    /// coalesce into a single undoable step.
+    ///
+    /// • A new `name` is added (its cached `value` seeded from the freshly-evaluated
+    ///   expression, with unit conversion at this seam); an existing one is updated.
+    /// • The affected geometry is the connected component of every constraint whose
+    ///   expression references `name` (directly, or transitively through another parameter)
+    ///   — gathered, then re-solved (the recompute inside `resolveConstraints` refreshes the
+    ///   driven `value`s first). On a bad/cyclic expression the geometry is left UNMOVED.
+    /// Returns whether the parameter was created/updated (false on an empty name).
+    @discardableResult
+    func setParameterExpression(name: String, expression: String) -> Bool {
+        let trimmedName = name.trimmingCharacters(in: .whitespaces)
+        let trimmedExpr = expression.trimmingCharacters(in: .whitespaces)
+        guard !trimmedName.isEmpty else { return false }
+
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+
+        // Evaluate the new expression to seed/refresh the parameter's cached value (unit
+        // conversion at this seam). On a failure keep 0 / the prior value — never NaN.
+        let symbols = currentParameterSymbols()
+        let seeded = evaluatedValue(forExpression: trimmedExpr, symbols: symbols)
+        let unitToken = (try? ExpressionEvaluator.evaluateLiteralUnit(trimmedExpr).unitToken) ?? nil
+
+        var changed = false
+        if let existing = drawing.parameters.parameter(named: trimmedName) {
+            var updated = existing
+            updated.expression = trimmedExpr
+            if let seeded, seeded.isFinite { updated.value = seeded }
+            updated.unit = unitToken ?? existing.unit
+            changed = drawing.updateParameter(updated)
+        } else {
+            let value = (seeded?.isFinite == true) ? seeded! : 0
+            changed = drawing.addParameter(Parameter(name: trimmedName, expression: trimmedExpr,
+                                                     value: value, unit: unitToken))
+        }
+
+        // Re-solve every component a constraint driven by this parameter touches (the
+        // recompute at the top of `resolveConstraints` refreshes the driven values first).
+        resolveConstraints(touching: componentsDriven(byParameterNamed: trimmedName))
+        modelDirty = true
+        modelVersion &+= 1
+        return changed
+    }
+
+    /// Sets parameter `name` to a literal `value` (the Parameters-table numeric edit) AND
+    /// re-solves the geometry it drives — ONE undo group. A thin wrapper over
+    /// `setParameterExpression` that stores the number as the source expression (so the
+    /// expression and the cache agree). Returns whether the parameter changed.
+    @discardableResult
+    func setParameterValue(name: String, value: Double) -> Bool {
+        guard value.isFinite else { return false }
+        return setParameterExpression(name: name, expression: String(value))
+    }
+
+    /// Removes the parameter `name` (FREEZING every referencing constraint to a literal —
+    /// the engine's `removeParameter(named:)` does the freeze) AND re-solves the affected
+    /// components, ALL in ONE undo group. After the freeze the geometry doesn't actually
+    /// move (the frozen literal == the last cache), but the re-solve keeps the seam uniform
+    /// and the quadtree in sync. Returns whether a parameter was removed.
+    @discardableResult
+    func removeParameterAndResolve(name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return false }
+        let affected = componentsDriven(byParameterNamed: trimmed)
+
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+
+        guard drawing.removeParameter(named: trimmed) != nil else { return false }   // undoable freeze
+        resolveConstraints(touching: affected)
+        modelDirty = true
+        modelVersion &+= 1
+        return true
+    }
+
+    /// BINDS the existing dimensional constraint `id` to source `expression` (or UNBINDS it
+    /// back to a pure literal with `expression: nil`) AND re-solves the geometry — ONE undo
+    /// group. The bound constraint's `value` becomes the freshly-evaluated cache of the
+    /// expression (unit-converted at this seam); the solver still reads only `value`.
+    /// Returns whether the binding changed. No-op (false) for an absent or non-dimensional
+    /// constraint.
+    @discardableResult
+    func setConstraintExpression(id: UUID, expression: String?) -> Bool {
+        guard let current = drawing.constraints.constraint(id), current.kind.isDimensional else {
+            return false
+        }
+        let trimmed = expression?.trimmingCharacters(in: .whitespaces)
+        let newExpr = (trimmed?.isEmpty == false) ? trimmed : nil
+
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+
+        // Compute the bound value: re-evaluate the new expression (keep `value` literal on
+        // unbind). On a bad expression keep the current `value` (no NaN).
+        var newValue = current.value
+        if let newExpr,
+           let evaluated = evaluatedValue(forExpression: newExpr,
+                                          symbols: currentParameterSymbols()),
+           evaluated.isFinite {
+            newValue = evaluated
+        }
+        let bound = current.driven(by: newExpr, value: newValue)
+        guard bound != current else { return false }
+        drawing.mutateConstraints { $0.replace(bound) }   // undoable
+        resolveConstraints(touching: Set(current.entityIDs))
+        modelDirty = true
+        modelVersion &+= 1
+        return true
+    }
+
+    /// The name→value parameter symbol map for the CURRENT table (lower-cased keys, unit
+    /// conversion applied) — the inputs a fresh expression evaluation needs. A thin public-
+    /// to-this-file convenience over `resolvedParameterSymbols`.
+    private func currentParameterSymbols() -> [String: Double] {
+        resolvedParameterSymbols(drawing.parameters.parameters)
+    }
+
+    /// The union of the connected components of every entity touched by a dimensional
+    /// constraint whose `expression` references the parameter `name` — DIRECTLY, or
+    /// TRANSITIVELY through another parameter (`h = w/2`: editing `w` must re-solve the
+    /// `h`-driven constraints too). The set the re-solve seeds when a parameter changes.
+    private func componentsDriven(byParameterNamed name: String) -> Set<EntityID> {
+        // The transitive closure of parameter names that depend on `name` (so editing `w`
+        // pulls `h = w/2`, and anything depending on `h`, …).
+        let affectedNames = parameterNamesDepending(on: name)
+        var seeds: Set<EntityID> = []
+        for c in drawing.constraints.constraints {
+            guard let expr = c.expression else { continue }
+            if affectedNames.contains(where: { expression(expr, references: $0) }) {
+                seeds.formUnion(c.entityIDs)
+            }
+        }
+        // Expand each seed to its full connected component (what the solver solves at once).
+        var union = seeds
+        for seed in seeds { union.formUnion(drawing.constraints.connectedComponent(of: seed)) }
+        return union
+    }
+
+    /// The set of parameter names that depend on `name` (transitively), INCLUDING `name`
+    /// itself — so a constraint bound to ANY of them is re-solved when `name` changes. A
+    /// fixed-point expansion over the parameter table's reference graph (whole-word token
+    /// match, case-insensitive, via `CADDrawing.expression(_:references:)`).
+    private func parameterNamesDepending(on name: String) -> Set<String> {
+        let params = drawing.parameters.parameters
+        var affected: Set<String> = [name.lowercased()]
+        var changed = true
+        while changed {
+            changed = false
+            for p in params {
+                let key = p.name.lowercased()
+                guard !affected.contains(key) else { continue }
+                if affected.contains(where: { expression(p.expression, references: $0) }) {
+                    affected.insert(key)
+                    changed = true
+                }
+            }
+        }
+        return affected
     }
 
     // MARK: Create / remove (selection-based; the wire-wave calls these)
@@ -5298,6 +5756,47 @@ final class CanvasModel {
             guard entities.count == 1 else { return false }
             guard case .circle = drawing.entity(entities[0])?.kind else { return false }
             constraint = .radius(circle: entities[0], value: value)
+        case .horizontalDistance, .verticalDistance, .diameter, .angle:
+            return false   // declared but solver-unsupported
+        }
+        return commitConstraint(constraint, touching: Set(entities))
+    }
+
+    /// AUTO-BIND: creates a DIMENSIONAL constraint of `kind` over `entities` already BOUND
+    /// to the parameter-driving `expression` (the constraint's `value` is the freshly-
+    /// evaluated cache of that expression, unit-converted at this seam) — validating arity,
+    /// registering it undoably, then re-solving immediately, ALL in ONE undo group. This is
+    /// what the `name=value` command-line route calls when a dimensional constraint is in
+    /// flight on the selection: the constraint is created driven by the parameter rather
+    /// than a frozen literal, so editing the parameter later moves the geometry.
+    ///
+    /// The `expression` is evaluated against the CURRENT parameter table (so it can be the
+    /// just-created parameter's name, or any expression in parameter terms). On an
+    /// unevaluable expression the constraint is NOT created (returns `false`) — a bound
+    /// dimension must have a real driven value, never NaN.
+    ///
+    /// Arity matches the value overload (distance → 2 entities; radius → 1 circle).
+    @discardableResult
+    func addConstraint(_ kind: DimensionalConstraintKind, entities: [EntityID],
+                       expression: String) -> Bool {
+        guard kind.isSolverSupported else { return false }
+        guard entities.allSatisfy({ drawing.contains($0) }) else { return false }
+        let trimmed = expression.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty,
+              let value = evaluatedValue(forExpression: trimmed, symbols: currentParameterSymbols()),
+              value.isFinite else { return false }
+
+        let constraint: Constraint
+        switch kind {
+        case .distance:
+            guard entities.count == 2 else { return false }
+            constraint = .distance(ConstraintPoint(entityID: entities[0], point: .start),
+                                   ConstraintPoint(entityID: entities[1], point: .start),
+                                   expression: trimmed, value: value)
+        case .radius:
+            guard entities.count == 1 else { return false }
+            guard case .circle = drawing.entity(entities[0])?.kind else { return false }
+            constraint = .radius(circle: entities[0], expression: trimmed, value: value)
         case .horizontalDistance, .verticalDistance, .diameter, .angle:
             return false   // declared but solver-unsupported
         }
