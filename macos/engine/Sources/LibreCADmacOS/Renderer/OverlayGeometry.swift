@@ -99,6 +99,12 @@ enum OverlayGeometry {
     ///     EXACT same code path as before this parameter existed, so the world-frame
     ///     output is byte-identical (regression-lock — the grid is invisible until a
     ///     UCS is actually set).
+    ///   - isoPlane: the active ISOMETRIC drafting plane (Wave 2c). When `nil` (the
+    ///     default) the RECTANGULAR grid is generated exactly as before this parameter
+    ///     existed (byte-identical — the iso branch is gated off). When a plane is set
+    ///     the grid is instead the 30°/90°/150° iso LATTICE for that plane (drawn so it
+    ///     matches `Snapping.snappedToIsoGrid`). The iso grid is anchored at
+    ///     `ucs.origin` (the world origin for the default `.world`).
     /// - Returns: (vertices, spacing) — spacing is the world step used (also the
     ///   snap grid spacing the caller should pass to `Snapping.snap`).
     static func grid(
@@ -106,8 +112,17 @@ enum OverlayGeometry {
         renderOrigin: Vector,
         targetCellPx: Double = 64,
         preferredSpacing: Double? = nil,
-        ucs: UCS = .world
+        ucs: UCS = .world,
+        isoPlane: IsoPlane? = nil
     ) -> (vertices: [FlatVertex], spacing: Double) {
+        // ISO grid (Wave 2c): the 30°/90°/150° iso lattice for the active plane. Split
+        // out so the rectangular path below stays byte-identical when iso is off
+        // (regression-lock). Only taken when an iso plane is active.
+        if let plane = isoPlane {
+            return isoGrid(viewport: viewport, renderOrigin: renderOrigin,
+                           targetCellPx: targetCellPx, preferredSpacing: preferredSpacing,
+                           plane: plane, origin: ucs.origin)
+        }
         // UCS-aligned grid: anchor at the UCS origin and run the lines along the UCS
         // axes. Split out so the world-frame path below stays byte-identical to the
         // pre-UCS code (regression-lock). Only taken when a non-world UCS is active.
@@ -243,6 +258,117 @@ enum OverlayGeometry {
             y += spacing
         }
         return (verts, spacing)
+    }
+
+    /// The ISOMETRIC grid (Wave 2c): the 30°/90°/150° lattice for `plane`, anchored at
+    /// `origin`, drawn so it coincides with `Snapping.snappedToIsoGrid`. The lattice is
+    /// spanned by the plane's two iso basis vectors `(e1, e2)` at `spacing`; the grid is
+    /// two families of parallel lines — one running ALONG `e1` (stepped by `e2`), one
+    /// ALONG `e2` (stepped by `e1`).
+    ///
+    /// Construction: the visible world rect's four corners are expressed in the
+    /// non-orthogonal `(e1, e2)` lattice basis (a 2×2 solve, exactly like the snap), and
+    /// the integer index ranges that cover the rect are taken from their bounds (padded
+    /// by one so partial edge cells are drawn). Each `i = const` line is drawn ALONG
+    /// `e2` across the j-range, and each `j = const` line ALONG `e1` across the i-range,
+    /// then offset against `renderOrigin`. The total line count is capped (mirroring the
+    /// rectangular grid) so extreme zoom-out degrades gracefully.
+    private static func isoGrid(
+        viewport: Viewport,
+        renderOrigin: Vector,
+        targetCellPx: Double,
+        preferredSpacing: Double?,
+        plane: IsoPlane,
+        origin: Vector
+    ) -> (vertices: [FlatVertex], spacing: Double) {
+        let rect = viewport.visibleWorldRect
+        guard !rect.isEmpty, viewport.scale > 0 else { return ([], 1) }
+
+        // Spacing uses the SAME rule as the world grid (a preferred value wins, else the
+        // adaptive 1/2/5 × 10ⁿ pick by screen size). The iso spacing is the lattice edge
+        // length along the iso axes.
+        let spacing: Double
+        if let pref = preferredSpacing, pref > 0, pref.isFinite {
+            spacing = pref
+        } else {
+            spacing = niceStep(targetCellPx / viewport.scale)
+        }
+        guard spacing > 0, spacing.isFinite else { return ([], 1) }
+
+        let (e1, e2) = plane.gridBasis(spacing: spacing)
+        let det = e1.x * e2.y - e1.y * e2.x
+        guard abs(det) > 1e-12 else { return ([], spacing) }
+
+        // The visible rect's corners expressed in the (e1, e2) lattice basis.
+        let corners = [
+            Vector(rect.min.x, rect.min.y),
+            Vector(rect.max.x, rect.min.y),
+            Vector(rect.max.x, rect.max.y),
+            Vector(rect.min.x, rect.max.y),
+        ]
+        var iLo = Double.greatestFiniteMagnitude, iHi = -Double.greatestFiniteMagnitude
+        var jLo = Double.greatestFiniteMagnitude, jHi = -Double.greatestFiniteMagnitude
+        for c in corners {
+            let p = c - origin
+            let i = (p.x * e2.y - p.y * e2.x) / det
+            let j = (e1.x * p.y - e1.y * p.x) / det
+            iLo = Swift.min(iLo, i); iHi = Swift.max(iHi, i)
+            jLo = Swift.min(jLo, j); jHi = Swift.max(jHi, j)
+        }
+        // Integer index ranges covering the rect, padded by one for partial edge cells.
+        let i0 = Int(iLo.rounded(.down)) - 1, i1 = Int(iHi.rounded(.up)) + 1
+        let j0 = Int(jLo.rounded(.down)) - 1, j1 = Int(jHi.rounded(.up)) + 1
+
+        // Cap pathological line counts at extreme zoom-out (mirrors the rect grid).
+        let iCount = i1 - i0, jCount = j1 - j0
+        guard iCount > 0, jCount > 0, iCount + jCount < 4000 else {
+            return (isoAxisLines(plane: plane, spacing: spacing, origin: origin,
+                                 iRange: (i0, i1), jRange: (j0, j1), renderOrigin: renderOrigin),
+                    spacing)
+        }
+
+        @inline(__always)
+        func node(_ i: Int, _ j: Int) -> Vector {
+            origin + e1 * Double(i) + e2 * Double(j)
+        }
+
+        var verts: [FlatVertex] = []
+        let axisC = OverlayStyle.gridAxisColor
+        let lineC = OverlayStyle.gridColor
+        // Lines of constant i (running ALONG e2 across the j-range).
+        for i in i0...i1 {
+            let c = i == 0 ? axisC : lineC
+            verts.append(FlatVertex(position: off(node(i, j0), renderOrigin), color: c))
+            verts.append(FlatVertex(position: off(node(i, j1), renderOrigin), color: c))
+        }
+        // Lines of constant j (running ALONG e1 across the i-range).
+        for j in j0...j1 {
+            let c = j == 0 ? axisC : lineC
+            verts.append(FlatVertex(position: off(node(i0, j), renderOrigin), color: c))
+            verts.append(FlatVertex(position: off(node(i1, j), renderOrigin), color: c))
+        }
+        return (verts, spacing)
+    }
+
+    /// The two iso axis lines (the `i == 0` and `j == 0` lattice lines through
+    /// `origin`) spanning the covered index range. The degenerate-density fallback for
+    /// `isoGrid`, mirroring the rectangular grid's `axisLines`.
+    private static func isoAxisLines(
+        plane: IsoPlane, spacing: Double, origin: Vector,
+        iRange: (Int, Int), jRange: (Int, Int), renderOrigin: Vector
+    ) -> [FlatVertex] {
+        let (e1, e2) = plane.gridBasis(spacing: spacing)
+        @inline(__always)
+        func node(_ i: Int, _ j: Int) -> Vector { origin + e1 * Double(i) + e2 * Double(j) }
+        var v: [FlatVertex] = []
+        let c = OverlayStyle.gridAxisColor
+        // i == 0 line (along e2 across the j-range).
+        v.append(FlatVertex(position: off(node(0, jRange.0), renderOrigin), color: c))
+        v.append(FlatVertex(position: off(node(0, jRange.1), renderOrigin), color: c))
+        // j == 0 line (along e1 across the i-range).
+        v.append(FlatVertex(position: off(node(iRange.0, 0), renderOrigin), color: c))
+        v.append(FlatVertex(position: off(node(iRange.1, 0), renderOrigin), color: c))
+        return v
     }
 
     /// The UCS axis cross (through the UCS origin) spanning the UCS-local `rect`,

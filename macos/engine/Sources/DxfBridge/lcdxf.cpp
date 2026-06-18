@@ -505,7 +505,11 @@ public:
         // Coord-typed vars ($GRIDUNIT/$PINSBASE — codes 10/20/30) preserve all three
         // components. The DXF reader keys $-prefixed, the DWG reader un-prefixed; both
         // spellings are tried (findHdrVar). A missing var simply yields no record.
-        static const char *kExtraInt[]    = { "GRIDMODE", "PDMODE", "ANGDIR" };
+        // $SNAPSTYLE (0 = rectangular, 1 = isometric, Wave 2c) rides the generic int
+        // bag: it is a STANDARD AutoCAD header var (libdxfrw emits it in its curated
+        // write list AND parses it generically into DRW_Header.vars on read), so it
+        // round-trips with ZERO vendored libdxfrw edits — just whitelisting it here.
+        static const char *kExtraInt[]    = { "GRIDMODE", "PDMODE", "ANGDIR", "SNAPSTYLE" };
         // $LTSCALE (drawing-wide linetype scale, code 40) rides the generic bag so
         // the global scale round-trips on read; libdxfrw always emits it (curated).
         static const char *kExtraDouble[] = { "PDSIZE", "ANGBASE", "LTSCALE" };

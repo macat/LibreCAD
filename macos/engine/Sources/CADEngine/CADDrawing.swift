@@ -433,6 +433,45 @@ public struct GraphicVariables: Sendable, Hashable, Codable {
         }
     }
 
+    // MARK: Isometric drafting mode (Wave 2c — $SNAPSTYLE + $LC_ISOPLANE)
+    //
+    // Two vars persist the iso drafting state (additive drafting MODE — NOT a new
+    // EntityKind, NOT new geometry):
+    //
+    //   • `$SNAPSTYLE` — the STANDARD AutoCAD header var (0 = rectangular,
+    //     1 = isometric). It is in libdxfrw's curated DXF emit list AND the bridge's
+    //     `kExtraInt` read whitelist, so — like `$GRIDMODE`/`$PDMODE` — it survives a
+    //     .dxf Save → reopen via the R4b generic `$VAR` header pass-through (ZERO
+    //     vendored libdxfrw edits). Surfaced as the bool `snapIsometric`.
+    //
+    //   • `$LC_ISOPLANE` — a LibreCAD-PRIVATE app var carrying the active plane
+    //     (`IsoPlane.rawValue`: Top=0/Left=1/Right=2). DXF has no per-plane header
+    //     var, and libdxfrw's writer emits only its curated list, so this is NOT
+    //     emitted to a .dxf file (it is intentionally absent from the bridge whitelist
+    //     + DXFWriter's `makeHeaderVars`). It persists ONLY in memory + the Codable
+    //     `DXFPayload` / `CADDrawing.load` path; on a PURE-DXF reopen it is gone, so
+    //     the plane resets to `.top` (the `isoPlane` getter's default) — matching that
+    //     `$SNAPSTYLE` records "is iso" but not "which face".
+
+    /// `$SNAPSTYLE` — whether ISOMETRIC drafting is active (snap/grid use the iso
+    /// lattice). `0` (default) = rectangular, `1` = isometric. A standard AutoCAD
+    /// header var: it round-trips through a .dxf Save → reopen (R4b header pass-through;
+    /// libdxfrw emits `$SNAPSTYLE` in its curated list — no vendored edit needed).
+    public var snapIsometric: Bool {
+        get { int("$SNAPSTYLE", default: 0) != 0 }
+        set { setInt("$SNAPSTYLE", newValue ? 1 : 0) }
+    }
+
+    /// `$LC_ISOPLANE` — the active isometric plane (Top / Left / Right). A LibreCAD-
+    /// PRIVATE app var: it persists in memory + the Codable document payload but is
+    /// NOT written to a .dxf file (DXF has no per-plane var), so a pure-DXF reopen
+    /// drops it and the plane resets to `.top` (the default below). The setter stores
+    /// the plane's raw value (Top=0/Left=1/Right=2).
+    public var isoPlane: IsoPlane {
+        get { IsoPlane(rawValue: int("$LC_ISOPLANE", default: IsoPlane.top.rawValue)) ?? .top }
+        set { setInt("$LC_ISOPLANE", newValue.rawValue) }
+    }
+
     // MARK: DXF code ↔ enum (LC_GraphicVariables::convertLinearFormatDXF2LC etc.)
 
     /// Maps a DXF `$LUNITS` code to a `LinearFormat`

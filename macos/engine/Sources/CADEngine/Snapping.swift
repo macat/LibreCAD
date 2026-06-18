@@ -251,6 +251,13 @@ public enum Snapping {
     ///     `gridAngle == 0` (a world frame) the grid candidate is computed by the
     ///     exact same `snappedToGrid` path as before these params existed, so existing
     ///     callers that omit them get byte-identical grid snapping.
+    ///   - isoPlane: the active ISOMETRIC drafting plane (Wave 2c). When `nil` (the
+    ///     default) the grid candidate uses the EXISTING rectangular world/UCS-frame
+    ///     `snappedToGrid` path — byte-identical to before this parameter existed
+    ///     (regression-lock; existing callers are unaffected). When a plane is set the
+    ///     grid candidate instead snaps to the nearest node of that plane's iso lattice
+    ///     (`snappedToIsoGrid`), anchored at `gridOrigin`. The iso lattice is its own
+    ///     rotated/sheared frame, so `gridAngle` does not additionally rotate it.
     @MainActor
     public static func snap(worldPoint: Vector,
                             modes: SnapMode,
@@ -262,7 +269,8 @@ public enum Snapping {
                             referencePoint: Vector? = nil,
                             distanceAlong: Double? = nil,
                             gridOrigin: Vector = .zero,
-                            gridAngle: Double = 0) -> SnapResult {
+                            gridAngle: Double = 0,
+                            isoPlane: IsoPlane? = nil) -> SnapResult {
         let freeResult = SnapResult(point: worldPoint, kind: .free, entity: nil)
         guard worldPoint.valid else { return freeResult }
         let tol = Swift.max(worldTolerance, 0)
@@ -360,9 +368,20 @@ public enum Snapping {
         // world — so the snap nodes coincide with the UCS-aligned drawn grid. A world
         // frame (origin .zero, angle 0) takes the identical `snappedToGrid` path as
         // before (byte-identical for existing callers).
+        //
+        // ISO (Wave 2c): when an `isoPlane` is set, the grid candidate snaps to that
+        // plane's iso lattice node (`snappedToIsoGrid`, anchored at `gridOrigin`)
+        // instead of the rectangular frame. `isoPlane == nil` (every existing caller)
+        // takes the UNCHANGED `snappedToGrid` path above — byte-identical.
         if modes.contains(.grid), let spacing = gridSpacing, spacing > Tolerance.distance {
-            let gp = snappedToGrid(worldPoint, spacing: spacing,
+            let gp: Vector
+            if let plane = isoPlane {
+                gp = snappedToIsoGrid(worldPoint, spacing: spacing,
+                                      plane: plane, origin: gridOrigin)
+            } else {
+                gp = snappedToGrid(worldPoint, spacing: spacing,
                                    gridOrigin: gridOrigin, gridAngle: gridAngle)
+            }
             appendIfNear(&candidates, point: gp, kind: .grid, entity: nil,
                          cursor: worldPoint, tol: tol)
         }
@@ -923,6 +942,43 @@ public enum Snapping {
         // Back to world: rotate by +angle, translate by +origin. Preserve cursor z.
         let world = Vector(lx, ly, 0).rotated(by: gridAngle) + gridOrigin
         return Vector(world.x, world.y, point.z)
+    }
+
+    // MARK: - Isometric grid snap (Wave 2c)
+
+    /// Rounds `point` to the nearest node of the ISOMETRIC lattice for `plane`,
+    /// anchored at `origin` and stepped by `spacing` along the plane's two iso axes
+    /// (the parallelogram lattice `origin + i·e1 + j·e2`, integer i/j, where
+    /// `(e1, e2) = plane.gridBasis(spacing:)`).
+    ///
+    /// Procedure (a 2×2 lattice solve — robust because the iso axes are never
+    /// parallel, so the basis is invertible): express `point − origin` in the
+    /// non-orthogonal basis `(e1, e2)`, round the two coefficients to the nearest
+    /// integers, then map the rounded `(i, j)` back to world. The cursor `z` is
+    /// passed through unchanged.
+    ///
+    /// This is the iso analog of `snappedToGrid`; the `Snapping.snap(...,
+    /// isoPlane:)` dispatch calls it ONLY when an iso plane is active, so the
+    /// rectangular (world-frame) snap is left byte-identical when no plane is set.
+    static func snappedToIsoGrid(_ point: Vector, spacing: Double,
+                                 plane: IsoPlane, origin: Vector = .zero) -> Vector {
+        guard spacing > Tolerance.distance else { return point }
+        let (e1, e2) = plane.gridBasis(spacing: spacing)
+        // Solve [e1 e2] · (i, j)ᵀ = (point − origin) for the real coefficients, then
+        // round to the nearest integer node. det ≠ 0 (iso axes are independent).
+        let p = point - origin
+        let det = e1.x * e2.y - e1.y * e2.x
+        guard abs(det) > Tolerance.distanceSquared else {
+            // Degenerate basis (cannot happen for a real iso plane) → leave the point.
+            return point
+        }
+        // Cramer's rule for the (i, j) coefficients.
+        let iCoef = (p.x * e2.y - p.y * e2.x) / det
+        let jCoef = (e1.x * p.y - e1.y * p.x) / det
+        let i = iCoef.rounded(.toNearestOrAwayFromZero)
+        let j = jCoef.rounded(.toNearestOrAwayFromZero)
+        let node = origin + e1 * i + e2 * j
+        return Vector(node.x, node.y, point.z)
     }
 
     // MARK: - Intersection between two entities (RS_Information adapter)
