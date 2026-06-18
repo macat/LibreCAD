@@ -142,6 +142,112 @@ final class CrosshairOverlayView: NSView {
         }
     }
 
+    // MARK: Isometric crosshair geometry (Wave 3)
+
+    /// Compute the cross-line segments for an ISOMETRIC crosshair: the two lines run
+    /// along `axisAngles` (the active iso plane's two drawing-axis directions, in
+    /// SCREEN space) instead of the rectangular horizontal+vertical. When
+    /// `axisAngles == nil` this returns the SAME result as the rectangular
+    /// `crosshairGeometry(style:bounds:center:)` above (byte-identical), so the
+    /// non-iso path is unchanged — the wire-wave passes `nil` whenever no iso plane is
+    /// active and the two screen-space axis angles when one is.
+    ///
+    /// SCREEN-SPACE CONVENTION: the angles are measured in the overlay's flipped
+    /// (top-left, Y-DOWN) coordinate space, matching `center`/`bounds`. World iso-axis
+    /// angles are Y-UP, so the wire-wave NEGATES each world axis angle before passing
+    /// it here (the `Viewport` flips Y exactly once on `worldToScreen`). The geometry
+    /// math itself is frame-agnostic — it just strokes two lines at the given angles.
+    ///
+    /// - `.full`  — each line is the infinite line through `center` at its axis angle,
+    ///   CLIPPED to `bounds` (the iso "spider" cross). A line that misses the rect
+    ///   (degenerate) yields a `nil` segment.
+    /// - `.small` — each line is a short `±smallArmHalf` arm centered on `center`,
+    ///   rotated to its axis angle.
+    /// - `.none`  — no lines (both `nil`).
+    ///
+    /// The `vertical` slot carries the FIRST axis (`axisAngles.0`) and `horizontal`
+    /// the SECOND (`axisAngles.1`); the names are kept for storage compatibility — for
+    /// an iso cross they are simply "axis 1" / "axis 2", not literally V/H.
+    static func crosshairGeometry(style: CrosshairStyle,
+                                  bounds: CGRect,
+                                  center: CGPoint,
+                                  axisAngles: (Double, Double)?) -> CrosshairGeometry {
+        // No iso plane → exactly the rectangular geometry (unchanged path).
+        guard let (angle1, angle2) = axisAngles else {
+            return crosshairGeometry(style: style, bounds: bounds, center: center)
+        }
+        switch style {
+        case .none:
+            return CrosshairGeometry(vertical: nil, horizontal: nil)
+        case .full:
+            return CrosshairGeometry(
+                vertical: clippedLine(through: center, angle: angle1, in: bounds),
+                horizontal: clippedLine(through: center, angle: angle2, in: bounds))
+        case .small:
+            return CrosshairGeometry(
+                vertical: arm(through: center, angle: angle1, half: smallArmHalf),
+                horizontal: arm(through: center, angle: angle2, half: smallArmHalf))
+        }
+    }
+
+    /// A short fixed-length line segment of half-length `half` through `center` at
+    /// `angle` (radians, in the same space as `center`).
+    private static func arm(through center: CGPoint, angle: Double,
+                            half: CGFloat) -> (from: CGPoint, to: CGPoint) {
+        let dx = CGFloat(cos(angle)) * half
+        let dy = CGFloat(sin(angle)) * half
+        return (CGPoint(x: center.x - dx, y: center.y - dy),
+                CGPoint(x: center.x + dx, y: center.y + dy))
+    }
+
+    /// The infinite line through `center` at `angle`, clipped to `rect`, as an
+    /// inclusive `(from, to)` endpoint pair — or `nil` if the line does not cross the
+    /// rect (e.g. the center lies outside it on an axis that misses the box).
+    ///
+    /// Liang–Barsky–style parametric clip: the line is `center + t·(cos, sin)` for
+    /// `t ∈ ℝ`; we intersect each of the four rect edges, keep the `[tMin, tMax]`
+    /// interval that stays inside, and emit the two endpoints. Handles the
+    /// axis-aligned (`cos == 0` or `sin == 0`) cases — so passing the rectangular
+    /// horizontal (`0`) / vertical (`π/2`) angles reproduces a full-span line.
+    private static func clippedLine(through center: CGPoint, angle: Double,
+                                    in rect: CGRect) -> (from: CGPoint, to: CGPoint)? {
+        let dx = cos(angle)
+        let dy = sin(angle)
+        var tMin = -Double.greatestFiniteMagnitude
+        var tMax = Double.greatestFiniteMagnitude
+        let cx = Double(center.x), cy = Double(center.y)
+        let minX = Double(rect.minX), maxX = Double(rect.maxX)
+        let minY = Double(rect.minY), maxY = Double(rect.maxY)
+
+        // Clip against one pair of parallel edges. `p` is the direction component,
+        // `q1`/`q2` the slack from the center to the near/far edge of the pair.
+        // Returns false if the line is wholly outside that slab.
+        func clip(_ p: Double, _ q1: Double, _ q2: Double) -> Bool {
+            if abs(p) < 1e-12 {
+                // Parallel to this edge pair: inside iff the center is within the slab.
+                return q1 >= 0 && q2 >= 0
+            }
+            // t at each edge of the pair.
+            var tA = -q1 / p
+            var tB = q2 / p
+            if tA > tB { swap(&tA, &tB) }
+            tMin = Swift.max(tMin, tA)
+            tMax = Swift.min(tMax, tB)
+            return tMin <= tMax
+        }
+
+        // X slab: minX ≤ cx + t·dx ≤ maxX → with q1 = cx − minX, q2 = maxX − cx,
+        // the edge parameters are t = −q1/dx (at minX) and t = q2/dx (at maxX).
+        guard clip(dx, cx - minX, maxX - cx) else { return nil }
+        // Y slab.
+        guard clip(dy, cy - minY, maxY - cy) else { return nil }
+        guard tMin <= tMax else { return nil }
+
+        let from = CGPoint(x: cx + tMin * dx, y: cy + tMin * dy)
+        let to = CGPoint(x: cx + tMax * dx, y: cy + tMax * dy)
+        return (from, to)
+    }
+
     /// Resolve the user's crosshair-style preference from UserDefaults, falling back
     /// to the app default (`.full` — the full-window "spider" crosshair;
     /// `AppSettings.Default.crosshairStyle`) when unset or holding a legacy/unknown value.

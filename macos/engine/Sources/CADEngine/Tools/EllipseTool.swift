@@ -95,6 +95,20 @@ public struct EllipseTool: Tool {
         case inscribeQuad
         /// Axis-defined ellipse PLUS start/end angles → an elliptic ARC.
         case arc
+        /// ISOMETRIC circle (AutoCAD ELLIPSE → `Isocircle`): center → radius. The
+        /// committed ellipse is the projection of a true circle lying flat on the
+        /// active iso `plane` — its major axis runs along that plane's LONG iso
+        /// diagonal and its minor/major `ratio == tan(30°) ≈ 0.57735`. The radius is
+        /// the major SEMI-axis. The active plane is fixed at construction (the
+        /// wire-wave passes `CanvasModel`'s current `IsoPlane`).
+        case isocircle(plane: IsoPlane)
+
+        /// Whether this is the `.isocircle` mode (it carries an associated `IsoPlane`,
+        /// so a plain `== .isocircle` is impossible — this is the case test).
+        var isIsocircle: Bool {
+            if case .isocircle = self { return true }
+            return false
+        }
     }
 
     /// The construction mode for this tool instance (fixed for the instance's
@@ -133,6 +147,11 @@ public struct EllipseTool: Tool {
         /// Collecting points (4-point fit) or corners (inscribe). `points` holds
         /// the picks so far (0...3); the 4th pick commits.
         case collecting(points: [Vector])
+
+        // --- .isocircle ---
+        /// Center fixed; waiting for the RADIUS point (center → cursor distance is the
+        /// isocircle radius, i.e. the major semi-axis). `plane` is the active iso plane.
+        case settingIsoRadius(center: Vector, plane: IsoPlane)
     }
 
     /// The current state. The initial case depends on the mode.
@@ -146,7 +165,7 @@ public struct EllipseTool: Tool {
     public init(mode: Mode = .axis) {
         self.mode = mode
         switch mode {
-        case .axis, .arc:               self.state = .settingCenter
+        case .axis, .arc, .isocircle:   self.state = .settingCenter
         case .fociPoint:                self.state = .settingFocus1
         case .fourPoint, .inscribeQuad: self.state = .collecting(points: [])
         }
@@ -161,12 +180,17 @@ public struct EllipseTool: Tool {
         case .fourPoint:    return "Ellipse (4 Points)"
         case .inscribeQuad: return "Ellipse (Inscribed)"
         case .arc:          return "Elliptical Arc"
+        case .isocircle:    return "Isometric Circle"
         }
     }
 
     public var status: String {
         switch state {
-        case .settingCenter:    return "Specify center point"
+        case .settingCenter:
+            // The isocircle's first pick is its center, but the prompt then asks for a
+            // radius (not an axis endpoint) — differentiate it from the axis modes.
+            return (mode.isIsocircle) ? "Specify center of isocircle" : "Specify center point"
+        case .settingIsoRadius: return "Specify radius of isocircle"
         case .settingMajor:     return "Specify first axis endpoint"
         case .settingRatio:     return "Specify minor axis distance"
         case .settingArcStart:  return "Specify start angle"
@@ -215,6 +239,10 @@ public struct EllipseTool: Tool {
             let endAngle = Self.ellipseAngle(center: center, majorP: majorP, ratio: ratio, point: cursor)
             return EllipseData(center: center, majorP: majorP, ratio: ratio,
                                startAngle: startAngle, endAngle: endAngle, reversed: false)
+
+        case .settingIsoRadius(let center, let plane):
+            guard cursor.valid else { return nil }
+            return Self.isocircle(center: center, radiusPoint: cursor, plane: plane)
 
         case .settingFociPoint(let focus1, let focus2):
             guard cursor.valid else { return nil }
@@ -417,11 +445,35 @@ public struct EllipseTool: Tool {
 
     private mutating func handleClick(_ p: Vector) -> ToolOutcome {
         switch mode {
-        case .axis:         return handleAxisClick(p, commitArc: false)
-        case .arc:          return handleAxisClick(p, commitArc: true)
-        case .fociPoint:    return handleFociClick(p)
-        case .fourPoint:    return handleCollectClick(p, fit: Self.fromFourPoints)
-        case .inscribeQuad: return handleCollectClick(p, fit: Self.fromInscribedQuad)
+        case .axis:               return handleAxisClick(p, commitArc: false)
+        case .arc:                return handleAxisClick(p, commitArc: true)
+        case .fociPoint:          return handleFociClick(p)
+        case .fourPoint:          return handleCollectClick(p, fit: Self.fromFourPoints)
+        case .inscribeQuad:       return handleCollectClick(p, fit: Self.fromInscribedQuad)
+        case .isocircle(let pl):  return handleIsocircleClick(p, plane: pl)
+        }
+    }
+
+    /// `.isocircle` click handler: center → radius → commit. The first click fixes the
+    /// center; the second commits an isometric circle of radius |p − center| oriented
+    /// on `plane`. A degenerate (zero-radius) second pick is IGNORED.
+    private mutating func handleIsocircleClick(_ p: Vector, plane: IsoPlane) -> ToolOutcome {
+        switch state {
+        case .settingCenter:
+            guard p.valid else { return .none }
+            state = .settingIsoRadius(center: p, plane: plane)
+            cursor = p
+            return .none
+
+        case .settingIsoRadius(let center, let pl):
+            guard center.valid, p.valid,
+                  let data = Self.isocircle(center: center, radiusPoint: p, plane: pl) else {
+                return .none
+            }
+            return commitEllipse(data)
+
+        default:
+            return .none
         }
     }
 
@@ -582,13 +634,19 @@ public struct EllipseTool: Tool {
             state = .collecting(points: Array(pts.dropLast()))
             cursor = last
             return .preview
+
+        case .settingIsoRadius(let center, _):
+            // Step back to picking the center (mirrors .settingMajor → reset spine).
+            reset()
+            cursor = center
+            return .preview
         }
     }
 
     /// Returns to this mode's initial waiting state.
     private mutating func reset() {
         switch mode {
-        case .axis, .arc:               state = .settingCenter
+        case .axis, .arc, .isocircle:   state = .settingCenter
         case .fociPoint:                state = .settingFocus1
         case .fourPoint, .inscribeQuad: state = .collecting(points: [])
         }
@@ -638,6 +696,51 @@ public struct EllipseTool: Tool {
         var diff = (b - a).truncatingRemainder(dividingBy: twoPi)
         if diff < 0 { diff += twoPi }                 // → [0, 2π)
         return diff < Tolerance.angle || (twoPi - diff) < Tolerance.angle
+    }
+
+    // MARK: - Isometric circle construction (.isocircle)
+
+    /// The minor/major ratio of EVERY isometric circle: `tan(30°) = 1/√3 ≈ 0.57735`.
+    /// An iso-circle is a true circle on an iso face projected onto the screen; the
+    /// projection squashes the short diagonal of the iso rhombus to `tan(30°)` of the
+    /// long one, so the inscribed-ellipse ratio is this constant for all three planes.
+    public static let isoCircleRatio: Double = tan(Double.pi / 6)   // tan(30°) ≈ 0.57735
+
+    /// The major-axis DIRECTION (unit vector) of an isometric circle on `plane`: the
+    /// LONGER diagonal of the rhombus spanned by the plane's two iso-axis unit
+    /// directions `(a₁, a₂)`. The long diagonal of that rhombus is the major axis of
+    /// the inscribed (iso-)circle and the short diagonal the minor axis. Resolving it
+    /// straight from `IsoPlane.axisDirections` keeps the orientation derived from the
+    /// single source of truth — yielding the canonical angles per plane:
+    ///   - `.top`   → 0°   (horizontal)
+    ///   - `.left`  → 120°
+    ///   - `.right` → 60°
+    public static func isoMajorAxisDirection(_ plane: IsoPlane) -> Vector {
+        let (a1, a2) = plane.axisDirections
+        let sum = a1 + a2          // one rhombus diagonal
+        let diff = a1 - a2         // the other rhombus diagonal
+        // The LONGER diagonal is the major axis (the iso-circle is widest across it).
+        let longer = sum.magnitude >= diff.magnitude ? sum : diff
+        let len = longer.magnitude
+        guard len > Tolerance.distance else { return Vector(angle: 0) }
+        return longer / len
+    }
+
+    /// Builds an ISOMETRIC CIRCLE (AutoCAD ELLIPSE → `Isocircle`): a `center` and a
+    /// `radiusPoint` whose distance to the center is the circle radius, projected onto
+    /// `plane`. The result is an `EllipseData` whose:
+    ///   - major axis runs along `isoMajorAxisDirection(plane)` (the long iso diagonal),
+    ///   - major SEMI-axis length == the radius (`|radiusPoint − center|`),
+    ///   - `ratio == isoCircleRatio` (`tan(30°)`).
+    /// Returns `nil` for a degenerate (zero) radius. `startAngle == endAngle == 0`, so
+    /// it commits as a WHOLE ellipse (the `isArc` convention).
+    public static func isocircle(center: Vector, radiusPoint: Vector,
+                                 plane: IsoPlane) -> EllipseData? {
+        guard center.valid, radiusPoint.valid else { return nil }
+        let radius = center.distance(to: radiusPoint)
+        guard radius > Tolerance.distance else { return nil }
+        let majorP = isoMajorAxisDirection(plane) * radius
+        return EllipseData(center: center, majorP: majorP, ratio: isoCircleRatio)
     }
 
     // MARK: - Foci + point construction (.fociPoint)
