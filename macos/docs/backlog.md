@@ -29,6 +29,37 @@ Newly-found open items from the 2026-06-18 docs/state reconciliation audit.
   with no checkmark / dynamic Lock↔Unlock title; lock state is surfaced only via the status-bar RelZero chip
   (`CanvasModel.swift:3157/3165`). Minor UX polish. *(audit 2026-06-18)*
 
+## Constraints program follow-ups (2026-06-18)
+Deferred items from the parametric-constraints program (AutoConstrain + 7 new kinds + GUI). The bug
+fix + the 7 straightforward AutoCAD kinds + the panel shipped; these are the documented residuals.
+- **tangent + symmetric constraints not implemented** — left DECLARED + `.failed(.unsupported)` in every
+  switch (critic IMPORTANT-7 split). `tangent` needs a distance-to-curve residual (line↔circle:
+  `dist(center,line)==r`; circle↔circle: `|c1−c2|==r1±r2`); `symmetric` needs a symmetry-AXIS reference and
+  a defined `points`-ordering contract (the value model's `points` ordering is unspecified for it) — a small
+  ADR addendum + residual-design pass. *(constraints Lane B, deferred)*
+- **Inline dimensional-value edit in the Constraints panel** — the panel shows dimensional values READ-ONLY;
+  editing them needs an undo-grouped `setConstraintValue` re-solve funnel on `CanvasModel` (today only
+  `drawing.editConstraint` + a separate `resolveConstraints` exist). Add the funnel, then surface an editable
+  field in `ConstraintsSidebar`/Inspector. *(constraints Lane C, deferred)*
+- **AutoConstrain weld tolerance is exact (1e-6)** — welds endpoints that are coincident-by-value (snapped /
+  chained LineTool draws — the owner's case). Eyeballed corners with a real gap do NOT weld. Add an
+  AutoConstrain **distance tolerance** setting (AutoCAD "Constraint Settings ▸ Tolerances ▸ Distance") and use
+  the snap aperture, with the tentative-solve safeguard, so non-snapped "drawn-like-that" corners also weld.
+  Also: auto-constrain currently lines-only (the MVP solver can't resolve polyline endpoints — `VariableLayout`
+  returns `false` for them); welding polyline vertices needs solver work. *(constraints Lane A, deferred)*
+- **AutoConstrain perf** — `nearestExistingLineEndpoint` linearly scans all entities per new endpoint (fine for
+  the single-segment LineTool path; `// TODO(perf)` in place). Use the quadtree for a future bulk/polyline-draw
+  path. *(constraints Lane A, NIT)*
+- **Lane B review NITs** — (a) `ConstraintSolver.swift:874` equal-lines comment says "L is a line DOF
+  (half-length)" but `lineLength` computes the true Euclidean segment length — reword. (b) H/V-distance on an
+  arc/ellipse: the engine's `addConstraint` resolves it (center) but `currentDimensionalValue`→`startPoint`
+  returns `nil` for arc/ellipse, so the UI rejects it (fails closed, no crash) — extend `startPoint` to
+  arc/ellipse centers or document the point-only restriction. *(constraints review-laneB NITs)*
+- **Constraints panel** — `pairJoiner` (ConstraintListLogic.swift:209) has a `default` arm (not
+  compiler-exhaustive like `displayName`) — a future kind silently gets the neutral "·" joiner (cosmetic).
+  Optionally drop the `default`. Add a test for `referenceDescription`'s multi-role single-entity branch.
+  *(constraints review-laneC NITs)*
+
 ## Parity program — W1 follow-up NITs (text-style round-trip)
 - **Loaded-file re-save adds a benign `1071=1` on Standard** — `DXFReader` decodes libdxfrw's default stroke font "txt" to `.native(family:"txt")`, which `makeTextStyle` re-encodes WITH the TTF flag, so re-saving a *loaded* file gains a spurious `1071=1` on Standard. Functionally benign (code-3 name preserved; consistent with the dimStyle precedent) — but scope the "byte-identical" comment (DXFWriter.swift ~266-279) to new/in-memory drawings, OR decode a bare no-flag/no-extension name to a flag-free source. *(review-w1a NIT-1)*
 - **Partial 1071 fidelity** — reader extracts only TTF/bold/italic bits from code 1071; AutoCAD charset/pitch low-byte bits are dropped on round-trip. Acceptable (name is what renders); a raw-int `LCTextStyle.fontFamily` model field would be needed for full fidelity. *(review-w1a NIT-2)*
