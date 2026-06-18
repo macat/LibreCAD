@@ -417,6 +417,9 @@ private final class PODBuilder {
     /// Each interned double array (spline knots / weights) is a heap `Double`
     /// buffer, same lifetime.
     private var doubleBuffers: [UnsafeMutableBufferPointer<Double>] = []
+    /// Each interned Int32 array (MLINE per-element colors) is a heap `Int32`
+    /// buffer, same lifetime.
+    private var int32Buffers: [UnsafeMutableBufferPointer<Int32>] = []
     /// Each interned attribute array (ATTRIB / ATTDEF) is a heap `LCAttrib`
     /// buffer, same lifetime. The `tag`/`text`/`prompt` C strings each `LCAttrib`
     /// borrows are interned into `strings` (same builder lifetime).
@@ -427,6 +430,7 @@ private final class PODBuilder {
         for v in vertexBuffers { v.deallocate() }
         for l in loopBuffers { l.deallocate() }
         for d in doubleBuffers { d.deallocate() }
+        for i in int32Buffers { i.deallocate() }
         for a in attribBuffers { a.deallocate() }
     }
 
@@ -511,6 +515,16 @@ private final class PODBuilder {
         let buf = UnsafeMutableBufferPointer<Double>.allocate(capacity: values.count)
         _ = buf.initialize(from: values)
         doubleBuffers.append(buf)
+        return (UnsafePointer(buf.baseAddress!), Int32(values.count))
+    }
+
+    /// Interns an `Int32` list (MLINE per-element colors) as a stable contiguous
+    /// block. Returns `(nil, 0)` for an empty list.
+    private func internInt32s(_ values: [Int32]) -> (UnsafePointer<Int32>?, Int32) {
+        guard !values.isEmpty else { return (nil, 0) }
+        let buf = UnsafeMutableBufferPointer<Int32>.allocate(capacity: values.count)
+        _ = buf.initialize(from: values)
+        int32Buffers.append(buf)
         return (UnsafePointer(buf.baseAddress!), Int32(values.count))
     }
 
@@ -924,14 +938,39 @@ private final class PODBuilder {
             e.vertices = wptr
             e.vertexCount = wcount
 
-        case .mline:
-            // Wave-0 STUB: the real DXF MLINE write arm (a bridge POD field set +
-            // `dxfRW::writeMLine` dispatch) is a LATER wave. Until the bridge gains
-            // `LC_ENT_MLINE`, mark it UNSUPPORTED so the C side counts it skipped (no
-            // bytes emitted), exactly like the interim WIPEOUT/MLEADER stubs were.
-            // The engine's own Codable document path still round-trips an MLINE
-            // losslessly (vertices + inline elements + justification/scale/closed).
-            e.kind = Int32(LC_ENT_UNSUPPORTED.rawValue)
+        case .mline(let d):
+            // Emitted as a DXF MLINE (DRW_MLine / AcDbMline) via STOCK
+            // `dxfRW::writeMLine` — ZERO vendored libdxfrw edits. The vertex path →
+            // the flat vertex array (codes 10/11); scale → mlineScale (code 40);
+            // justification → mlineJustification (code 70: the engine's raw value 0
+            // top / 1 zero / 2 bottom IS the DXF value); closed → mlineClosed (code 71
+            // bit 0). The per-element offsets + colors do NOT live on the DXF MLINE
+            // entity (they belong to the MLINESTYLE, which stock libdxfrw cannot
+            // write), so they ride a "LIBRECAD" XDATA element table the C side builds
+            // from mlineElementOffsets/mlineElementColors (full round-trip for our own
+            // files; a foreign reader still sees the element count via code 73). A nil
+            // per-element color → the `mlineColorNone` sentinel (mirrors the C bridge's
+            // `LC_MLINE_COLOR_NONE` == Int32.min; restated because the C macro is not
+            // Swift-importable). MLINE needs R2000+; at R12 / on DWG the C side drops it
+            // (counted skipped), like MTEXT/DIMENSION.
+            e.kind = Int32(LC_ENT_MLINE.rawValue)
+            let (vptr, vcount) = internPoints(d.vertices)
+            e.vertices = vptr
+            e.vertexCount = vcount
+            e.mlineScale = d.scale
+            e.mlineJustification = Int32(d.justification.rawValue)
+            e.mlineClosed = d.closed ? 1 : 0
+            e.mlineElementCount = Int32(d.elements.count)
+            let (optr, _) = internDoubles(d.elements.map(\.offset))
+            e.mlineElementOffsets = optr
+            // `Int32.min` mirrors the C bridge's `LC_MLINE_COLOR_NONE` (not importable).
+            let mlineColorNone = Int32.min
+            let colors: [Int32] = d.elements.map { el in
+                if let ci = el.colorIndex { return Int32(truncatingIfNeeded: ci) }
+                return mlineColorNone
+            }
+            let (cptr, _) = internInt32s(colors)
+            e.mlineElementColors = cptr
         }
         return e
     }

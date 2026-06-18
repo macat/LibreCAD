@@ -92,6 +92,7 @@ struct LCEntityList {
     std::deque<std::string>          strings;
     std::deque<std::vector<LCVertex>> vertexPool;
     std::deque<std::vector<double>>  doublePool;
+    std::deque<std::vector<int32_t>> int32Pool;   // MLINE per-element colors (read path)
     std::deque<std::vector<LCLoop>>  loopPool;
     // Block ATTRIB / ATTDEF flat arrays (one vector per owning INSERT / block).
     // Each LCEntity.attribs / LCBlock.attribDefs borrows a pointer into one of
@@ -128,6 +129,17 @@ constexpr const char *kDynAttrTag = "LIBRECAD$DYN";
 
 // Whether an attribute tag is the reserved dynamic-block carrier tag.
 inline bool isDynamicAttrTag(const std::string &tag) { return tag == kDynAttrTag; }
+
+// ----- MLINE element-table XDATA carrier (shared by the reader + writer) ------
+// A DXF MLINE entity does NOT carry its per-element OFFSETS/COLORS — those live in
+// the referenced MLINESTYLE object, which stock libdxfrw cannot write or read on the
+// DXF path. To round-trip element geometry with ZERO vendored edits we ride the MLINE
+// entity's own XDATA (extData), which stock `dxfRW::writeMLine` DOES emit and the
+// stock reader DOES collect. The group, under appid "LIBRECAD": one 1001 appid string,
+// then a 1070 element-count, then per element a (1040 offset, 1070 color) pair — color
+// LC_MLINE_COLOR_NONE means "no override". A foreign reader ignores the unknown appid;
+// AutoCAD still draws N lines from code 73 (numLines).
+constexpr const char *kMLineAppId = "LIBRECAD";
 
 // ----- HATCH gradient kind <-> DRW gradient name (code 470) ------------------
 // AutoCAD gradient names: LINEAR / CYLINDER (and INV*) are directional ramps
@@ -436,6 +448,12 @@ public:
         e.imgClip = 0;
         e.imgShow = 1;
         e.wipeoutClipMode = 0;          // code 290 absent ⇒ 0 (mask polygon interior)
+        e.mlineScale = 1.0;             // code 40 absent ⇒ unit scale
+        e.mlineJustification = 1;       // code 70 default ⇒ zero (centerline on path)
+        e.mlineClosed = 0;              // code 71 bit 0 absent ⇒ open
+        e.mlineElementCount = 0;
+        e.mlineElementOffsets = nullptr;
+        e.mlineElementColors = nullptr;
         e.attribs = nullptr;
         e.attribCount = 0;
         e.vertices = nullptr;
@@ -1049,6 +1067,124 @@ public:
             e.lineType = intern("BYLAYER");
         }
         pushEntity(e);
+    }
+
+    // MLINE entity (DRW_MLine / AcDbMline): N parallel line ELEMENTS along a shared
+    // vertex PATH. The path vertices are the per-vertex baseline points
+    // (`vertlist[].position`, codes 10/11); the scalars are `scale` (40),
+    // `justification` (70: 0 top / 1 zero / 2 bottom) and `openClosed` (71, bit 0 =
+    // closed). The per-ELEMENT offsets + colors are NOT on the entity in stock DXF
+    // (they live in the MLINESTYLE, which libdxfrw does not parse) — they are decoded
+    // from our "LIBRECAD" XDATA element table when present; otherwise (a FOREIGN file)
+    // they fall back to `numLines` evenly-spaced default offsets so the multiline still
+    // imports as a real `.mline` with the right element COUNT, not a noisy skip.
+    void addMLine(const DRW_MLine *data) override {
+        ++m_out->geometryCount;
+        LCEntity e = makeEntity(LC_ENT_MLINE);
+        if (data == nullptr) { pushEntity(e); return; }
+        fillCommon(e, *data);
+        e.mlineScale = data->scale;
+        // justification: DRW masks to 0..3; clamp to our 0(top)/1(zero)/2(bottom).
+        e.mlineJustification = (data->justification <= 2)
+                                   ? static_cast<int32_t>(data->justification) : 1;
+        e.mlineClosed = (data->openClosed & 0x1) ? 1 : 0;
+
+        // Path vertices ← per-vertex baseline points.
+        m_out->vertexPool.emplace_back();
+        std::vector<LCVertex> &verts = m_out->vertexPool.back();
+        verts.reserve(data->vertlist.size());
+        for (const auto &v : data->vertlist) {
+            verts.push_back(LCVertex{v.position.x, v.position.y, 0.0});
+        }
+        e.vertices = verts.empty() ? nullptr : verts.data();
+        e.vertexCount = static_cast<int32_t>(verts.size());
+
+        // Element offsets + colors: prefer our XDATA element table (full fidelity);
+        // else synthesize `numLines` defaults so a foreign MLINE still round-trips its
+        // element count + the centered default fan.
+        std::vector<double> offsets;
+        std::vector<int32_t> colors;
+        decodeMLineElementsXData(*data, offsets, colors);
+        if (offsets.empty()) {
+            const int n = std::max(0, static_cast<int>(data->numLines));
+            synthesizeDefaultMLineElements(n, offsets, colors);
+        }
+        if (!offsets.empty()) {
+            m_out->doublePool.push_back(std::move(offsets));
+            m_out->int32Pool.push_back(std::move(colors));
+            const std::vector<double> &offRef = m_out->doublePool.back();
+            const std::vector<int32_t> &colRef = m_out->int32Pool.back();
+            e.mlineElementOffsets = offRef.data();
+            e.mlineElementColors = colRef.data();
+            e.mlineElementCount = static_cast<int32_t>(offRef.size());
+        }
+        pushEntity(e);
+    }
+
+    // Scan a DRW_MLine's FIFO extData for our "LIBRECAD" element table:
+    //   1001 "LIBRECAD", 1070 <count>, then <count>× (1040 offset, 1070 color).
+    // Fills `offsets`/`colors` (parallel, same length) and leaves them EMPTY if the
+    // group is absent (a foreign file). Robust to interleaved/foreign XDATA groups:
+    // it only reads pairs while inside an open "LIBRECAD" group.
+    static void decodeMLineElementsXData(const DRW_MLine &data,
+                                         std::vector<double> &offsets,
+                                         std::vector<int32_t> &colors) {
+        bool inGroup = false;
+        bool haveCount = false;
+        bool pendingOffset = false;
+        double offset = 0.0;
+        for (const auto &sp : data.extData) {
+            if (!sp) continue;
+            const DRW_Variant &v = *sp;
+            switch (v.code()) {
+            case 1001:
+                inGroup = (v.type() == DRW_Variant::STRING && v.c_str() != nullptr &&
+                           std::string(v.c_str()) == kMLineAppId);
+                haveCount = false;
+                pendingOffset = false;
+                break;
+            case 1070:
+                if (!inGroup || v.type() != DRW_Variant::INTEGER) break;
+                if (!haveCount) {
+                    haveCount = true;          // the element-count marker (ignored as a cap)
+                } else if (pendingOffset) {
+                    colors.push_back(static_cast<int32_t>(v.i_val()));
+                    pendingOffset = false;
+                }
+                break;
+            case 1040:
+                if (inGroup && haveCount && v.type() == DRW_Variant::DOUBLE) {
+                    offset = v.d_val();
+                    offsets.push_back(offset);
+                    pendingOffset = true;
+                }
+                break;
+            default:
+                break;
+            }
+        }
+        // A malformed group could leave an offset without its color; pad with NONE so
+        // the two arrays stay the same length (never over-read on the Swift side).
+        while (colors.size() < offsets.size()) colors.push_back(LC_MLINE_COLOR_NONE);
+        if (colors.size() > offsets.size()) colors.resize(offsets.size());
+    }
+
+    // Default element fan for a FOREIGN MLINE (no LIBRECAD XDATA): n evenly-spaced
+    // offsets centered on 0 (the AutoCAD STANDARD style is a ±0.5 pair). Colors are
+    // all "none" (inherit the entity pen). n==0 ⇒ empty (degenerate-safe).
+    static void synthesizeDefaultMLineElements(int n,
+                                               std::vector<double> &offsets,
+                                               std::vector<int32_t> &colors) {
+        if (n <= 0) return;
+        offsets.reserve(n);
+        colors.reserve(n);
+        // Spread across [+0.5 .. -0.5] (top→bottom), matching AutoCAD's STANDARD pair.
+        for (int i = 0; i < n; ++i) {
+            const double t = (n == 1) ? 0.0
+                                      : 0.5 - static_cast<double>(i) / (n - 1);
+            offsets.push_back(t);
+            colors.push_back(LC_MLINE_COLOR_NONE);
+        }
     }
     // IMAGEDEF object (DRW_ImageDef): recorded in the handle→def map so a pending
     // IMAGE can resolve its path + pixel size by its code-340 reference.
@@ -1847,6 +1983,14 @@ public:
     // has no multileader path. On DWG we skip (return false → caller counts the skip),
     // DXF emits the (geometry-light) MULTILEADER scalars.
     bool emitMLeader(DRW_MLeader *e)    { if (m_dwg) return false; return m_dxf->writeMultiLeader(e); }
+    // dxfRW::writeMLine needs R2000+ (returns true-but-emits-nothing at <= AC1009);
+    // dwgWriter15 has no MLINE path. On DWG, or at R12, we skip (return false → the
+    // caller counts the skip), exactly like MTEXT/DIMENSION/MULTILEADER.
+    bool emitMLine(DRW_MLine *e) {
+        if (m_dwg) return false;
+        if (m_dxf->getVersion() <= DRW::AC1009) return false;
+        return m_dxf->writeMLine(e);
+    }
 
     // ----- attribute mapping (inverse of FlatteningReader::fillCommon) -----
     void fillCommon(DRW_Entity &ent, const LCEntity &src) {
@@ -2317,6 +2461,7 @@ private:
         case LC_ENT_MLEADER:    writeMLeader(e);    break;
         case LC_ENT_IMAGE:      writeImage(e);      break;
         case LC_ENT_WIPEOUT:    writeWipeout(e);    break;
+        case LC_ENT_MLINE:      writeMLine(e);      break;
         default:                ++m_skipped;        break; // UNSUPPORTED / ...
         }
     }
@@ -2486,6 +2631,68 @@ private:
             img.clipPath.emplace_back(e.vertices[i].x, e.vertices[i].y);
         }
         if (!m_dxf->writeWipeout(&img)) { ++m_skipped; }
+    }
+
+    // ----- MLINE (multiline) ---------------------------------------------
+    // Emit a DXF MLINE (the inverse of FlatteningReader::addMLine) via STOCK
+    // dxfRW::writeMLine — ZERO vendored edits. The path vertices (the flat array) →
+    // per-vertex baseline points (DRW_MLineVertex::position, codes 10/11); scale →
+    // code 40; justification → code 70; closed → code 71 bit 0; element count →
+    // numLines (code 73). The per-ELEMENT offsets + colors do not exist on the DXF
+    // MLINE entity (they live in the MLINESTYLE, which stock libdxfrw cannot write),
+    // so they ride the "LIBRECAD" XDATA element table (DRW_Entity::extData, which
+    // writeMLine emits) — full-fidelity for our own round-trip, ignored by foreign
+    // readers (which still see the right element COUNT via code 73). styleName is set
+    // to a synthetic per-entity name for traceability; we never reference a real
+    // MLINESTYLE handle (none is written). MLINE needs R2000+; at R12 / on DWG the
+    // emit shim skips it (counted), like MTEXT/DIMENSION/MULTILEADER.
+    void writeMLine(const LCEntity &e) {
+        DRW_MLine ml;
+        fillCommon(ml, e);
+        ml.scale = e.mlineScale;
+        // justification: clamp to the DXF 0(top)/1(zero)/2(bottom) range.
+        const int just = (e.mlineJustification >= 0 && e.mlineJustification <= 2)
+                             ? e.mlineJustification : 1;
+        ml.justification = static_cast<duint8>(just);
+        ml.openClosed = (e.mlineClosed != 0) ? 1 : 0;   // bit 0 = closed
+        const int nLines = std::max(0, static_cast<int>(e.mlineElementCount));
+        ml.numLines = static_cast<duint8>(std::min(nLines, 255));
+
+        // Path vertices → DRW_MLineVertex positions. basePoint = first vertex (the
+        // DXF reference point). vertexDir/miterDir are left at default — they are
+        // AutoCAD render hints we do not consume on re-read (positions carry the path).
+        ml.vertlist.clear();
+        ml.vertlist.reserve(static_cast<size_t>(e.vertexCount));
+        for (int32_t i = 0; i < e.vertexCount; ++i) {
+            DRW_MLineVertex v;
+            v.position = DRW_Coord(e.vertices[i].x, e.vertices[i].y, 0.0);
+            ml.vertlist.push_back(std::move(v));
+        }
+        ml.numVerts = static_cast<duint16>(ml.vertlist.size());
+        if (e.vertexCount > 0) {
+            ml.basePoint = DRW_Coord(e.vertices[0].x, e.vertices[0].y, 0.0);
+        }
+        // A synthetic style name (traceable; not a referenced MLINESTYLE object).
+        ml.styleName = std::string("STANDARD");
+
+        // The "LIBRECAD" XDATA element table: 1001 appid, 1070 count, then per element
+        // (1040 offset, 1070 color). Carried on extData → writeMLine's writeExtData.
+        if (nLines > 0 && e.mlineElementOffsets != nullptr) {
+            ml.extData.push_back(std::make_shared<DRW_Variant>(
+                1001, std::string(kMLineAppId)));
+            ml.extData.push_back(std::make_shared<DRW_Variant>(
+                1070, static_cast<dint32>(nLines)));
+            for (int i = 0; i < nLines; ++i) {
+                ml.extData.push_back(std::make_shared<DRW_Variant>(
+                    1040, e.mlineElementOffsets[i]));
+                const int32_t color = (e.mlineElementColors != nullptr)
+                                          ? e.mlineElementColors[i]
+                                          : LC_MLINE_COLOR_NONE;
+                ml.extData.push_back(std::make_shared<DRW_Variant>(
+                    1070, static_cast<dint32>(color)));
+            }
+        }
+        if (!emitMLine(&ml)) { ++m_skipped; }
     }
 
     // ----- VIEWPORT (paper-space window) ---------------------------------

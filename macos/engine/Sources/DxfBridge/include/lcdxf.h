@@ -23,6 +23,13 @@
 extern "C" {
 #endif
 
+/** Sentinel for `LCEntity::mlineElementColors[i]` meaning "no per-element color
+ *  override" (== nil in the engine `MLineElement.colorIndex`). INT32_MIN can never
+ *  be a real AutoCAD Color Index (0=ByBlock, 1..255 palette, 256=ByLayer), so it is
+ *  an unambiguous "absent" marker for the XDATA element table. Defined via INT32_MIN
+ *  (from <stdint.h>) so it imports into Swift as a proper negative `Int32`. */
+#define LC_MLINE_COLOR_NONE (INT32_MIN)
+
 /**
  * Status codes returned by the bridge. Replaces the previous process-global
  * error-string scheme: every call now returns an explicit, thread-safe status,
@@ -196,6 +203,19 @@ typedef enum LCEntityKind {
      *  skipped at R12 and on DWG, like IMAGE). Distinct from LC_ENT_UNSUPPORTED so
      *  the reader maps it to `.wipeout`. */
     LC_ENT_WIPEOUT = 20,
+    /** A MULTILINE (DXF MLINE / DRW_MLine / AcDbMline): N parallel line ELEMENTS
+     *  drawn along one shared vertex PATH (AutoCAD's MLINE command — walls / multi-
+     *  line borders). The path vertices are in the flat `vertices` array (codes
+     *  10/11); the scalars `mlineScale` (40), `mlineJustification` (70) and
+     *  `mlineClosed` (71) ride the MLINE-only fields; the per-element offsets +
+     *  colors ride `mlineElementOffsets`/`mlineElementColors` (carried as entity
+     *  XDATA — see the MLINE-only field doc for why the MLINESTYLE path is unusable
+     *  with stock libdxfrw). Read: the bridge overrides `addMLine` and flattens
+     *  directly. Write: it builds a DRW_MLine + an XDATA element table and dispatches
+     *  to STOCK `dxfRW::writeMLine`. MLINE needs R2000+ (dropped at R12 and on DWG,
+     *  like MTEXT/DIMENSION). Distinct from LC_ENT_UNSUPPORTED so the reader maps it
+     *  to `.mline`. */
+    LC_ENT_MLINE = 21,
     /** An entity libdxfrw delivered but the reader does not flatten
      *  (ordinate-DIMENSION/...). Carries only its `typeName` so Swift
      *  can collect a warning; geometry fields are unset. */
@@ -482,6 +502,34 @@ typedef struct LCEntity {
      * imgSizeU/V pixel size) PLUS the masking polygon in `vertices`/`vertexCount`
      * (the clip boundary, codes 91 + 14/24, in IMAGE-PIXEL space, bulge unused). */
     int32_t wipeoutClipMode;     /**< code 290 — clip-mode flag (0/1). Round-trips. */
+
+    /* MLINE-only fields (meaningful when kind == LC_ENT_MLINE). A DXF MLINE
+     * (DRW_MLine / AcDbMline) is N parallel line ELEMENTS drawn along one shared
+     * vertex PATH. The path vertices live in the flat `vertices` array (bulge
+     * unused — codes 10/11 baseline points). The entity-level scalars are
+     * `mlineScale` (code 40), `mlineJustification` (code 70: 0 top / 1 zero / 2
+     * bottom — AutoCAD's value, identical to the engine's MLineJustification raw),
+     * and `mlineClosed` (code 71 bit 0). The per-ELEMENT offsets + colors do NOT
+     * live on the MLINE entity in DXF — they live in the referenced MLINESTYLE
+     * object, which stock libdxfrw neither writes (no writeMLineStyle / no
+     * MLINESTYLE in writeObjects) nor reads on the DXF path (processObjects parses
+     * only IMAGEDEF + PLOTSETTINGS). To round-trip element geometry with ZERO
+     * vendored edits, the bridge carries the elements as ENTITY XDATA under the
+     * "LIBRECAD" appid (the same vehicle as layer transparency / dim DSTYLE):
+     * stock `dxfRW::writeMLine` emits `ent->extData` (libdxfrw.cpp:1545) and the
+     * stock reader collects unknown XDATA into `DRW_Entity::extData`. The flat
+     * `mlineElementOffsets` / `mlineElementColors` arrays (length
+     * `mlineElementCount`) borrow the owning list's pools; a color of INT32_MIN
+     * (LC_MLINE_COLOR_NONE) means "no per-element color override" (== nil in the
+     * engine model). `numLines` (code 73) is set from `mlineElementCount` on write
+     * so a foreign reader still sees the correct element count even though it
+     * cannot decode our XDATA. */
+    double mlineScale;            /**< code 40 — overall element-offset scale (default 1). */
+    int32_t mlineJustification;  /**< code 70 — 0 top, 1 zero, 2 bottom. */
+    int32_t mlineClosed;         /**< code 71 bit 0 — 1 if the path is closed. */
+    int32_t mlineElementCount;   /**< number of parallel-line elements (== code 73). */
+    const double *mlineElementOffsets; /**< per-element signed offset (borrowed; may be NULL/0). */
+    const int32_t *mlineElementColors; /**< per-element ACI, LC_MLINE_COLOR_NONE == none (borrowed). */
 
     /* Variable-length data — borrowed pointers into the owning list's pools. */
     const LCVertex *vertices;   /**< polyline vertices, spline control points, hatch
