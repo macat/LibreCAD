@@ -777,6 +777,12 @@ struct LibreCADApp: App {
             // chord, so menu/⌘K only (the bare/⇧/⌥ W chords are unused, but the canvas
             // keymap is owned elsewhere — this wave adds only the menu entry).
             toolItem(.wipeout, nil, [])
+            // Wire-wave-1: MULTILINE (parallel mitered element lines — justification /
+            // scale set in the Tool Options bar). No free key chord, so menu/⌘K only.
+            toolItem(.mline, nil, [])
+            // Wire-wave-1: TABLE insert (click one point to place a default 3×3 grid).
+            // No free key chord, so menu/⌘K only.
+            toolItem(.table, nil, [])
         }
     }
 

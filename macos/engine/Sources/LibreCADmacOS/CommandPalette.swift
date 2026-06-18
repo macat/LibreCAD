@@ -184,6 +184,8 @@ enum CommandRegistry {
         // Parity-program W: Multiline draw tool (UNWIRED — coupled no-default arm only;
         // no canvas chord yet, so the palette surfaces it without a shortcut hint).
         case .mline:           return ("lines.measurement.horizontal", nil)
+        // Wire-wave-1: Table insert (no canvas chord yet, surfaced without a hint).
+        case .table:           return ("tablecells", nil)
         }
     }
 

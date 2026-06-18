@@ -238,4 +238,111 @@ struct WireWaveConfigTests {
         #expect(m.tool as? WipeoutTool != nil,
                 "activating .wipeout must mint a WipeoutTool")
     }
+
+    // MARK: - Multiline (MLINE) ▸ justification + scale (applyToolConfig ↔ options bar)
+
+    @Test("MLINE: default config is STANDARD-like (.top justification, scale 1)")
+    func mlineDefaults() throws {
+        let m = model()
+        m.activateTool(.mline)
+        let tool = try #require(m.tool as? MLineTool, "activating .mline must mint an MLineTool")
+        #expect(tool.justification == .top)
+        #expect(tool.scale == 1)
+    }
+
+    @Test("MLINE: the justification + scale options flow onto the minted tool")
+    func mlineConfigFlowsToTool() throws {
+        let m = model()
+        m.mlineJustification = .zero
+        m.mlineScale = 2.5
+        m.activateTool(.mline)
+        let tool = try #require(m.tool as? MLineTool)
+        #expect(tool.justification == .zero, "mlineJustification must reach the live tool")
+        #expect(tool.scale == 2.5, "mlineScale must reach the live tool")
+    }
+
+    @Test("MLINE: every justification round-trips through applyToolConfig")
+    func mlineJustificationRoundTrips() throws {
+        let m = model()
+        for j in MLineJustification.allCases {
+            m.mlineJustification = j
+            m.activateTool(.mline)
+            #expect((m.tool as? MLineTool)?.justification == j,
+                    "mlineJustification \(j) must reach the live MLineTool")
+        }
+    }
+
+    @Test("MLINE: the options bar can change justification/scale mid-run via reapply")
+    func mlineReapplyAppliesInPlace() throws {
+        let m = model()
+        m.mlineJustification = .top
+        m.mlineScale = 1
+        m.activateTool(.mline)
+        #expect((m.tool as? MLineTool)?.justification == .top)
+
+        // Mid-run change via the options-bar reapply path (in-place — no re-mint).
+        m.mlineJustification = .bottom
+        m.mlineScale = -1
+        m.reapplyActiveToolConfig()
+        let tool = try #require(m.tool as? MLineTool)
+        #expect(tool.justification == .bottom, "re-applying must push the new justification")
+        #expect(tool.scale == -1, "re-applying must push the new (mirroring) scale")
+    }
+
+    // MARK: - Table ▸ placement renders grid lines on the canvas
+
+    @Test("Table: .table activates a TableTool with no pending table")
+    func tableActivates() throws {
+        let m = model()
+        m.activateTool(.table)
+        #expect(m.activeToolKind == .table)
+        let tool = try #require(m.tool as? TableTool, "activating .table must mint a TableTool")
+        #expect(tool.pendingTable == nil, "a freshly-activated TableTool places nothing yet")
+    }
+
+    @Test("Table: a placed table is added to drawing.tables and appears in the render set")
+    func placedTableRendersGridLines() throws {
+        let m = model()
+        // No tables yet → no table render geometry.
+        #expect(m.tableRenderGeometry().isEmpty,
+                "an empty drawing must yield no table render geometry")
+
+        // Drive the tool: move (preview), then click the insertion point → place.
+        m.activateTool(.table)
+        _ = m.handleToolInput(.move(Vector(0, 0)))
+        let placed = m.handleToolInput(.click(Vector(0, 0)))
+        #expect(placed, "placing a table must report a model change")
+
+        // The undoable model op added exactly one table to the drawing.
+        #expect(m.drawing.tables.count == 1, "the click must add one table to drawing.tables")
+
+        // The render set now contains that table's GRID LINES (a default 3×3 grid has a
+        // 4-edge border + interior separators → many 2-point polylines).
+        let geos = m.tableRenderGeometry()
+        #expect(geos.count == 1, "one placed table → one ResolvedGeometry in the render set")
+        let lineCount = geos.reduce(0) { $0 + $1.polylines.count }
+        #expect(lineCount >= 4,
+                "a placed table must contribute at least its 4 border edges as grid lines")
+
+        // Undo removes the table → the render set empties again (undoable).
+        m.undoManager.undo()
+        #expect(m.drawing.tables.isEmpty, "undo must remove the placed table")
+        #expect(m.tableRenderGeometry().isEmpty,
+                "after undo the table render set must be empty again")
+    }
+
+    @Test("Table: tables are MODEL-space only — none render on a paper layout (MVP)")
+    func tablesAreModelSpaceOnly() throws {
+        let m = model()
+        m.activateTool(.table)
+        _ = m.handleToolInput(.click(Vector(0, 0)))
+        #expect(m.tableRenderGeometry().count == 1, "the table renders in model space")
+
+        // Add a layout and switch to it; the MVP keeps tables in model space, so the
+        // paper-space render set carries no tables (consistent with the entity gate).
+        m.drawing.addLayout(Layout(name: "Layout1"))
+        m.setActiveSpace(.paper, layoutName: "Layout1")
+        #expect(m.tableRenderGeometry().isEmpty,
+                "tables are model-space only this MVP — none render on a paper layout")
+    }
 }

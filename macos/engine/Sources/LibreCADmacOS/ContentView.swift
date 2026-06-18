@@ -1843,6 +1843,10 @@ enum ToolCatalog {
         // here so it is not orphaned + reachable via the Tools menu; the primary-toolbar
         // pin / canvas chord / options-bar config are a later wire-wave.
         .mline,
+        // Wire-wave-1: TABLE insert (a normal draw tool — makeTool mints a TableTool).
+        // Click one point to drop a default 3×3 grid; the app adds it to
+        // `drawing.tables` via the undoable model op (it is not an EntityKind).
+        .table,
     ]
 
     private static let modifyTools: [ToolKind] = [
@@ -1970,6 +1974,11 @@ enum ToolCatalog {
         // wire-wave). Surfaced without a shortcut hint until the chord is assigned.
         case .mline:       return .init(symbol: "lines.measurement.horizontal",
                                         help: "Draw multiline (parallel mitered element lines)",
+                                        shortcut: nil)
+        // Wire-wave-1: Table insert (click one point to place a default 3×3 grid). No
+        // canvas chord assigned yet, so the toolbar/menu/⌘K surface it without a hint.
+        case .table:       return .init(symbol: "tablecells",
+                                        help: "Insert table — click a point to place a default grid",
                                         shortcut: nil)
         }
     }

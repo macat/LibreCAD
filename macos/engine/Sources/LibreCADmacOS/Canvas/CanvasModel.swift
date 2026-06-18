@@ -992,6 +992,19 @@ final class CanvasModel {
     /// default stays `false`/in-place for byte-identical direct-engine behavior).
     var mirrorKeepOriginal: Bool = true
 
+    /// Multiline (MLINE) tool: which element rides the clicked vertex path —
+    /// top / zero / bottom (`MLineTool.justification`). `MLineJustification` is an
+    /// `Int`-raw `CaseIterable` enum (so it CAN be a Picker tag directly). Defaults to
+    /// `.top` (AutoCAD MLINE's default). `MLineTool.justification` is a settable `var`,
+    /// so `applyToolConfig` sets it IN PLACE (the RotateTool/MirrorTool pattern).
+    var mlineJustification: MLineJustification = .top
+
+    /// Multiline (MLINE) tool: the overall offset SCALE (DXF code 40) applied to every
+    /// element offset (`MLineTool.scale`). A negative scale mirrors the element fan
+    /// across the path. Defaults to `1` (the STANDARD width). Settable `var`, so
+    /// `applyToolConfig` sets it IN PLACE.
+    var mlineScale: Double = 1
+
     /// Line-construction tool: the construction METHOD. `LineConstructionTool.Mode` is
     /// a `String`-raw `CaseIterable` enum (so it CAN be a Picker tag directly — unlike
     /// the index-bound modes). `LineConstructionTool.mode` is fixed at construction, so
@@ -1307,6 +1320,44 @@ final class CanvasModel {
         let members = drawing.blockMemberIDs
         guard !members.isEmpty else { return scoped }
         return scoped.filter { !members.contains($0.id) }
+    }
+
+    // MARK: - Table render geometry (Wire-wave-1 — tables drawn on the canvas)
+
+    /// The default pen tables draw with on the canvas. Tables carry no layer / pen of
+    /// their own (a `TableObject` has only a `TableStyle`), so they render in the same
+    /// "automatic" default color the engine resolves a `.byLayer`/default entity to
+    /// (LibreCAD green) — so a placed table reads like the rest of the drawing. The
+    /// light-mode auto-invert the renderer applies to near-white pens leaves this
+    /// non-white color untouched (it only flips near-white), matching entity geometry.
+    static let tableRenderPen = ResolvedPen(color: .librecadGreen, lineType: .solid, lineWidth: .default)
+
+    /// The renderable geometry for every TABLE in the CURRENT active space — the grid
+    /// lines (`ResolvedPolyline`s) plus each non-empty cell's text SHAPED through the
+    /// SHARED `TextShaper` path (via `TableGeometry.resolve`, so there is no second text
+    /// layout — ADR-004). One `ResolvedGeometry` per table.
+    ///
+    /// MVP scope: tables live in MODEL space, so this returns nothing while a paper-
+    /// space layout (or a block-edit session) is active — keeping the table render set
+    /// consistent with how entities are space-filtered (a table never leaks onto a sheet
+    /// or into a block). The renderer iterates this AFTER the entity pack and feeds each
+    /// table's polylines/fills through the SAME `RendererGeometry` packing path, so a
+    /// placed table appears on the canvas. The set is a pure function of
+    /// `drawing.tables`, so it rebuilds whenever the table list changes (the renderer's
+    /// `modelVersion`-keyed cache repaints on every `addTable`/`updateTable`/`removeTable`,
+    /// which bump `modelVersion`).
+    ///
+    /// PURE (no Metal / no view): unit-testable headless over the `_SharedCanvasModel`
+    /// symlink — a placed table yields grid-line polylines here without a GPU.
+    func tableRenderGeometry() -> [ResolvedGeometry] {
+        // MVP: tables are MODEL-space only; nothing to draw outside model space (a paper
+        // layout or an open block-edit session scopes to a different content set).
+        guard activeSpace == .model, editingBlock == nil else { return [] }
+        guard !drawing.tables.isEmpty else { return [] }
+        let ctx = drawing.makeResolveContext()
+        return drawing.tables.map { table in
+            TableGeometry.resolve(table, pen: Self.tableRenderPen, ctx: ctx)
+        }
     }
 
     /// The `Layout` currently active (paper space), or `nil` in model space / when the
@@ -2727,6 +2778,14 @@ final class CanvasModel {
             // `false` (the default) is mirror-in-place (the original behavior).
             t.keepOriginal = mirrorKeepOriginal
             tool = t
+        case var t as MLineTool:
+            // MLineTool carries `justification` + `scale` as settable `var`s (no-arg
+            // init), so apply them IN PLACE on the live tool (the RotateTool/MirrorTool
+            // pattern). The defaults (`.top`, scale `1`) reproduce the STANDARD-style
+            // multiline, so an un-configured MLINE draws byte-for-byte as before.
+            t.justification = mlineJustification
+            t.scale = mlineScale
+            tool = t
         case is LineConstructionTool:
             // LineConstructionTool's `mode` is read live (a settable `var` re-minted from
             // the options-bar `lineConstructionMode`), so RE-MINT with the chosen mode (the
@@ -2836,6 +2895,11 @@ final class CanvasModel {
             // (the re-mint discards the request). A `.cancel` clears `pendingCreation`,
             // so a cancelled run applies nothing.
             applyPendingBlockCreationIfAny()
+            // TableTool, like CreateBlockTool, does NOT emit `.commit` edits (a table is
+            // not an `EntityKind` — it lives in `drawing.tables`). It records a
+            // `pendingTable` REQUEST the app adds via the undoable `CADDrawing.addTable`.
+            // Read it from the just-finished tool BEFORE the re-mint discards it.
+            applyPendingTableInsertionIfAny()
             // The run ended (commit/cancel). Mint a fresh tool of the same kind so
             // the user can immediately start the next run (LibreCAD keeps the tool
             // active after each line). To leave the tool entirely, the app calls
@@ -2906,6 +2970,29 @@ final class CanvasModel {
         } else {
             selection.clear()
         }
+        modelDirty = true
+        modelVersion &+= 1
+    }
+
+    /// If the just-finished tool is a `TableTool` carrying a `pendingTable` request,
+    /// adds it to the drawing via the undoable model op `CADDrawing.addTable` (ONE
+    /// undoable group — a single ⌘Z removes the placed table). A table is NOT an
+    /// `EntityKind` — it lives in `drawing.tables` (off the enum, like a paper-space
+    /// viewport) — so it cannot flow through `ToolEdit`/`applyCommit`; this routes
+    /// through the model op instead, exactly as `applyPendingBlockCreationIfAny` does
+    /// for block creation. Marks the GPU buffer dirty + bumps `modelVersion` so the
+    /// renderer repacks (the table render path keys off `modelVersion`). Tables carry no
+    /// id in the spatial index this MVP (they are not snap/hit-test targets yet), so no
+    /// `rebuildIndex` is needed. No-op for any other tool / a cancelled run.
+    private func applyPendingTableInsertionIfAny() {
+        guard let tableTool = tool as? TableTool,
+              let table = tableTool.pendingTable else { return }
+
+        let explicitGroup = !undoManager.groupsByEvent
+        if explicitGroup { undoManager.beginUndoGrouping() }
+        defer { if explicitGroup { undoManager.endUndoGrouping() } }
+
+        TableTool.apply(table, to: drawing)
         modelDirty = true
         modelVersion &+= 1
     }
