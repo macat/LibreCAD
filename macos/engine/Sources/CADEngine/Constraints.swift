@@ -198,17 +198,27 @@ public struct Constraint: Sendable, Hashable, Codable, Identifiable {
     /// units, or radians for `.angle`). Ignored — and conventionally `0` — for a
     /// `.geometric` constraint.
     public var value: Double
+    /// Whether this constraint was AUTO-INFERRED (hidden) rather than explicitly added
+    /// by the user. AutoCAD's "inferred coincidence": applying a perpendicular/parallel
+    /// constraint to two lines sharing a corner auto-adds a coincident at that endpoint
+    /// pair so the corner stays joined while the angle constraint rotates the lines. An
+    /// inferred constraint solves EXACTLY like its explicit twin (the solver is unaware
+    /// of this flag) — it is purely a DISPLAY hint: the glyph overlay skips inferred
+    /// constraints (no badge). Default `false` (an explicit, user-visible constraint).
+    public var inferred: Bool
 
     public init(
         id: UUID = UUID(),
         kind: Kind,
         points: [ConstraintPoint],
-        value: Double = 0
+        value: Double = 0,
+        inferred: Bool = false
     ) {
         self.id = id
         self.kind = kind
         self.points = points
         self.value = value
+        self.inferred = inferred
     }
 
     // MARK: Derived
@@ -235,7 +245,7 @@ public struct Constraint: Sendable, Hashable, Codable, Identifiable {
 
     // MARK: Codable (additive back-compat)
 
-    private enum CodingKeys: String, CodingKey { case id, kind, points, value }
+    private enum CodingKeys: String, CodingKey { case id, kind, points, value, inferred }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -246,6 +256,9 @@ public struct Constraint: Sendable, Hashable, Codable, Identifiable {
         points = try c.decodeIfPresent([ConstraintPoint].self, forKey: .points) ?? []
         // A geometric constraint born without a `value` decodes to 0.
         value = try c.decodeIfPresent(Double.self, forKey: .value) ?? 0
+        // `inferred` is additive-tolerant: a payload written before the flag existed
+        // (an old file) decodes to `false` — every prior constraint was user-explicit.
+        inferred = try c.decodeIfPresent(Bool.self, forKey: .inferred) ?? false
     }
 
     // MARK: Convenience constructors (the MVP set the tools/tests build through)
@@ -253,6 +266,16 @@ public struct Constraint: Sendable, Hashable, Codable, Identifiable {
     /// A coincident constraint pinning point `a` to point `b`.
     public static func coincident(_ a: ConstraintPoint, _ b: ConstraintPoint) -> Constraint {
         Constraint(kind: .geometric(.coincident), points: [a, b])
+    }
+
+    /// A HIDDEN, auto-inferred coincident constraint pinning point `a` to point `b` —
+    /// the AutoCAD "inferred coincidence" companion auto-added at a shared CORNER when
+    /// the user applies a perpendicular/parallel constraint to two lines, so the corner
+    /// stays joined as the angle constraint rotates them. Identical to `coincident`
+    /// (the solver treats it the same) except `inferred == true`, which the glyph
+    /// overlay uses to SKIP it (no badge — it is invisible to the user).
+    public static func coincidentInferred(_ a: ConstraintPoint, _ b: ConstraintPoint) -> Constraint {
+        Constraint(kind: .geometric(.coincident), points: [a, b], inferred: true)
     }
 
     /// A horizontal constraint on the line `id` (its two endpoints share a Y).
