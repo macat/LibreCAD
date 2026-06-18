@@ -6,6 +6,17 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-18 — SYNC: pulled upstream/master incl. DWG round-3 (#2603) — (`native-macos @ d1c865fc1`, **3967 tests**, `.app` rebuilt + launch-smoked)
+
+Owner: "rebase on upstream/master, giant dwg improvement landed." upstream/master was 4 commits ahead of our base `04daa8ca9`, one being `117c8710b` "DWG support: round 3 (#2603)" — a massive libdxfrw rewrite (drw_entities.cpp +4077, drw_objects.cpp +5191, drw_interface.h +129/−24, drw_header, the whole intern/dwg* internals). Delegated to a builder in an ISOLATED worktree (native-macos held at recovery `d7701818f` throughout); reviewed-by-verification + fast-forwarded only after green.
+
+- **MERGE, not rebase (methodology call):** our 797 commits include **288 hand-resolved merge commits**; a plain rebase flattens them and a `--rebase-merges` re-derives + re-conflicts every hand-merge (the intractable path). A merge of upstream into our branch keeps our resolved tree and limits the conflict surface to EXACTLY the 4 vendored libdxfrw files — same outcome (we now carry #2603), minimal risk. (Topology is a merge, not replayed-on-top — flag if strict rebase topology is ever required.)
+- **Vendored-patch reconciliation:** viewport `viewHeight` ctor-init → now redundant (upstream default-inits it) → dropped; `parseCode` case-45 → still ours; `writeDimension` extData (#19 dim DSTYLE) → still ours; ATTRIB write → now upstream-covered (code-66 + `writeAttrib` + SEQEND) so dropped our loop; ATTDEF write → still ours.
+- **Bridge reconciled to the new libdxfrw (the real work, `lcdxf.cpp` + `Package.swift` only; C-ABI/Swift readers unchanged):** int typedef shim (`dint*`/`duint*` removed upstream → `<cstdint>`); new mandatory `DRW_Interface::addDimArc` → no-op override (engine has no DimArc entity); MTEXT line-spacing moved to a dedicated `linespacingStyle` (code 73) field → bridge read/write updated; **+5 DWG-writer TUs added to Package.swift** (`dwgwriter18/24/27/32.cpp` + `proxygraphicdecoder.cpp`) — referenced by the new writer, needed to LINK.
+- **5 tests updated to genuine upstream improvements (no assertion weakened):** R2018 now emits true `$ACADVER` **AC1032**; per-entity **code-48 linetype scale now WRITTEN**; **`$PDMODE` now round-trips through DWG** (new DWG variable-header encoder). 1 malformed test fixture (`hatch_sample.dxf`, multi-line `999` comment) fixed for the stricter new DXF reader. Build clean; full serial suite 3967 green; `.app` rebuilt + launch-smoked on the new lib. Not pushed (owner pushes). Stale `.git/rr-cache` was flagged/cleared during the sync.
+
+---
+
 ## 2026-06-18 — NAMED PARAMETERS: Parameters Manager table + `a=22` auto-creation — (`native-macos`, **3967 tests**, `.app` rebuilt + launch-smoked)
 
 Owner: "get the parameters table and the parameter auto-creation." Ran a research→plan→critic workflow (5 probes + planner + critic, **GO-WITH-FIXES**) → a 3-wave, 5-lane, file-disjoint build, executed **delegated** (builders + per-lane code-review + merge-by-hash + serial gate). All additive — NO new EntityKind; the solver is untouched (reads only `Constraint.value`); the literal dimensional path stays byte-identical.
