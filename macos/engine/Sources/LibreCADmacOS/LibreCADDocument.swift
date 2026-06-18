@@ -56,7 +56,14 @@ import struct CADEngine.Layout
 /// entry points can build/serialize it without ever touching the `@MainActor`
 /// `CADDrawing`. The live drawing is reconstructed from this in the view on the
 /// main actor (see `CADDrawing.make(from:)`).
-struct DXFPayload: Sendable, Equatable {
+///
+/// `Codable` (additive, back-compat): every field is itself `Codable`, and the
+/// custom `init(from:)` below decodes the two parametric tables
+/// (`constraints`/`parameters`) with `decodeIfPresent` so a payload encoded BEFORE
+/// those keys existed (an old serialized snapshot) decodes to EMPTY tables rather
+/// than failing — the same back-compat contract the entity `*Data` structs and the
+/// two tables' own decoders use.
+struct DXFPayload: Sendable, Equatable, Codable {
     /// Entities in stable draw order, ids already minted by the reader.
     var entities: [EntityRecord]
     /// The parsed layer table (always carries at least layer "0" for a new doc).
@@ -87,6 +94,29 @@ struct DXFPayload: Sendable, Equatable {
     /// decodes `tables` to `[]` (the read path has no table source). The editable model
     /// rides ONLY this in-session payload; it is exploded on a pure-DXF reopen.
     var tables: [TableObject]
+    /// The parametric CONSTRAINT table (`constraints`) — ADDITIVE document state (NOT an
+    /// `EntityKind`). Carried so the in-session model's `drawing.constraints` SURVIVES the
+    /// document snapshot/restore (undo + autosave-via-payload). Symmetric to `tables`.
+    /// Previously the constraint table rode the LIVE model + undo, but was DROPPED on a
+    /// `payloadSnapshot` → `make(from:)` round-trip — so a constraint was lost across a
+    /// document snapshot/restore. Threading it here (Lane L3) closes that in-session gap.
+    ///
+    /// PURE-DXF CAVEAT (the documented limit — IDENTICAL to `tables`): DXF cannot carry a
+    /// native constraint, so the read path (`payload(from:)`) has NO source for it and
+    /// always decodes `constraints` to an EMPTY table. The constraint table therefore
+    /// rides ONLY this in-session payload (undo / snapshot-restore / autosave-via-payload);
+    /// a pure-`.dxf` save → reopen-from-disk still DROPS constraints. (No DXF-bytes
+    /// encoding of constraints is attempted in this lane.)
+    var constraints: ConstraintTable
+    /// The named-PARAMETER table (`parameters`) — ADDITIVE document state (NOT an
+    /// `EntityKind`). Carried so the in-session model's `drawing.parameters` SURVIVES the
+    /// document snapshot/restore (undo + autosave-via-payload). Symmetric to `constraints`.
+    ///
+    /// PURE-DXF CAVEAT (the documented limit — IDENTICAL to `constraints`): DXF cannot carry
+    /// a named parameter, so the read path (`payload(from:)`) has NO source for it and always
+    /// decodes `parameters` to an EMPTY table. The parameter table rides ONLY this in-session
+    /// payload; a pure-`.dxf` save → reopen-from-disk still DROPS parameters.
+    var parameters: ParameterTable
 
     init(
         entities: [EntityRecord] = [],
@@ -95,7 +125,9 @@ struct DXFPayload: Sendable, Equatable {
         graphicVariables: GraphicVariables = GraphicVariables(),
         dimStyles: DimStyleTable = DimStyleTable(),
         layouts: [Layout] = [],
-        tables: [TableObject] = []
+        tables: [TableObject] = [],
+        constraints: ConstraintTable = ConstraintTable(),
+        parameters: ParameterTable = ParameterTable()
     ) {
         self.entities = entities
         self.layers = layers
@@ -104,6 +136,37 @@ struct DXFPayload: Sendable, Equatable {
         self.dimStyles = dimStyles
         self.layouts = layouts
         self.tables = tables
+        self.constraints = constraints
+        self.parameters = parameters
+    }
+
+    // MARK: - Codable (additive, back-compat)
+    //
+    // Explicit keys + a custom `init(from:)` so the two parametric tables decode with
+    // `decodeIfPresent` → empty: a payload encoded BEFORE these keys existed (an old
+    // serialized snapshot) loads with no constraints/parameters instead of throwing. The
+    // pre-existing fields keep their synthesized round-trip. `encode(to:)` stays
+    // synthesized (Swift derives it from the same `CodingKeys`).
+
+    private enum CodingKeys: String, CodingKey {
+        case entities, layers, blocks, graphicVariables, dimStyles, layouts, tables
+        case constraints, parameters
+    }
+
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        entities = try c.decode([EntityRecord].self, forKey: .entities)
+        layers = try c.decode(LayerTable.self, forKey: .layers)
+        blocks = try c.decode(BlockTable.self, forKey: .blocks)
+        graphicVariables = try c.decode(GraphicVariables.self, forKey: .graphicVariables)
+        dimStyles = try c.decode(DimStyleTable.self, forKey: .dimStyles)
+        layouts = try c.decode([Layout].self, forKey: .layouts)
+        tables = try c.decode([TableObject].self, forKey: .tables)
+        // The two parametric tables are ADDITIVE: an old payload (encoded before these
+        // keys existed) omits them, so decode them forgivingly to an EMPTY table — the
+        // same back-compat the tables' own `init(from:)` and the entity `*Data` structs use.
+        constraints = try c.decodeIfPresent(ConstraintTable.self, forKey: .constraints) ?? ConstraintTable()
+        parameters = try c.decodeIfPresent(ParameterTable.self, forKey: .parameters) ?? ParameterTable()
     }
 
     /// An empty drawing for File ▸ New: no entities, the default layer table
@@ -187,6 +250,13 @@ extension CADDrawing {
             graphicVariables: payload.graphicVariables,
             dimStyles: payload.dimStyles,
             layouts: payload.layouts,
+            // Restore the in-session CONSTRAINT + PARAMETER tables (they ride the payload,
+            // not the DXF bytes — see `DXFPayload.constraints`/`.parameters`). On a FRESH
+            // file open both are EMPTY (the DXF read path has no source for them); on an
+            // undo/autosave snapshot-restore they are the live tables, so a constraint /
+            // parameter survives the round-trip in-session.
+            constraints: payload.constraints,
+            parameters: payload.parameters,
             // Restore the in-session TABLE-OBJECT list (it rides the payload, not the DXF
             // bytes — see `DXFPayload.tables`). On a FRESH file open this is `[]` (the DXF
             // read path has no table source); on an undo/autosave snapshot-restore it is
@@ -211,7 +281,14 @@ extension CADDrawing {
             // Capture the live TABLE-OBJECT list so the in-session model's tables ride the
             // payload (undo / autosave). On a SAVE the codec explodes them to LINE + TEXT
             // (see `DXFDocumentCodec.data`); within the session they survive verbatim.
-            tables: tables
+            tables: tables,
+            // Capture the live CONSTRAINT + PARAMETER tables so the in-session model's
+            // `constraints`/`parameters` ride the payload (undo / autosave / snapshot-
+            // restore). These do NOT reach the DXF bytes (DXF can't carry them — see the
+            // caveats on `DXFPayload.constraints`/`.parameters`); within the session they
+            // survive verbatim, closing the pre-existing snapshot gap (Lane L3).
+            constraints: constraints,
+            parameters: parameters
         )
     }
 }
@@ -313,6 +390,13 @@ enum DXFDocumentCodec {
                 // viewports. Previously DROPPED here, so a paper-space file opened
                 // with ZERO layout tabs and invisible paper entities (confirmed bug).
                 layouts: result.layouts
+                // DOCUMENTED LIMIT (Lane L3): `tables`, `constraints`, and `parameters`
+                // are INTENTIONALLY omitted here, so they default to EMPTY. DXF (and DWG)
+                // cannot carry a native table / constraint / parameter — the read path has
+                // NO source for them — so a pure-`.dxf` save → reopen-from-disk drops them
+                // (a table comes back as exploded LINE+TEXT; constraints/parameters come
+                // back as nothing). They ride ONLY the in-session payload (snapshot/restore,
+                // undo, autosave-via-payload) — see `DXFPayload.constraints`/`.parameters`.
             )
         } catch {
             throw CodecError.engine(error)
