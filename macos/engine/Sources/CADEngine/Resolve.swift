@@ -410,6 +410,17 @@ public struct ResolveContext: Sendable {
     /// staying a FINITE value (so the bbox never goes to infinity, ADR-001).
     public static let xlineFallbackHalfLength: Double = 1e6
 
+    /// Wave 2a — the document-side values used to evaluate auto-updating text FIELDS
+    /// (current date / active layout name / file name / object properties) embedded
+    /// in TEXT/MTEXT (`TextData.fields` / `MTextData.fields`). When non-`nil`, the
+    /// `.text`/`.mtext` resolve arms substitute each field's evaluated value into the
+    /// displayed string (`FieldEvaluator.substitute`) before shaping. When `nil` (the
+    /// default) — OR when the entity carries no fields — resolve is BYTE-IDENTICAL to
+    /// today (the regression-lock): the stored string shapes verbatim. Additive — every
+    /// existing caller leaves this `nil`. The app populates it (live date/layout/file)
+    /// in a later wire-wave via `CADDrawing.makeResolveContext(fieldContext:)`.
+    public var fieldContext: FieldContext? = nil
+
     public init(
         tessellationTolerance: Double = 0.05,
         layerAttributes: @escaping @Sendable (LayerID) -> ResolvedPen = { _ in
@@ -429,7 +440,8 @@ public struct ResolveContext: Sendable {
         blockProvider: (@Sendable (String) -> [EntityRecord]?)? = nil,
         blockDynamic: (@Sendable (String) -> DynamicBlockDef?)? = nil,
         blockRecursionDepth: Int = ResolveContext.maxBlockRecursionDepth,
-        clipBounds: AABB? = nil
+        clipBounds: AABB? = nil,
+        fieldContext: FieldContext? = nil
     ) {
         self.tessellationTolerance = tessellationTolerance
         self.layerAttributes = layerAttributes
@@ -446,6 +458,7 @@ public struct ResolveContext: Sendable {
         self.blockDynamic = blockDynamic
         self.blockRecursionDepth = blockRecursionDepth
         self.clipBounds = clipBounds
+        self.fieldContext = fieldContext
     }
 
     /// A sensible default context for tests/previews.
@@ -1002,7 +1015,13 @@ extension EntityKind {
             // multi-line (\n), the special-char pre-pass, and annotative scaling
             // are handled by the shared TextShaper (no second text path). No
             // provider / font ⇒ empty geometry (no crash).
-            return TextShaper.resolve(d, pen: pen, ctx: ctx)
+            //
+            // Wave 2a FIELDS: when the entity carries `fields` AND a field context is
+            // wired, substitute each field's evaluated value into the displayed string
+            // before shaping. With no context / no fields this is byte-identical to
+            // the prior behavior (regression-lock): `substitute` returns `d.text`
+            // unchanged and the shaped data is the same value.
+            return TextShaper.resolve(Self.applyingFields(d, ctx: ctx), pen: pen, ctx: ctx)
 
         case .mtext(let d):
             // Rich MTEXT → per-run shaped glyph geometry (native outlines → fills,
@@ -1011,7 +1030,12 @@ extension EntityKind {
             // fractions, and underline/overline/strike decorations. All runs go
             // through the SAME FontProvider as `.text` (no second text path). No
             // provider / font ⇒ empty geometry (no crash).
-            return MTextShaper.resolve(d, pen: pen, ctx: ctx)
+            //
+            // Wave 2a FIELDS: when the entity carries `fields` AND a field context is
+            // wired, substitute each field's evaluated value into every run's text
+            // before shaping; with no context / no fields the data passes through
+            // unchanged (regression-lock).
+            return MTextShaper.resolve(Self.applyingFields(d, ctx: ctx), pen: pen, ctx: ctx)
 
         case .hatch(let d):
             // A non-solid hatch with a KNOWN bundled `.pat` pattern resolves to
@@ -1600,6 +1624,49 @@ extension EntityKind {
     /// - **Pattern with an unknown/missing name, or whose generation yields no
     ///   lines**: falls back to the solid fill (so the region stays visible —
     ///   the brief's "unknown pattern → solid").
+    // MARK: - Wave 2a: field substitution (text / mtext)
+
+    /// Returns `d` with its auto-updating FIELDS substituted into the displayed
+    /// `text` — but ONLY when the entity carries fields AND `ctx.fieldContext` is
+    /// wired. With no fields / no context the SAME value is returned (the stored
+    /// string shapes verbatim), so a non-field text — or any resolve without a field
+    /// context — is byte-identical to the prior behavior (regression-lock).
+    static func applyingFields(_ d: TextData, ctx: ResolveContext) -> TextData {
+        guard let fc = ctx.fieldContext, let fields = d.fields, !fields.isEmpty else { return d }
+        var out = d
+        out.text = FieldEvaluator.substitute(d.text, fields: fields, context: fc)
+        return out
+    }
+
+    /// Returns `d` with its auto-updating FIELDS substituted into every run's text
+    /// across all paragraphs — but ONLY when the entity carries fields AND
+    /// `ctx.fieldContext` is wired. With no fields / no context the SAME value is
+    /// returned (the runs shape verbatim), so a non-field MTEXT — or any resolve
+    /// without a field context — is byte-identical to the prior behavior.
+    static func applyingFields(_ d: MTextData, ctx: ResolveContext) -> MTextData {
+        guard let fc = ctx.fieldContext, let fields = d.fields, !fields.isEmpty else { return d }
+        var out = d
+        out.paragraphs = d.paragraphs.map { paragraph in
+            var p = paragraph
+            p.inlines = paragraph.inlines.map { inline in
+                switch inline {
+                case .run(var run):
+                    run.text = FieldEvaluator.substitute(run.text, fields: fields, context: fc)
+                    return .run(run)
+                case .stacked(var stacked):
+                    // Fields may appear in the upper/lower halves of a stacked run too.
+                    stacked.upper = FieldEvaluator.substitute(stacked.upper, fields: fields, context: fc)
+                    stacked.lower = FieldEvaluator.substitute(stacked.lower, fields: fields, context: fc)
+                    return .stacked(stacked)
+                case .tab:
+                    return .tab
+                }
+            }
+            return p
+        }
+        return out
+    }
+
     static func resolveHatch(_ d: HatchData, pen: ResolvedPen, ctx: ResolveContext)
         -> ResolvedGeometry
     {

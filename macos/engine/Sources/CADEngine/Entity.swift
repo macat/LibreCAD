@@ -397,6 +397,15 @@ public struct TextData: Sendable, Hashable, Codable {
     /// for round-trip.                                                           [NEW]
     public var generation: TextGenerationFlags
     public var letterSpacingFactor: Double
+    /// Wave 2a — the auto-updating FIELDS embedded in `text`. When non-`nil`, `text`
+    /// carries field PLACEHOLDERS (`FieldEvaluator.placeholder(for:)`) and each
+    /// `FieldRun.index` names the token its placeholder displays; `resolve()`
+    /// substitutes evaluated values (`FieldEvaluator.substitute`) when a
+    /// `ResolveContext.fieldContext` is supplied, else `text` shapes verbatim.
+    /// ADDITIVE: a record born without it — and every old saved file — decodes to
+    /// `nil` (no fields), so plain text is byte-identical. `nil` vs `[]` both mean
+    /// "no fields" (resolve treats an empty list as a no-op).                    [NEW]
+    public var fields: [FieldRun]?
 
     public init(
         position: Vector,
@@ -410,7 +419,8 @@ public struct TextData: Sendable, Hashable, Codable {
         widthFactor: Double = 1.0,
         obliqueAngle: Double = 0,
         generation: TextGenerationFlags = [],
-        letterSpacingFactor: Double = 1.0
+        letterSpacingFactor: Double = 1.0,
+        fields: [FieldRun]? = nil
     ) {
         self.position = position
         self.secondPoint = secondPoint
@@ -424,6 +434,39 @@ public struct TextData: Sendable, Hashable, Codable {
         self.obliqueAngle = obliqueAngle
         self.generation = generation
         self.letterSpacingFactor = letterSpacingFactor
+        self.fields = fields
+    }
+}
+
+// MARK: - Decodable (back-compat: tolerate a missing `fields` → nil)
+//
+// `fields` (Wave 2a) is ADDITIVE: an OLD saved TEXT (encoded before fields existed)
+// has no `fields` key. A hand-written `init(from:)` (the same `decodeIfPresent`
+// pattern the other *Data structs use) decodes the absent key to `nil`, so old text
+// loads byte-identically and resolves unchanged. `encode(to:)` + Hashable/Equatable
+// stay synthesized (CodingKeys covers every field; Hashable auto-includes `fields`).
+extension TextData {
+    private enum CodingKeys: String, CodingKey {
+        case position, secondPoint, height, rotation, text, styleName, hAlign, vAlign
+        case widthFactor, obliqueAngle, generation, letterSpacingFactor, fields
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        position = try c.decode(Vector.self, forKey: .position)
+        secondPoint = try c.decodeIfPresent(Vector.self, forKey: .secondPoint)
+        height = try c.decode(Double.self, forKey: .height)
+        rotation = try c.decodeIfPresent(Double.self, forKey: .rotation) ?? 0
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        styleName = try c.decodeIfPresent(String.self, forKey: .styleName)
+        hAlign = try c.decodeIfPresent(TextHAlign.self, forKey: .hAlign) ?? .left
+        vAlign = try c.decodeIfPresent(TextVAlign.self, forKey: .vAlign) ?? .baseline
+        widthFactor = try c.decodeIfPresent(Double.self, forKey: .widthFactor) ?? 1.0
+        obliqueAngle = try c.decodeIfPresent(Double.self, forKey: .obliqueAngle) ?? 0
+        generation = try c.decodeIfPresent(TextGenerationFlags.self, forKey: .generation) ?? []
+        letterSpacingFactor = try c.decodeIfPresent(Double.self, forKey: .letterSpacingFactor) ?? 1.0
+        // ADDITIVE: old files (no `fields` key) decode to nil — plain text.
+        fields = try c.decodeIfPresent([FieldRun].self, forKey: .fields)
     }
 }
 

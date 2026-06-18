@@ -2018,7 +2018,8 @@ public final class CADDrawing {
     /// Block-resolve owner sets that when recursing). The text hook is the shared
     /// `.lff` font provider (ADR-004) so text entities resolve to stroked glyphs.
     public func makeResolveContext(tessellationTolerance: Double = 0.05,
-                                   annotationScale: Double = 1.0) -> ResolveContext {
+                                   annotationScale: Double = 1.0,
+                                   fieldContext: FieldContext? = nil) -> ResolveContext {
         // Snapshot the layer table into a Sendable closure (value type copy).
         let table = layers
         // Snapshot the STYLE table into a Sendable closure (value type copy).
@@ -2066,7 +2067,13 @@ public final class CADDrawing {
             namedDimStyleProvider: { name in dimStyleTable.style(named: name)?.style },
             pointStyleProvider: { (mode: docPointMode, size: docPointSize) },
             blockProvider: { name in blockMembers[name] },
-            blockDynamic: { name in blockDynamics[name] }
+            blockDynamic: { name in blockDynamics[name] },
+            // Wave 2a FIELDS: thread the (optional) field context so the `.text`/
+            // `.mtext` resolve arms can substitute live field values (date / active
+            // layout / file name / object props). `nil` (the default) ⇒ field-bearing
+            // text shapes its stored placeholders verbatim — the app supplies a live
+            // context in a later wire-wave.
+            fieldContext: fieldContext
         )
     }
 
