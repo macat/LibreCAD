@@ -626,6 +626,19 @@ public final class CADDrawing {
     /// a session.
     public private(set) var layerStates = LayerStateTable()
 
+    /// The PARAMETRIC-CONSTRAINT table (Wave 1 — engine, UNWIRED). Geometric +
+    /// dimensional constraints over entity ids (`ConstraintTable`), ADDITIVE document
+    /// state — NOT a new `EntityKind` case (the constraint set is a separate list,
+    /// exactly like `Layout.viewports`). Mutated only through the undoable funnel
+    /// (`mutateConstraints` and its `addConstraint`/`removeConstraint`/`editConstraint`
+    /// helpers), mirroring the layer/block/layout tables; carried by value so it
+    /// snapshots cheaply for undo (ADR-002) and round-trips through the Codable
+    /// document payload. The entity-`remove(...)` path drops any constraint that
+    /// references a deleted entity (dangling-drop), so the table never points at a
+    /// gone entity. The app-side re-solve seam (calling `ConstraintSolver` on edit)
+    /// is a LATER wave.
+    public private(set) var constraints = ConstraintTable()
+
     /// The `UndoManager` mutations register with. Injected by the document layer
     /// (SwiftUI hands one in from `DocumentGroup`); nil == undo disabled.
     public weak var undoManager: UndoManager?
@@ -696,6 +709,12 @@ public final class CADDrawing {
 
     /// Removes an entity by id (no-op if absent). Undo restores it at its
     /// original draw order; redo removes it again.
+    ///
+    /// Also drops any PARAMETRIC CONSTRAINT that references the removed entity
+    /// (dangling-drop) so the constraint table never points at a gone entity. The
+    /// constraint drop registers its OWN value-snapshot undo, so it reverses together
+    /// with the entity restore within the same user-action undo group (matching how
+    /// `removeLayer`/`renameLayout` register multiple undo steps that one ⌘Z reverts).
     public func remove(_ id: EntityID) {
         guard let idx = indexByID[id] else { return }
         let removed = entities[idx]
@@ -708,6 +727,13 @@ public final class CADDrawing {
         registerUndo { drawing in
             // Undo of remove == reinsert at the original position.
             drawing.reinsert(removed, at: idx)
+        }
+
+        // Drop constraints referencing the now-removed entity (undoable). A no-op
+        // (no constraint touched it) registers nothing via the `mutateConstraints`
+        // funnel's unchanged-guard.
+        if !constraints.referencing(id).isEmpty {
+            mutateConstraints { $0.dropDangling(removedID: id) }
         }
     }
 
@@ -1008,6 +1034,53 @@ public final class CADDrawing {
         var ok = false
         mutateLayerStates { ok = $0.rename(oldName, to: newName) }
         return ok
+    }
+
+    // MARK: - Parametric constraints (value-snapshot undo of the whole table)
+    //
+    // The constraint table (Wave 1) mirrors the layer/block/layout tables: a
+    // whole-table value-snapshot undo funnel (`mutateConstraints`) plus add /
+    // remove / edit helpers. `ConstraintTable` is a value type, so the undo snapshot
+    // is one struct copy (ADR-002), and a no-op edit registers no undo. The
+    // entity-`remove(...)` path also routes its dangling-drop through this funnel.
+
+    /// Whole-table constraint mutation with undo (the same value-snapshot scheme as
+    /// `mutateLayerStates`/`mutateBlocks`). No-op edits don't pollute undo.
+    public func mutateConstraints(_ body: (inout ConstraintTable) -> Void) {
+        let prior = constraints
+        body(&constraints)
+        guard constraints != prior else { return }
+        registerUndo { drawing in
+            drawing.mutateConstraints { $0 = prior }
+        }
+    }
+
+    /// Adds a parametric constraint (undoable). No-op (no undo) if a constraint with
+    /// the same id already exists. Returns `true` if added.
+    @discardableResult
+    public func addConstraint(_ constraint: Constraint) -> Bool {
+        var added = false
+        mutateConstraints { added = $0.add(constraint) }
+        return added
+    }
+
+    /// Removes the constraint with `id` (undoable). No-op (no undo) if absent.
+    /// Returns `true` if removed.
+    @discardableResult
+    public func removeConstraint(_ id: UUID) -> Bool {
+        var removed = false
+        mutateConstraints { removed = $0.remove(id) }
+        return removed
+    }
+
+    /// Edits the DRIVEN value of the (dimensional) constraint with `id` (undoable).
+    /// No-op (no undo) if absent, geometric (no driven value), or unchanged. Returns
+    /// `true` if the value changed.
+    @discardableResult
+    public func editConstraint(_ id: UUID, value: Double) -> Bool {
+        var changed = false
+        mutateConstraints { changed = $0.setValue(id, value) }
+        return changed
     }
 
     // MARK: - Block mutations (value-snapshot undo of the whole BlockTable)
@@ -1902,13 +1975,18 @@ public final class CADDrawing {
         graphicVariables newVariables: GraphicVariables = GraphicVariables(),
         dimStyles newDimStyles: DimStyleTable = DimStyleTable(),
         textStyles newTextStyles: TextStyleTable = TextStyleTable(),
-        layouts newLayouts: [Layout] = []
+        layouts newLayouts: [Layout] = [],
+        constraints newConstraints: ConstraintTable = ConstraintTable()
     ) {
         entities = newEntities
         layers = newLayers
         blocks = newBlocks
         graphicVariables = newVariables
         dimStyles = newDimStyles
+        // The parametric-constraint table (Wave 1). Defaults to empty so existing
+        // callers (and a constraint-free drawing) are unchanged; a future Codable
+        // document payload threads the loaded table here.
+        constraints = newConstraints
         // The STYLE (text-style) table so a TEXT/MTEXT entity's code-7 style name
         // resolves to the file's real font (the text-style round-trip read side).
         // Defaults to the standard table so existing callers are unchanged.
