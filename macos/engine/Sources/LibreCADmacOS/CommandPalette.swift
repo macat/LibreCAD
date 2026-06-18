@@ -181,6 +181,9 @@ enum CommandRegistry {
         // Parity-program W3: Wipeout masking polygon (no canvas chord yet, so the
         // palette surfaces it without a shortcut hint).
         case .wipeout:         return ("rectangle.slash", nil)
+        // Parity-program W: Multiline draw tool (UNWIRED — coupled no-default arm only;
+        // no canvas chord yet, so the palette surfaces it without a shortcut hint).
+        case .mline:           return ("lines.measurement.horizontal", nil)
         }
     }
 
