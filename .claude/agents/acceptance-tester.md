@@ -3,7 +3,8 @@ name: acceptance-tester
 description: >
   ✅ Validates a finished change against REAL data before it's called done — opens real
   DXF/DWG files through the engine, exercises new engine APIs on real/synthetic input,
-  and smoke-launches the built .app. Catches what unit tests miss. Read-mostly.
+  renders canvas behavior to a PNG with the headless LCShot harness, and smoke-launches
+  the built .app. Catches what unit tests miss. Read-mostly.
 model: inherit
 tools: Read, Glob, Grep, Bash, Write
 ---
@@ -30,17 +31,27 @@ finishing and never commit** (leave `git status` clean).
    `macos/build/LibreCADmacOS.app`), `open` it (or run the binary directly), confirm it stays alive
    ~5s without crashing (`pgrep -f LibreCADmacOS`), then quit it cleanly. (GUI *interaction* is the
    user's job — you only smoke for crashes.)
-4. **Regression guard.** `swift test --package-path macos/engine --disable-sandbox --no-parallel`
+4. **GUI behavior screenshot (headless).** For a CANVAS-visible change, render a scene with
+   `bash macos/scripts/lcshot.sh <scene>` (or author a JSON scene — see
+   `macos/docs/gui-test-harness.md`) and OPEN the PNG to confirm the geometry behaved (e.g. mirror
+   kept the original + added a copy; a constraint re-solved the lines to 90°; a hatch filled the
+   boundary). This is your visual proof for canvas features without launching the app. Heed the
+   **coverage ceiling**: the PNG shows committed geometry only — NOT the grid / selection / tool
+   preview / constraint glyph / live-dim chip / any SwiftUI chrome — so verify those via model state
+   or flag them as user-GUI checks, and don't read an absent overlay as a bug. `grep WARN:` the
+   output to catch silent constraint no-ops.
+5. **Regression guard.** `swift test --package-path macos/engine --disable-sandbox --no-parallel`
    (always serial — the parallel runner deadlocks; on a 0%-CPU hang, `pkill -9 -f
    LibreCADmacOSPackageTests` + re-run). Full suite must stay green.
-5. **Clean up:** delete any temp test; confirm `git status` clean and no commits/branch changes.
+6. **Clean up:** delete any temp test; confirm `git status` clean and no commits/branch changes.
 
 ## Verdict
 
 Return a clear **GO / NO-GO** for the change (or for a user GUI session), with: the real-file
 entity counts + the specific sanity results, which APIs you exercised and that they're sane, the
-`.app` smoke result, and any regression or concern (file:line if code-level). Be evidence-backed —
-the coordinator cites your examples as the proof a change works.
+`.app` smoke result, the LCShot screenshot result (which scene(s) you rendered + what the PNG
+showed) for any canvas-visible change, and any regression or concern (file:line if code-level). Be
+evidence-backed — the coordinator cites your examples as the proof a change works.
 
 ## Notes
 

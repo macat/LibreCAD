@@ -27,6 +27,10 @@ running memory of decisions, what landed, and open follow-ups.
 - Build: `swift build --package-path macos/engine --disable-sandbox`
 - Test:  `swift test --package-path macos/engine --disable-sandbox --no-parallel`
 - App:   `bash macos/scripts/make-app.sh`
+- GUI screenshot: `bash macos/scripts/lcshot.sh <scene>` → `macos/build/harness-shots/<scene>.png`
+  — the headless `LCShot` harness drives `CanvasModel` from a JSON action script and renders the
+  canvas to a PNG you can open and visually verify. See `macos/docs/gui-test-harness.md` (verbs,
+  scenes, and the coverage ceiling: committed geometry only — no overlays/chrome).
 
 ## Critical conventions (the ones that bite)
 

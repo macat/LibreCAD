@@ -32,6 +32,12 @@ upstream LibreCAD.
 - Build: `swift build --package-path macos/engine --disable-sandbox`
 - Test:  `swift test --package-path macos/engine --disable-sandbox --no-parallel`  ← **always serial**
 - App:   `bash macos/scripts/make-app.sh` → `macos/build/LibreCADmacOS.app`
+- GUI screenshot: `bash macos/scripts/lcshot.sh <scene>` → `macos/build/harness-shots/<scene>.png`
+  — the headless `LCShot` harness drives a JSON-scripted `CanvasModel` to a PNG you can **open and
+  visually verify** (you can't see the running app, but you CAN see this). Use it to eyeball a
+  canvas-feature change yourself, or have the acceptance-tester render scenes as proof. Verbs +
+  the coverage ceiling (committed geometry only; no overlays/chrome) are in
+  `macos/docs/gui-test-harness.md`.
 
 The suite intermittently **deadlocks under the parallel runner** (Core Text static-init
 lock-inversion in `CADFonts.provider`). `--no-parallel` is the reliable gate (<1s). On a 0%-CPU
@@ -58,9 +64,11 @@ hang >60s: `pkill -9 -f LibreCADmacOSPackageTests` and re-run.
 ## Definition of done
 
 A change is done when it's **committed on `native-macos`** + the full **`--no-parallel` suite is
-green** + (for anything user-facing) the **`.app` is rebuilt** so the user can verify the GUI (you
-can't see the running app — hand them the path and say what to try). There is no external
-review/submit step here; `git` + a green suite is "landed". The user pushes to their fork themselves (don't push).
+green** + (for anything user-facing) the **`.app` is rebuilt** so the user can verify the GUI. You
+can't see the *running app*, but for a **canvas-geometry** change you CAN see the result: render it
+with `lcshot.sh` and open the PNG before handing off (hand the user the `.app` path + what to try for
+chrome/interaction the harness can't show). There is no external review/submit step here; `git` + a
+green suite is "landed". The user pushes to their fork themselves (don't push).
 
 ## Build-unwired + wire-waves
 

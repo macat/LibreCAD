@@ -39,6 +39,9 @@ Shared bar for every agent. Reference this from any role.
 - Committed on `native-macos`, full suite green.
 - User-facing change → acceptance-tester GO (real DXF/DWG round-trip + `.app` smoke) + the `.app`
   rebuilt for the user to verify the GUI.
+- Canvas-visible change → render it with `bash macos/scripts/lcshot.sh <scene>` and confirm the PNG
+  shows the expected geometry (headless visual check; coverage ceiling = committed geometry only, no
+  overlays/chrome — see `macos/docs/gui-test-harness.md`).
 - decision-log.md updated.
 
 ## Verify-before-report

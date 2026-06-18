@@ -33,6 +33,11 @@ specialists in this directory as dispatchable subagents.
 - **Build:** `swift build --package-path macos/engine --disable-sandbox`
 - **Test:** `swift test --package-path macos/engine --disable-sandbox --no-parallel` (ALWAYS serial
   — the parallel runner deadlocks).
+- **GUI screenshot (headless):** `bash macos/scripts/lcshot.sh <scene>` renders a JSON-scripted
+  `CanvasModel` to `macos/build/harness-shots/<scene>.png` — open it to *visually verify how a feature
+  behaves* without launching the app. Authorable verbs + the coverage ceiling (committed geometry
+  only; no overlays/chrome) are in `macos/docs/gui-test-harness.md`. Use it to self-check visual
+  changes (builder) and to prove behavior end-to-end (acceptance-tester).
 - **Worktrees branch off `master`** (no `macos/engine/`!) → first step `git reset --hard native-macos`;
   never touch `native-macos`/`master`; never `cd` to the shared checkout.
 - **`CADEngine` ⊥ app module** (no app-type references from the engine).

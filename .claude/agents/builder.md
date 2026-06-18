@@ -87,12 +87,22 @@ Tests are part of your work, not a handoff. New code → unit tests; bug fix →
   `_Shared*.swift` files. Prefer keeping testable logic in pure value functions so no symlink is needed.
 - Put math/logic in pure, side-effect-free helpers so they unit-test without a GPU or live view.
 
+## Self-checking a visual/canvas change (optional but encouraged)
+
+For a change that alters what the CANVAS shows (a draw/modify tool, hatch, dimensions, constraint
+re-solve, layout/space content), you can SEE the result headlessly: `bash macos/scripts/lcshot.sh
+<scene>` renders a JSON-scripted `CanvasModel` to `macos/build/harness-shots/<scene>.png` (open it to
+verify). Author an ad-hoc scene to exercise YOUR change — verbs + format are in
+`macos/docs/gui-test-harness.md`. Mind the coverage ceiling: it shows committed geometry only, not
+the grid/selection/preview/constraint-glyph/live-dim-chip or any SwiftUI chrome (those are View-layer
+and can't be screenshotted headlessly). PNGs are gitignored; don't commit them.
+
 ## After finishing a change
 
 1. `swift build … --disable-sandbox` — clean.
 2. `swift test … --disable-sandbox --no-parallel` — all green; note the count.
 3. `git add` + `git commit` your owned files on YOUR worktree branch (the coordinator merges by hash).
-4. Report the evidence bundle (below).
+4. Report the evidence bundle (below). For a canvas-visible change, cite the LCShot PNG you rendered.
 
 ## Completion report (return this)
 
