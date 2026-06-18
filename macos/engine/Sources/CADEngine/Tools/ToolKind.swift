@@ -209,6 +209,11 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     /// lower-draw-order entities (the AutoCAD WIPEOUT). This is the ONE tool whose
     /// committed entity is the new `EntityKind.wipeout`.
     case wipeout
+    // --- Parity-program W (new-EntityKind reuse) tool (built UNWIRED) ---
+    /// The Multiline draw tool (`MLineTool`) — click path vertices, commit ONE
+    /// `.mline` drawn as N parallel mitered element lines (the AutoCAD MLINE). Reuses
+    /// the existing `EntityKind.mline`; built UNWIRED (surfaced in a later wire-wave).
+    case mline
     // Append new draw tools here (one `case` per tool) — see the collision note.
 
     /// A short title for the UI (toolbar button / menu).
@@ -273,6 +278,7 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         case .revcloud:        return "Revision Cloud"
         case .lineConstruction: return "Line Construction"
         case .wipeout:         return "Wipeout"
+        case .mline:           return "Multiline"
         // Append a title arm per new case.
         }
     }
@@ -372,6 +378,10 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
         // Parity-program W3: Wipeout masking-polygon tool. Commits the ONE new
         // `EntityKind.wipeout`; mints a fresh `WipeoutTool`.
         case .wipeout:         return WipeoutTool()
+        // Parity-program W: Multiline draw tool (UNWIRED — surfaced later). Minted with
+        // the default STANDARD-like style; the wire-wave pushes the options-bar
+        // justification/scale onto it via `CanvasModel.applyToolConfig`.
+        case .mline:           return MLineTool()
         // Append a `case <kind>: return <Name>Tool()` arm per new tool.
         }
     }

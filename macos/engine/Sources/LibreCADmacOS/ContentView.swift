@@ -1839,6 +1839,10 @@ enum ToolCatalog {
         .xline, .ray, .insert, .viewport,
         // Wire-wave-4: WIPEOUT masking polygon (a normal draw tool — makeTool mints it).
         .wipeout,
+        // Parity-program W: MULTILINE (a normal draw tool — makeTool mints it). Grouped
+        // here so it is not orphaned + reachable via the Tools menu; the primary-toolbar
+        // pin / canvas chord / options-bar config are a later wire-wave.
+        .mline,
     ]
 
     private static let modifyTools: [ToolKind] = [
@@ -1960,6 +1964,12 @@ enum ToolCatalog {
         // no toolbar group / pinned / activate wiring beyond what compiles).
         case .wipeout:     return .init(symbol: "rectangle.slash",
                                         help: "Wipeout (mask region in the background color)",
+                                        shortcut: nil)
+        // Parity-program W: Multiline draw tool (UNWIRED — coupled no-default arm only;
+        // no toolbar group / pinned / canvas chord / activate wiring, that's a later
+        // wire-wave). Surfaced without a shortcut hint until the chord is assigned.
+        case .mline:       return .init(symbol: "lines.measurement.horizontal",
+                                        help: "Draw multiline (parallel mitered element lines)",
                                         shortcut: nil)
         }
     }
