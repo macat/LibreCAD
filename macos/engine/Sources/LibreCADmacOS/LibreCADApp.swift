@@ -88,6 +88,12 @@ struct LibreCADApp: App {
     /// the View menu fires the grid toggle. (W4's canvas `keyDown` also handles F7 via
     /// keyCode 98, so it works whether the menu or the canvas has key focus.)
     private static let f7Key = KeyEquivalent(Character(UnicodeScalar(NSF7FunctionKey)!))
+    /// The F5 key as a SwiftUI `KeyEquivalent` (Wire-wave 3 — cycle isoplane). Built
+    /// from AppKit's `NSF5FunctionKey` Unicode scalar (same construction as `f8Key`), so
+    /// ⌥-free F5 in the View ▸ Isoplane submenu cycles the plane. (The canvas `keyDown`
+    /// also handles F5 via keyCode 96 while iso mode is on, so it works whether the menu
+    /// or the canvas has key focus.)
+    private static let f5Key = KeyEquivalent(Character(UnicodeScalar(NSF5FunctionKey)!))
 
     /// Options for the custom standard About panel (Wave 3D). Surfaces the app name +
     /// the GPLv2-or-later / LibreCAD / libdxfrw attribution this fork must carry. The
@@ -528,6 +534,38 @@ struct LibreCADApp: App {
                     NSApp.sendAction(Selector(("toggleGridAction:")), to: nil, from: nil)
                 }
                 .keyboardShortcut(Self.f7Key, modifiers: [])
+                // View ▸ Isometric Snap (Wire-wave 3) — toggles ISOMETRIC drafting (the
+                // iso grid / snap / ortho / crosshair use the active plane's iso lattice).
+                // Routed through the responder chain like Ortho / Show Grid (same
+                // `NSApp.sendAction` mechanism), targeting `toggleIsometricAction:` whose
+                // `@objc` handler lives in the canvas-view `FlippedMTKView` extension, which
+                // also drives the menu checkmark via `validateUserInterfaceItem`. NO KEY
+                // EQUIVALENT: AutoCAD's iso-snap has no default chord (only F5 cycles the
+                // PLANE, bound on the submenu below + the canvas keyDown); the ISO status
+                // chip is the at-a-glance toggle.
+                Button("Isometric Snap") {
+                    NSApp.sendAction(Selector(("toggleIsometricAction:")), to: nil, from: nil)
+                }
+                // View ▸ Isoplane ▸ Left / Top / Right — set the active iso plane (the face
+                // the iso grid / snap / crosshair / iso-circle work on). Each routes
+                // through the responder chain to the canvas-view `@objc` handlers, which
+                // drive the radio-style checkmark via `validateUserInterfaceItem`. F5 is
+                // bound to TOP as the submenu's representative cycle key (the canvas keyDown
+                // F5 cycles Top → Right → Left while iso is on; the menu's per-plane items
+                // set a plane directly). Ordered Left / Top / Right to match the iso face
+                // diagram (left wall, floor, right wall).
+                Menu("Isoplane") {
+                    Button("Left") {
+                        NSApp.sendAction(Selector(("setIsoplaneLeftAction:")), to: nil, from: nil)
+                    }
+                    Button("Top") {
+                        NSApp.sendAction(Selector(("setIsoplaneTopAction:")), to: nil, from: nil)
+                    }
+                    .keyboardShortcut(Self.f5Key, modifiers: [])
+                    Button("Right") {
+                        NSApp.sendAction(Selector(("setIsoplaneRightAction:")), to: nil, from: nil)
+                    }
+                }
                 // View ▸ Object Snap Tracking (OTRACK) — toggles the persistent
                 // object-snap-tracking aid (alignment guides radiating from acquired
                 // snaps), INDEPENDENT of ortho/polar. Routed through the responder chain

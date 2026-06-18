@@ -169,16 +169,20 @@ struct ToolOptionsBar: View {
                 .font(.caption).foregroundStyle(.tertiary)
 
         case .ellipse:
-            // Construction mode: Axis / Foci / 4-Point / Inscribe / Arc (case index
-            // 0…4 → EllipseTool.Mode in applyToolConfig). EllipseTool's mode is fixed at
+            // Construction mode: Axis / Foci / 4-Point / Inscribe / Arc / Iso (case index
+            // 0…5 → EllipseTool.Mode in applyToolConfig). EllipseTool's mode is fixed at
             // construction, so applyToolConfig RE-MINTS on change. (Bound to an Int index
-            // because EllipseTool.Mode isn't Hashable — can't be a Picker tag.)
+            // because EllipseTool.Mode isn't Hashable — can't be a Picker tag.) Index 5
+            // ("Iso") draws an ISOMETRIC circle on the active iso plane (Wire-wave 3) — it
+            // maps to `.isocircle(plane: model.isoPlane)`, so the isocircle follows
+            // whatever plane the user has F5-selected.
             Picker("Mode", selection: $model.ellipseModeIndex) {
                 Text("Axis").tag(0)
                 Text("Foci").tag(1)
                 Text("4-Point").tag(2)
                 Text("Inscribe").tag(3)
                 Text("Arc").tag(4)
+                Text("Iso").tag(5)
             }
             .pickerStyle(.segmented)
             .fixedSize()

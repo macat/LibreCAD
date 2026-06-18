@@ -462,6 +462,30 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
         controller?.contextToggleGrid()
     }
 
+    /// View ▸ Isometric Snap — toggles isometric drafting (Wire-wave 3). Routed through
+    /// the responder chain like Ortho / Show Grid; `validateUserInterfaceItem` drives its
+    /// menu checkmark off `CanvasModel.isometricMode`.
+    @objc func toggleIsometricAction(_ sender: Any?) {
+        controller?.toggleIsometric()
+    }
+
+    /// View ▸ Isoplane ▸ Top — set the active iso plane to Top. The plane is recorded
+    /// even while iso is off (it takes effect when iso turns on). `validateUserInterfaceItem`
+    /// drives the radio-style checkmark off the active plane.
+    @objc func setIsoplaneTopAction(_ sender: Any?) {
+        controller?.setIsoPlane(.top)
+    }
+
+    /// View ▸ Isoplane ▸ Left — set the active iso plane to Left.
+    @objc func setIsoplaneLeftAction(_ sender: Any?) {
+        controller?.setIsoPlane(.left)
+    }
+
+    /// View ▸ Isoplane ▸ Right — set the active iso plane to Right.
+    @objc func setIsoplaneRightAction(_ sender: Any?) {
+        controller?.setIsoPlane(.right)
+    }
+
     /// View ▸ Zoom Window (F23) — arm the transient drag-box zoom.
     @objc func zoomWindowAction(_ sender: Any?) {
         controller?.enterZoomWindow()
@@ -526,6 +550,28 @@ final class FlippedMTKView: MTKView, NSUserInterfaceValidations {
             // Reflect the grid-visible state as the menu checkmark.
             if let menuItem = item as? NSMenuItem {
                 menuItem.state = controller.isGridVisible ? .on : .off
+            }
+            return true
+        case #selector(toggleIsometricAction(_:)):
+            // Reflect the isometric-drafting state as the menu checkmark (Wire-wave 3).
+            if let menuItem = item as? NSMenuItem {
+                menuItem.state = controller.model.isometricMode ? .on : .off
+            }
+            return true
+        case #selector(setIsoplaneTopAction(_:)):
+            // Radio-style checkmark on the active iso plane in the Isoplane submenu.
+            if let menuItem = item as? NSMenuItem {
+                menuItem.state = controller.model.isoPlane == .top ? .on : .off
+            }
+            return true
+        case #selector(setIsoplaneLeftAction(_:)):
+            if let menuItem = item as? NSMenuItem {
+                menuItem.state = controller.model.isoPlane == .left ? .on : .off
+            }
+            return true
+        case #selector(setIsoplaneRightAction(_:)):
+            if let menuItem = item as? NSMenuItem {
+                menuItem.state = controller.model.isoPlane == .right ? .on : .off
             }
             return true
         case #selector(zoomWindowAction(_:)):
@@ -1857,6 +1903,28 @@ final class CADCanvasController {
         redraw()
     }
 
+    /// View ▸ Isometric Snap / the ISO status chip — flips isometric drafting on/off
+    /// and repaints so the iso grid + iso crosshair appear/clear immediately (the snap /
+    /// ortho lock switch to the iso lattice on the next cursor move). One undo step
+    /// (the model's `toggleIsometric` funnels through the undoable header-var mutator).
+    func toggleIsometric() {
+        model.toggleIsometric()
+        redraw()
+    }
+
+    /// F5 / View ▸ Isoplane / the ISO chip — cycles the active iso plane (Top → Right →
+    /// Left → Top) and repaints so the iso grid + crosshair retilt to the new plane.
+    func cycleIsoPlane() {
+        model.cycleIsoPlane()
+        redraw()
+    }
+
+    /// View ▸ Isoplane ▸ Top/Left/Right — set the active iso plane directly and repaint.
+    func setIsoPlane(_ plane: IsoPlane) {
+        model.isoPlane = plane
+        redraw()
+    }
+
     // MARK: - Zoom window + Zoom previous (F23, View menu)
 
     /// World anchor of an in-progress zoom-window drag (the box's first corner), or
@@ -2004,6 +2072,7 @@ final class CADCanvasController {
         let isF9 = event.keyCode == 101                            // F9 → toggle Grid Snap
         let isF10 = event.keyCode == 109                           // F10 → toggle Polar
         let isF12 = event.keyCode == 111                           // F12 → toggle Dynamic Input
+        let isF5 = event.keyCode == 96                             // F5 → cycle isoplane
         let isTab = event.keyCode == 48                            // Tab → cycle dyn field
 
         // F8 toggles ortho (AutoCAD/LibreCAD convention), in any mode and regardless
@@ -2049,6 +2118,15 @@ final class CADCanvasController {
             // `redraw()` re-syncs the live-dimension overlay's `isEnabled` off the new
             // `dynamicInputEnabled` (see its overlay-refresh block) and repaints.
             redraw()
+            return true
+        }
+        // F5 cycles the ISOPLANE (Top → Right → Left → Top — the AutoCAD F5 order), but
+        // ONLY while isometric drafting is on; off, F5 is left unhandled so it keeps its
+        // default behavior. Matches the iso grid/snap/crosshair, which only switch to the
+        // iso lattice when iso mode is active. The View ▸ Isoplane submenu cycles too.
+        if isF5 {
+            guard model.isometricMode else { return false }
+            cycleIsoPlane()
             return true
         }
 

@@ -781,12 +781,20 @@ final class CanvasModel {
 
     /// The `EllipseTool.Mode` for the current `ellipseModeIndex` (assembled here so
     /// `applyToolConfig` and the tests share one mapping).
+    ///
+    /// Index 5 = `.isocircle` (the ISOMETRIC-circle mode — Wire-wave 3): an ellipse
+    /// drawn as the iso-projection of a circle onto the ACTIVE iso plane. The plane is
+    /// the live `isoPlane` (so the isocircle follows the current isoplane the moment the
+    /// user F5-cycles it), matching AutoCAD's `ELLIPSE > Isocircle`, which is only
+    /// offered while `SNAPSTYLE == 1`. The ToolOptionsBar surfaces this as the "Iso"
+    /// segment (selectable any time; it draws an isocircle on the current plane).
     var ellipseModeValue: EllipseTool.Mode {
         switch ellipseModeIndex {
         case 1:  return .fociPoint
         case 2:  return .fourPoint
         case 3:  return .inscribeQuad
         case 4:  return .arc
+        case 5:  return .isocircle(plane: isoPlane)
         default: return .axis
         }
     }
@@ -2332,7 +2340,12 @@ final class CanvasModel {
             // (origin .zero, angle 0) makes these defaults, so grid snap is
             // byte-identical until a UCS is set.
             gridOrigin: currentUCS.origin,
-            gridAngle: currentUCS.angle
+            gridAngle: currentUCS.angle,
+            // Wire-wave 3 (iso): when isometric drafting is ON, grid snap lands on the
+            // ISO lattice of the active plane instead of the rectangular grid. `nil`
+            // (the rectangular default) is byte-identical to the prior behavior, so
+            // every non-iso drawing is unchanged.
+            isoPlane: isoPlaneIfActive
         )
         let changed = result != snap
         snap = result
@@ -6334,6 +6347,79 @@ final class CanvasModel {
         modelVersion &+= 1
     }
 
+    // MARK: - Isometric drafting (Wire-wave 3 — AutoCAD ISODRAFT / F5 ISOPLANE)
+    //
+    // Isometric drafting is a persisted DOCUMENT drafting MODE (the `$SNAPSTYLE` /
+    // `$LC_ISOPLANE` header vars, not a live-only aid like ortho/polar), so its two
+    // verbs funnel through the undoable `applySetting` value-snapshot mutator (one undo
+    // step each, marks the document dirty) — exactly like `setGridOn` / `setGridSpacing`.
+    // When iso mode is ON the snap, grid overlay, ortho lock, and crosshair all switch
+    // to the active plane's iso lattice (the call sites read `isoPlaneIfActive` /
+    // `crosshairAxisAngles` / `isometricMode`); OFF, every path is byte-identical to the
+    // rectangular behavior (the parameters default to `nil`).
+
+    /// Whether ISOMETRIC drafting is active (`$SNAPSTYLE == 1`). Reads/writes the
+    /// document header var through the undoable mutator, so toggling it is one undo step.
+    var isometricMode: Bool {
+        get { drawing.graphicVariables.snapIsometric }
+        set { applySetting { $0.snapIsometric = newValue } }
+    }
+
+    /// The active isometric drafting plane (Top / Left / Right — `$LC_ISOPLANE`).
+    /// Reads/writes the document header var through the undoable mutator. Independent of
+    /// `isometricMode`: the plane is remembered even while iso is off (so re-enabling
+    /// restores the last plane), but only TAKES EFFECT when iso is on (`isoPlaneIfActive`).
+    var isoPlane: IsoPlane {
+        get { drawing.graphicVariables.isoPlane }
+        set { applySetting { $0.isoPlane = newValue } }
+    }
+
+    /// The active iso plane ONLY when iso mode is on, else `nil` — the value the snap /
+    /// grid-overlay / crosshair call sites pass through. `nil` selects the rectangular
+    /// (unchanged) path in each kernel, so a non-iso drawing is byte-identical.
+    var isoPlaneIfActive: IsoPlane? { isometricMode ? isoPlane : nil }
+
+    /// Toggles isometric drafting on/off (View ▸ Isometric Snap / the ISO status chip).
+    /// One undo step via `isometricMode`'s `applySetting` funnel; `modelVersion` is bumped
+    /// there so the menu checkmark + status chip + canvas (iso grid/crosshair) refresh.
+    func toggleIsometric() {
+        isometricMode.toggle()
+    }
+
+    /// Cycles the active iso plane in the AutoCAD F5 order Top → Right → Left → Top.
+    /// One undo step via `isoPlane`'s `applySetting` funnel. Bound to F5 (canvas keyDown)
+    /// + the View ▸ Isoplane submenu + the ISO chip. Cycling is allowed even when iso is
+    /// off (it just records the plane for the next time iso turns on), matching AutoCAD's
+    /// F5, which sets ISOPLANE regardless of ISODRAFT.
+    func cycleIsoPlane() {
+        switch isoPlane {
+        case .top:   isoPlane = .right
+        case .right: isoPlane = .left
+        case .left:  isoPlane = .top
+        }
+    }
+
+    /// The two SCREEN-space crosshair axis angles (radians) for the active iso plane, or
+    /// `nil` when iso mode is off (⇒ the unchanged rectangular crosshair). The plane's
+    /// `axisDirections` are WORLD-space angles; the viewport flips Y (screen Y grows
+    /// downward), so each angle is NEGATED for the screen-space `CrosshairOverlay`
+    /// (`crosshairGeometry(…axisAngles:)`), matching the iso grid the user sees.
+    var crosshairAxisAngles: (Double, Double)? {
+        guard isometricMode else { return nil }
+        let (a1, a2) = isoPlane.axisDirections
+        return (-a1.angle, -a2.angle)
+    }
+
+    /// Short status-chip label for the active iso plane (e.g. "Top"). View-layer reads
+    /// this to render the ISO chip text ("ISO: Top").
+    var isoPlaneLabel: String {
+        switch isoPlane {
+        case .top:   return "Top"
+        case .left:  return "Left"
+        case .right: return "Right"
+        }
+    }
+
     // MARK: - Dynamic input (live dimensional feedback — AutoCAD F12 / DYNMODE)
 
     /// Toggles DYNAMIC INPUT — the on-canvas live dimensional feedback (View menu /
@@ -6600,6 +6686,15 @@ final class CanvasModel {
         guard orthoEffective(shiftHeld: shiftHeld) else { return point }
         guard !osnapActive else { return point }                 // osnap wins
         guard let reference = relativeZero else { return point }  // need a last point
+        // Iso-ortho (Wire-wave 3): when isometric drafting is ON, ortho locks to the
+        // active iso PLANE's two drawing axes (e.g. 30°/150° for .top) instead of
+        // horizontal/vertical — the AutoCAD iso-ortho behavior. The iso axes are WORLD
+        // directions (not UCS-rotated), so this branch ignores the UCS frame (iso + a
+        // rotated UCS is a deferred coupling, noted in the report). Off ⇒ the
+        // unchanged rectangular/UCS path below.
+        if isometricMode {
+            return OrthoConstraint.constrain(point, relativeTo: reference, isoPlane: isoPlane)
+        }
         // Ortho locks to the UCS axes (UCS-W3): convert the candidate + reference INTO
         // the active UCS frame, axis-lock there with the unchanged pure kernel, then
         // convert the result back to WORLD. With `UCS.world` `toUCS`/`toWorld` are the
