@@ -781,6 +781,7 @@ struct TextStyleEditor: View {
             TextField("Text", text: $bodyText, axis: .vertical)
                 .lineLimit(1...4)
                 .onSubmit { onKindCommit(record.id, InspectorEdits.setTextString(record.kind, bodyText)) }
+            insertFieldMenu
 
         case .mtext:
             Picker("Attachment", selection: attachmentBinding) {
@@ -802,10 +803,38 @@ struct TextStyleEditor: View {
             TextField("Text", text: $bodyText, axis: .vertical)
                 .lineLimit(1...6)
                 .onSubmit { onKindCommit(record.id, InspectorEdits.setMTextPlainText(record.kind, bodyText)) }
+            insertFieldMenu
 
         default:
             EmptyView()
         }
+    }
+
+    // MARK: Insert Field (Wave 3 — embed an auto-updating field)
+
+    /// The "Insert Field" affordance for the TEXT/MTEXT body: a small menu offering
+    /// the MVP field tokens (Date / Layout Name / File Name). Choosing one APPENDS the
+    /// field — its `FieldRun` + a zero-width placeholder marker — to the entity's text
+    /// via the undoable `InspectorEdits.appendField` setter (so it round-trips and
+    /// undoes like any other inspector edit). UNWIRED beyond this menu: the Insert-Field
+    /// command-palette/menu entry and the live-value refresh are the wire-wave; until
+    /// `ResolveContext.fieldContext` is supplied, the appended field renders as its
+    /// zero-width placeholder (no visible value yet).
+    @ViewBuilder
+    private var insertFieldMenu: some View {
+        Menu("Insert Field") {
+            Button("Date") { insertField(.date()) }
+            Button("Layout Name") { insertField(.layoutName()) }
+            Button("File Name") { insertField(.fileName()) }
+        }
+        .help("Insert an auto-updating field (date / layout name / file name) at the end of the text. The value appears once field updating is wired.")
+    }
+
+    /// Commits an `appendField` of `token` to the selected TEXT/MTEXT through the
+    /// undoable kind-commit funnel, then re-seeds the body draft so the editor reflects
+    /// the new (placeholder-bearing) text.
+    private func insertField(_ token: FieldToken) {
+        onKindCommit(record.id, InspectorEdits.appendField(to: record.kind, token: token))
     }
 
     // MARK: Bindings
