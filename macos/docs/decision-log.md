@@ -6,6 +6,20 @@ Newest first. (Reversible code lives behind small diffs on `native-macos`; cite 
 
 ---
 
+## 2026-06-18 — NAMED PARAMETERS: Parameters Manager table + `a=22` auto-creation — (`native-macos`, **3967 tests**, `.app` rebuilt + launch-smoked)
+
+Owner: "get the parameters table and the parameter auto-creation." Ran a research→plan→critic workflow (5 probes + planner + critic, **GO-WITH-FIXES**) → a 3-wave, 5-lane, file-disjoint build, executed **delegated** (builders + per-lane code-review + merge-by-hash + serial gate). All additive — NO new EntityKind; the solver is untouched (reads only `Constraint.value`); the literal dimensional path stays byte-identical.
+
+- **L0 evaluator** `c503580`/`8def5c9`: pure `ExpressionEvaluator` (recursive-descent + - * / parens/unary-minus, numeric+unit literals, name refs, whole-table topological eval with CYCLE detection, `parseAssignment`). Units NOT converted in the pure engine (returns the unit token) + a pure `DrawingUnit(unitToken:)` inverse helper; the app seam does the conversion. (Review-fix: spaced unit `3.5 cm` now lexes like `3.5cm`.)
+- **L1 model** `e624ef3`: `Parameter`/`ParameterTable` on CADDrawing (clone of ConstraintTable — undoable funnel, Codable back-compat, case-insensitive dup-name reject); additive `Constraint.expression: String?` (nil ⇒ literal, byte-identical; non-nil ⇒ `value` is the evaluated cache the solver reads). Parameter-delete FREEZES referencing constraints to their last literal (one undo). RENAME deferred (delete+recreate).
+- **L2 seam + input** `9e22a86`: `recomputeParameterDrivenValues()` choke point at the top of `resolveConstraints` (cycle/NaN-safe — keeps last-good, never feeds NaN); one-undo `setParameterExpression/Value` + `setConstraintExpression` funnels with TRANSITIVE re-solve; `name=value[unit]` route in `interpretCommandLine` (after coord, before tool, returns `.handled` → command-line files untouched; unit conversion here); dimensional auto-bind over the selection. Mid-line-DRAW dynamic-input binding deferred.
+- **L3 persistence** `3c2f854`: `DXFPayload` now carries constraints + parameters through the in-session snapshot/restore (fixes a pre-existing gap — constraints never rode the payload). Pure-`.dxf` save→reopen still drops them (DXF can't carry them — documented, same as tables).
+- **L4 Parameters Manager** `23fc1a4`/`7d173dc`: an AutoCAD-style sheet (user params Name|Expression|Value editable + add/remove + parameter-driven constraint list), edits commit through the L2 funnels (live re-solve, one undo), opened from a Tools-menu item + ⌘K; pure `ParameterNaming` validator; sheet presented only via the responder chain, inline-red errors (no NSAlert — headless-modal-safe).
+
+**Delegation note:** owner asked me to keep coding delegated to builders — this whole feature was builder-built + reviewer-checked; I stayed coordinator. Reviews: APPROVE / APPROVE-WITH-NITS across all lanes (nits fixed: spaced-unit lexing; fragile test import → extracted pure `ParameterNaming` + convention-correct symlink). **Deferred:** parameter RENAME (needs reference-repoint), auto-naming dimensional constraints (d1/d2), bare-literal→param binding, mid-draw dynamic-input `a=22`, DXF-bytes persistence of the parametric model.
+
+---
+
 ## 2026-06-17 — FOUR-FEATURE PROGRAM: parametric constraints + tables&fields + MLINE + isometric — (`native-macos`, **3892 + 71 tests**, `.app` rebuilt + launch-smoked)
 
 Owner: "build these four next — research, plan, then build." Ran a research→plan→critic workflow (5 research probes + 4 planners + 1 gating critic, **GO-WITH-FIXES**) → a sequenced, file-disjoint **7-wave** build executed with isolated worktrees, per-lane code-review on the algorithm/ABI-heavy lanes, merge-by-hash, serial gate each wave. **Key architecture decision (critic-confirmed):** only **MLINE** adds a new `EntityKind`; **constraints, tables, fields, isometric are all ADDITIVE** (CADDrawing tables / live state) — so MLINE got a solo critical-section wave and the rest never touched the 28-file switch set.
