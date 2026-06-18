@@ -223,11 +223,15 @@ final class ConstraintGlyphOverlayView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        guard isShowingGlyphs, !model.allConstraints.isEmpty else { return }
+        // INFERRED constraints are HIDDEN (AutoCAD's inferred coincidence): the
+        // auto-added corner-coincident companion of a perpendicular/parallel never gets
+        // a badge — it is invisible to the user. Filter it out before laying out badges.
+        let visibleConstraints = model.allConstraints.filter { !$0.inferred }
+        guard isShowingGlyphs, !visibleConstraints.isEmpty else { return }
 
         let viewport = model.viewport
         let placements = ConstraintGlyphLayout.placements(
-            for: model.allConstraints,
+            for: visibleConstraints,
             worldAnchor: { [model] c in Self.anchorWorld(c, model: model) },
             worldToScreen: { viewport.worldToScreen($0) })
 

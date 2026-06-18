@@ -5256,10 +5256,14 @@ final class CanvasModel {
             }
         case .parallel:
             guard entities.count == 2 else { return false }
-            constraint = .parallel(line: entities[0], line: entities[1])
+            let main = Constraint.parallel(line: entities[0], line: entities[1])
+            return commitConstraints(withInferredCorner(main, lineA: entities[0], lineB: entities[1]),
+                                     touching: Set(entities))
         case .perpendicular:
             guard entities.count == 2 else { return false }
-            constraint = .perpendicular(line: entities[0], line: entities[1])
+            let main = Constraint.perpendicular(line: entities[0], line: entities[1])
+            return commitConstraints(withInferredCorner(main, lineA: entities[0], lineB: entities[1]),
+                                     touching: Set(entities))
         case .coincident:
             guard entities.count == 2 else { return false }
             constraint = .coincident(ConstraintPoint(entityID: entities[0], point: .start),
@@ -5302,19 +5306,106 @@ final class CanvasModel {
 
     /// Registers `constraint` undoably AND re-solves the geometry it now constrains, in
     /// ONE undo group (a single ⌘Z reverts both the add and any geometry it moved).
-    /// Shared tail of the two `addConstraint` overloads. Returns whether the constraint
-    /// was added (the table rejects a duplicate id, but a freshly-minted one never is).
+    /// Returns whether the constraint was added.
     @discardableResult
     private func commitConstraint(_ constraint: Constraint, touching ids: Set<EntityID>) -> Bool {
+        commitConstraints([constraint], touching: ids)
+    }
+
+    /// Registers EVERY constraint in `constraints` undoably (in order) AND re-solves the
+    /// geometry they now constrain, ALL in ONE undo group — a single ⌘Z reverts every
+    /// add AND any geometry the combined re-solve moved. This is the generalized tail of
+    /// the `addConstraint` overloads: a single explicit constraint commits as a one-element
+    /// list, while the perpendicular/parallel create path commits the user's main
+    /// constraint TOGETHER with its auto-inferred hidden coincident companion so they
+    /// re-solve ONCE as one undoable step (the corner stays joined as the angle rotates).
+    /// Returns whether AT LEAST ONE constraint was added (the table rejects a duplicate id;
+    /// a freshly-minted one never is). On an empty list it is a no-op returning `false`.
+    @discardableResult
+    private func commitConstraints(_ constraints: [Constraint], touching ids: Set<EntityID>) -> Bool {
+        guard !constraints.isEmpty else { return false }
         let explicitGroup = !undoManager.groupsByEvent
         if explicitGroup { undoManager.beginUndoGrouping() }
         defer { if explicitGroup { undoManager.endUndoGrouping() } }
 
-        guard drawing.addConstraint(constraint) else { return false }   // undoable
-        resolveConstraints(touching: ids)   // apply immediately, same undo group
+        var addedAny = false
+        for constraint in constraints {
+            if drawing.addConstraint(constraint) { addedAny = true }   // undoable
+        }
+        guard addedAny else { return false }
+        resolveConstraints(touching: ids)   // apply ALL once, same undo group
         modelDirty = true
         modelVersion &+= 1
         return true
+    }
+
+    // MARK: Inferred coincidence (AutoCAD-style hidden corner coincident)
+
+    /// Returns the constraint list to commit for a perpendicular/parallel applied to two
+    /// LINES: the user's `main` constraint, plus — when the two lines meet at a shared
+    /// CORNER — a HIDDEN, auto-inferred coincident pinning that endpoint pair together.
+    ///
+    /// WHY: a bare perpendicular/parallel constrains only the ANGLE; nothing holds the
+    /// shared end together, so applying it to a hand-drawn corner rotates the lines and
+    /// the ends DRIFT APART. AutoCAD's "inferred coincidence" auto-adds the (hidden)
+    /// coincident at the corner so it stays joined as the angle constraint rotates the
+    /// pair. The companion solves exactly like an explicit coincident — only the glyph
+    /// overlay treats it as hidden.
+    ///
+    /// Returns `[main]` (no companion) when: an entity isn't a line; the lines don't share
+    /// an essentially-touching corner (see `nearestCornerPair`); or a coincident already
+    /// binds that endpoint pair (don't duplicate). Returns `[main, inferred]` otherwise.
+    private func withInferredCorner(_ main: Constraint,
+                                    lineA: EntityID, lineB: EntityID) -> [Constraint] {
+        guard case .line(let a)? = drawing.entity(lineA)?.kind,
+              case .line(let b)? = drawing.entity(lineB)?.kind else { return [main] }
+        guard let (pa, pb) = Self.nearestCornerPair(lineA: lineA, a: a, lineB: lineB, b: b)
+        else { return [main] }
+        // Don't duplicate an existing coincident already binding this exact pair.
+        guard !coincidentExists(pa, pb) else { return [main] }
+        return [main, .coincidentInferred(pa, pb)]
+    }
+
+    /// The nearest START/END pair between two lines, IF they form an essentially-touching
+    /// CORNER. Of the 4 endpoint combos (start/end of A × start/end of B) it picks the
+    /// closest, and treats it as a corner only when the gap is within
+    /// `max(1e-6, 1e-3 · min(lenA, lenB))` — a snapped / already-touching corner. Lines
+    /// that merely cross or sit far apart get NO companion (we never JOIN far-apart lines).
+    /// Returns the two `ConstraintPoint`s to pin, or `nil` when there is no such corner
+    /// (or either line is degenerate / zero-length).
+    static func nearestCornerPair(lineA: EntityID, a: LineData,
+                                  lineB: EntityID, b: LineData)
+        -> (ConstraintPoint, ConstraintPoint)? {
+        let lenA = a.start.distance(to: a.end)
+        let lenB = b.start.distance(to: b.end)
+        guard lenA > 0, lenB > 0 else { return nil }   // degenerate line → no corner
+        let tol = max(1e-6, 1e-3 * min(lenA, lenB))
+
+        let combos: [(EntityPoint, Vector, EntityPoint, Vector)] = [
+            (.start, a.start, .start, b.start),
+            (.start, a.start, .end,   b.end),
+            (.end,   a.end,   .start, b.start),
+            (.end,   a.end,   .end,   b.end),
+        ]
+        var best: (EntityPoint, EntityPoint, Double)? = nil
+        for (pa, va, pb, vb) in combos {
+            let d = va.distance(to: vb)
+            if best == nil || d < best!.2 { best = (pa, pb, d) }
+        }
+        guard let (pa, pb, gap) = best, gap <= tol else { return nil }
+        return (ConstraintPoint(entityID: lineA, point: pa),
+                ConstraintPoint(entityID: lineB, point: pb))
+    }
+
+    /// Whether a COINCIDENT constraint already binds the endpoint pair {`pa`, `pb`}
+    /// (either order). Avoids stacking a redundant inferred coincident on a corner the
+    /// user already pinned explicitly.
+    private func coincidentExists(_ pa: ConstraintPoint, _ pb: ConstraintPoint) -> Bool {
+        drawing.constraints.constraints.contains { c in
+            guard case .geometric(.coincident) = c.kind, c.points.count == 2 else { return false }
+            let p0 = c.points[0], p1 = c.points[1]
+            return (p0 == pa && p1 == pb) || (p0 == pb && p1 == pa)
+        }
     }
 
     /// Removes the constraint with `id` (undoable). The geometry it WAS holding is left
