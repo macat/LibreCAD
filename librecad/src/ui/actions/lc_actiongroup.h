@@ -24,11 +24,12 @@
 #define LC_ACTIONGROUP_H
 
 #include <QActionGroup>
+#include <QIcon>
 
 class LC_ActionGroup : public QActionGroup {
     Q_OBJECT
 public:
-    LC_ActionGroup(QObject* parent, const QString& name, const QString& title, const QString& description, const char* icon);
+    LC_ActionGroup(QObject* parent, const QString& name, const QString& title, const QString& description, const char* iconName);
     ~LC_ActionGroup() override;
     const QString& getName() const;
     void setName(const QString& name);
@@ -38,7 +39,7 @@ public:
     void setIcon(const QIcon& icon);
     bool isActionMappingsMayBeConfigured() const;
     void setActionMappingsMayBeConfigured(bool actionMappingsMayBeConfigured);
-    const QString getTitle() const;
+    QString getTitle() const;
 protected:
     QString m_name;
     QString m_title;
@@ -47,4 +48,4 @@ protected:
     bool m_actionMappingsMayBeConfigured = true;
 };
 
-#endif // LC_ACTIONGROUP_H
+#endif

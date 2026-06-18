@@ -28,6 +28,9 @@
 #ifndef RS_INSERT_H
 #define RS_INSERT_H
 
+#include <cstddef>
+
+#include "lc_insert_transform.h"
 #include "rs_entitycontainer.h"
 
 class RS_BlockList;
@@ -42,6 +45,7 @@ struct RS_InsertData {
     RS_InsertData() = default;
 
     RS_InsertData(const RS_InsertData &other);
+    RS_InsertData& operator=(const RS_InsertData& other) = default;
 
 	/**
 	 * @param name The name of the block used as an identifier.
@@ -72,14 +76,40 @@ struct RS_InsertData {
 	QString name;
 	RS_Vector insertionPoint;
 	RS_Vector scaleFactor;
+    RS_Vector extrusion {0.0, 0.0, 1.0};
     double angle=0.;
-    int cols=0, rows=0;
+    // DXF groups 70/71 are optional and default to one ordinary INSERT.
+    // Keep the in-memory default aligned with that contract so a default
+    // payload never masquerades as an empty MINSERT array.
+    int cols=1, rows=1;
 	RS_Vector spacing;
     RS_BlockList* blockSource = nullptr;
     RS2::UpdateMode updateMode{};
 };
 
 std::ostream& operator << (std::ostream& os, const RS_InsertData& d);
+
+/**
+ * Bounds work performed while expanding a BLOCK reference.  Callers that
+ * process untrusted or unusually deep drawings can provide a stricter
+ * budget to update(const RS_InsertExpansionBudget&).
+ */
+struct RS_InsertExpansionBudget {
+    static constexpr std::size_t DefaultMaxNestingDepth = 256U;
+    static constexpr std::size_t DefaultMaxDerivedEntities = 1000000U;
+    // This is separate from derived entities: an empty BLOCK can otherwise
+    // make a huge MINSERT grid consume unbounded traversal work.
+    static constexpr std::size_t DefaultMaxArrayInstances = DefaultMaxDerivedEntities;
+
+    std::size_t maxNestingDepth {DefaultMaxNestingDepth};
+    std::size_t maxDerivedEntities {DefaultMaxDerivedEntities};
+    std::size_t maxArrayInstances {DefaultMaxArrayInstances};
+
+    [[nodiscard]] bool isValid() const noexcept {
+        return maxNestingDepth > 0U && maxDerivedEntities > 0U
+               && maxArrayInstances > 0U;
+    }
+};
 
 /**
  * An insert inserts a block into the drawing at a certain location
@@ -112,19 +142,24 @@ public:
          */
     void reparent(RS_EntityContainer* parent)  override{
                 RS_Entity::reparent(parent);
-                m_block = nullptr;
+                invalidateBlockCache();
     }
 
-	RS_Block* getBlockForInsert() const;
+    RS_Block* getBlockForInsert() const;
 
     void update() override;
+    void update(const RS_InsertExpansionBudget& budget);
+    void calculateBorders() override;
 
     QString getName() const {
         return m_data.name;
     }
 
     void setName(const QString& newName) {
+        if (m_data.name == newName)
+            return;
         m_data.name = newName;
+        invalidateBlockCache();
         update();
     }
 
@@ -174,14 +209,21 @@ public:
         m_data.spacing = s;
     }
 
+    [[nodiscard]] LC_InsertSourceEditStatus lastSourceEditStatus() const noexcept {
+        return m_lastSourceEditStatus;
+    }
+
+    [[nodiscard]] bool lastSourceEditSucceeded() const noexcept {
+        return m_lastSourceEditStatus == LC_InsertSourceEditStatus::Ok;
+    }
+
     bool isVisible() const override;
 
     RS_VectorSolutions getRefPoints() const override;
-    RS_Vector getMiddlePoint(void) const  override{
+
+    RS_Vector getMiddlePoint() const override {
         return {};
     }
-    RS_Vector getNearestRef(const RS_Vector& coord,
-                            double* dist = nullptr) const override;
 
     void move(const RS_Vector& offset) override;
     void rotate(const RS_Vector& center, double angle) override;
@@ -189,11 +231,27 @@ public:
     void scale(const RS_Vector& center, const RS_Vector& factor) override;
     void mirror(const RS_Vector& axisPoint1, const RS_Vector& axisPoint2) override;
 
-    friend std::ostream& operator << (std::ostream& os, const RS_Insert& i);
+    friend std::ostream& operator <<(std::ostream& os, const RS_Insert& i);
 
 protected:
-    RS_InsertData m_data{};
+    void applySourceEdit(const LC_InsertTransform& edit, const char* operation);
+    void setLastSourceEditStatus(LC_InsertSourceEditStatus status) noexcept {
+        m_lastSourceEditStatus = status;
+    }
+
+    void invalidateBlockCache() const noexcept {
+        m_block = nullptr;
+        m_blockList = nullptr;
+        m_blockListGeneration = 0U;
+    }
+
+    RS_InsertData m_data;
+    LC_InsertSourceEditStatus m_lastSourceEditStatus {LC_InsertSourceEditStatus::Ok};
     mutable RS_Block* m_block = nullptr;
+    mutable const RS_BlockList* m_blockList = nullptr;
+    mutable std::size_t m_blockListGeneration = 0U;
+
+    RS_Vector doGetNearestRef(const RS_Vector& coord, double* dist = nullptr) const override;
 };
 
 

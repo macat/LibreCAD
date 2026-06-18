@@ -16,9 +16,12 @@
 
 #define DRW_VERSION "0.6.3"
 
+#include <cstdint>
 #include <string>
 #include <cmath>
+#include <memory>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #ifdef DRW_ASSERTS
@@ -49,21 +52,6 @@
 #define M_PIx2      6.283185307179586 // 2*PI
 #define ARAD 57.29577951308232
 
-typedef signed char dint8;              /* 8 bit signed */
-typedef signed short dint16;            /* 16 bit signed */
-typedef signed int dint32;              /* 32 bit signed */
-typedef long long int dint64;           /* 64 bit signed */
-
-typedef unsigned char duint8;           /* 8 bit unsigned */
-typedef unsigned short duint16;         /* 16 bit unsigned */
-typedef unsigned int duint32;           /* 32 bit unsigned */
-typedef unsigned long long int duint64; /* 64 bit unsigned */
-
-typedef float dfloat32;                 /* 32 bit floating point */
-typedef double ddouble64;               /* 64 bit floating point */
-typedef long double ddouble80;          /* 80 bit floating point */
-
-
 namespace DRW {
 
 //! Version numbers for the DXF Format.
@@ -93,6 +81,7 @@ const std::unordered_map< const char*, DRW::Version > dwgVersionStrings {
     { "MC0.0", DRW::MC00 },
     { "AC1.2", DRW::AC12 },
     { "AC1.4", DRW::AC14 },
+    { "AC1.40", DRW::AC14 },   // R1.40 real magic is the 6-char form (sniffVersion reads 6)
     { "AC1.50", DRW::AC150 },
     { "AC2.10", DRW::AC210 },
     { "AC1002", DRW::AC1002 },
@@ -109,6 +98,18 @@ const std::unordered_map< const char*, DRW::Version > dwgVersionStrings {
     { "AC1027", DRW::AC1027 },
     { "AC1032", DRW::AC1032 },
 };
+
+namespace dxfCode {
+    enum Common {
+        HANDLE = 5,
+        LAYER = 8,
+        COLOR = 62,
+        OWNER_HANDLE = 330,
+        INVISIBLE = 60,
+        LINEWEIGHT = 370,
+        PLOTSTYLE = 390
+    };
+}
 
 enum error {
 BAD_NONE,             /*!< No error. */
@@ -224,12 +225,18 @@ public:
         }
     }
 
-public:
-    double x{0};
+double x{0};
     double y{0};
     double z{0};
 };
 
+class dxfReader;
+
+class DRW_ParseableEntity {
+public:
+    virtual ~DRW_ParseableEntity() = default;
+    virtual bool parseCode(int code, const std::unique_ptr<dxfReader>& reader) = 0;
+};
 
 //! Class to handle vertex
 /*!
@@ -238,16 +245,16 @@ public:
 */
 class DRW_Vertex2D {
 public:
-    DRW_Vertex2D(): x(0), y(0), stawidth(0), endwidth(0), bulge(0){}
+    DRW_Vertex2D(): x(0), y(0), stawidth(0), endwidth(0), bulge(0), identifier(0){}
 
-    DRW_Vertex2D(double sx, double sy, double b): x(sx), y(sy), stawidth(0), endwidth(0), bulge(b) {}
+    DRW_Vertex2D(double sx, double sy, double b): x(sx), y(sy), stawidth(0), endwidth(0), bulge(b), identifier(0) {}
 
-public:
-    double x;                 /*!< x coordinate, code 10 */
+double x;                 /*!< x coordinate, code 10 */
     double y;                 /*!< y coordinate, code 20 */
     double stawidth;          /*!< Start width, code 40 */
     double endwidth;          /*!< End width, code 41 */
     double bulge;             /*!< bulge, code 42 */
+    int identifier;           /*!< vertex identifier, code 91, default 0 */
 };
 
 
@@ -261,17 +268,21 @@ public:
     enum TYPE {
         STRING,
         INTEGER,
+        INTEGER64,
         DOUBLE,
         COORD,
         BINARY,
         INVALID
     };
-//TODO: add INT64 support
-    DRW_Variant(): sdata(std::string()), vdata(), bdata(), content(0), vType(INVALID), vCode(0) {}
+    DRW_Variant(): sdata(std::string()), vdata(), bdata(), content(static_cast<std::int32_t>(0)), vType(INVALID), vCode(0) {}
 
-    DRW_Variant(int c, dint32 i): sdata(std::string()), vdata(), bdata(), content(i), vType(INTEGER), vCode(c){}
+    DRW_Variant(int c, std::int32_t i): sdata(std::string()), vdata(), bdata(), content(i), vType(INTEGER), vCode(c){}
 
-    DRW_Variant(int c, duint32 i): sdata(std::string()), vdata(), bdata(), content(static_cast<dint32>(i)), vType(INTEGER), vCode(c) {}
+    DRW_Variant(int c, std::uint32_t i): sdata(std::string()), vdata(), bdata(), content(static_cast<std::int32_t>(i)), vType(INTEGER), vCode(c) {}
+
+    DRW_Variant(int c, std::int64_t i): sdata(std::string()), vdata(), bdata(), content(i), vType(INTEGER64), vCode(c) {}
+
+    DRW_Variant(int c, std::uint64_t i): sdata(std::string()), vdata(), bdata(), content(static_cast<std::int64_t>(i)), vType(INTEGER64), vCode(c) {}
 
     DRW_Variant(int c, double d): sdata(std::string()), vdata(), bdata(), content(d), vType(DOUBLE), vCode(c) {}
 
@@ -281,7 +292,7 @@ public:
 
     DRW_Variant(int c, DRW_Coord crd): sdata(std::string()), vdata(crd), bdata(), content(&vdata), vType(COORD), vCode(c) {}
 
-    DRW_Variant(int c, std::vector<duint8> b): sdata(std::string()), vdata(), bdata(std::move(b)), content(&bdata), vType(BINARY), vCode(c) {}
+    DRW_Variant(int c, std::vector<std::uint8_t> b): sdata(std::string()), vdata(), bdata(std::move(b)), content(&bdata), vType(BINARY), vCode(c) {}
 
     DRW_Variant(const DRW_Variant& d): sdata(d.sdata), vdata(d.vdata), bdata(d.bdata), content(d.content), vType(d.vType), vCode(d.vCode), sIsLayerRef(d.sIsLayerRef) {
         if (d.vType == COORD)
@@ -292,14 +303,69 @@ public:
             content.b = &bdata;
     }
 
+    DRW_Variant& operator=(const DRW_Variant& d) {
+        if (this == &d)
+            return *this;
+        sdata = d.sdata;
+        vdata = d.vdata;
+        bdata = d.bdata;
+        content = d.content;
+        vType = d.vType;
+        vCode = d.vCode;
+        sIsLayerRef = d.sIsLayerRef;
+        if (d.vType == COORD)
+            content.v = &vdata;
+        if (d.vType == STRING)
+            content.s = &sdata;
+        if (d.vType == BINARY)
+            content.b = &bdata;
+        return *this;
+    }
+
+    DRW_Variant(DRW_Variant&& d) noexcept
+        : sdata(std::move(d.sdata))
+        , vdata(d.vdata)
+        , bdata(std::move(d.bdata))
+        , content(d.content)
+        , vType(d.vType)
+        , vCode(d.vCode)
+        , sIsLayerRef(d.sIsLayerRef) {
+        if (d.vType == COORD)
+            content.v = &vdata;
+        if (d.vType == STRING)
+            content.s = &sdata;
+        if (d.vType == BINARY)
+            content.b = &bdata;
+    }
+
+    DRW_Variant& operator=(DRW_Variant&& d) noexcept {
+        if (this == &d)
+            return *this;
+        sdata = std::move(d.sdata);
+        vdata = d.vdata;
+        bdata = std::move(d.bdata);
+        content = d.content;
+        vType = d.vType;
+        vCode = d.vCode;
+        sIsLayerRef = d.sIsLayerRef;
+        if (d.vType == COORD)
+            content.v = &vdata;
+        if (d.vType == STRING)
+            content.s = &sdata;
+        if (d.vType == BINARY)
+            content.b = &bdata;
+        return *this;
+    }
+
     ~DRW_Variant() {
     }
 
     void addString(int c, UTF8STRING s) {vType = STRING; sdata = s; content.s = &sdata; vCode=c; sIsLayerRef=false;}
     void addInt(int c, int i) {vType = INTEGER; content.i = i; vCode=c;}
+    void addInt64(int c, std::int64_t i) {vType = INTEGER64; content.i64 = i; vCode=c;}
     void addDouble(int c, double d) {vType = DOUBLE; content.d = d; vCode=c;}
     void addCoord(int c, DRW_Coord v) {vType = COORD; vdata = v; content.v = &vdata; vCode=c;}
-    void addBinary(int c, std::vector<duint8> b) {vType = BINARY; bdata = std::move(b); content.b = &bdata; vCode=c;}
+    void addBinary(int c, std::vector<std::uint8_t> b) {vType = BINARY; bdata = std::move(b); content.b = &bdata; vCode=c;}
     void setCoordX(double d) { if (vType == COORD) vdata.x = d;}
     void setCoordY(double d) { if (vType == COORD) vdata.y = d;}
     void setCoordZ(double d) { if (vType == COORD) vdata.z = d;}
@@ -309,34 +375,36 @@ public:
     bool isLayerRef() const { return sIsLayerRef && vType == STRING; }
     const char* c_str() const { return content.s->c_str(); }
     double d_val() const { return content.d; }
-    dint32 i_val() const { return content.i; }
+    std::int32_t i_val() const { return content.i; }
+    std::int64_t i64_val() const { return content.i64; }
     DRW_Coord* coord() const { return content.v; }
-    const std::vector<duint8>* binary() const { return &bdata; }
+    const std::vector<std::uint8_t>* binary() const { return &bdata; }
 
 private:
     std::string sdata;
     DRW_Coord vdata;
-    std::vector<duint8> bdata;
+    std::vector<std::uint8_t> bdata;
 
-private:
-    union DRW_VarContent{
+union DRW_VarContent{
         UTF8STRING *s;
-        dint32 i;
+        std::int32_t i;
+        std::int64_t i64;
         double d;
         DRW_Coord *v;
-        std::vector<duint8> *b;
+        std::vector<std::uint8_t> *b;
 
         DRW_VarContent(UTF8STRING *sd):s(sd){}
-        DRW_VarContent(dint32 id):i(id){}
+        DRW_VarContent(std::int32_t id):i(id){}
+        DRW_VarContent(std::int64_t id):i64(id){}
         DRW_VarContent(double dd):d(dd){}
         DRW_VarContent(DRW_Coord *vd):v(vd){}
-        DRW_VarContent(std::vector<duint8> *bd):b(bd){}
+        DRW_VarContent(std::vector<std::uint8_t> *bd):b(bd){}
     };
 
 public:
     DRW_VarContent content;
 private:
-    enum TYPE vType;
+    TYPE vType = INVALID;
     int vCode;            /*!< dxf code of this value*/
     bool sIsLayerRef{false}; /*!< when type==STRING, marks code 1003 layer-name references */
 
@@ -351,10 +419,10 @@ class dwgHandle{
 public:
     dwgHandle(): code(0), size(0), ref(0){}
 
-    ~dwgHandle(){}
-    duint8 code;
-    duint8 size;
-    duint32 ref;
+    ~dwgHandle() = default;
+    std::uint8_t code;
+    std::uint8_t size;
+    std::uint32_t ref;
 };
 
 //! Class to convert between line width and integer
@@ -396,7 +464,7 @@ public:
         widthDefault = 31  /*!< by default (dxf -3) */
     };
 
-    static int lineWidth2dxfInt(enum lineWidth lw){
+    static int lineWidth2dxfInt(lineWidth lw){
         switch (lw){
         case widthByLayer:
             return -1;
@@ -458,11 +526,11 @@ public:
         return -3;
     }
 
-    static int lineWidth2dwgInt(enum lineWidth lw){
+    static int lineWidth2dwgInt(lineWidth lw){
         return static_cast<int> (lw);
     }
 
-    static enum lineWidth dxfInt2lineWidth(int i){
+    static lineWidth dxfInt2lineWidth(int i){
         if (i<0) {
             if (i==-1)
                 return widthByLayer;
@@ -523,7 +591,7 @@ public:
         return widthDefault;
     }
 
-    static enum lineWidth dwgInt2lineWidth(int i){
+    static lineWidth dwgInt2lineWidth(int i){
         if ( (i>-1 && i<24) || (i>28 && i<32) ) {
             return static_cast<lineWidth> (i);
         }
@@ -533,6 +601,3 @@ public:
 };
 
 #endif
-
-// EOF
-

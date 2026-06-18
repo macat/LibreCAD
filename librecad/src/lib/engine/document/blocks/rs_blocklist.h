@@ -24,9 +24,10 @@
 **
 **********************************************************************/
 
-
 #ifndef RS_BLOCKLIST_H
 #define RS_BLOCKLIST_H
+
+#include <cstddef>
 
 #include <QList>
 
@@ -43,62 +44,77 @@ class RS_BlockListListener;
  */
 class RS_BlockList {
 public:
-    RS_BlockList(bool owner=false);
-	virtual ~RS_BlockList() = default;
+    explicit RS_BlockList(bool owner = false);
+    virtual ~RS_BlockList() = default;
 
     void clear();
     /**
      * @return Number of blocks available.
      */
-	int count() const;
+    int count() const;
 
     /**
      * @return Block at given position or NULL if i is out of range.
      */
-	RS_Block* at(int i);
-	RS_Block* at(int i) const;
-	//! \{ \brief range based loop
-	QList<RS_Block*>::iterator begin();
-	QList<RS_Block*>::iterator end();
-	QList<RS_Block*>::const_iterator begin()const;
-	QList<RS_Block*>::const_iterator end()const;
-	//! \}
+    RS_Block* at(int i);
+    RS_Block* at(int i) const;
+    //! \{ \brief range based loop
+    QList<RS_Block*>::iterator begin();
+    QList<RS_Block*>::iterator end();
+    QList<RS_Block*>::const_iterator begin() const;
+    QList<RS_Block*>::const_iterator end() const;
+    //! \}
 
     void activate(const QString& name);
     void activate(RS_Block* block);
     //! @return The active block of NULL if no block is activated.
     RS_Block* getActive() const;
 
-    bool add(RS_Block* block, bool notify=true);
+    bool add(RS_Block* block, bool notify = true);
     void addNotification();
     void remove(RS_Block* block);
     bool rename(RS_Block* block, const QString& name);
     //virtual void editBlock(RS_Block* block, const RS_Block& source);
     RS_Block* find(const QString& name);
+    const RS_Block* find(const QString& name) const;
     RS_Block* findCaseInsensitive(const QString& name) const;
     QString newName(const QString& suggestion = "");
     void toggle(const QString& name);
     void toggle(RS_Block* block);
+    /** Toggles each distinct block once and emits one full-list notification. */
+    bool toggleMulti(const QList<RS_Block*>& blocks);
     void freezeAll(bool freeze);
 
     void addListener(RS_BlockListListener* listener);
     void removeListener(RS_BlockListListener* listener);
 
-    bool isOwner() const {return m_owner;}
-    void setOwner(bool ow) {m_owner = ow;}
+    bool isOwner() const {
+        return m_owner;
+    }
+
+    void setOwner(const bool ow) {
+        m_owner = ow;
+    }
 
     /**
      * Sets the block list modified status to 'm'.
      */
-	void setModified(bool m);
+    void setModified(bool m);
 
     /**
      * @retval true The block list has been modified.
      * @retval false The block list has not been modified.
      */
-	bool isModified() const;
+    bool isModified() const;
 
-    friend std::ostream& operator << (std::ostream& os, RS_BlockList& b);
+    /**
+     * Monotonically increases whenever name-to-block resolution can change.
+     */
+    [[nodiscard]] std::size_t generation() const noexcept {
+        return m_generation;
+    }
+
+    friend std::ostream& operator <<(std::ostream& os, RS_BlockList& b);
 
 private:
     //! Is the list owning the blocks?
@@ -111,6 +127,7 @@ private:
     RS_Block* m_activeBlock = nullptr;
     /** Flag set if the block list was modified and not yet saved. */
     bool m_modified = false;
+    std::size_t m_generation = 0U;
 };
 
 #endif

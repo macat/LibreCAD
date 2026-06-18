@@ -23,6 +23,7 @@
 **********************************************************************/
 
 #include "lc_dimarc.h"
+
 #include <iostream>
 
 #include "lc_rect.h"
@@ -33,7 +34,7 @@
 #include "rs_solid.h"
 #include "rs_units.h"
 
-namespace{
+namespace {
     // trunc a floating point to multiplier of the giving unitLength
     void truncF(double& length, double unitLength) {
         length -= std::fmod(length, unitLength);
@@ -51,7 +52,12 @@ LC_DimArcData::LC_DimArcData(const LC_DimArcData& other)
     arcLength(other.arcLength),
     centre(other.centre),
     endAngle(other.endAngle),
-    startAngle(other.startAngle) {
+    startAngle(other.startAngle),
+    arcSymbol(other.arcSymbol),
+    isPartial(other.isPartial),
+    hasLeader(other.hasLeader),
+    leaderPt1(other.leaderPt1),
+    leaderPt2(other.leaderPt2) {
 }
 
 LC_DimArcData::LC_DimArcData(double input_radius,
@@ -66,7 +72,7 @@ LC_DimArcData::LC_DimArcData(double input_radius,
     startAngle(input_startAngle) {
 }
 
-LC_DimArc::LC_DimArc(const LC_DimArc& other): RS_Dimension(other), m_dimArcData{other.m_dimArcData} {
+LC_DimArc::LC_DimArc(const LC_DimArc& other) : RS_Dimension(other), m_dimArcData{other.m_dimArcData} {
 }
 
 LC_DimArc::LC_DimArc(RS_EntityContainer* parent,
@@ -109,17 +115,13 @@ QString LC_DimArc::getMeasuredLabel() {
     return measuredLabel;
 }
 
-void LC_DimArc::arrow(const RS_Vector& point,
-                      const double angle,
-                      const double direction,
-                      const RS_Pen& pen) {
+void LC_DimArc::arrow(const RS_Vector& point, const double angle, const double direction, const RS_Pen& pen) {
     if ((getTickSize() * getGeneralScale()) < 0.01) {
         double endAngle{0.0};
 
         if (m_dimArcData.radius > RS_TOLERANCE_ANGLE) endAngle = getArrowSize() / m_dimArcData.radius;
 
-        const RS_Vector arrowEnd = RS_Vector::polar(m_dimArcData.radius, angle + std::copysign(endAngle, direction))
-            + m_dimArcData.centre;
+        const RS_Vector arrowEnd = RS_Vector::polar(m_dimArcData.radius, angle + std::copysign(endAngle, direction)) + m_dimArcData.centre;
 
         const double arrowAngle{arrowEnd.angleTo(point)};
 
@@ -150,7 +152,7 @@ void LC_DimArc::doUpdateDim() {
 
     clear();
 
-    if (isUndone()) return;
+    if (isDeleted()) return;
 
     if (!m_dimArcData.centre.valid) return;
 
@@ -161,14 +163,18 @@ void LC_DimArc::doUpdateDim() {
     pen.setWidth(getDimensionLineWidth());
     pen.setColor(getDimensionLineColor());
 
-    extLine1->setPen(pen);
     extLine2->setPen(pen);
-
-    extLine1->setLayer(nullptr);
     extLine2->setLayer(nullptr);
-
-    addEntity(extLine1);
     addEntity(extLine2);
+
+    if (!m_dimArcData.isPartial) {
+        extLine1->setPen(pen);
+        extLine1->setLayer(nullptr);
+        addEntity(extLine1);
+    } else {
+        delete extLine1;
+        extLine1 = nullptr;
+    }
 
     RS_Arc* refArc{
         new RS_Arc(this,RS_ArcData(m_dimArcData.centre,
@@ -179,7 +185,8 @@ void LC_DimArc::doUpdateDim() {
             )
     };
 
-    arrow(arrowStartPoint, m_dimArcData.startAngle.angle(), +1.0, pen);
+    if (!m_dimArcData.isPartial)
+        arrow(arrowStartPoint, m_dimArcData.startAngle.angle(), +1.0, pen);
     arrow(arrowEndPoint, m_dimArcData.endAngle.angle(), -1.0, pen);
 
     double textAngle{0.0};
@@ -215,22 +222,16 @@ void LC_DimArc::doUpdateDim() {
 
     dimLabel.toDouble(&ok);
 
-    if (ok)
-        dimLabel.prepend("∩ ");
+    if (ok) {
+        if (m_dimArcData.arcSymbol == 0)
+            dimLabel.prepend("∩ ");
+        // arcSymbol == 2: no symbol; arcSymbol == 1: rendered as separate entity below
+    }
 
     RS_MTextData textData
     {
-        RS_MTextData(textPos,
-                     getTextHeight() * getGeneralScale(),
-                     30.0,
-                     RS_MTextData::VABottom,
-                     RS_MTextData::HACenter,
-                     RS_MTextData::LeftToRight,
-                     RS_MTextData::Exact,
-                     1.0,
-                     dimLabel,
-                     QString("unicode"),
-                     textAngle)
+        RS_MTextData(textPos, getTextHeight() * getGeneralScale(), 30.0, RS_MTextData::VABottom, RS_MTextData::HACenter,
+                     RS_MTextData::LeftToRight, RS_MTextData::Exact, 1.0, dimLabel, QString("unicode"), textAngle)
     };
 
     auto text = std::make_unique<RS_MText>(this, textData);
@@ -245,8 +246,7 @@ void LC_DimArc::doUpdateDim() {
     text->move(-RS_Vector::polar(getTextHeight() / 2.0, textAngle + M_PI_2));
 
     /* Text rectangle's corners : top left, top right, bottom right, bottom left. */
-    RS_Vector textRectCorners[4] =
-    {
+    RS_Vector textRectCorners[4] = {
         RS_Vector(false),
         RS_Vector(textPos + RS_Vector(+halfWidth_plusGap, +halfHeight_plusGap)),
         RS_Vector(false),
@@ -269,9 +269,7 @@ void LC_DimArc::doUpdateDim() {
     text.release();
 
     if (RS_DEBUG->getLevel() == RS_Debug::D_INFORMATIONAL) {
-        std::cout << std::endl
-            << " LC_DimArc::updateEntity: Text position / angle : " << textPos << " / " << text->getAngle()
-            << std::endl;
+        std::cout << std::endl << " LC_DimArc::updateEntity: Text position / angle : " << textPos << " / " << text->getAngle() << std::endl;
 
         std::cout << std::endl
             << " LC_DimArc::updateEntity: Reference arc middle point : " << refArc->getMiddlePoint()
@@ -318,6 +316,34 @@ void LC_DimArc::doUpdateDim() {
     addEntity(dimArc1);
     addEntity(dimArc2);
 
+    // arcSymbol == 1: draw "∩" as a separate text entity radially outward from the main text
+    if (ok && m_dimArcData.arcSymbol == 1) {
+        const double symbolHeight = getTextHeight() * getGeneralScale();
+        const RS_Vector symbolPos = textPos
+            + RS_Vector::polar(symbolHeight * 1.1, textAngle_preliminary);
+        RS_MTextData symbolData{
+            symbolPos, symbolHeight, 30.0,
+            RS_MTextData::VABottom, RS_MTextData::HACenter,
+            RS_MTextData::LeftToRight, RS_MTextData::Exact,
+            1.0, "∩", QString("unicode"), textAngle};
+        auto* symbolText = new RS_MText(this, symbolData);
+        symbolText->setPen(RS_Pen(getTextColor(), RS2::WidthByBlock, RS2::SolidLine));
+        symbolText->setLayer(nullptr);
+        addEntity(symbolText);
+    }
+
+    // Leader lines: draw when hasLeader is true and both endpoints are valid
+    if (m_dimArcData.hasLeader
+        && m_dimArcData.leaderPt1.valid
+        && m_dimArcData.leaderPt2.valid) {
+        auto* leaderLine = new RS_Line(this,
+                                       m_dimArcData.leaderPt1,
+                                       m_dimArcData.leaderPt2);
+        leaderLine->setPen(pen);
+        leaderLine->setLayer(nullptr);
+        addEntity(leaderLine);
+    }
+
     calculateBorders();
 }
 
@@ -328,9 +354,9 @@ void LC_DimArc::update() {
 
 void LC_DimArc::move(const RS_Vector& offset) {
     RS_Dimension::move(offset);
-
     m_dimArcData.centre.move(offset);
-
+    if (m_dimArcData.leaderPt1.valid) m_dimArcData.leaderPt1.move(offset);
+    if (m_dimArcData.leaderPt2.valid) m_dimArcData.leaderPt2.move(offset);
     update();
 }
 
@@ -342,33 +368,26 @@ void LC_DimArc::rotate(const RS_Vector& center, double angle) {
 
 void LC_DimArc::rotate(const RS_Vector& center, const RS_Vector& angleVector) {
     RS_Dimension::rotate(center, angleVector);
-
     m_dimArcData.centre.rotate(center, angleVector);
+    if (m_dimArcData.leaderPt1.valid) m_dimArcData.leaderPt1.rotate(center, angleVector);
+    if (m_dimArcData.leaderPt2.valid) m_dimArcData.leaderPt2.rotate(center, angleVector);
 
     const double arcDeltaAngle{m_dimArcData.startAngle.angleTo(m_dimArcData.endAngle)};
-
     m_dimArcData.startAngle = RS_Vector(m_dimGenericData.definitionPoint.angleTo(m_dimArcData.centre) - M_PI);
-
     m_dimArcData.endAngle = m_dimArcData.startAngle;
-
     m_dimArcData.endAngle.rotate(arcDeltaAngle);
-
     update();
 }
 
 void LC_DimArc::scale(const RS_Vector& center, const RS_Vector& factor) {
-    const double adjustedFactor = factor.x < factor.y
-                                      ? factor.x
-                                      : factor.y;
+    const double adjustedFactor = factor.x < factor.y ? factor.x : factor.y;
 
     const RS_Vector adjustedFactorVector(adjustedFactor, adjustedFactor);
-
     RS_Dimension::scale(center, adjustedFactorVector);
-
     m_dimArcData.centre.scale(center, adjustedFactorVector);
-
     m_dimArcData.radius *= adjustedFactor;
-
+    if (m_dimArcData.leaderPt1.valid) m_dimArcData.leaderPt1.scale(center, adjustedFactorVector);
+    if (m_dimArcData.leaderPt2.valid) m_dimArcData.leaderPt2.scale(center, adjustedFactorVector);
     update();
 }
 
@@ -376,6 +395,8 @@ void LC_DimArc::mirror(const RS_Vector& axisPoint1, const RS_Vector& axisPoint2)
     RS_Dimension::mirror(axisPoint1, axisPoint2);
 
     m_dimArcData.centre.mirror(axisPoint1, axisPoint2);
+    if (m_dimArcData.leaderPt1.valid) m_dimArcData.leaderPt1.mirror(axisPoint1, axisPoint2);
+    if (m_dimArcData.leaderPt2.valid) m_dimArcData.leaderPt2.mirror(axisPoint1, axisPoint2);
 
     /*
         // Just another way of accomplishing the operation below this comment.
@@ -415,7 +436,6 @@ void LC_DimArc::calcDimension() {
     dimArc2 = new RS_Arc(this, RS_ArcData(m_dimArcData.centre, m_dimArcData.radius, endAngle, endAngle, false));
 
     RS_Vector entityStartPoint = truncateVector(m_dimGenericData.definitionPoint);
-
     const double entityRadius = m_dimArcData.centre.distanceTo(entityStartPoint);
 
     RS_Vector entityEndPoint = truncateVector(m_dimArcData.centre
@@ -440,13 +460,10 @@ void LC_DimArc::calcDimension() {
 
     /* RS_DEBUG->setLevel(RS_Debug::D_INFORMATIONAL); */
 
-    RS_DEBUG->print(RS_Debug::D_INFORMATIONAL,
-                    "\n LC_DimArc::calcDimension: Start / end angles : %lf / %lf\n",
-                    startAngle, endAngle);
+    RS_DEBUG->print(RS_Debug::D_INFORMATIONAL, "\n LC_DimArc::calcDimension: Start / end angles : %lf / %lf\n", startAngle, endAngle);
 
-    RS_DEBUG->print(RS_Debug::D_INFORMATIONAL,
-                    "\n LC_DimArc::calcDimension: Dimension / entity radii : %lf / %lf\n",
-                    m_dimArcData.radius, entityRadius);
+    RS_DEBUG->print(RS_Debug::D_INFORMATIONAL, "\n LC_DimArc::calcDimension: Dimension / entity radii : %lf / %lf\n", m_dimArcData.radius,
+                    entityRadius);
 
     if (RS_DEBUG->getLevel() == RS_Debug::D_INFORMATIONAL) {
         std::cout << std::endl

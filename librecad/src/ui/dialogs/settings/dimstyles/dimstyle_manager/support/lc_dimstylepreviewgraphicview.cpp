@@ -23,6 +23,7 @@
 
 #include "lc_dimstylepreviewgraphicview.h"
 
+#include <QList>
 #include <QMouseEvent>
 
 #include "lc_defaultactioncontext.h"
@@ -39,10 +40,10 @@
 
 class LC_PreviewGraphic: public RS_Graphic {
 public:
-    explicit LC_PreviewGraphic() {};
+    explicit LC_PreviewGraphic() {}
 
     void setDimStyle(LC_DimStyle* dimStyle) {
-        QString styleName = dimStyle->getName();
+        const QString styleName = dimStyle->getName();
         RS2::EntityType styleType;
         LC_DimStyle::parseStyleName(styleName, m_currentStyleBaseName, styleType);
         getDimStyleList()->addDimStyle(dimStyle);
@@ -51,11 +52,10 @@ public:
     void onLoadingCompleted() override {}
     void clearDimStyles() {getDimStyleList()->clear();}
 
-    LC_DimStyle* getResolvedDimStyle([[maybe_unused]]const QString& dimStyleName, RS2::EntityType dimType) const override {
+    LC_DimStyle* getResolvedDimStyle([[maybe_unused]]const QString& dimStyleName, const RS2::EntityType dimType) const override {
         return RS_Graphic::getResolvedDimStyle(m_currentStyleBaseName, dimType);
-    };
+    }
 private:
-    RS2::EntityType m_dimType {RS2::EntityUnknown};
     QString m_currentStyleBaseName;
 };
 
@@ -75,12 +75,12 @@ LC_DimStylePreviewGraphicView::LC_DimStylePreviewGraphicView(QWidget* parent, LC
 
 LC_DimStylePreviewGraphicView::~LC_DimStylePreviewGraphicView() {
     deleteActionContext();
-};
+}
 
-LC_DimStylePreviewGraphicView* LC_DimStylePreviewGraphicView::createAndSetupView(QWidget* parent, LC_PreviewGraphic* graphic, RS_Graphic* originalGraphic, bool showInWCS) {
+LC_DimStylePreviewGraphicView* LC_DimStylePreviewGraphicView::createAndSetupView(QWidget* parent, LC_PreviewGraphic* graphic, const RS_Graphic* originalGraphic, const bool showInWCS) {
 
     graphic->setAnglesBase(originalGraphic->getAnglesBase());
-    graphic->setAnglesCounterClockwise((originalGraphic->areAnglesCounterClockWise()));
+    graphic->setAnglesCounterClockwise(originalGraphic->areAnglesCounterClockWise());
 
 
     auto* actionHandler = new QG_ActionHandler(nullptr);
@@ -88,8 +88,8 @@ LC_DimStylePreviewGraphicView* LC_DimStylePreviewGraphicView::createAndSetupView
     actionHandler->setActionContext(actionContext);
     auto* result = new LC_DimStylePreviewGraphicView(parent, actionContext);
     actionHandler->setDocumentAndView(graphic->getDocument(), result);
-    result->setContainer(graphic);
-    auto viewport = result->getViewPort();
+    result->setDocument(graphic);
+    const auto viewport = result->getViewPort();
     viewport->setBorders(15,15,15,15);
 
     result->initView();
@@ -98,13 +98,13 @@ LC_DimStylePreviewGraphicView* LC_DimStylePreviewGraphicView::createAndSetupView
     result->setDraftMode(false);
     result->setDraftLinesMode(false);
 
-    auto* renderer = dynamic_cast<LC_GraphicViewRenderer*>(result->getRenderer());
-    renderer->absZeroOptions()->m_extendAxisLines = false;
-    renderer->ucsMarkOptions()->m_showWCSZeroMarker = false;
+    auto* renderer = static_cast<LC_GraphicViewRenderer*>(result->getRenderer());
+    renderer->absZeroOptions()->extendAxisLines = false;
+    renderer->ucsMarkOptions()->showWcsZeroMarker = false;
     renderer->relZeroOptions()->hideRelativeZero = true;
 
     if (!showInWCS) {
-        auto ucs = originalGraphic->getCurrentUCS();
+        const auto ucs = originalGraphic->getCurrentUCS();
         viewport->applyUCS(ucs);
         delete ucs;
     }
@@ -116,52 +116,52 @@ LC_DimStylePreviewGraphicView* LC_DimStylePreviewGraphicView::createAndSetupView
 
 void LC_DimStylePreviewGraphicView::copyBlocks(RS_Graphic* originalGraphic, LC_PreviewGraphic* graphic) {
     // copy blocks to preview graphics for arrows. Can't determine which blocks are for arrows, so force to copy all available ones
-    auto srcBlockLock = originalGraphic->getBlockList();
-    auto blockList = graphic->getBlockList();
-    int blocksCount = srcBlockLock->count();
+    const auto srcBlockLock = originalGraphic->getBlockList();
+    const auto blockList = graphic->getBlockList();
+    const int blocksCount = srcBlockLock->count();
     if (blocksCount > 0) {
-        for (RS_Block* block: *srcBlockLock) {
+        for (const RS_Block* block: *srcBlockLock) {
             auto* blockClone = static_cast<RS_Block*>(block->clone());
             blockList->add(blockClone, false);
         }
     }
 }
 
-LC_DimStylePreviewGraphicView* LC_DimStylePreviewGraphicView::init(QWidget* parent,RS_Graphic* originalGraphic, RS2::EntityType dimensionType) {
-    auto graphic = new LC_PreviewGraphic();
-    graphic->newDoc();
+LC_DimStylePreviewGraphicView* LC_DimStylePreviewGraphicView::init(QWidget* parent,RS_Graphic* originalGraphic, const RS2::EntityType dimensionType) {
+    const auto graphic = new LC_PreviewGraphic();
+    graphic->initForNewDocument();
     copyBlocks(originalGraphic, graphic);
 
-    bool loaded = RS_FileIO::instance()->fileImport(*graphic, ":/dxf/dim_sample.dxf", RS2::FormatUnknown);
+    const bool loaded = RS_FileIO::instance()->fileImport(*graphic, ":/dxf/dim_sample.dxf", RS2::FormatUnknown);
     if (loaded) {
         LC_DimStylePreviewGraphicView* result = createAndSetupView(parent, graphic, originalGraphic, true);
         result->hideNonRelevantLayers(dimensionType);
         return result;
     }
-    else {
-        // how it could be???
-        return nullptr;
-    }
+    // how it could be???
+    return nullptr;
 }
 
-LC_DimStylePreviewGraphicView* LC_DimStylePreviewGraphicView::init(QWidget* parent, RS_Graphic* originalGraphic, RS_Dimension* dimension) {
-    auto graphic = new LC_PreviewGraphic();
-    graphic->newDoc();
+LC_DimStylePreviewGraphicView* LC_DimStylePreviewGraphicView::init(QWidget* parent, RS_Graphic* originalGraphic, const RS_Dimension* dimension) {
+    const auto graphic = new LC_PreviewGraphic();
+    graphic->initForNewDocument();
 
-    auto clone = dimension->clone();
-
+    const auto clone = dimension->clone();
     graphic->getDocument()->addEntity(clone);
 
     copyBlocks(originalGraphic, graphic);
     return createAndSetupView(parent, graphic, originalGraphic, false);
 }
 
-void LC_DimStylePreviewGraphicView::hideNonRelevantLayers(RS2::EntityType dimType) {
+void LC_DimStylePreviewGraphicView::hideNonRelevantLayers(const RS2::EntityType dimType) const {
+    auto* graphic = getGraphic(false);
     if (dimType == RS2::EntityUnknown) {
-        auto layersList = getGraphic(false)->getLayerList();
-        for (auto layer: *layersList) {
-            layer->freeze(false);
+        QList<RS_Layer*> layersToShow;
+        const auto layersList = graphic->getLayerList();
+        for (RS_Layer* layer : *layersList) {
+            layersToShow.append(layer);
         }
+        graphic->setFreezeLayers(layersToShow, {});
     }
     else {
         QString layerToShow;
@@ -189,13 +189,20 @@ void LC_DimStylePreviewGraphicView::hideNonRelevantLayers(RS2::EntityType dimTyp
             default:
                 break;
         }
-        auto layersList = getGraphic(false)->getLayerList();
-        for (auto layer: *layersList) {
-            QString layerName = layer->getName();
+        const auto layersList = graphic->getLayerList();
+        QList<RS_Layer*> layersToShow;
+        QList<RS_Layer*> layersToHide;
+        for (const auto layer: *layersList) {
+            const QString layerName = layer->getName();
             if (layerName != "0") {
-                layer->freeze(layerName != layerToShow);
+                if (layerName == layerToShow) {
+                    layersToShow.append(layer);
+                } else {
+                    layersToHide.append(layer);
+                }
             }
         }
+        graphic->setFreezeLayers(layersToShow, layersToHide);
     }
 }
 
@@ -204,7 +211,7 @@ bool LC_DimStylePreviewGraphicView::proceedEvent(QEvent* event) {
 }
 
 void LC_DimStylePreviewGraphicView::updateDims() {
-    auto graphic = getGraphic();
+    const auto graphic = getGraphic();
     graphic->updateVisibleDimensions(true);
     redraw(RS2::RedrawDrawing);
     repaint();
@@ -215,71 +222,65 @@ void LC_DimStylePreviewGraphicView::refresh() {
     repaint();
 }
 
-void LC_DimStylePreviewGraphicView::addDimStyle(LC_DimStyle* dimStyle) {
-    auto* graphic = dynamic_cast<LC_PreviewGraphic*>(getGraphic());
+void LC_DimStylePreviewGraphicView::addDimStyle(LC_DimStyle* dimStyle) const {
+    auto* graphic = static_cast<LC_PreviewGraphic*>(getGraphic());
     graphic->addDimStyle(dimStyle);
 }
 
-void LC_DimStylePreviewGraphicView::setDimStyle(LC_DimStyle* dimStyle) {
-    auto* graphic = dynamic_cast<LC_PreviewGraphic*>(getGraphic());
+void LC_DimStylePreviewGraphicView::setDimStyle(LC_DimStyle* dimStyle) const {
+    auto* graphic = static_cast<LC_PreviewGraphic*>(getGraphic());
     graphic->clearDimStyles();
     graphic->setDimStyle(dimStyle);
-    RS2::EntityType dimType = dimStyle->getDimensionType();
+    const RS2::EntityType dimType = dimStyle->getDimensionType();
     hideNonRelevantLayers(dimType);
 }
 
-void LC_DimStylePreviewGraphicView::setEntityDimStyle(LC_DimStyle* dimStyle, bool override, const QString& baseName) {
-    auto* graphic = dynamic_cast<LC_PreviewGraphic*>(getGraphic());
-    auto doc = graphic->getDocument();
+void LC_DimStylePreviewGraphicView::setEntityDimStyle(const LC_DimStyle* dimStyle, const bool override, const QString& baseName) const {
+    const auto* graphic = static_cast<LC_PreviewGraphic*>(getGraphic());
+    const auto doc = graphic->getDocument();
 
-    LC_DimStyle* styleOverride = nullptr;
-    QString styleName = baseName;
+    const LC_DimStyle* styleOverride = nullptr;
+    const QString styleName = baseName;
 
     if (override) {
         styleOverride = dimStyle;
     }
 
-    for (auto en : *doc) {
+    for (const auto en : *doc) {
         if (RS2::isDimensionalEntity(en->rtti())) {
-            auto dim = dynamic_cast<RS_Dimension*>(en);
-            if (dim) {
-                dim->setStyle(styleName);
-                dim->setDimStyleOverride(styleOverride);
-            }
+            const auto dim = static_cast<RS_Dimension*>(en);
+            dim->setStyle(styleName);
+            dim->setDimStyleOverride(styleOverride);
         }
     }
 }
 
-void LC_DimStylePreviewGraphicView::setEntityPen(const RS_Pen &pen) {
-    auto* graphic = dynamic_cast<LC_PreviewGraphic*>(getGraphic());
-    auto doc = graphic->getDocument();
+void LC_DimStylePreviewGraphicView::setEntityPen(const RS_Pen &pen) const {
+    const auto* graphic = static_cast<LC_PreviewGraphic*>(getGraphic());
+    const auto doc = graphic->getDocument();
 
-    for (auto en : *doc) {
+    for (const auto en : *doc) {
         if (RS2::isDimensionalEntity(en->rtti())) {
-            auto dim = dynamic_cast<RS_Dimension*>(en);
-            if (dim) {
-                dim->setPen(pen);
-            }
+            const auto dim = static_cast<RS_Dimension*>(en);
+            dim->setPen(pen);
         }
     }
 }
 
-void LC_DimStylePreviewGraphicView::setEntityArrowsFlipMode(bool flipArrow1, bool flipArrow2) {
-    auto* graphic = dynamic_cast<LC_PreviewGraphic*>(getGraphic());
-    auto doc = graphic->getDocument();
+void LC_DimStylePreviewGraphicView::setEntityArrowsFlipMode(const bool flipArrow1, const bool flipArrow2) const {
+    const auto* graphic = static_cast<LC_PreviewGraphic*>(getGraphic());
+    const auto doc = graphic->getDocument();
 
-    for (auto en : *doc) {
+    for (const auto en : *doc) {
         if (RS2::isDimensionalEntity(en->rtti())) {
-            auto dim = dynamic_cast<RS_Dimension*>(en);
-            if (dim) {
-                dim->setFlipArrow1(flipArrow1);
-                dim->setFlipArrow2(flipArrow2);
-            }
+            const auto dim = static_cast<RS_Dimension*>(en);
+            dim->setFlipArrow1(flipArrow1);
+            dim->setFlipArrow2(flipArrow2);
         }
     }
 }
 
-void LC_DimStylePreviewGraphicView::zoomPan() {
+void LC_DimStylePreviewGraphicView::zoomPan() const {
     switchToAction(RS2::ActionZoomPan);
 }
 
@@ -310,7 +311,7 @@ void LC_DimStylePreviewGraphicView::mouseReleaseEvent(QMouseEvent* event){
 
     switch (event->button()) {
     case Qt::RightButton: {
-        back();
+        back(Qt::KeyboardModifier::NoModifier);
         break;
     }
     case Qt::XButton1:

@@ -30,26 +30,34 @@
  */
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
+#include <limits>
 #include <map>
 #include <regex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "drw_base.h"
 #include "drw_interface.h"
+#include "intern/proxygraphicdecoder.h"
 #include "intern/drw_dbg.h"
 #include "libdwgr.h"
+#include "libdxfrw.h"
 
 // LibreCAD entity headers for end-to-end DRW→RS_Hatch pipeline tests.
 #include "lc_containertraverser.h"
@@ -62,13 +70,17 @@
 #include "rs_circle.h"
 #include "rs_ellipse.h"
 #include "rs_entitycontainer.h"
+#include "rs_debug.h"
 #include "rs_filterdxfrw.h"
 #include "rs_graphic.h"
+#include "lc_graphicviewport.h"
 #include "rs_hatch.h"
 #include "rs_insert.h"
 #include "rs_layer.h"
 #include "rs_line.h"
 #include "rs_math.h"
+#include "rs_solid.h"
+#include "rs_point.h"
 #include "rs_polyline.h"
 #include "rs_settings.h"
 
@@ -184,12 +196,13 @@ public:
   void addDimDiametric(const DRW_DimDiametric *e) override { track(*e); }
   void addDimAngular(const DRW_DimAngular *e) override { track(*e); }
   void addDimAngular3P(const DRW_DimAngular3p *e) override { track(*e); }
+  void addDimArc(const DRW_DimArc *e) override { track(*e); }
   void addDimOrdinate(const DRW_DimOrdinate *e) override { track(*e); }
   void addLeader(const DRW_Leader *e) override { track(*e); }
   void addHatch(const DRW_Hatch *e) override { track(*e); }
   void addViewport(const DRW_Viewport &e) override { track(e); }
   void addImage(const DRW_Image *e) override { track(*e); }
-  void addWipeout(const DRW_Image *e) override {
+  void addWipeout(const DRW_Wipeout *e) override {
     track(*e);
     wipeouts++;
     wipeoutVertices += static_cast<int>(e->clipPath.size());
@@ -236,7 +249,24 @@ public:
   void writeAppId() override {}
 };
 
+struct XlineCaptureIface : public CountingIface {
+  std::vector<DRW_Xline> xlines;
+  int lineCallbacks = 0;
+
+  void addLine(const DRW_Line &e) override {
+    CountingIface::addLine(e);
+    ++lineCallbacks;
+  }
+
+  void addXline(const DRW_Xline &e) override {
+    CountingIface::addXline(e);
+    xlines.push_back(e);
+  }
+};
+
 // ---- helpers ----------------------------------------------------------------
+
+const char *versionStr(DRW::Version v);
 
 struct DwgResult {
   bool ok;
@@ -256,6 +286,7 @@ DwgResult readDwg(const std::string &path, bool verbose = false,
     if (verbose)
       reader.setDebug(DRW::DebugLevel::Debug);
     bool ok = reader.read(&iface, true);
+    std::cout << "DWG fixture: " << path << "  version=" << versionStr(reader.getVersion()) << "\n";
     return {
         ok,           reader.getError(), reader.getVersion(), iface.entities,
         iface.blocks, iface.layers};
@@ -268,6 +299,49 @@ DwgResult readDwg(const std::string &path, bool verbose = false,
     return {false,          DRW::BAD_UNKNOWN, DRW::UNKNOWNV,
             iface.entities, iface.blocks,     iface.layers};
   }
+}
+
+DwgResult readDwgBuffer(const std::string &path, bool verbose = false,
+                        CountingIface *outIface = nullptr) {
+  CountingIface localIface;
+  CountingIface &iface = outIface ? *outIface : localIface;
+  try {
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+      return {false, DRW::BAD_OPEN, DRW::UNKNOWNV, 0, 0, 0};
+    std::vector<std::uint8_t> bytes(
+        (std::istreambuf_iterator<char>(in)),
+        std::istreambuf_iterator<char>());
+
+    dwgR reader(path.c_str());
+    if (verbose)
+      reader.setDebug(DRW::DebugLevel::Debug);
+    bool ok = reader.readBuffer(bytes.data(), bytes.size(), &iface, true);
+    std::cout << "DWG fixture (buffer): " << path << "  version=" << versionStr(reader.getVersion()) << "\n";
+    return {
+        ok,           reader.getError(), reader.getVersion(), iface.entities,
+        iface.blocks, iface.layers};
+  } catch (const std::exception &e) {
+    std::cerr << "  [EXCEPTION: " << e.what() << "]\n";
+    return {false,          DRW::BAD_UNKNOWN, DRW::UNKNOWNV,
+            iface.entities, iface.blocks,     iface.layers};
+  } catch (...) {
+    std::cerr << "  [UNKNOWN EXCEPTION]\n";
+    return {false,          DRW::BAD_UNKNOWN, DRW::UNKNOWNV,
+            iface.entities, iface.blocks,     iface.layers};
+  }
+}
+
+std::string libredwgFixturePath(const char *release, const char *file) {
+  const char *root = getenv("LIBREDWG_TEST_DATA");
+  if (root && root[0] != '\0')
+    return (std::filesystem::path(root) / release / file).string();
+  const char *home = getenv("HOME");
+  if (!home || home[0] == '\0')
+    return {};
+  return (std::filesystem::path(home) / "dev" / "libredwg" / "test" /
+          "test-data" / release / file)
+      .string();
 }
 
 // DRW_LW_Conv::lineWidth enum -> human-readable mm
@@ -494,6 +568,11 @@ public:
   }
   void addPolyline(const DRW_Polyline &e) override { trackT(e, "POLYLINE"); }
   void addSpline(const DRW_Spline *e) override { trackT(*e, "SPLINE"); }
+  // These entity types are delivered by the reader but were previously untracked
+  // here, so they were undercounted in the [.audit]/[.coverage] telemetry.
+  void addHelix(const DRW_Helix *e) override { trackT(*e, "HELIX"); }
+  void addOle2Frame(const DRW_Ole2Frame &e) override { trackT(e, "OLE2FRAME"); }
+  void addShape(const DRW_Shape &e) override { trackT(e, "SHAPE"); }
   void addKnot(const DRW_Entity &) override {}
   void addInsert(const DRW_Insert &e) override {
     trackT(e, "INSERT");
@@ -510,6 +589,7 @@ public:
   void addSolid(const DRW_Solid &e) override { trackT(e, "SOLID"); }
   void addMText(const DRW_MText &e) override { trackT(e, "MTEXT"); }
   void addText(const DRW_Text &e) override { trackT(e, "TEXT"); }
+  void addAttDef(const DRW_Attdef &e) override { trackT(e, "ATTDEF"); }
   void addDimAlign(const DRW_DimAligned *e) override {
     trackT(*e, "DIM_ALIGNED");
   }
@@ -528,6 +608,9 @@ public:
   void addDimAngular3P(const DRW_DimAngular3p *e) override {
     trackT(*e, "DIM_ANGULAR3P");
   }
+  void addDimArc(const DRW_DimArc *e) override {
+    trackT(*e, "ARC_DIMENSION");
+  }
   void addDimOrdinate(const DRW_DimOrdinate *e) override {
     trackT(*e, "DIM_ORDINATE");
   }
@@ -536,7 +619,7 @@ public:
   void addViewport(const DRW_Viewport &e) override { trackT(e, "VIEWPORT"); }
   void addImage(const DRW_Image *e) override { trackT(*e, "IMAGE"); }
   void addMLeader(const DRW_MLeader *e) override { trackT(*e, "MLEADER"); }
-  void addWipeout(const DRW_Image *e) override {
+  void addWipeout(const DRW_Wipeout *e) override {
     trackT(*e, "WIPEOUT");
     // Surface the polygon size so tests can sanity-check that the boundary
     // actually came through — empty clipPath is the historical bug shape.
@@ -1035,6 +1118,297 @@ public:
 
 } // namespace
 
+TEST_CASE("dwgRW::readBuffer matches file-path read for a committed fixture",
+          "[dwg][readbuffer][libdxfrw]") {
+  const std::string path =
+      std::string(LIBRECAD_TEST_DIR) + "/mpolygon_solid.dwg";
+  REQUIRE(std::filesystem::exists(path));
+
+  CountingIface fileIface;
+  const DwgResult fileRead = readDwg(path, /*verbose=*/false, &fileIface);
+  REQUIRE(fileRead.ok);
+  REQUIRE(fileRead.error == DRW::BAD_NONE);
+
+  CountingIface memoryIface;
+  const DwgResult memoryRead =
+      readDwgBuffer(path, /*verbose=*/false, &memoryIface);
+  REQUIRE(memoryRead.ok);
+  REQUIRE(memoryRead.error == DRW::BAD_NONE);
+
+  CHECK(memoryRead.version == fileRead.version);
+  CHECK(memoryRead.entities == fileRead.entities);
+  CHECK(memoryRead.blocks == fileRead.blocks);
+  CHECK(memoryRead.layers == fileRead.layers);
+  CHECK(memoryIface.entityLWeights == fileIface.entityLWeights);
+  CHECK(memoryIface.layerLWeights == fileIface.layerLWeights);
+}
+
+// Regression guard for the R2007/AC1021 header-read fix: dwgReader21 previously
+// clobbered the UTF-16 decoder with the legacy codepage, so section names
+// decoded with embedded 0x00 bytes, no section matched secEnum::getEnum(), and
+// every R2007 file failed at BAD_READ_HEADER. The committed AC1021 fixture must
+// now read clean.
+TEST_CASE("DWG R2007: section names decode via UTF-16 (no BAD_READ_HEADER)",
+          "[dwg][r2007]") {
+  const std::string path =
+      std::string(LIBRECAD_TEST_DIR) + "/visualstyle_r2007.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("visualstyle_r2007.dwg fixture absent; skipping");
+    return;
+  }
+  const DwgResult r = readDwg(path);
+  REQUIRE(r.version == DRW::AC1021);
+  REQUIRE(r.error == DRW::BAD_NONE); // was BAD_READ_HEADER before the fix
+  REQUIRE(r.ok);
+  CHECK(r.entities > 0);
+}
+
+namespace {
+// Counts POLYLINE deliveries + total vertices, over CountingIface.
+class PolyCountIface : public CountingIface {
+public:
+  int polylines = 0;
+  int polyVerts = 0;
+  void addPolyline(const DRW_Polyline &e) override {
+    CountingIface::addPolyline(e);
+    ++polylines;
+    polyVerts += static_cast<int>(e.vertlist.size());
+  }
+};
+} // namespace
+
+// Pre-R13 (R10/AC1006) JUMP + EXTRAS-section regression. entities_3.dwg holds
+// two POLYLINE_2D; the second is split by a JUMP record whose continuation
+// lives in the EXTRAS section. Before the fix, dwgReaderR11 (a) counted JUMP as
+// a parse failure and (b) never read the EXTRAS section, so only ONE polyline
+// was delivered (entityParseFailures=1). Now both are delivered, 0 failures --
+// matching dwgTs (which reads entities+blocks+extras).
+TEST_CASE("DWG pre-R13 R10: JUMP-split polyline recovered from EXTRAS section",
+          "[dwg][pre-r13][r10][jump]") {
+  const std::string path =
+      std::string(LIBRECAD_TEST_DIR) + "/pre_r13_r10_entities.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("pre_r13_r10_entities.dwg fixture absent; skipping");
+    return;
+  }
+  PolyCountIface iface;
+  dwgR reader(path.c_str());
+  REQUIRE(reader.read(&iface, /*ext=*/true));
+  REQUIRE(reader.getVersion() == DRW::AC1006);
+  REQUIRE(reader.getError() == DRW::BAD_NONE);
+  // Both POLYLINE entities are now delivered (was 1 before the EXTRAS/JUMP fix,
+  // with a spurious parse failure). The second polyline is JUMP-relocated into
+  // the EXTRAS section; per dwgTs's own note "neither libredwg nor libdxfrw
+  // follows the JUMP", so its 3 vertices are NOT relocated back onto it (dwgTs
+  // leaves them flat; dwgread delivers them as 6 separate VERTEX_2D). We
+  // therefore get 2 polylines carrying the 3 relocatable vertices of the first.
+  CHECK(iface.polylines == 2);
+  CHECK(iface.polyVerts == 3);
+}
+
+namespace {
+// Captures APPID + DIMSTYLE table-record names.
+class TableNameCapture : public CountingIface {
+public:
+  std::vector<std::string> appIds;
+  std::vector<std::string> dimStyles;
+  void addAppId(const DRW_AppId &a) override { appIds.push_back(a.name); }
+  void addDimStyle(const DRW_Dimstyle &d) override { dimStyles.push_back(d.name); }
+};
+} // namespace
+
+// Pre-R13 (R11/AC1009) EMBEDDED extended-table regression. dwgReaderR11 read
+// only LAYER/LTYPE/STYLE; the embedded APPID (@0x512) + DIMSTYLE (@0x522)
+// descriptors (present when numheader_vars@0x11 > 158) were never read. dwgTs
+// decodes these two name-only (VPORT/VIEW/UCS/VX stay dormant in dwgTs too).
+// ACEB10.dwg (R11/AC1009) carries APPID "ACAD" + DIMSTYLE "STANDARD" (dwgread).
+TEST_CASE("DWG pre-R13 R11: embedded APPID + DIMSTYLE tables decode name-only",
+          "[dwg][pre-r13][r11][tables]") {
+  const std::string path =
+      std::string(LIBRECAD_TEST_DIR) + "/pre_r13_r11_tables.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("pre_r13_r11_tables.dwg fixture absent; skipping");
+    return;
+  }
+  TableNameCapture iface;
+  dwgR reader(path.c_str());
+  REQUIRE(reader.read(&iface, /*ext=*/true));
+  REQUIRE(reader.getVersion() == DRW::AC1009);
+  REQUIRE(reader.getError() == DRW::BAD_NONE);
+  // Both embedded tables now deliver (were absent before the fix).
+  REQUIRE(iface.appIds.size() == 1);
+  CHECK(iface.appIds[0] == "ACAD");
+  REQUIRE(iface.dimStyles.size() == 1);
+  CHECK(iface.dimStyles[0] == "STANDARD");
+}
+
+namespace {
+// Captures LINE entities (count + first start point) over CountingIface.
+class LineCapture : public CountingIface {
+public:
+  int lines = 0;
+  RS_Vector firstStart{false};
+  void addLine(const DRW_Line &e) override {
+    CountingIface::addLine(e);
+    if (lines == 0)
+      firstStart = RS_Vector(e.basePoint.x, e.basePoint.y, e.basePoint.z);
+    ++lines;
+  }
+};
+} // namespace
+
+// Pre-R10 tier (R2.6/AC1003, R9/AC1004, R2.10/AC2.10) parse regression. These
+// share the R10/R11 container (dwgReaderR11) but were rejected by readMetaData
+// + the routing in libdwgr.cpp -> 0 entities. Now decoded via version-gated
+// deltas: 1-byte LTYPE handle for all pre-R11, 2D LINE/POINT/3DLINE/3DFACE
+// bodies for pre-R10, elevation-for-all, empty-ENTITIES tolerance, and
+// REPEAT/ENDREP/LOAD structural markers. Each fixture carries a 2D LINE at
+// (6,1,0) (z=0 proves the pre-R10 2D-body path; byte-identical to dwgread).
+TEST_CASE("DWG pre-R10 tier (R2.6/R9/R2.10) reads entities with 2D bodies",
+          "[dwg][pre-r13][pre-r10]") {
+  struct Case { const char *file; DRW::Version version; int minEntities; };
+  const Case cases[] = {
+      {"pre_r10_r26_entities.dwg", DRW::AC1003, 24},
+      {"pre_r10_r9_entities.dwg", DRW::AC1004, 24},
+      {"pre_r10_r210_entities.dwg", DRW::AC210, 15},
+  };
+  for (const Case &c : cases) {
+    const std::string path = std::string(LIBRECAD_TEST_DIR) + "/" + c.file;
+    INFO("fixture: " << c.file);
+    if (!std::filesystem::is_regular_file(path)) {
+      SUCCEED("fixture absent; skipping");
+      continue;
+    }
+    LineCapture iface;
+    dwgR reader(path.c_str());
+    REQUIRE(reader.read(&iface, /*ext=*/true));
+    REQUIRE(reader.getVersion() == c.version);
+    REQUIRE(reader.getError() == DRW::BAD_NONE);
+    // Entities are now delivered (was 0 before the pre-R10 fix).
+    CHECK(iface.entities >= c.minEntities);
+    REQUIRE(iface.lines >= 2);
+    // The (6,1,0) 2D LINE: z==0 confirms the pre-R10 2D-body read (a 3D read
+    // would consume the next entity's bytes as Z).
+    CHECK(iface.firstStart.x == Catch::Approx(6.0));
+    CHECK(iface.firstStart.y == Catch::Approx(1.0));
+    CHECK(iface.firstStart.z == Catch::Approx(0.0));
+  }
+}
+
+// R1.40 (magic "AC1.40") — the dedicated pre-R2.0b reader (dwgReaderR1_40).
+// Different container: no @0x14 section pointers, no per-record size/CRC; the
+// entity stream runs contiguously from 0x202 to dwg_size@0x24, each record =
+// type(RS)+layer(RS)+body. entities_4.dwg exercises all 14 types; the 9
+// renderable ones are delivered (BLOCK/ENDBLK = scope, REPEAT/ENDREP/LOAD =
+// markers). It carries a LINE (2,3)->(3,4), byte-identical to dwgread.
+TEST_CASE("DWG R1.40 (AC1.40) dedicated reader decodes the entity stream",
+          "[dwg][pre-r13][r1_40]") {
+  const std::string path =
+      std::string(LIBRECAD_TEST_DIR) + "/pre_r10_r140_entities.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("pre_r10_r140_entities.dwg fixture absent; skipping");
+    return;
+  }
+  LineCapture iface;
+  dwgR reader(path.c_str());
+  REQUIRE(reader.read(&iface, /*ext=*/true));
+  REQUIRE(reader.getVersion() == DRW::AC14);
+  REQUIRE(reader.getError() == DRW::BAD_NONE);
+  // 9 renderable entities (POINT2 LINE3 ARC CIRCLE TEXT TRACE INSERT SHAPE SOLID).
+  CHECK(iface.entities >= 9);
+  REQUIRE(iface.lines >= 3);
+  // No parse failure means the size-less walk landed exactly on dwg_size.
+  bool sawLine23 = false;
+  // firstStart is one delivered LINE start; every LINE is 2D (z==0).
+  CHECK(iface.firstStart.z == Catch::Approx(0.0));
+  // The (2,3)->(3,4) LINE proves correct body geometry vs dwgread.
+  {
+    struct L23 : public LineCapture {
+      bool found = false;
+      void addLine(const DRW_Line &e) override {
+        LineCapture::addLine(e);
+        if (std::abs(e.basePoint.x - 2.0) < 1e-9 &&
+            std::abs(e.basePoint.y - 3.0) < 1e-9)
+          found = true;
+      }
+    } cap;
+    dwgR r2(path.c_str());
+    REQUIRE(r2.read(&cap, /*ext=*/true));
+    sawLine23 = cap.found;
+  }
+  CHECK(sawLine23);
+}
+
+// Regression for BAD_READ_TABLES on a stored (incompressible) R2007 data page.
+// The $100-bill raster artwork produces an AcDb:AcDbObjects page with
+// cSize==uSize that dwgReader21::parseDataPage must memcpy, not LZ77-decompress
+// (mirrors LibreDWG read_data_page). The file is 30 MB -> developer-local, skip
+// if absent (tag hidden with leading '.').
+TEST_CASE("DWG R2007 stored-page: usa_dollar100_front.dwg reads tables",
+          "[.dwg6_stored_page]") {
+  const char *home = std::getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path =
+      std::string(home) + "/doc/dwg6/usa_dollar100_front.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("usa_dollar100_front.dwg not present; skipping");
+    return;
+  }
+  CountingIface iface;
+  const DwgResult r = readDwg(path, /*verbose=*/false, &iface);
+  REQUIRE(r.error == DRW::BAD_NONE); // was BAD_READ_TABLES before the fix
+  CHECK(iface.entities == 41368);    // dwgread: 41364 POLYLINE_3D + 4 LWPOLYLINE
+  CHECK(iface.blocks == 2);
+  CHECK(iface.layers == 1);
+}
+
+TEST_CASE("DWG XLINE reads as typed construction line across LibreDWG versions",
+          "[dwg][xline]") {
+  struct Fixture {
+    const char *file;
+    DRW::Version version;
+  };
+
+  const Fixture fixtures[] = {
+      {"xline/constructionline_2000.dwg", DRW::AC1015},
+      {"xline/constructionline_2004.dwg", DRW::AC1018},
+      // (R2007/AC1021 row omitted only because no constructionline_2007.dwg
+      //  fixture is committed; the former BAD_READ_HEADER blocker is now fixed.)
+      {"xline/constructionline_2010.dwg", DRW::AC1024},
+      {"xline/constructionline_2013.dwg", DRW::AC1027},
+      {"xline/constructionline_2018.dwg", DRW::AC1032},
+  };
+
+  for (const Fixture &fixture : fixtures) {
+    const std::string path =
+        std::string(LIBRECAD_TEST_DIR) + "/" + fixture.file;
+    INFO("fixture: " << fixture.file);
+    REQUIRE(std::filesystem::is_regular_file(path));
+
+    XlineCaptureIface iface;
+    const DwgResult result = readDwg(path, /*verbose=*/false, &iface);
+    REQUIRE(result.ok);
+    REQUIRE(result.error == DRW::BAD_NONE);
+    CHECK(result.version == fixture.version);
+    CHECK(result.entities == 1);
+    CHECK(iface.lineCallbacks == 0);
+    REQUIRE(iface.xlines.size() == 1);
+
+    const DRW_Xline &xline = iface.xlines.front();
+    CHECK(xline.eType == DRW::XLINE);
+    CHECK(std::isfinite(xline.basePoint.x));
+    CHECK(std::isfinite(xline.basePoint.y));
+    CHECK(std::isfinite(xline.secPoint.x));
+    CHECK(std::isfinite(xline.secPoint.y));
+    const double dirLen =
+        std::hypot(xline.secPoint.x, xline.secPoint.y);
+    CHECK(dirLen > 0.0);
+  }
+}
+
 TEST_CASE("DWG smoke test: read ~/doc/dwg/*.dwg and report entity counts") {
   // The test corpus lives in a developer-local directory (~/doc/dwg/) and
   // is not shipped with the repo. If it isn't present, skip cleanly so the
@@ -1230,8 +1604,8 @@ TEST_CASE("DWG Pool_Detail.dwg: dump every circle", "[.dwg_pool_circles]") {
     struct CInfo {
       double cx, cy, cz, r;
       std::string layer;
-      duint32 handle;
-      duint32 parentHandle;
+      std::uint32_t handle;
+      std::uint32_t parentHandle;
       int space; // 0=Model, 1=Paper
       bool visible;
       double ex, ey, ez;
@@ -1530,6 +1904,102 @@ TEST_CASE("DWG corpus: load all files in ~/doc/dwg3/", "[.dwg3]") {
   std::cout << std::string(110, '-') << "\n";
   std::cout << "Passed: " << passed << "  Failed: " << failed
             << "  Total: " << paths.size() << "\n";
+}
+
+// makeall-plus.dwg (AC1032/R2018) is a "make-everything" torture file with ~179
+// distinct DWG types. This deep diagnostic enumerates exactly which entity types
+// libdxfrw surfaces versus which it leaves in the skipped-custom-class telemetry,
+// so coverage gaps (surfaces, pointcloud, section) are measurable, not inferred.
+// Run: ./librecad_tests "[.dwg_makeall]" -s
+TEST_CASE("DWG makeall-plus.dwg: deep coverage diagnostic", "[.dwg_makeall]") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path = std::string(home) + "/doc/dwg3/makeall-plus.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("makeall-plus.dwg not present; skipping");
+    return;
+  }
+
+  // Counts EVERY delivery path, including those the shared TypeTrackingIface
+  // ignores: MESH, modeler geometry (3DSOLID/REGION/BODY/SURFACE), and the raw
+  // unsupported-object carrier.
+  struct CoverageIface : public TypeTrackingIface {
+    int meshes = 0, modelerGeoms = 0, unsupported = 0;
+    std::map<std::string, int> unsupportedByName;
+    std::vector<std::string> blockNames;
+    std::vector<std::pair<std::string, bool>> layerFrozen;
+    std::vector<std::pair<std::string, bool>> insertNames;
+    void addMesh(const DRW_Mesh &e) override {
+      trackT(e, "MESH");
+      ++meshes;
+    }
+    void addModelerGeometry(const DRW_ModelerGeometry &) override {
+      ++modelerGeoms;
+      typeCounts["(modeler-geometry)"]++;
+    }
+    void addUnsupportedObject(const DRW_UnsupportedObject &e) override {
+      ++unsupported;
+      unsupportedByName[e.m_recordName.empty() ? "(unnamed)" : e.m_recordName]++;
+    }
+    void addBlock(const DRW_Block &b) override {
+      TypeTrackingIface::addBlock(b);
+      blockNames.push_back(b.name);
+    }
+    void addLayer(const DRW_Layer &l) override {
+      TypeTrackingIface::addLayer(l);
+      layerFrozen.push_back({l.name, (l.flags & 0x01) != 0 || l.color < 0});
+    }
+    void addInsert(const DRW_Insert &e) override {
+      TypeTrackingIface::addInsert(e);
+      insertNames.push_back({e.name, !e.visible});
+    }
+  } iface;
+
+  DRW::setCustomDebugPrinter(new DRW::DebugPrinter()); // silent
+  dwgR reader(path.c_str());
+  const bool ok = reader.read(&iface, true);
+
+  std::cout << "\n=== makeall-plus.dwg coverage ===\n";
+  std::cout << "ok=" << ok << "  error=" << errorStr(reader.getError())
+            << "  version=" << versionStr(reader.getVersion()) << "\n";
+  std::cout << "blocks=" << iface.blocks << "  layers=" << iface.layers
+            << "  entity-callbacks=" << iface.total() << "\n";
+  std::cout << "meshes=" << iface.meshes
+            << "  modelerGeoms=" << iface.modelerGeoms
+            << "  unsupportedObjects=" << iface.unsupported
+            << "  decodedProxyPrimitives=" << reader.getDecodedProxyPrimitives()
+            << "\n";
+
+  std::cout << "\nHandled entity type distribution:\n";
+  for (const auto &[t, c] : iface.typeCounts)
+    std::cout << "  " << std::left << std::setw(22) << t << c << "\n";
+
+  std::cout << "\n*** Skipped custom CLASSES (entity-pass; THE coverage gap) ***\n";
+  for (const auto &[name, c] : reader.getSkippedCustomClasses())
+    std::cout << "  " << std::left << std::setw(34) << name << c << "\n";
+
+  std::cout << "\nSkipped unsupported OBJECTS (objects-pass):\n";
+  for (const auto &[name, c] : reader.getSkippedUnsupportedObjects())
+    std::cout << "  " << std::left << std::setw(34) << name << c << "\n";
+
+  std::cout << "\nUnsupported raw carriers delivered (by record name):\n";
+  for (const auto &[name, c] : iface.unsupportedByName)
+    std::cout << "  " << std::left << std::setw(34) << name << c << "\n";
+
+  std::cout << "\nBlock names (" << iface.blockNames.size() << "):\n";
+  for (const auto &name : iface.blockNames)
+    std::cout << "  '" << name << "'\n";
+
+  std::cout << "\nLayers (" << iface.layerFrozen.size() << "):\n";
+  for (const auto &[name, frozen] : iface.layerFrozen)
+    std::cout << "  " << std::left << std::setw(30) << name << (frozen ? "FROZEN/OFF" : "visible") << "\n";
+
+  std::cout << "\nINSERT entities (" << iface.insertNames.size() << "):\n";
+  for (const auto &[name, invis] : iface.insertNames)
+    std::cout << "  '" << name << "'" << (invis ? " INVISIBLE" : "") << "\n";
 }
 
 TEST_CASE("DWG corpus: load all files in ~/doc/dwg2/") {
@@ -1940,6 +2410,11 @@ TEST_CASE("DWG gear_pump_subassy: entity population", "[.dwg_gear_pump]") {
     if (oType >= 500)
       customLeak += count;
   CHECK(customLeak == 0);
+
+  // ATTDEFs belong to their owning BLOCK definitions and must be delivered
+  // through addAttDef(), not attached to an INSERT's attribute list.
+  REQUIRE(dr.iface.typeCounts.count("ATTDEF"));
+  CHECK(dr.iface.typeCounts.at("ATTDEF") == 17);
 
   // ATTRIBs ride attached to their owning INSERTs via DRW_Insert::attlist.
   // The file declares 17 visible-attribute instances; require at least 14
@@ -2969,6 +3444,3734 @@ TEST_CASE("DWG robot_handling_cell: entity population", "[.dwg_robot]") {
   printDeepReport("robot_handling_cell.dwg", dr);
 }
 
+// Filter-path audit for robot_handling_cell.dwg: the host carries an unresolved
+// XREF block GRIPPER ASSEMBLY NEW (Windows path in xrefPath). LibreCAD must
+// resolve gripper_assembly_new.dwg from the host directory and embed it.
+//   ./librecad_tests "[.dwg_robot_filter]" -s
+TEST_CASE("DWG robot_handling_cell: filter pipeline + XREF embed",
+          "[.dwg_robot_filter]") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path =
+      std::string(home) + "/doc/dwg2/robot_handling_cell.dwg";
+  const std::string xrefPath =
+      std::string(home) + "/doc/dwg2/gripper_assembly_new.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("robot_handling_cell.dwg not present; skipping");
+    return;
+  }
+  if (!std::filesystem::is_regular_file(xrefPath)) {
+    SUCCEED("gripper_assembly_new.dwg not present; skipping");
+    return;
+  }
+
+  static int qargc = 1;
+  static char qarg0[] = "librecad_tests";
+  static char *qargv[] = {qarg0, nullptr};
+  static QCoreApplication *qapp = QCoreApplication::instance()
+                                      ? QCoreApplication::instance()
+                                      : new QCoreApplication(qargc, qargv);
+  static bool settingsReady = [] {
+    QCoreApplication::setOrganizationName("LibreCAD");
+    QCoreApplication::setApplicationName("LibreCAD-tests");
+    RS_Settings::init("LibreCAD", "LibreCAD-tests");
+    return true;
+  }();
+  (void)qapp;
+  (void)settingsReady;
+
+  RS_Graphic graphic;
+  RS_FilterDXFRW filter;
+  REQUIRE(filter.fileImport(graphic, QString::fromStdString(path),
+                            RS2::FormatDWG));
+
+  auto *blockList = graphic.getBlockList();
+  REQUIRE(blockList);
+  RS_Block *gripperBlock = blockList->find("GRIPPER ASSEMBLY NEW");
+  REQUIRE(gripperBlock);
+  INFO("GRIPPER ASSEMBLY NEW direct count = " << gripperBlock->count());
+  // embedXref copies model-space top-level entities from gripper_assembly_new.dwg
+  // (1504) plus namespaced block defs; nested block geometry rides INSERT refs.
+  CHECK(gripperBlock->count() >= 1500);
+
+  auto *layers = graphic.getLayerList();
+  REQUIRE(layers);
+  CHECK(layers->find("GRIPPER ASSEMBLY NEW|AM_0") != nullptr);
+
+  std::cout << "\n=== robot_handling_cell filter audit ===\n";
+  std::cout << "countDeep=" << graphic.countDeep()
+            << " gripperBlock=" << gripperBlock->count()
+            << " gripperDeep=" << gripperBlock->countDeep() << "\n";
+}
+
+// robot_handling_cell.dwg stores many arcs in OCS with extrusion (0,0,-1).
+// Without applyExtrusion the semicircle at OCS center (+900,2217.74) r=66 is
+// drawn on the wrong side of the drawing; WCS center must be (-900,2217.74).
+//   ./librecad_tests "[.dwg_robot_arc_ext]" -s
+TEST_CASE("DWG robot_handling_cell: negative extrusion arc placement",
+          "[.dwg_robot_arc_ext]") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path =
+      std::string(home) + "/doc/dwg2/robot_handling_cell.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("robot_handling_cell.dwg not present; skipping");
+    return;
+  }
+
+  struct ArcProbe : public DRW_Interface {
+    int negExtHits = 0;
+    int wrongSideHits = 0;
+    void addHeader(const DRW_Header *) override {}
+    void addLType(const DRW_LType &) override {}
+    void addLayer(const DRW_Layer &) override {}
+    void addDimStyle(const DRW_Dimstyle &) override {}
+    void addVport(const DRW_Vport &) override {}
+    void addTextStyle(const DRW_Textstyle &) override {}
+    void addAppId(const DRW_AppId &) override {}
+    void addBlock(const DRW_Block &) override {}
+    void setBlock(const int) override {}
+    void endBlock() override {}
+    void addPoint(const DRW_Point &) override {}
+    void addLine(const DRW_Line &) override {}
+    void addRay(const DRW_Ray &) override {}
+    void addXline(const DRW_Xline &) override {}
+    void addCircle(const DRW_Circle &) override {}
+    void addArc(const DRW_Arc &a) override {
+      if (std::fabs(a.basePoint.y - 2217.73666) > 0.05
+          || std::fabs(a.radious - 66.0) > 0.05) {
+        return;
+      }
+      ++negExtHits;
+      if (a.basePoint.x > 0.0) {
+        ++wrongSideHits;
+      }
+    }
+    void addEllipse(const DRW_Ellipse &) override {}
+    void addLWPolyline(const DRW_LWPolyline &) override {}
+    void addPolyline(const DRW_Polyline &) override {}
+    void addSpline(const DRW_Spline *) override {}
+    void addKnot(const DRW_Entity &) override {}
+    void addInsert(const DRW_Insert &) override {}
+    void addTrace(const DRW_Trace &) override {}
+    void add3dFace(const DRW_3Dface &) override {}
+    void addSolid(const DRW_Solid &) override {}
+    void addMText(const DRW_MText &) override {}
+    void addText(const DRW_Text &) override {}
+    void addDimAlign(const DRW_DimAligned *) override {}
+    void addDimLinear(const DRW_DimLinear *) override {}
+    void addDimRadial(const DRW_DimRadial *) override {}
+    void addDimDiametric(const DRW_DimDiametric *) override {}
+    void addDimAngular(const DRW_DimAngular *) override {}
+    void addDimAngular3P(const DRW_DimAngular3p *) override {}
+    void addDimArc(const DRW_DimArc *) override {}
+    void addDimOrdinate(const DRW_DimOrdinate *) override {}
+    void addLeader(const DRW_Leader *) override {}
+    void addHatch(const DRW_Hatch *) override {}
+    void addViewport(const DRW_Viewport &) override {}
+    void addImage(const DRW_Image *) override {}
+    void linkImage(const DRW_ImageDef *) override {}
+    void addComment(const char *) override {}
+    void addPlotSettings(const DRW_PlotSettings *) override {}
+    void writeHeader(DRW_Header &) override {}
+    void writeBlocks() override {}
+    void writeBlockRecords() override {}
+    void writeEntities() override {}
+    void writeLTypes() override {}
+    void writeLayers() override {}
+    void writeTextstyles() override {}
+    void writeVports() override {}
+    void writeDimstyles() override {}
+    void writeObjects() override {}
+    void writeAppId() override {}
+  } probe;
+
+  dwgR reader(path.c_str());
+  REQUIRE(reader.read(&probe, true));
+  CHECK(probe.negExtHits >= 1);
+  CHECK(probe.wrongSideHits == 0);
+
+  static int qargc = 1;
+  static char qarg0[] = "librecad_tests";
+  static char *qargv[] = {qarg0, nullptr};
+  static QCoreApplication *qapp = QCoreApplication::instance()
+                                      ? QCoreApplication::instance()
+                                      : new QCoreApplication(qargc, qargv);
+  static bool settingsReady = [] {
+    QCoreApplication::setOrganizationName("LibreCAD");
+    QCoreApplication::setApplicationName("LibreCAD-tests");
+    RS_Settings::init("LibreCAD", "LibreCAD-tests");
+    return true;
+  }();
+  (void)qapp;
+  (void)settingsReady;
+
+  RS_Graphic graphic;
+  RS_FilterDXFRW filter;
+  REQUIRE(filter.fileImport(graphic, QString::fromStdString(path),
+                            RS2::FormatDWG));
+
+  bool foundWcsArc = false;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e || e->rtti() != RS2::EntityArc) {
+      continue;
+    }
+    auto *arc = static_cast<RS_Arc *>(e);
+    const RS_Vector c = arc->getCenter();
+    if (std::fabs(c.x + 900.0) < 0.1 && std::fabs(c.y - 2217.73666) < 0.05
+        && std::fabs(arc->getRadius() - 66.0) < 0.05) {
+      foundWcsArc = true;
+      break;
+    }
+  }
+  CHECK(foundWcsArc);
+}
+
+namespace chicun {
+
+struct NearHit {
+  QString type;
+  QString layer;
+  QString insertChain;
+  quint32 handle = 0;
+  RS_Vector p1;
+  RS_Vector p2;
+  double dist = 0;
+};
+
+struct ProbeResult {
+  std::vector<NearHit> hits;
+  NearHit globalBest;
+};
+
+struct ProbeTarget {
+  const char *label;
+  double x;
+  double y;
+  double tol = 50.0;
+  double minGlobalDist = 1000.0;
+};
+
+QString insertChain(RS_Entity *e) {
+  QString chain;
+  for (RS_Entity *p = e; p; p = p->getParent()) {
+    if (p->rtti() != RS2::EntityInsert)
+      continue;
+    if (!chain.isEmpty())
+      chain += " <- ";
+    chain += static_cast<RS_Insert *>(p)->getName();
+  }
+  return chain;
+}
+
+void ensureTestApp() {
+  static int qargc = 1;
+  static char qarg0[] = "librecad_tests";
+  static char *qargv[] = {qarg0, nullptr};
+  static QCoreApplication *qapp = QCoreApplication::instance()
+                                      ? QCoreApplication::instance()
+                                      : new QCoreApplication(qargc, qargv);
+  static bool settingsReady = [] {
+    QCoreApplication::setOrganizationName("LibreCAD");
+    QCoreApplication::setApplicationName("LibreCAD-tests");
+    RS_Settings::init("LibreCAD", "LibreCAD-tests");
+    RS_DEBUG->setLevel(RS_Debug::D_WARNING);
+    return true;
+  }();
+  (void)qapp;
+  (void)settingsReady;
+}
+
+std::string fixturePath() {
+  const char *home = getenv("HOME");
+  if (!home)
+    return {};
+  const std::string path = std::string(home) + "/doc/dwg4/2带尺寸图库.dwg";
+  if (!std::filesystem::is_regular_file(path))
+    return {};
+  return path;
+}
+
+bool importFixture(RS_Graphic &graphic) {
+  const std::string path = fixturePath();
+  if (path.empty())
+    return false;
+  ensureTestApp();
+  RS_FilterDXFRW filter;
+  return filter.fileImport(graphic, QString::fromStdString(path),
+                           RS2::FormatDWG);
+}
+
+ProbeResult probeResolvedGeometry(RS_Graphic &graphic, double tx, double ty,
+                                  double tol) {
+  ProbeResult result;
+  result.globalBest.dist = std::numeric_limits<double>::infinity();
+
+  auto distToTarget = [&](const RS_Vector &p) {
+    return std::hypot(p.x - tx, p.y - ty);
+  };
+  auto consider = [&](const QString &type, RS_Entity *e, const RS_Vector &p1,
+                      const RS_Vector &p2 = RS_Vector(false)) {
+    const double d = p2.valid ? std::min(distToTarget(p1), distToTarget(p2))
+                              : distToTarget(p1);
+    if (d > tol)
+      return;
+    const QString layer =
+        e->getLayer() ? e->getLayer()->getName() : QStringLiteral("(none)");
+    result.hits.push_back(
+        {type, layer, insertChain(e), e->sourceHandle(), p1, p2, d});
+  };
+
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e)
+      continue;
+    const QString layer =
+        e->getLayer() ? e->getLayer()->getName() : QStringLiteral("(none)");
+    auto updateGlobal = [&](const QString &type, const RS_Vector &p) {
+      const double d = distToTarget(p);
+      if (d < result.globalBest.dist)
+        result.globalBest = {type, layer, insertChain(e), e->sourceHandle(),
+                             p, RS_Vector(false), d};
+    };
+    switch (e->rtti()) {
+    case RS2::EntityLine: {
+      auto *l = static_cast<RS_Line *>(e);
+      consider("LINE", e, l->getStartpoint(), l->getEndpoint());
+      updateGlobal("LINE_SP", l->getStartpoint());
+      updateGlobal("LINE_EP", l->getEndpoint());
+      break;
+    }
+    case RS2::EntityPolyline: {
+      auto *pl = static_cast<RS_Polyline *>(e);
+      RS_Vector prev(false);
+      for (RS_Entity *v : *pl) {
+        if (!v)
+          continue;
+        RS_Vector pt = v->getStartpoint();
+        consider("PLINE_VTX", e, pt);
+        if (prev.valid)
+          consider("PLINE_SEG", e, prev, pt);
+        updateGlobal("PLINE_VTX", pt);
+        prev = pt;
+      }
+      break;
+    }
+    case RS2::EntityArc: {
+      auto *a = static_cast<RS_Arc *>(e);
+      consider("ARC_CTR", e, a->getCenter());
+      consider("ARC_SP", e, a->getStartpoint());
+      consider("ARC_EP", e, a->getEndpoint());
+      updateGlobal("ARC_CTR", a->getCenter());
+      updateGlobal("ARC_SP", a->getStartpoint());
+      updateGlobal("ARC_EP", a->getEndpoint());
+      break;
+    }
+    case RS2::EntityCircle:
+      consider("CIRCLE", e, static_cast<RS_Circle *>(e)->getCenter());
+      updateGlobal("CIRCLE", static_cast<RS_Circle *>(e)->getCenter());
+      break;
+    case RS2::EntityInsert:
+      consider("INSERT", e,
+               static_cast<RS_Insert *>(e)->getInsertionPoint());
+      break;
+    case RS2::EntityEllipse: {
+      auto *el = static_cast<RS_Ellipse *>(e);
+      e->calculateBorders();
+      consider("ELL_CTR", e, el->getCenter());
+      consider("ELL_MIN", e, e->getMin());
+      consider("ELL_MAX", e, e->getMax());
+      updateGlobal("ELL_CTR", el->getCenter());
+      break;
+    }
+    case RS2::EntityWipeout: {
+      e->calculateBorders();
+      consider("WIPE_MIN", e, e->getMin());
+      consider("WIPE_MAX", e, e->getMax());
+      updateGlobal("WIPE_MIN", e->getMin());
+      break;
+    }
+    default:
+      break;
+    }
+  }
+  return result;
+}
+
+bool findResolvedPoint(RS_Graphic &graphic, const QString &chainSubstr,
+                       const char *pointType, double x, double y,
+                       double tol) {
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e || !insertChain(e).contains(chainSubstr))
+      continue;
+    RS_Vector p(false);
+    if (strcmp(pointType, "ARC_EP") == 0 && e->rtti() == RS2::EntityArc)
+      p = static_cast<RS_Arc *>(e)->getEndpoint();
+    else if (strcmp(pointType, "ARC_CTR") == 0 && e->rtti() == RS2::EntityArc)
+      p = static_cast<RS_Arc *>(e)->getCenter();
+    else if (strcmp(pointType, "ARC_SP") == 0 && e->rtti() == RS2::EntityArc)
+      p = static_cast<RS_Arc *>(e)->getStartpoint();
+    else
+      continue;
+    if (std::hypot(p.x - x, p.y - y) < tol)
+      return true;
+  }
+  return false;
+}
+
+bool findCushArcEpNearY(RS_Graphic &graphic, double y, bool positiveX,
+                        double yTol = 5.0) {
+  auto cushChain = [](RS_Entity *e) {
+    return insertChain(e).contains(QStringLiteral("CUSH"));
+  };
+  auto endpointNear = [&](const RS_Vector &ep) {
+    if (std::fabs(ep.y - y) > yTol)
+      return false;
+    if (positiveX && ep.x > 1.0e5)
+      return true;
+    if (!positiveX && ep.x < -1.0e5)
+      return true;
+    return false;
+  };
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e || !cushChain(e))
+      continue;
+    if (e->rtti() == RS2::EntityArc) {
+      if (endpointNear(static_cast<RS_Arc *>(e)->getEndpoint()))
+        return true;
+    } else if (e->rtti() == RS2::EntityEllipse) {
+      e->calculateBorders();
+      if (endpointNear(e->getMax()) || endpointNear(e->getMin()))
+        return true;
+    }
+  }
+  return false;
+}
+
+void assertProbeEmpty(const ProbeResult &result, double minGlobalDist) {
+  CHECK(result.hits.empty());
+  if (result.globalBest.dist < std::numeric_limits<double>::infinity())
+    CHECK(result.globalBest.dist > minGlobalDist);
+}
+
+void assertStray3OcsPositive(RS_Graphic &graphic) {
+  RS_Insert *a4d8Ins = nullptr;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveNone}.entities()) {
+    if (!e || e->rtti() != RS2::EntityInsert)
+      continue;
+    auto *ins = static_cast<RS_Insert *>(e);
+    if (ins->getName() == QStringLiteral("A$C4D8A4BEC")) {
+      a4d8Ins = ins;
+      break;
+    }
+  }
+  REQUIRE(a4d8Ins != nullptr);
+  CHECK(a4d8Ins->getData().extrusion.z < -0.5);
+  CHECK(a4d8Ins->getScale().z < -0.4);
+
+  // Relative to the (possibly re-based) insert grip after dense-core re-base.
+  const RS_Vector ip = a4d8Ins->getInsertionPoint();
+  const double expX = ip.x + 0.5 * 77.14807952690171;
+  const double expY = ip.y + 0.5 * 219.9479471713712;
+  int primaryCluster = 0;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e || !insertChain(e).contains(QStringLiteral("A$C4D8A4BEC")))
+      continue;
+    RS_Vector p(false);
+    if (e->rtti() == RS2::EntityCircle)
+      p = static_cast<RS_Circle *>(e)->getCenter();
+    else if (e->rtti() == RS2::EntityArc)
+      p = static_cast<RS_Arc *>(e)->getCenter();
+    else
+      continue;
+    if (std::hypot(p.x - expX, p.y - expY) < 80.0)
+      ++primaryCluster;
+  }
+  CHECK(primaryCluster >= 4);
+}
+
+const ProbeTarget kPhantoms[] = {
+    {"stray1", -774805.8834, 588320.7858},
+    {"stray2", 52984.74, 222052.06},
+    {"stray3", -294315.207, 48571.65792, 50.0, 0.0},
+    {"stray4A", 104517.7659, -1239995.976, 50.0, 900.0},
+    {"stray4B", 57585.03448, -1240174.235, 50.0, 700.0},
+    {"stray4C", 1322040.68, 492532.476, 50.0, 500.0},
+    {"stray5D", -1099318.43, 492532.476, 50.0, 1100.0},
+    {"stray5E", -952337.4015, 403260.8869},
+    {"stray5F", 1322040.68, 492532.476, 50.0, 500.0},
+    {"stray6", -2230355.08, 1646735.10, 50.0, 500.0},
+    {"stray7", -2230420.44, 1646754.55, 50.0, 500.0},
+    {"stray8", -1099671.573, 492101.3029, 50.0, 500.0},
+};
+
+struct BboxCornerHit {
+  char corner = 0;
+  QString type;
+  RS_Vector p;
+  QString insertChain;
+};
+
+void collectProbePoints(RS_Entity *e, const QString &chain,
+                        std::vector<std::pair<QString, RS_Vector>> &out) {
+  if (!e)
+    return;
+  switch (e->rtti()) {
+  case RS2::EntityLine: {
+    auto *l = static_cast<RS_Line *>(e);
+    out.push_back({"LINE_SP", l->getStartpoint()});
+    out.push_back({"LINE_EP", l->getEndpoint()});
+    break;
+  }
+  case RS2::EntityPolyline: {
+    auto *pl = static_cast<RS_Polyline *>(e);
+    for (RS_Entity *v : *pl) {
+      if (v)
+        out.push_back({"PLINE_VTX", v->getStartpoint()});
+    }
+    break;
+  }
+  case RS2::EntityArc: {
+    auto *a = static_cast<RS_Arc *>(e);
+    out.push_back({"ARC_CTR", a->getCenter()});
+    out.push_back({"ARC_SP", a->getStartpoint()});
+    out.push_back({"ARC_EP", a->getEndpoint()});
+    break;
+  }
+  case RS2::EntityCircle:
+    out.push_back({"CIRCLE", static_cast<RS_Circle *>(e)->getCenter()});
+    break;
+  case RS2::EntityInsert:
+    out.push_back({"INSERT",
+                   static_cast<RS_Insert *>(e)->getInsertionPoint()});
+    break;
+  default:
+    break;
+  }
+  (void)chain;
+}
+
+std::vector<BboxCornerHit> findBboxCornerDrivers(RS_Graphic &graphic,
+                                                 double eps = 1.0) {
+  graphic.calculateBorders();
+  const RS_Vector bmin = graphic.getMin();
+  const RS_Vector bmax = graphic.getMax();
+  std::vector<BboxCornerHit> hits;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e)
+      continue;
+    const QString chain = insertChain(e);
+    std::vector<std::pair<QString, RS_Vector>> pts;
+    collectProbePoints(e, chain, pts);
+    for (const auto &[type, p] : pts) {
+      if (!p.valid)
+        continue;
+      if (std::fabs(p.x - bmin.x) < eps)
+        hits.push_back({'W', type, p, chain});
+      if (std::fabs(p.x - bmax.x) < eps)
+        hits.push_back({'E', type, p, chain});
+      if (std::fabs(p.y - bmin.y) < eps)
+        hits.push_back({'S', type, p, chain});
+      if (std::fabs(p.y - bmax.y) < eps)
+        hits.push_back({'N', type, p, chain});
+    }
+  }
+  return hits;
+}
+
+// Draw-path envelope: walk the same RS_Entity hierarchy RS_EntityContainer::draw
+// uses (id!=0 children), apply render-time isVisible() like
+// LC_GraphicViewRenderer::renderEntity, and collect leaf min/max at the moment
+// justDrawEntity would call e->draw() — not DRW/parser-only, not pre-updateInserts.
+struct DrawPathEnvHit {
+  RS_Entity *entity = nullptr;
+  RS2::EntityType rtti = RS2::EntityUnknown;
+  RS_Vector emin;
+  RS_Vector emax;
+  QString chain;
+};
+
+struct DrawPathEnvelope {
+  RS_Vector min;
+  RS_Vector max;
+  bool valid = false;
+  int visited = 0;
+  int leaves = 0;
+  std::vector<DrawPathEnvHit> leavesList;
+};
+
+void accumulateDrawEnvelope(DrawPathEnvelope &env, const RS_Vector &emin,
+                            const RS_Vector &emax) {
+  if (!emin.valid || !emax.valid)
+    return;
+  if (!env.valid) {
+    env.min = emin;
+    env.max = emax;
+    env.valid = true;
+    return;
+  }
+  env.min = RS_Vector::minimum(env.min, emin);
+  env.max = RS_Vector::maximum(env.max, emax);
+}
+
+// Recurse like EntityContainer::draw → painter->drawEntity → e->draw().
+// Hatch overrides draw (solid path / FlagHatchChild patterns); treat hatch as
+// a leaf for solid fills and recurse only pattern hatch-children.
+void collectDrawPathBorders(RS_Entity *e, DrawPathEnvelope &env) {
+  if (!e || e->getId() == 0)
+    return;
+  // Same gate as LC_GraphicViewRenderer::renderEntity before justDrawEntity.
+  if (!e->isVisible())
+    return;
+  ++env.visited;
+
+  const RS2::EntityType t = e->rtti();
+  if (t == RS2::EntityHatch) {
+    auto *h = static_cast<RS_EntityContainer *>(e);
+    bool anyHatchChild = false;
+    for (RS_Entity *sub : *h) {
+      if (sub && !sub->isContainer() && sub->getFlag(RS2::FlagHatchChild)) {
+        anyHatchChild = true;
+        collectDrawPathBorders(sub, env);
+      }
+    }
+    if (!anyHatchChild) {
+      // Solid fill: hatch.draw paints loops; borders from hatch itself.
+      e->calculateBorders();
+      const RS_Vector emin = e->getMin();
+      const RS_Vector emax = e->getMax();
+      accumulateDrawEnvelope(env, emin, emax);
+      ++env.leaves;
+      env.leavesList.push_back(
+          {e, t, emin, emax, insertChain(e)});
+    }
+    return;
+  }
+
+  if (e->isContainer()) {
+    // RS_EntityContainer::draw / Insert::draw: paint each child with id!=0.
+    auto *c = static_cast<RS_EntityContainer *>(e);
+    for (RS_Entity *child : *c) {
+      if (child != nullptr && child->getId() != 0)
+        collectDrawPathBorders(child, env);
+    }
+    return;
+  }
+
+  // Leaf atomic: borders at the moment draw() would paint this entity.
+  e->calculateBorders();
+  const RS_Vector emin = e->getMin();
+  const RS_Vector emax = e->getMax();
+  accumulateDrawEnvelope(env, emin, emax);
+  ++env.leaves;
+  env.leavesList.push_back({e, t, emin, emax, insertChain(e)});
+}
+
+DrawPathEnvelope collectDrawPathEnvelope(RS_Graphic &graphic) {
+  DrawPathEnvelope env;
+  // Root draw: justDrawEntity(graphic) → Graphic::draw → each model child.
+  for (RS_Entity *e : graphic) {
+    if (e != nullptr && e->getId() != 0)
+      collectDrawPathBorders(e, env);
+  }
+  return env;
+}
+
+void dumpDrawPathBorderDrivers(const DrawPathEnvelope &env,
+                               double boundTol = 15.0) {
+  if (!env.valid)
+    return;
+  int envWest = 0, envEast = 0, envSouth = 0, envNorth = 0;
+  for (const auto &h : env.leavesList) {
+    if (!h.emin.valid || !h.emax.valid)
+      continue;
+    if (std::fabs(h.emin.x - env.min.x) < boundTol) {
+      ++envWest;
+      if (envWest <= 3)
+        std::cout << "  draw-env-west " << rttiName(h.rtti) << " emin=("
+                  << h.emin.x << "," << h.emin.y << ") emax=(" << h.emax.x
+                  << "," << h.emax.y << ") " << h.chain.toStdString() << "\n";
+    }
+    if (std::fabs(h.emax.x - env.max.x) < boundTol) {
+      ++envEast;
+      if (envEast <= 3)
+        std::cout << "  draw-env-east " << rttiName(h.rtti) << " emin=("
+                  << h.emin.x << "," << h.emin.y << ") emax=(" << h.emax.x
+                  << "," << h.emax.y << ") " << h.chain.toStdString() << "\n";
+    }
+    if (std::fabs(h.emin.y - env.min.y) < boundTol) {
+      ++envSouth;
+      if (envSouth <= 3)
+        std::cout << "  draw-env-south " << rttiName(h.rtti) << " emin=("
+                  << h.emin.x << "," << h.emin.y << ") emax=(" << h.emax.x
+                  << "," << h.emax.y << ") " << h.chain.toStdString() << "\n";
+    }
+    if (std::fabs(h.emax.y - env.max.y) < boundTol) {
+      ++envNorth;
+      if (envNorth <= 3)
+        std::cout << "  draw-env-north " << rttiName(h.rtti) << " emin=("
+                  << h.emin.x << "," << h.emin.y << ") emax=(" << h.emax.x
+                  << "," << h.emax.y << ") " << h.chain.toStdString() << "\n";
+    }
+  }
+  std::cout << "draw-envelope west=" << envWest << " east=" << envEast
+            << " south=" << envSouth << " north=" << envNorth << "\n";
+}
+
+bool phantomNear(const RS_Vector &p, double tol = 50.0) {
+  for (const auto &t : kPhantoms) {
+    if (std::hypot(p.x - t.x, p.y - t.y) < tol)
+      return true;
+  }
+  return false;
+}
+
+} // namespace chicun
+
+TEST_CASE("INSERT expand does not select children (policy A)",
+          "[insert][selection]") {
+  chicun::ensureTestApp();
+  RS_Graphic graphic;
+  graphic.initForNewDocument();
+  RS_Block *blk = new RS_Block(&graphic, RS_BlockData(QStringLiteral("T"),
+                                                      RS_Vector(0, 0), false));
+  blk->addEntity(new RS_Line(blk, RS_LineData(RS_Vector(0, 0), RS_Vector(10, 0))));
+  graphic.addBlock(blk);
+  auto *ins = new RS_Insert(
+      &graphic,
+      RS_InsertData(QStringLiteral("T"), RS_Vector(0, 0), RS_Vector(1, 1), 0.0,
+                    1, 1, RS_Vector(0, 0)));
+  graphic.addEntity(ins);
+  ins->update();
+  REQUIRE(ins->count() >= 1);
+  ins->setSelectionFlag(true);
+  ins->update();
+  CHECK(ins->isSelected());
+  for (RS_Entity *e : *ins) {
+    REQUIRE(e != nullptr);
+    CHECK_FALSE(e->isSelected());
+  }
+}
+
+// Probe incorrect geometry near WCS (120, 35220) in 2带尺寸图库.dwg.
+//   ./librecad_tests "[.dwg_chicun_near]" -s
+TEST_CASE("DWG 2带尺寸图库: entities near (120,35220)",
+          "[.dwg_chicun_near]") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path = std::string(home) + "/doc/dwg4/2带尺寸图库.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+
+  static int qargc = 1;
+  static char qarg0[] = "librecad_tests";
+  static char *qargv[] = {qarg0, nullptr};
+  static QCoreApplication *qapp = QCoreApplication::instance()
+                                      ? QCoreApplication::instance()
+                                      : new QCoreApplication(qargc, qargv);
+  static bool settingsReady = [] {
+    QCoreApplication::setOrganizationName("LibreCAD");
+    QCoreApplication::setApplicationName("LibreCAD-tests");
+    RS_Settings::init("LibreCAD", "LibreCAD-tests");
+    return true;
+  }();
+  (void)qapp;
+  (void)settingsReady;
+
+  RS_Graphic graphic;
+  RS_FilterDXFRW filter;
+  REQUIRE(filter.fileImport(graphic, QString::fromStdString(path),
+                            RS2::FormatDWG));
+
+  const double tx = 120.0, ty = 35220.0;
+  struct NearHit {
+    QString type;
+    QString layer;
+    RS_Vector p1;
+    RS_Vector p2;
+    double dist = 0;
+  };
+  std::vector<NearHit> hits;
+  auto dist = [&](const RS_Vector &p) {
+    return std::hypot(p.x - tx, p.y - ty);
+  };
+  auto consider = [&](const QString &type, const QString &layer,
+                      const RS_Vector &p1, const RS_Vector &p2 = RS_Vector(false)) {
+    const double d = p2.valid ? std::min(dist(p1), dist(p2)) : dist(p1);
+    if (d > 100.0)
+      return;
+    hits.push_back({type, layer, p1, p2, d});
+  };
+
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e)
+      continue;
+    const QString layer =
+        e->getLayer() ? e->getLayer()->getName() : QStringLiteral("(none)");
+    switch (e->rtti()) {
+    case RS2::EntityLine:
+      consider("LINE", layer,
+               static_cast<RS_Line *>(e)->getStartpoint(),
+               static_cast<RS_Line *>(e)->getEndpoint());
+      break;
+    case RS2::EntityArc: {
+      auto *a = static_cast<RS_Arc *>(e);
+      consider("ARC_CTR", layer, a->getCenter());
+      consider("ARC_SP", layer, a->getStartpoint());
+      consider("ARC_EP", layer, a->getEndpoint());
+      break;
+    }
+    case RS2::EntityCircle:
+      consider("CIRCLE", layer,
+               static_cast<RS_Circle *>(e)->getCenter());
+      break;
+    case RS2::EntityInsert:
+      consider("INSERT", layer,
+               static_cast<RS_Insert *>(e)->getInsertionPoint());
+      break;
+    default:
+      break;
+    }
+  }
+
+  std::sort(hits.begin(), hits.end(),
+            [](const NearHit &a, const NearHit &b) { return a.dist < b.dist; });
+
+  std::cout << "\n=== chicun near (120,35220) tol=100 ===\n";
+  std::cout << "countDeep=" << graphic.countDeep() << " hits=" << hits.size()
+            << "\n";
+
+  // Paper-space dimension blocks use large absolute coords. Endpoints with
+  // y~35220 often satisfy (paperX - 63880) ~ 120 (display UCS), e.g. *D927
+  // LINE 24EC5E at paper (63999.8, 35223.4).
+  bool foundDim927Ext = false;
+  double bestDy = std::numeric_limits<double>::infinity();
+  RS_Vector bestPaper(false);
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e || e->rtti() != RS2::EntityLine)
+      continue;
+    auto *l = static_cast<RS_Line *>(e);
+    for (const RS_Vector &p : {l->getStartpoint(), l->getEndpoint()}) {
+      if (std::fabs(p.y - ty) > 100.0)
+        continue;
+      const double dy = std::fabs(p.y - ty);
+      if (dy < bestDy) {
+        bestDy = dy;
+        bestPaper = p;
+      }
+      if (std::fabs(p.x - 63999.83) < 1.0 && std::fabs(p.y - 35223.38) < 1.0) {
+        foundDim927Ext = true;
+        std::cout << "  *D927 ext line endpoint paper=(" << p.x << "," << p.y
+                  << ") display~(" << tx << "," << p.y << ") dy=" << (p.y - ty)
+                  << "\n";
+      }
+    }
+  }
+  if (bestPaper.valid) {
+    std::cout << "closest y~35220 line endpoint paper=(" << bestPaper.x << ","
+              << bestPaper.y << ") |dy|=" << bestDy << "\n";
+  }
+  if (foundDim927Ext)
+    std::cout << "matched anonymous dim block *D927 extension line top\n";
+  for (std::size_t i = 0; i < hits.size() && i < 30; ++i) {
+    const auto &h = hits[i];
+    if (h.p2.valid)
+      std::cout << "  " << h.type.toStdString() << " layer="
+                << h.layer.toStdString() << " (" << h.p1.x << "," << h.p1.y
+                << ")->(" << h.p2.x << "," << h.p2.y << ") dist=" << h.dist
+                << "\n";
+    else
+      std::cout << "  " << h.type.toStdString() << " layer="
+                << h.layer.toStdString() << " (" << h.p1.x << "," << h.p1.y
+                << ") dist=" << h.dist << "\n";
+  }
+
+  NearHit globalBest;
+  globalBest.dist = std::numeric_limits<double>::infinity();
+  auto updateGlobal = [&](const QString &type, const QString &layer,
+                          const RS_Vector &p) {
+    const double d = dist(p);
+    if (d < globalBest.dist) {
+      globalBest = {type, layer, p, RS_Vector(false), d};
+    }
+  };
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e)
+      continue;
+    const QString layer =
+        e->getLayer() ? e->getLayer()->getName() : QStringLiteral("(none)");
+    switch (e->rtti()) {
+    case RS2::EntityLine: {
+      auto *l = static_cast<RS_Line *>(e);
+      updateGlobal("LINE_SP", layer, l->getStartpoint());
+      updateGlobal("LINE_EP", layer, l->getEndpoint());
+      break;
+    }
+    case RS2::EntityArc: {
+      auto *a = static_cast<RS_Arc *>(e);
+      updateGlobal("ARC_SP", layer, a->getStartpoint());
+      updateGlobal("ARC_EP", layer, a->getEndpoint());
+      break;
+    }
+    default:
+      break;
+    }
+  }
+
+  if (!hits.empty()) {
+    const auto &best = hits.front();
+    std::cout << "closest tol100: " << best.type.toStdString()
+              << " dist=" << best.dist << "\n";
+  } else {
+    std::cout << "no hits within tol=100; global closest "
+              << globalBest.type.toStdString() << " layer="
+              << globalBest.layer.toStdString() << " (" << globalBest.p1.x
+              << "," << globalBest.p1.y << ") dist=" << globalBest.dist
+              << "\n";
+  }
+
+  int xNear = 0;
+  std::vector<std::pair<double, QString>> yAt120;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e || e->rtti() != RS2::EntityLine || !e->getLayer())
+      continue;
+    auto *l = static_cast<RS_Line *>(e);
+    for (const RS_Vector &p : {l->getStartpoint(), l->getEndpoint()}) {
+      if (std::fabs(p.x - tx) < 10.0) {
+        ++xNear;
+        yAt120.emplace_back(p.y, e->getLayer()->getName());
+      }
+    }
+  }
+  std::sort(yAt120.begin(), yAt120.end(),
+            [](const auto &a, const auto &b) {
+              return std::fabs(a.first - 35220.0) < std::fabs(b.first - 35220.0);
+            });
+  std::cout << "line endpoints with |x-120|<10: " << xNear << "\n";
+  for (std::size_t i = 0; i < yAt120.size() && i < 8; ++i)
+    std::cout << "  y=" << yAt120[i].first << " layer="
+              << yAt120[i].second.toStdString() << " dy="
+              << (yAt120[i].first - 35220.0) << "\n";
+
+  // Informational — file may use different coordinate neighborhood.
+  SUCCEED("near-point audit complete");
+}
+
+// Block-local neighborhood for status-bar coords (120,35220) ≈ 117×(1.026,301.026).
+// Dimension _ArchTick inserts use scale 117; library symbols sit at y≈300 in block space.
+//   ./librecad_tests "[.dwg_chicun_blocklocal]" -s
+TEST_CASE("DWG 2带尺寸图库: block-local geometry near (1.026,301.026)",
+          "[.dwg_chicun_blocklocal]") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path = std::string(home) + "/doc/dwg4/2带尺寸图库.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+
+  constexpr double kDimScale = 117.0;
+  constexpr double kLocalX = 120.0 / kDimScale;
+  constexpr double kLocalY = 35220.0 / kDimScale;
+
+  struct ArcProbe : public DRW_Interface {
+    int nearSmallArc = 0;
+    int nearSharedEndArc = 0;
+    int nearCornerLine = 0;
+    std::string currentBlock;
+
+    static double dist(double x, double y, double tx, double ty) {
+      return std::hypot(x - tx, y - ty);
+    }
+
+    void addBlock(const DRW_Block &b) override { currentBlock = b.name; }
+    void endBlock() override { currentBlock.clear(); }
+
+    void addArc(const DRW_Arc &a) override {
+      const double cx = a.basePoint.x;
+      const double cy = a.basePoint.y;
+      const double spx = cx + a.radious * std::cos(a.staangle);
+      const double spy = cy + a.radious * std::sin(a.staangle);
+      const double epx = cx + a.radious * std::cos(a.endangle);
+      const double epy = cy + a.radious * std::sin(a.endangle);
+      const double dCtr = dist(cx, cy, kLocalX, kLocalY);
+      const double dSp = dist(spx, spy, kLocalX, kLocalY);
+      const double dEp = dist(epx, epy, kLocalX, kLocalY);
+      if (std::min({dCtr, dSp, dEp}) > 8.0)
+        return;
+      if (currentBlock == "A$C44380A39" && std::fabs(a.radious - 9.73736) < 0.05)
+        ++nearSmallArc;
+      if (currentBlock == "A$C44380A39"
+          && std::fabs(epx - 7.18846) < 0.05 && std::fabs(epy - 301.9017) < 0.05)
+        ++nearSharedEndArc;
+    }
+
+    void addLine(const DRW_Line &l) override {
+      if (currentBlock != "A$C2F3706B8")
+        return;
+      const auto near = [&](double x, double y) {
+        return dist(x, y, kLocalX, kLocalY) < 5.0;
+      };
+      if (near(l.basePoint.x, l.basePoint.y) || near(l.secPoint.x, l.secPoint.y)) {
+        if (std::fabs(l.basePoint.y - 301.02004368277267) < 0.01
+            || std::fabs(l.secPoint.y - 301.02004368277267) < 0.01)
+          ++nearCornerLine;
+      }
+    }
+
+    void addHeader(const DRW_Header *) override {}
+    void addLType(const DRW_LType &) override {}
+    void addLayer(const DRW_Layer &) override {}
+    void addDimStyle(const DRW_Dimstyle &) override {}
+    void addVport(const DRW_Vport &) override {}
+    void addTextStyle(const DRW_Textstyle &) override {}
+    void addAppId(const DRW_AppId &) override {}
+    void setBlock(const int) override {}
+    void addPoint(const DRW_Point &) override {}
+    void addRay(const DRW_Ray &) override {}
+    void addXline(const DRW_Xline &) override {}
+    void addCircle(const DRW_Circle &) override {}
+    void addEllipse(const DRW_Ellipse &) override {}
+    void addLWPolyline(const DRW_LWPolyline &) override {}
+    void addPolyline(const DRW_Polyline &) override {}
+    void addSpline(const DRW_Spline *) override {}
+    void addKnot(const DRW_Entity &) override {}
+    void addInsert(const DRW_Insert &) override {}
+    void addTrace(const DRW_Trace &) override {}
+    void add3dFace(const DRW_3Dface &) override {}
+    void addSolid(const DRW_Solid &) override {}
+    void addMText(const DRW_MText &) override {}
+    void addText(const DRW_Text &) override {}
+    void addDimAlign(const DRW_DimAligned *) override {}
+    void addDimLinear(const DRW_DimLinear *) override {}
+    void addDimRadial(const DRW_DimRadial *) override {}
+    void addDimDiametric(const DRW_DimDiametric *) override {}
+    void addDimAngular(const DRW_DimAngular *) override {}
+    void addDimAngular3P(const DRW_DimAngular3p *) override {}
+    void addDimArc(const DRW_DimArc *) override {}
+    void addDimOrdinate(const DRW_DimOrdinate *) override {}
+    void addLeader(const DRW_Leader *) override {}
+    void addHatch(const DRW_Hatch *) override {}
+    void addViewport(const DRW_Viewport &) override {}
+    void addImage(const DRW_Image *) override {}
+    void linkImage(const DRW_ImageDef *) override {}
+    void addComment(const char *) override {}
+    void addPlotSettings(const DRW_PlotSettings *) override {}
+    void writeHeader(DRW_Header &) override {}
+    void writeBlocks() override {}
+    void writeBlockRecords() override {}
+    void writeEntities() override {}
+    void writeLTypes() override {}
+    void writeLayers() override {}
+    void writeTextstyles() override {}
+    void writeVports() override {}
+    void writeDimstyles() override {}
+    void writeObjects() override {}
+    void writeAppId() override {}
+  };
+
+  ArcProbe probe;
+  dwgR reader(path.c_str());
+  REQUIRE(reader.read(&probe, true));
+  CHECK(probe.nearSmallArc >= 1);
+  CHECK(probe.nearSharedEndArc >= 2);
+  CHECK(probe.nearCornerLine >= 1);
+
+  static int qargc = 1;
+  static char qarg0[] = "librecad_tests";
+  static char *qargv[] = {qarg0, nullptr};
+  static QCoreApplication *qapp = QCoreApplication::instance()
+                                      ? QCoreApplication::instance()
+                                      : new QCoreApplication(qargc, qargv);
+  static bool settingsReady = [] {
+    QCoreApplication::setOrganizationName("LibreCAD");
+    QCoreApplication::setApplicationName("LibreCAD-tests");
+    RS_Settings::init("LibreCAD", "LibreCAD-tests");
+    return true;
+  }();
+  (void)qapp;
+  (void)settingsReady;
+
+  RS_Graphic graphic;
+  RS_FilterDXFRW filter;
+  REQUIRE(filter.fileImport(graphic, QString::fromStdString(path),
+                            RS2::FormatDWG));
+
+  RS_Block *detailBlk = graphic.findBlock(QStringLiteral("A$C44380A39"));
+  REQUIRE(detailBlk != nullptr);
+
+  int sharedEndArcs = 0;
+  int minorSweepOk = 0;
+  for (RS_Entity *e : *detailBlk) {
+    if (!e || e->rtti() != RS2::EntityArc)
+      continue;
+    auto *a = static_cast<RS_Arc *>(e);
+    const RS_Vector ep = a->getEndpoint();
+    if (ep.distanceTo(RS_Vector(7.18846, 301.9017)) > 0.1)
+      continue;
+    ++sharedEndArcs;
+    const double sweep = RS_Math::correctAngle(a->getAngle2() - a->getAngle1());
+    if (sweep < M_PI)
+      ++minorSweepOk;
+  }
+  CHECK(sharedEndArcs >= 2);
+  CHECK(minorSweepOk >= 2);
+
+  bool foundMirroredInsert = false;
+  for (RS_Entity *e : lc::LC_ContainerTraverser{graphic, RS2::ResolveNone}.entities()) {
+    if (!e || e->rtti() != RS2::EntityInsert)
+      continue;
+    auto *ins = static_cast<RS_Insert *>(e);
+    if (ins->getName() != QStringLiteral("A$C44380A39"))
+      continue;
+    if (std::fabs(ins->getScale().x + 1.0) < 0.01
+        && std::fabs(ins->getInsertionPoint().x - 334984.274) < 1.0) {
+      foundMirroredInsert = true;
+      break;
+    }
+  }
+  CHECK(foundMirroredInsert);
+}
+
+struct Deng1RawIface : public CountingIface {
+  std::string curBlock;
+  void addBlock(const DRW_Block &b) override {
+    CountingIface::addBlock(b);
+    curBlock = b.name;
+    if (curBlock == "deng1")
+      std::cout << "raw deng1 block bp=(" << b.basePoint.x << "," << b.basePoint.y
+                << ")\n";
+  }
+  void endBlock() override {
+    CountingIface::endBlock();
+    curBlock.clear();
+  }
+  void addCircle(const DRW_Circle &e) override {
+    CountingIface::addCircle(e);
+    if (curBlock == "deng1")
+      std::cout << "raw deng1 circle h=0x" << std::hex << e.handle << std::dec
+                << " ctr=(" << e.basePoint.x << "," << e.basePoint.y
+                << ") r=" << e.radious << "\n";
+  }
+};
+
+// Lamp block (deng1) nested in A$C5ABE7CED — circles must land on the compounded
+// insert point (84004, 115511), not at the raw block-local offset (~36k, 58k).
+//   ./librecad_tests "[.dwg_chicun_circle]" -s
+TEST_CASE("DWG 2带尺寸图库: deng1 circles at insert point (84004,115511)",
+          "[.dwg_chicun_circle]") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path = std::string(home) + "/doc/dwg4/2带尺寸图库.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+
+  Deng1RawIface rawIface;
+  readDwg(path, false, &rawIface);
+  std::cout << "raw deng1 read with applyExt=true (see above)\n";
+  {
+    Deng1RawIface noExt;
+    dwgR reader(path.c_str());
+    reader.read(&noExt, false);
+    std::cout << "raw deng1 read with applyExt=false done\n";
+  }
+
+  static int qargc = 1;
+  static char qarg0[] = "librecad_tests";
+  static char *qargv[] = {qarg0, nullptr};
+  static QCoreApplication *qapp = QCoreApplication::instance()
+                                      ? QCoreApplication::instance()
+                                      : new QCoreApplication(qargc, qargv);
+  static bool settingsReady = [] {
+    QCoreApplication::setOrganizationName("LibreCAD");
+    QCoreApplication::setApplicationName("LibreCAD-tests");
+    RS_Settings::init("LibreCAD", "LibreCAD-tests");
+    return true;
+  }();
+  (void)qapp;
+  (void)settingsReady;
+
+  RS_Graphic graphic;
+  RS_FilterDXFRW filter;
+  REQUIRE(filter.fileImport(graphic, QString::fromStdString(path),
+                            RS2::FormatDWG));
+
+  // Expected WCS for deng1-921 after full nested insert chain (not the stale
+  // partial transform that previously placed geometry ~75k from insertionPoint).
+  const double tx = 84004.0, ty = 115511.0;
+  struct CircleHit {
+    double r = 0;
+    quint32 handle = 0;
+    QString insertChain;
+  };
+  std::vector<CircleHit> hits;
+  auto insertChain = [](RS_Entity *e) {
+    QString chain;
+    for (RS_Entity *p = e; p; p = p->getParent()) {
+      if (p->rtti() != RS2::EntityInsert)
+        continue;
+      if (!chain.isEmpty())
+        chain += " <- ";
+      chain += static_cast<RS_Insert *>(p)->getName();
+    }
+    return chain;
+  };
+
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e || e->rtti() != RS2::EntityCircle)
+      continue;
+    auto *c = static_cast<RS_Circle *>(e);
+    const RS_Vector ctr = c->getCenter();
+    if (std::hypot(ctr.x - tx, ctr.y - ty) > 1.0)
+      continue;
+    hits.push_back({c->getRadius(), e->sourceHandle(), insertChain(e)});
+  }
+  std::sort(hits.begin(), hits.end(),
+            [](const CircleHit &a, const CircleHit &b) { return a.r < b.r; });
+
+  std::cout << "\n=== chicun circle (44748.7,180186.7) ===\n";
+  std::cout << "countDeep=" << graphic.countDeep() << " hits=" << hits.size()
+            << "\n";
+  for (const auto &h : hits) {
+    std::cout << "  r=" << h.r << " handle=0x" << std::hex << h.handle
+              << std::dec << " insert=" << h.insertChain.toStdString() << "\n";
+  }
+
+  if (hits.empty()) {
+    for (RS_Entity *e :
+         lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+      if (!e || e->rtti() != RS2::EntityCircle || e->sourceHandle() != 0x15C6D5u)
+        continue;
+      auto *c = static_cast<RS_Circle *>(e);
+      const RS_Vector ctr = c->getCenter();
+      if (!insertChain(e).contains(QStringLiteral("A$C5ABE7CED")))
+        continue;
+      std::cout << "fallback deng1 circle ctr=(" << ctr.x << "," << ctr.y
+                << ") chain=" << insertChain(e).toStdString() << "\n";
+    }
+  }
+
+  RS_Insert *topParentEarly = nullptr;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveNone}.entities()) {
+    if (!e || e->rtti() != RS2::EntityInsert)
+      continue;
+    auto *ins = static_cast<RS_Insert *>(e);
+    if (ins->getName() != QStringLiteral("A$C5ABE7CED"))
+      continue;
+    if (ins->getParent() == nullptr
+        || ins->getParent()->rtti() != RS2::EntityGraphic)
+      continue;
+    topParentEarly = ins;
+    break;
+  }
+  if (topParentEarly) {
+    std::cout << "top parent children=" << topParentEarly->count() << "\n";
+    for (RS_Entity *e : *topParentEarly) {
+      if (!e || e->rtti() != RS2::EntityInsert)
+        continue;
+      auto *ins = static_cast<RS_Insert *>(e);
+      std::cout << " child insert " << ins->getName().toStdString() << " h=0x"
+                << std::hex << ins->sourceHandle() << std::dec << "\n";
+      if (ins->getName() != QStringLiteral("deng1"))
+        continue;
+      RS_Vector firstGeom(false);
+      for (RS_Entity *c : *ins) {
+        if (c && c->rtti() == RS2::EntityCircle) {
+          firstGeom = static_cast<RS_Circle *>(c)->getCenter();
+          break;
+        }
+      }
+      const RS_Vector ip = ins->getInsertionPoint();
+      std::cout << "early resolved deng1 ip=(" << ip.x << "," << ip.y << ")";
+      if (firstGeom.valid)
+        std::cout << " circle=(" << firstGeom.x << "," << firstGeom.y
+                  << ") dist=" << firstGeom.distanceTo(ip);
+      std::cout << "\n";
+    }
+  }
+
+  RS_Block *deng1 = graphic.findBlock(QStringLiteral("deng1"));
+  REQUIRE(deng1 != nullptr);
+  int blockCircles = 0;
+  RS_Vector blockCtr(false);
+  for (RS_Entity *e : *deng1) {
+    if (!e || e->rtti() != RS2::EntityCircle)
+      continue;
+    auto *c = static_cast<RS_Circle *>(e);
+    if (blockCircles == 0)
+      blockCtr = c->getCenter();
+    CHECK(blockCtr.distanceTo(c->getCenter()) < 0.01);
+    ++blockCircles;
+  }
+  CHECK(blockCircles == 3);
+  std::cout << "deng1 block circle center=(" << blockCtr.x << "," << blockCtr.y
+            << ")\n";
+  CHECK(blockCtr.distanceTo(RS_Vector(0.0, 0.0)) < 1.0);
+
+  REQUIRE(hits.size() == 3);
+  CHECK(std::fabs(hits[0].r - 27.5) < 0.05);
+  CHECK(std::fabs(hits[1].r - 110.0) < 0.05);
+  CHECK(std::fabs(hits[2].r - 247.5) < 0.05);
+  CHECK(hits[0].insertChain.contains(QStringLiteral("deng1")));
+  CHECK(hits[0].insertChain.contains(QStringLiteral("A$C5ABE7CED")));
+
+  RS_Arc *blockArc = nullptr;
+  for (RS_Entity *e : *deng1) {
+    if (e && e->rtti() == RS2::EntityArc) {
+      blockArc = static_cast<RS_Arc *>(e);
+      break;
+    }
+  }
+  REQUIRE(blockArc != nullptr);
+  std::cout << "deng1 block arc a1=" << blockArc->getAngle1()
+            << " a2=" << blockArc->getAngle2()
+            << " r=" << blockArc->getRadius() << "\n";
+
+  RS_Block *parentBlk = graphic.findBlock(QStringLiteral("A$C5ABE7CED"));
+  REQUIRE(parentBlk != nullptr);
+  const RS_Vector deng1Bp = deng1->getBasePoint();
+  const RS_Vector parentBp = parentBlk->getBasePoint();
+  std::cout << "deng1 basePoint=(" << deng1Bp.x << "," << deng1Bp.y << ")\n";
+  std::cout << "A$C5ABE7CED basePoint=(" << parentBp.x << "," << parentBp.y
+            << ")\n";
+
+  int parentInsertCount = 0;
+  int parentDeng1Count = 0;
+  std::cout << "INSERTs in A$C5ABE7CED block definition:\n";
+  for (RS_Entity *e : *parentBlk) {
+    if (!e || e->rtti() != RS2::EntityInsert)
+      continue;
+    ++parentInsertCount;
+    auto *ins = static_cast<RS_Insert *>(e);
+    const RS_Vector sc = ins->getScale();
+    std::cout << "  " << ins->getName().toStdString() << " h=0x" << std::hex
+              << ins->sourceHandle() << std::dec << " ip=("
+              << ins->getInsertionPoint().x << ","
+              << ins->getInsertionPoint().y << ") sc=(" << sc.x << "," << sc.y
+              << ") ang=" << ins->getAngle() << "\n";
+    if (ins->getName() == QStringLiteral("deng1"))
+      ++parentDeng1Count;
+  }
+  std::cout << "parent inserts total=" << parentInsertCount
+            << " deng1=" << parentDeng1Count << "\n";
+
+  std::cout << "resolved deng1 circle instances (handle 15C6D5):\n";
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e || e->rtti() != RS2::EntityCircle || e->sourceHandle() != 0x15C6D5u)
+      continue;
+    auto *c = static_cast<RS_Circle *>(e);
+    std::cout << "  WCS=(" << c->getCenter().x << "," << c->getCenter().y
+              << ") chain=" << insertChain(e).toStdString() << "\n";
+  }
+
+  RS_Insert *topParent = nullptr;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveNone}.entities()) {
+    if (!e || e->rtti() != RS2::EntityInsert)
+      continue;
+    auto *ins = static_cast<RS_Insert *>(e);
+    if (ins->getName() != QStringLiteral("A$C5ABE7CED"))
+      continue;
+    if (ins->getParent() == nullptr
+        || ins->getParent()->rtti() != RS2::EntityGraphic)
+      continue;
+    topParent = ins;
+    break;
+  }
+  REQUIRE(topParent != nullptr);
+  const RS_Vector topSc = topParent->getScale();
+  std::cout << "top A$C5ABE7CED h=0x" << std::hex << topParent->sourceHandle()
+            << std::dec << " ip=(" << topParent->getInsertionPoint().x << ","
+            << topParent->getInsertionPoint().y << ") sc=(" << topSc.x << ","
+            << topSc.y << ") ang=" << topParent->getAngle() << "\n";
+
+  const double lampX = tx, lampY = ty;
+  double bestShafa = std::numeric_limits<double>::infinity();
+  RS_Vector bestPt(false);
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e || e->rtti() != RS2::EntityLine)
+      continue;
+    QString chain = insertChain(e);
+    if (!chain.contains(QStringLiteral("shafa2"))
+        || !chain.contains(QStringLiteral("A$C5ABE7CED")))
+      continue;
+    auto *l = static_cast<RS_Line *>(e);
+    for (const RS_Vector &p : {l->getStartpoint(), l->getEndpoint()}) {
+      const double d = std::hypot(p.x - lampX, p.y - lampY);
+      if (d < bestShafa) {
+        bestShafa = d;
+        bestPt = p;
+      }
+    }
+  }
+  std::cout << "nearest shafa2 line endpoint to lamp: dist=" << bestShafa
+            << " at (" << bestPt.x << "," << bestPt.y << ")\n";
+
+  // Block-local: deng1 circle center vs shafa2 insert — should stay clustered.
+  RS_Insert *shafa2Ins = nullptr;
+  for (RS_Entity *e : *parentBlk) {
+    if (e && e->rtti() == RS2::EntityInsert
+        && static_cast<RS_Insert *>(e)->getName() == QStringLiteral("shafa2")) {
+      shafa2Ins = static_cast<RS_Insert *>(e);
+      break;
+    }
+  }
+  REQUIRE(shafa2Ins != nullptr);
+  RS_Insert *deng1Ins921 = nullptr;
+  for (RS_Entity *e : *parentBlk) {
+    if (e && e->rtti() == RS2::EntityInsert
+        && static_cast<RS_Insert *>(e)->getName() == QStringLiteral("deng1")
+        && e->sourceHandle() == 0x1DF921u) {
+      deng1Ins921 = static_cast<RS_Insert *>(e);
+      break;
+    }
+  }
+  REQUIRE(deng1Ins921 != nullptr);
+  const double blockDist = deng1Ins921->getInsertionPoint().distanceTo(
+      shafa2Ins->getInsertionPoint());
+  std::cout << "parent-block dist(deng1-921, shafa2)=" << blockDist << "\n";
+  std::cout << "deng1-921 block ip=" << deng1Ins921->getInsertionPoint().x
+            << "," << deng1Ins921->getInsertionPoint().y
+            << " shafa2 block ip=" << shafa2Ins->getInsertionPoint().x << ","
+            << shafa2Ins->getInsertionPoint().y << "\n";
+
+  // Resolved nested inserts under the top-level parent (post updateInserts).
+  auto dumpResolvedInsert = [](RS_Insert *parent, const char *name,
+                               quint32 handle) {
+    for (RS_Entity *e : *parent) {
+      if (!e || e->rtti() != RS2::EntityInsert)
+        continue;
+      auto *ins = static_cast<RS_Insert *>(e);
+      if (ins->getName() != QString::fromUtf8(name))
+        continue;
+      if (handle != 0 && ins->sourceHandle() != handle)
+        continue;
+      const RS_Vector sc = ins->getScale();
+      std::cout << "resolved " << name << " h=0x" << std::hex
+                << ins->sourceHandle() << std::dec << " ip=("
+                << ins->getInsertionPoint().x << ","
+                << ins->getInsertionPoint().y << ") sc=(" << sc.x << ","
+                << sc.y << ") ang=" << ins->getAngle()
+                << " children=" << ins->count() << "\n";
+      RS_Vector firstGeom(false);
+      for (RS_Entity *c : *ins) {
+        if (!c || c->rtti() != RS2::EntityCircle)
+          continue;
+        auto *circ = static_cast<RS_Circle *>(c);
+        if (!firstGeom.valid)
+          firstGeom = circ->getCenter();
+        std::cout << "  circle ctr=(" << circ->getCenter().x << ","
+                  << circ->getCenter().y << ") r=" << circ->getRadius()
+                  << "\n";
+      }
+      if (firstGeom.valid) {
+        const RS_Vector ip = ins->getInsertionPoint();
+        std::cout << "  geom-ip delta=(" << (firstGeom.x - ip.x) << ","
+                  << (firstGeom.y - ip.y) << ") dist="
+                  << firstGeom.distanceTo(ip) << "\n";
+        CHECK(firstGeom.distanceTo(ip) < 0.05);
+      }
+    }
+  };
+  std::cout << "resolved nested inserts under top parent:\n";
+  dumpResolvedInsert(topParent, "deng1", 0x1DF921u);
+  dumpResolvedInsert(topParent, "shafa2", 0x1DF955u);
+}
+
+// Probe stray geometry near WCS (-774805.88, 588320.79) in 2带尺寸图库.dwg.
+//   ./librecad_tests "[.dwg_chicun_stray]" -s
+TEST_CASE("DWG 2带尺寸图库: entities near (-774805.88,588320.79)",
+          "[.dwg_chicun_stray]") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path = std::string(home) + "/doc/dwg4/2带尺寸图库.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+
+  static int qargc = 1;
+  static char qarg0[] = "librecad_tests";
+  static char *qargv[] = {qarg0, nullptr};
+  static QCoreApplication *qapp = QCoreApplication::instance()
+                                      ? QCoreApplication::instance()
+                                      : new QCoreApplication(qargc, qargv);
+  static bool settingsReady = [] {
+    QCoreApplication::setOrganizationName("LibreCAD");
+    QCoreApplication::setApplicationName("LibreCAD-tests");
+    RS_Settings::init("LibreCAD", "LibreCAD-tests");
+    return true;
+  }();
+  (void)qapp;
+  (void)settingsReady;
+
+  RS_Graphic graphic;
+  RS_FilterDXFRW filter;
+  REQUIRE(filter.fileImport(graphic, QString::fromStdString(path),
+                            RS2::FormatDWG));
+
+  const double tx = -774805.8834, ty = 588320.7858;
+  const double tol = 50.0;
+  struct NearHit {
+    QString type;
+    QString layer;
+    quint32 handle = 0;
+    RS_Vector p1;
+    RS_Vector p2;
+    QString insertChain;
+    double dist = 0;
+  };
+  std::vector<NearHit> hits;
+  auto dist = [&](const RS_Vector &p) {
+    return std::hypot(p.x - tx, p.y - ty);
+  };
+  auto insertChain = [](RS_Entity *e) {
+    QString chain;
+    for (RS_Entity *p = e; p; p = p->getParent()) {
+      if (p->rtti() != RS2::EntityInsert)
+        continue;
+      if (!chain.isEmpty())
+        chain += " <- ";
+      chain += static_cast<RS_Insert *>(p)->getName();
+    }
+    return chain;
+  };
+  auto consider = [&](const QString &type, RS_Entity *e, const RS_Vector &p1,
+                      const RS_Vector &p2 = RS_Vector(false)) {
+    const double d = p2.valid ? std::min(dist(p1), dist(p2)) : dist(p1);
+    if (d > tol)
+      return;
+    const QString layer =
+        e->getLayer() ? e->getLayer()->getName() : QStringLiteral("(none)");
+    hits.push_back({type, layer, e->sourceHandle(), p1, p2, insertChain(e), d});
+  };
+
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e)
+      continue;
+    switch (e->rtti()) {
+    case RS2::EntityLine:
+      consider("LINE", e,
+               static_cast<RS_Line *>(e)->getStartpoint(),
+               static_cast<RS_Line *>(e)->getEndpoint());
+      break;
+    case RS2::EntityPolyline: {
+      auto *pl = static_cast<RS_Polyline *>(e);
+      RS_Vector prev(false);
+      for (RS_Entity *v : *pl) {
+        if (!v)
+          continue;
+        RS_Vector pt = v->getStartpoint();
+        consider("PLINE_VTX", e, pt);
+        if (prev.valid)
+          consider("PLINE_SEG", e, prev, pt);
+        prev = pt;
+      }
+      break;
+    }
+    case RS2::EntityArc: {
+      auto *a = static_cast<RS_Arc *>(e);
+      consider("ARC_CTR", e, a->getCenter());
+      consider("ARC_SP", e, a->getStartpoint());
+      consider("ARC_EP", e, a->getEndpoint());
+      break;
+    }
+    case RS2::EntityCircle:
+      consider("CIRCLE", e,
+               static_cast<RS_Circle *>(e)->getCenter());
+      break;
+    case RS2::EntityInsert:
+      consider("INSERT", e,
+               static_cast<RS_Insert *>(e)->getInsertionPoint());
+      break;
+    default:
+      break;
+    }
+  }
+
+  std::sort(hits.begin(), hits.end(),
+            [](const NearHit &a, const NearHit &b) { return a.dist < b.dist; });
+
+  std::cout << "\n=== chicun stray (-774805.88,588320.79) tol=" << tol
+            << " ===\n";
+  std::cout << "countDeep=" << graphic.countDeep() << " hits=" << hits.size()
+            << "\n";
+  for (std::size_t i = 0; i < hits.size() && i < 40; ++i) {
+    const auto &h = hits[i];
+    if (h.p2.valid)
+      std::cout << "  " << h.type.toStdString() << " h=0x" << std::hex
+                << h.handle << std::dec << " layer=" << h.layer.toStdString()
+                << " (" << h.p1.x << "," << h.p1.y << ")->(" << h.p2.x << ","
+                << h.p2.y << ") dist=" << h.dist
+                << " insert=" << h.insertChain.toStdString() << "\n";
+    else
+      std::cout << "  " << h.type.toStdString() << " h=0x" << std::hex
+                << h.handle << std::dec << " layer=" << h.layer.toStdString()
+                << " (" << h.p1.x << "," << h.p1.y << ") dist=" << h.dist
+                << " insert=" << h.insertChain.toStdString() << "\n";
+  }
+
+  double best = std::numeric_limits<double>::infinity();
+  NearHit globalBest;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e)
+      continue;
+    auto probe = [&](const QString &type, const RS_Vector &p) {
+      const double d = dist(p);
+      if (d < best) {
+        best = d;
+        globalBest = {type,
+                      e->getLayer() ? e->getLayer()->getName()
+                                    : QStringLiteral("(none)"),
+                      e->sourceHandle(), p, RS_Vector(false), insertChain(e), d};
+      }
+    };
+    switch (e->rtti()) {
+    case RS2::EntityLine: {
+      auto *l = static_cast<RS_Line *>(e);
+      probe("LINE_SP", l->getStartpoint());
+      probe("LINE_EP", l->getEndpoint());
+      break;
+    }
+    case RS2::EntityPolyline: {
+      auto *pl = static_cast<RS_Polyline *>(e);
+      for (RS_Entity *v : *pl) {
+        if (v)
+          probe("PLINE_VTX", v->getStartpoint());
+      }
+      break;
+    }
+    default:
+      break;
+    }
+  }
+  if (globalBest.dist < std::numeric_limits<double>::infinity()) {
+    std::cout << "global closest: " << globalBest.type.toStdString() << " h=0x"
+              << std::hex << globalBest.handle << std::dec << " ("
+              << globalBest.p1.x << "," << globalBest.p1.y
+              << ") dist=" << globalBest.dist
+              << " insert=" << globalBest.insertChain.toStdString() << "\n";
+  }
+
+  // Stray segments at (-774806,588321) were errant geometry from fghfdh567567
+  // after over-aggressive block re-centering; expect nothing near this point.
+  CHECK(hits.empty());
+  if (globalBest.dist < std::numeric_limits<double>::infinity())
+    CHECK(globalBest.dist > 1000.0);
+}
+
+// Probe incorrect geometry near WCS (52984.74, 222052.06) in 2带尺寸图库.dwg.
+//   ./librecad_tests "[.dwg_chicun_stray2]" -s
+TEST_CASE("DWG 2带尺寸图库: entities near (52984.74,222052.06)",
+          "[.dwg_chicun_stray2]") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path = std::string(home) + "/doc/dwg4/2带尺寸图库.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+
+  static int qargc = 1;
+  static char qarg0[] = "librecad_tests";
+  static char *qargv[] = {qarg0, nullptr};
+  static QCoreApplication *qapp = QCoreApplication::instance()
+                                      ? QCoreApplication::instance()
+                                      : new QCoreApplication(qargc, qargv);
+  static bool settingsReady = [] {
+    QCoreApplication::setOrganizationName("LibreCAD");
+    QCoreApplication::setApplicationName("LibreCAD-tests");
+    RS_Settings::init("LibreCAD", "LibreCAD-tests");
+    return true;
+  }();
+  (void)qapp;
+  (void)settingsReady;
+
+  RS_Graphic graphic;
+  RS_FilterDXFRW filter;
+  REQUIRE(filter.fileImport(graphic, QString::fromStdString(path),
+                            RS2::FormatDWG));
+
+  const double tx = 52984.73581, ty = 222052.0628;
+  const double tol = 50.0;
+  struct NearHit {
+    QString type;
+    QString layer;
+    quint32 handle = 0;
+    RS_Vector p1;
+    RS_Vector p2;
+    QString insertChain;
+    double dist = 0;
+  };
+  std::vector<NearHit> hits;
+  auto dist = [&](const RS_Vector &p) {
+    return std::hypot(p.x - tx, p.y - ty);
+  };
+  auto insertChain = [](RS_Entity *e) {
+    QString chain;
+    for (RS_Entity *p = e; p; p = p->getParent()) {
+      if (p->rtti() != RS2::EntityInsert)
+        continue;
+      if (!chain.isEmpty())
+        chain += " <- ";
+      chain += static_cast<RS_Insert *>(p)->getName();
+    }
+    return chain;
+  };
+  auto consider = [&](const QString &type, RS_Entity *e, const RS_Vector &p1,
+                      const RS_Vector &p2 = RS_Vector(false)) {
+    const double d = p2.valid ? std::min(dist(p1), dist(p2)) : dist(p1);
+    if (d > tol)
+      return;
+    const QString layer =
+        e->getLayer() ? e->getLayer()->getName() : QStringLiteral("(none)");
+    hits.push_back({type, layer, e->sourceHandle(), p1, p2, insertChain(e), d});
+  };
+
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e)
+      continue;
+    switch (e->rtti()) {
+    case RS2::EntityLine:
+      consider("LINE", e,
+               static_cast<RS_Line *>(e)->getStartpoint(),
+               static_cast<RS_Line *>(e)->getEndpoint());
+      break;
+    case RS2::EntityPolyline: {
+      auto *pl = static_cast<RS_Polyline *>(e);
+      RS_Vector prev(false);
+      for (RS_Entity *v : *pl) {
+        if (!v)
+          continue;
+        RS_Vector pt = v->getStartpoint();
+        consider("PLINE_VTX", e, pt);
+        if (prev.valid)
+          consider("PLINE_SEG", e, prev, pt);
+        prev = pt;
+      }
+      break;
+    }
+    case RS2::EntityArc: {
+      auto *a = static_cast<RS_Arc *>(e);
+      consider("ARC_CTR", e, a->getCenter());
+      consider("ARC_SP", e, a->getStartpoint());
+      consider("ARC_EP", e, a->getEndpoint());
+      break;
+    }
+    case RS2::EntityCircle:
+      consider("CIRCLE", e,
+               static_cast<RS_Circle *>(e)->getCenter());
+      break;
+    case RS2::EntityInsert:
+      consider("INSERT", e,
+               static_cast<RS_Insert *>(e)->getInsertionPoint());
+      break;
+    default:
+      break;
+    }
+  }
+
+  std::sort(hits.begin(), hits.end(),
+            [](const NearHit &a, const NearHit &b) { return a.dist < b.dist; });
+
+  std::cout << "\n=== chicun stray2 (52984.74,222052.06) tol=" << tol
+            << " ===\n";
+  std::cout << "countDeep=" << graphic.countDeep() << " hits=" << hits.size()
+            << "\n";
+  for (std::size_t i = 0; i < hits.size() && i < 40; ++i) {
+    const auto &h = hits[i];
+    if (h.p2.valid)
+      std::cout << "  " << h.type.toStdString() << " h=0x" << std::hex
+                << h.handle << std::dec << " layer=" << h.layer.toStdString()
+                << " (" << h.p1.x << "," << h.p1.y << ")->(" << h.p2.x << ","
+                << h.p2.y << ") dist=" << h.dist
+                << " insert=" << h.insertChain.toStdString() << "\n";
+    else
+      std::cout << "  " << h.type.toStdString() << " h=0x" << std::hex
+                << h.handle << std::dec << " layer=" << h.layer.toStdString()
+                << " (" << h.p1.x << "," << h.p1.y << ") dist=" << h.dist
+                << " insert=" << h.insertChain.toStdString() << "\n";
+  }
+
+  double best = std::numeric_limits<double>::infinity();
+  NearHit globalBest;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e)
+      continue;
+    auto probe = [&](const QString &type, const RS_Vector &p) {
+      const double d = dist(p);
+      if (d < best) {
+        best = d;
+        globalBest = {type,
+                      e->getLayer() ? e->getLayer()->getName()
+                                    : QStringLiteral("(none)"),
+                      e->sourceHandle(), p, RS_Vector(false), insertChain(e), d};
+      }
+    };
+    switch (e->rtti()) {
+    case RS2::EntityLine: {
+      auto *l = static_cast<RS_Line *>(e);
+      probe("LINE_SP", l->getStartpoint());
+      probe("LINE_EP", l->getEndpoint());
+      break;
+    }
+    case RS2::EntityPolyline: {
+      auto *pl = static_cast<RS_Polyline *>(e);
+      for (RS_Entity *v : *pl) {
+        if (v)
+          probe("PLINE_VTX", v->getStartpoint());
+      }
+      break;
+    }
+    default:
+      break;
+    }
+  }
+  if (globalBest.dist < std::numeric_limits<double>::infinity()) {
+    std::cout << "global closest: " << globalBest.type.toStdString() << " h=0x"
+              << std::hex << globalBest.handle << std::dec << " ("
+              << globalBest.p1.x << "," << globalBest.p1.y
+              << ") dist=" << globalBest.dist
+              << " insert=" << globalBest.insertChain.toStdString() << "\n";
+  }
+
+  // WCS-embedded esfsfdds geometry must not be re-centered onto the insert grip.
+  CHECK(hits.empty());
+  if (globalBest.dist < std::numeric_limits<double>::infinity())
+    CHECK(globalBest.dist > 1000.0);
+}
+
+// Probe incorrect geometry near WCS (-294315.21, 48571.66) in 2带尺寸图库.dwg.
+//   ./librecad_tests "[.dwg_chicun_stray3]" -s
+TEST_CASE("DWG 2带尺寸图库: entities near (-294315.21,48571.66)",
+          "[.dwg_chicun_stray3]") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path = std::string(home) + "/doc/dwg4/2带尺寸图库.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+
+  static int qargc = 1;
+  static char qarg0[] = "librecad_tests";
+  static char *qargv[] = {qarg0, nullptr};
+  static QCoreApplication *qapp = QCoreApplication::instance()
+                                      ? QCoreApplication::instance()
+                                      : new QCoreApplication(qargc, qargv);
+  static bool settingsReady = [] {
+    QCoreApplication::setOrganizationName("LibreCAD");
+    QCoreApplication::setApplicationName("LibreCAD-tests");
+    RS_Settings::init("LibreCAD", "LibreCAD-tests");
+    return true;
+  }();
+  (void)qapp;
+  (void)settingsReady;
+
+  RS_Graphic graphic;
+  RS_FilterDXFRW filter;
+  REQUIRE(filter.fileImport(graphic, QString::fromStdString(path),
+                            RS2::FormatDWG));
+
+  const double tx = -294315.207, ty = 48571.65792;
+  const double tol = 50.0;
+  struct NearHit {
+    QString type;
+    QString layer;
+    quint32 handle = 0;
+    RS_Vector p1;
+    RS_Vector p2;
+    QString insertChain;
+    double dist = 0;
+  };
+  std::vector<NearHit> hits;
+  auto dist = [&](const RS_Vector &p) {
+    return std::hypot(p.x - tx, p.y - ty);
+  };
+  auto insertChain = [](RS_Entity *e) {
+    QString chain;
+    for (RS_Entity *p = e; p; p = p->getParent()) {
+      if (p->rtti() != RS2::EntityInsert)
+        continue;
+      if (!chain.isEmpty())
+        chain += " <- ";
+      chain += static_cast<RS_Insert *>(p)->getName();
+    }
+    return chain;
+  };
+  auto consider = [&](const QString &type, RS_Entity *e, const RS_Vector &p1,
+                      const RS_Vector &p2 = RS_Vector(false)) {
+    const double d = p2.valid ? std::min(dist(p1), dist(p2)) : dist(p1);
+    if (d > tol)
+      return;
+    const QString layer =
+        e->getLayer() ? e->getLayer()->getName() : QStringLiteral("(none)");
+    hits.push_back({type, layer, e->sourceHandle(), p1, p2, insertChain(e), d});
+  };
+
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e)
+      continue;
+    switch (e->rtti()) {
+    case RS2::EntityLine:
+      consider("LINE", e,
+               static_cast<RS_Line *>(e)->getStartpoint(),
+               static_cast<RS_Line *>(e)->getEndpoint());
+      break;
+    case RS2::EntityPolyline: {
+      auto *pl = static_cast<RS_Polyline *>(e);
+      RS_Vector prev(false);
+      for (RS_Entity *v : *pl) {
+        if (!v)
+          continue;
+        RS_Vector pt = v->getStartpoint();
+        consider("PLINE_VTX", e, pt);
+        if (prev.valid)
+          consider("PLINE_SEG", e, prev, pt);
+        prev = pt;
+      }
+      break;
+    }
+    case RS2::EntityArc: {
+      auto *a = static_cast<RS_Arc *>(e);
+      consider("ARC_CTR", e, a->getCenter());
+      consider("ARC_SP", e, a->getStartpoint());
+      consider("ARC_EP", e, a->getEndpoint());
+      break;
+    }
+    case RS2::EntityCircle:
+      consider("CIRCLE", e,
+               static_cast<RS_Circle *>(e)->getCenter());
+      break;
+    case RS2::EntityInsert:
+      consider("INSERT", e,
+               static_cast<RS_Insert *>(e)->getInsertionPoint());
+      break;
+    default:
+      break;
+    }
+  }
+
+  CHECK(hits.empty());
+
+  // INSERT A$C4D8A4BEC: extrusion (0,0,-1), z-scale -0.5 — fold -X block half.
+  RS_Insert *a4d8Ins = nullptr;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveNone}.entities()) {
+    if (!e || e->rtti() != RS2::EntityInsert)
+      continue;
+    auto *ins = static_cast<RS_Insert *>(e);
+    if (ins->getName() == QStringLiteral("A$C4D8A4BEC")) {
+      a4d8Ins = ins;
+      break;
+    }
+  }
+  REQUIRE(a4d8Ins != nullptr);
+  CHECK(a4d8Ins->getData().extrusion.z < -0.5);
+  CHECK(a4d8Ins->getScale().z < -0.4);
+
+  // Primary (+77,+220) cluster relative to (possibly re-based) insert grip.
+  const RS_Vector ip = a4d8Ins->getInsertionPoint();
+  const double expX = ip.x + 0.5 * 77.14807952690171;
+  const double expY = ip.y + 0.5 * 219.9479471713712;
+  int primaryCluster = 0;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e || !insertChain(e).contains(QStringLiteral("A$C4D8A4BEC")))
+      continue;
+    RS_Vector p(false);
+    if (e->rtti() == RS2::EntityCircle)
+      p = static_cast<RS_Circle *>(e)->getCenter();
+    else if (e->rtti() == RS2::EntityArc)
+      p = static_cast<RS_Arc *>(e)->getCenter();
+    else
+      continue;
+    if (std::hypot(p.x - expX, p.y - expY) < 80.0)
+      ++primaryCluster;
+  }
+  CHECK(primaryCluster >= 4);
+}
+
+// Probe incorrect geometry at three WCS points in 2带尺寸图库.dwg.
+//   ./librecad_tests "[.dwg_chicun_stray4]" -s
+TEST_CASE("DWG 2带尺寸图库: entities near stray WCS triple",
+          "[.dwg_chicun_stray4]") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path = std::string(home) + "/doc/dwg4/2带尺寸图库.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+
+  static int qargc = 1;
+  static char qarg0[] = "librecad_tests";
+  static char *qargv[] = {qarg0, nullptr};
+  static QCoreApplication *qapp = QCoreApplication::instance()
+                                      ? QCoreApplication::instance()
+                                      : new QCoreApplication(qargc, qargv);
+  static bool settingsReady = [] {
+    QCoreApplication::setOrganizationName("LibreCAD");
+    QCoreApplication::setApplicationName("LibreCAD-tests");
+    RS_Settings::init("LibreCAD", "LibreCAD-tests");
+    return true;
+  }();
+  (void)qapp;
+  (void)settingsReady;
+
+  RS_Graphic graphic;
+  RS_FilterDXFRW filter;
+  REQUIRE(filter.fileImport(graphic, QString::fromStdString(path),
+                            RS2::FormatDWG));
+
+  struct Target {
+    const char *label;
+    double x;
+    double y;
+  };
+  const Target targets[] = {
+      {"A", 104517.7659, -1239995.976},
+      {"B", 57585.03448, -1240174.235},
+      {"C", 1322040.68, 492532.476},
+  };
+  const double tol = 50.0;
+
+  struct NearHit {
+    char target = 0;
+    QString type;
+    QString layer;
+    quint32 handle = 0;
+    RS_Vector p1;
+    RS_Vector p2;
+    QString insertChain;
+    double dist = 0;
+  };
+  std::vector<NearHit> hits;
+
+  auto insertChain = [](RS_Entity *e) {
+    QString chain;
+    for (RS_Entity *p = e; p; p = p->getParent()) {
+      if (p->rtti() != RS2::EntityInsert)
+        continue;
+      if (!chain.isEmpty())
+        chain += " <- ";
+      chain += static_cast<RS_Insert *>(p)->getName();
+    }
+    return chain;
+  };
+
+  for (const auto &t : targets) {
+    auto dist = [&](const RS_Vector &p) {
+      return std::hypot(p.x - t.x, p.y - t.y);
+    };
+    auto consider = [&](const QString &type, RS_Entity *e, const RS_Vector &p1,
+                        const RS_Vector &p2 = RS_Vector(false)) {
+      const double d = p2.valid ? std::min(dist(p1), dist(p2)) : dist(p1);
+      if (d > tol)
+        return;
+      const QString layer =
+          e->getLayer() ? e->getLayer()->getName() : QStringLiteral("(none)");
+      hits.push_back({t.label[0], type, layer, e->sourceHandle(), p1, p2,
+                      insertChain(e), d});
+    };
+
+    for (RS_Entity *e :
+         lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+      if (!e)
+        continue;
+      switch (e->rtti()) {
+      case RS2::EntityLine:
+        consider("LINE", e,
+                 static_cast<RS_Line *>(e)->getStartpoint(),
+                 static_cast<RS_Line *>(e)->getEndpoint());
+        break;
+      case RS2::EntityPolyline: {
+        auto *pl = static_cast<RS_Polyline *>(e);
+        RS_Vector prev(false);
+        for (RS_Entity *v : *pl) {
+          if (!v)
+            continue;
+          RS_Vector pt = v->getStartpoint();
+          consider("PLINE_VTX", e, pt);
+          if (prev.valid)
+            consider("PLINE_SEG", e, prev, pt);
+          prev = pt;
+        }
+        break;
+      }
+      case RS2::EntityArc: {
+        auto *a = static_cast<RS_Arc *>(e);
+        consider("ARC_CTR", e, a->getCenter());
+        consider("ARC_SP", e, a->getStartpoint());
+        consider("ARC_EP", e, a->getEndpoint());
+        break;
+      }
+      case RS2::EntityCircle:
+        consider("CIRCLE", e,
+                 static_cast<RS_Circle *>(e)->getCenter());
+        break;
+      case RS2::EntityInsert:
+        consider("INSERT", e,
+                 static_cast<RS_Insert *>(e)->getInsertionPoint());
+        break;
+      default:
+        break;
+      }
+    }
+  }
+
+  std::sort(hits.begin(), hits.end(), [](const NearHit &a, const NearHit &b) {
+    if (a.target != b.target)
+      return a.target < b.target;
+    return a.dist < b.dist;
+  });
+
+  std::cout << "\n=== chicun stray4 triple tol=" << tol << " ===\n";
+  std::cout << "countDeep=" << graphic.countDeep() << " hits=" << hits.size()
+            << "\n";
+  for (std::size_t i = 0; i < hits.size() && i < 60; ++i) {
+    const auto &h = hits[i];
+    if (h.p2.valid)
+      std::cout << "  tgt=" << h.target << " " << h.type.toStdString()
+                << " h=0x" << std::hex << h.handle << std::dec
+                << " layer=" << h.layer.toStdString() << " (" << h.p1.x << ","
+                << h.p1.y << ")->(" << h.p2.x << "," << h.p2.y
+                << ") dist=" << h.dist
+                << " insert=" << h.insertChain.toStdString() << "\n";
+    else
+      std::cout << "  tgt=" << h.target << " " << h.type.toStdString()
+                << " h=0x" << std::hex << h.handle << std::dec
+                << " layer=" << h.layer.toStdString() << " (" << h.p1.x << ","
+                << h.p1.y << ") dist=" << h.dist
+                << " insert=" << h.insertChain.toStdString() << "\n";
+  }
+
+  for (const auto &t : targets) {
+    double best = std::numeric_limits<double>::infinity();
+    NearHit bestHit;
+    for (const auto &h : hits) {
+      if (h.target != t.label[0])
+        continue;
+      if (h.dist < best) {
+        best = h.dist;
+        bestHit = h;
+      }
+    }
+    if (best < std::numeric_limits<double>::infinity()) {
+      std::cout << "target " << t.label << " (" << t.x << "," << t.y
+                << ") closest: " << bestHit.type.toStdString() << " dist="
+                << best << " insert=" << bestHit.insertChain.toStdString()
+                << "\n";
+    } else {
+      std::cout << "target " << t.label << " (" << t.x << "," << t.y
+                << ") no hits within tol\n";
+    }
+  }
+
+  // Diagnostic: list top-level INSERTs near each target.
+  for (const auto &t : targets) {
+    std::cout << "INSERTs near target " << t.label << ":\n";
+    int n = 0;
+    for (RS_Entity *e :
+         lc::LC_ContainerTraverser{graphic, RS2::ResolveNone}.entities()) {
+      if (!e || e->rtti() != RS2::EntityInsert)
+        continue;
+      auto *ins = static_cast<RS_Insert *>(e);
+      const RS_Vector ip = ins->getInsertionPoint();
+      const double d = std::hypot(ip.x - t.x, ip.y - t.y);
+      if (d > 500.0)
+        continue;
+      std::cout << "  " << ins->getName().toStdString() << " ip=(" << ip.x
+                << "," << ip.y << ") sc=(" << ins->getScale().x << ","
+                << ins->getScale().y << "," << ins->getScale().z
+                << ") ext.z=" << ins->getData().extrusion.z << " dist=" << d
+                << "\n";
+      if (++n >= 8)
+        break;
+    }
+  }
+
+  // Global closest (any distance) for diagnosis.
+  for (const auto &t : targets) {
+    double best = std::numeric_limits<double>::infinity();
+    QString bestType;
+    QString bestChain;
+    RS_Vector bestP(false);
+    for (RS_Entity *e :
+         lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+      if (!e)
+        continue;
+      auto probe = [&](const QString &type, const RS_Vector &p) {
+        const double d = std::hypot(p.x - t.x, p.y - t.y);
+        if (d < best) {
+          best = d;
+          bestType = type;
+          bestChain = insertChain(e);
+          bestP = p;
+        }
+      };
+      switch (e->rtti()) {
+      case RS2::EntityLine: {
+        auto *l = static_cast<RS_Line *>(e);
+        probe("LINE_SP", l->getStartpoint());
+        probe("LINE_EP", l->getEndpoint());
+        break;
+      }
+      case RS2::EntityArc: {
+        auto *a = static_cast<RS_Arc *>(e);
+        probe("ARC_CTR", a->getCenter());
+        probe("ARC_SP", a->getStartpoint());
+        probe("ARC_EP", a->getEndpoint());
+        break;
+      }
+      case RS2::EntityCircle:
+        probe("CIRCLE", static_cast<RS_Circle *>(e)->getCenter());
+        break;
+      case RS2::EntityPolyline: {
+        auto *pl = static_cast<RS_Polyline *>(e);
+        for (RS_Entity *v : *pl) {
+          if (v)
+            probe("PLINE_VTX", v->getStartpoint());
+        }
+        break;
+      }
+      default:
+        break;
+      }
+    }
+    if (best < std::numeric_limits<double>::infinity()) {
+      std::cout << "global " << t.label << ": " << bestType.toStdString()
+                << " (" << bestP.x << "," << bestP.y << ") dist=" << best
+                << " insert=" << bestChain.toStdString() << "\n";
+    }
+  }
+
+  CHECK(hits.empty());
+}
+
+// Probe incorrect geometry at three WCS points (negative-X mirror pair + E).
+//   ./librecad_tests "[.dwg_chicun_stray5]" -s
+TEST_CASE("DWG 2带尺寸图库: entities near stray WCS triple (neg X)",
+          "[.dwg_chicun_stray5]") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path = std::string(home) + "/doc/dwg4/2带尺寸图库.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+
+  static int qargc = 1;
+  static char qarg0[] = "librecad_tests";
+  static char *qargv[] = {qarg0, nullptr};
+  static QCoreApplication *qapp = QCoreApplication::instance()
+                                      ? QCoreApplication::instance()
+                                      : new QCoreApplication(qargc, qargv);
+  static bool settingsReady = [] {
+    QCoreApplication::setOrganizationName("LibreCAD");
+    QCoreApplication::setApplicationName("LibreCAD-tests");
+    RS_Settings::init("LibreCAD", "LibreCAD-tests");
+    return true;
+  }();
+  (void)qapp;
+  (void)settingsReady;
+
+  RS_Graphic graphic;
+  RS_FilterDXFRW filter;
+  REQUIRE(filter.fileImport(graphic, QString::fromStdString(path),
+                            RS2::FormatDWG));
+
+  struct Target {
+    const char *label;
+    double x;
+    double y;
+  };
+  const Target targets[] = {
+      {"D", -1099318.43, 492532.476},
+      {"E", -952337.4015, 403260.8869},
+      {"F", 1322040.68, 492532.476},
+  };
+  const double tol = 50.0;
+
+  struct NearHit {
+    char target = 0;
+    QString type;
+    QString layer;
+    quint32 handle = 0;
+    RS_Vector p1;
+    RS_Vector p2;
+    QString insertChain;
+    double dist = 0;
+  };
+  std::vector<NearHit> hits;
+
+  auto insertChain = [](RS_Entity *e) {
+    QString chain;
+    for (RS_Entity *p = e; p; p = p->getParent()) {
+      if (p->rtti() != RS2::EntityInsert)
+        continue;
+      if (!chain.isEmpty())
+        chain += " <- ";
+      chain += static_cast<RS_Insert *>(p)->getName();
+    }
+    return chain;
+  };
+
+  for (const auto &t : targets) {
+    auto dist = [&](const RS_Vector &p) {
+      return std::hypot(p.x - t.x, p.y - t.y);
+    };
+    auto consider = [&](const QString &type, RS_Entity *e, const RS_Vector &p1,
+                        const RS_Vector &p2 = RS_Vector(false)) {
+      const double d = p2.valid ? std::min(dist(p1), dist(p2)) : dist(p1);
+      if (d > tol)
+        return;
+      const QString layer =
+          e->getLayer() ? e->getLayer()->getName() : QStringLiteral("(none)");
+      hits.push_back({t.label[0], type, layer, e->sourceHandle(), p1, p2,
+                      insertChain(e), d});
+    };
+
+    for (RS_Entity *e :
+         lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+      if (!e)
+        continue;
+      switch (e->rtti()) {
+      case RS2::EntityLine:
+        consider("LINE", e,
+                 static_cast<RS_Line *>(e)->getStartpoint(),
+                 static_cast<RS_Line *>(e)->getEndpoint());
+        break;
+      case RS2::EntityPolyline: {
+        auto *pl = static_cast<RS_Polyline *>(e);
+        RS_Vector prev(false);
+        for (RS_Entity *v : *pl) {
+          if (!v)
+            continue;
+          RS_Vector pt = v->getStartpoint();
+          consider("PLINE_VTX", e, pt);
+          if (prev.valid)
+            consider("PLINE_SEG", e, prev, pt);
+          prev = pt;
+        }
+        break;
+      }
+      case RS2::EntityArc: {
+        auto *a = static_cast<RS_Arc *>(e);
+        consider("ARC_CTR", e, a->getCenter());
+        consider("ARC_SP", e, a->getStartpoint());
+        consider("ARC_EP", e, a->getEndpoint());
+        break;
+      }
+      case RS2::EntityCircle:
+        consider("CIRCLE", e,
+                 static_cast<RS_Circle *>(e)->getCenter());
+        break;
+      case RS2::EntityInsert:
+        consider("INSERT", e,
+                 static_cast<RS_Insert *>(e)->getInsertionPoint());
+        break;
+      default:
+        break;
+      }
+    }
+  }
+
+  std::cout << "\n=== chicun stray5 triple tol=" << tol << " ===\n";
+  std::cout << "countDeep=" << graphic.countDeep() << " hits=" << hits.size()
+            << "\n";
+  for (const auto &h : hits) {
+    std::cout << "  tgt=" << h.target << " " << h.type.toStdString() << " ("
+              << h.p1.x << "," << h.p1.y << ") dist=" << h.dist
+              << " insert=" << h.insertChain.toStdString() << "\n";
+  }
+
+  for (const auto &t : targets) {
+    double best = std::numeric_limits<double>::infinity();
+    QString bestType;
+    QString bestChain;
+    RS_Vector bestP(false);
+    for (RS_Entity *e :
+         lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+      if (!e)
+        continue;
+      auto probe = [&](const QString &type, const RS_Vector &p) {
+        const double d = std::hypot(p.x - t.x, p.y - t.y);
+        if (d < best) {
+          best = d;
+          bestType = type;
+          bestChain = insertChain(e);
+          bestP = p;
+        }
+      };
+      switch (e->rtti()) {
+      case RS2::EntityLine: {
+        auto *l = static_cast<RS_Line *>(e);
+        probe("LINE_SP", l->getStartpoint());
+        probe("LINE_EP", l->getEndpoint());
+        break;
+      }
+      case RS2::EntityArc: {
+        auto *a = static_cast<RS_Arc *>(e);
+        probe("ARC_CTR", a->getCenter());
+        probe("ARC_SP", a->getStartpoint());
+        probe("ARC_EP", a->getEndpoint());
+        break;
+      }
+      case RS2::EntityCircle:
+        probe("CIRCLE", static_cast<RS_Circle *>(e)->getCenter());
+        break;
+      case RS2::EntityPolyline: {
+        auto *pl = static_cast<RS_Polyline *>(e);
+        for (RS_Entity *v : *pl) {
+          if (v)
+            probe("PLINE_VTX", v->getStartpoint());
+        }
+        break;
+      }
+      default:
+        break;
+      }
+    }
+    if (best < std::numeric_limits<double>::infinity()) {
+      std::cout << "global " << t.label << ": " << bestType.toStdString()
+                << " (" << bestP.x << "," << bestP.y << ") dist=" << best
+                << " insert=" << bestChain.toStdString() << "\n";
+    }
+  }
+
+  CHECK(hits.empty());
+}
+
+// Probe incorrect geometry near WCS (-2230355.08, 1646735.10).
+//   ./librecad_tests "[.dwg_chicun_stray6]" -s
+TEST_CASE("DWG 2带尺寸图库: entities near (-2230355.08,1646735.10)",
+          "[.dwg_chicun_stray6]") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path = std::string(home) + "/doc/dwg4/2带尺寸图库.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+
+  static int qargc = 1;
+  static char qarg0[] = "librecad_tests";
+  static char *qargv[] = {qarg0, nullptr};
+  static QCoreApplication *qapp = QCoreApplication::instance()
+                                      ? QCoreApplication::instance()
+                                      : new QCoreApplication(qargc, qargv);
+  static bool settingsReady = [] {
+    QCoreApplication::setOrganizationName("LibreCAD");
+    QCoreApplication::setApplicationName("LibreCAD-tests");
+    RS_Settings::init("LibreCAD", "LibreCAD-tests");
+    return true;
+  }();
+  (void)qapp;
+  (void)settingsReady;
+
+  RS_Graphic graphic;
+  RS_FilterDXFRW filter;
+  REQUIRE(filter.fileImport(graphic, QString::fromStdString(path),
+                            RS2::FormatDWG));
+
+  const double tx = -2230355.082, ty = 1646735.104;
+  const double tol = 50.0;
+
+  struct NearHit {
+    QString type;
+    QString layer;
+    quint32 handle = 0;
+    RS_Vector p1;
+    RS_Vector p2;
+    QString insertChain;
+    double dist = 0;
+  };
+  std::vector<NearHit> hits;
+
+  auto dist = [&](const RS_Vector &p) {
+    return std::hypot(p.x - tx, p.y - ty);
+  };
+  auto insertChain = [](RS_Entity *e) {
+    QString chain;
+    for (RS_Entity *p = e; p; p = p->getParent()) {
+      if (p->rtti() != RS2::EntityInsert)
+        continue;
+      if (!chain.isEmpty())
+        chain += " <- ";
+      chain += static_cast<RS_Insert *>(p)->getName();
+    }
+    return chain;
+  };
+  auto consider = [&](const QString &type, RS_Entity *e, const RS_Vector &p1,
+                      const RS_Vector &p2 = RS_Vector(false)) {
+    const double d = p2.valid ? std::min(dist(p1), dist(p2)) : dist(p1);
+    if (d > tol)
+      return;
+    const QString layer =
+        e->getLayer() ? e->getLayer()->getName() : QStringLiteral("(none)");
+    hits.push_back({type, layer, e->sourceHandle(), p1, p2, insertChain(e), d});
+  };
+
+  NearHit globalBest;
+  globalBest.dist = std::numeric_limits<double>::infinity();
+
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e)
+      continue;
+    const QString layer =
+        e->getLayer() ? e->getLayer()->getName() : QStringLiteral("(none)");
+    auto updateGlobal = [&](const QString &type, const RS_Vector &p) {
+      const double d = dist(p);
+      if (d < globalBest.dist)
+        globalBest = {type, layer, e->sourceHandle(), p, RS_Vector(false),
+                      insertChain(e), d};
+    };
+    switch (e->rtti()) {
+    case RS2::EntityLine: {
+      auto *l = static_cast<RS_Line *>(e);
+      consider("LINE", e, l->getStartpoint(), l->getEndpoint());
+      updateGlobal("LINE_SP", l->getStartpoint());
+      updateGlobal("LINE_EP", l->getEndpoint());
+      break;
+    }
+    case RS2::EntityPolyline: {
+      auto *pl = static_cast<RS_Polyline *>(e);
+      RS_Vector prev(false);
+      for (RS_Entity *v : *pl) {
+        if (!v)
+          continue;
+        RS_Vector pt = v->getStartpoint();
+        consider("PLINE_VTX", e, pt);
+        if (prev.valid)
+          consider("PLINE_SEG", e, prev, pt);
+        updateGlobal("PLINE_VTX", pt);
+        prev = pt;
+      }
+      break;
+    }
+    case RS2::EntityArc: {
+      auto *a = static_cast<RS_Arc *>(e);
+      consider("ARC_CTR", e, a->getCenter());
+      consider("ARC_SP", e, a->getStartpoint());
+      consider("ARC_EP", e, a->getEndpoint());
+      updateGlobal("ARC_CTR", a->getCenter());
+      updateGlobal("ARC_SP", a->getStartpoint());
+      updateGlobal("ARC_EP", a->getEndpoint());
+      break;
+    }
+    case RS2::EntityCircle:
+      consider("CIRCLE", e, static_cast<RS_Circle *>(e)->getCenter());
+      updateGlobal("CIRCLE", static_cast<RS_Circle *>(e)->getCenter());
+      break;
+    case RS2::EntityInsert:
+      consider("INSERT", e,
+               static_cast<RS_Insert *>(e)->getInsertionPoint());
+      break;
+    default:
+      break;
+    }
+  }
+
+  std::cout << "\n=== chicun stray6 (-2230355,1646735) tol=" << tol << " ===\n";
+  std::cout << "countDeep=" << graphic.countDeep() << " hits=" << hits.size()
+            << "\n";
+  for (const auto &h : hits) {
+    std::cout << "  " << h.type.toStdString() << " (" << h.p1.x << ","
+              << h.p1.y << ") dist=" << h.dist
+              << " insert=" << h.insertChain.toStdString() << "\n";
+  }
+  if (globalBest.dist < std::numeric_limits<double>::infinity()) {
+    std::cout << "global closest: " << globalBest.type.toStdString() << " ("
+              << globalBest.p1.x << "," << globalBest.p1.y
+              << ") dist=" << globalBest.dist
+              << " insert=" << globalBest.insertChain.toStdString() << "\n";
+  }
+
+  CHECK(hits.empty());
+  if (globalBest.dist < std::numeric_limits<double>::infinity())
+    CHECK(globalBest.dist > 1000.0);
+}
+
+// Second vertex of the stray6 phantom cluster (~68 units away).
+//   ./librecad_tests "[.dwg_chicun_stray7]" -s
+TEST_CASE("DWG 2带尺寸图库: entities near (-2230420.44,1646754.55)",
+          "[.dwg_chicun_stray7]") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path = std::string(home) + "/doc/dwg4/2带尺寸图库.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+
+  static int qargc = 1;
+  static char qarg0[] = "librecad_tests";
+  static char *qargv[] = {qarg0, nullptr};
+  static QCoreApplication *qapp = QCoreApplication::instance()
+                                      ? QCoreApplication::instance()
+                                      : new QCoreApplication(qargc, qargv);
+  static bool settingsReady = [] {
+    QCoreApplication::setOrganizationName("LibreCAD");
+    QCoreApplication::setApplicationName("LibreCAD-tests");
+    RS_Settings::init("LibreCAD", "LibreCAD-tests");
+    return true;
+  }();
+  (void)qapp;
+  (void)settingsReady;
+
+  RS_Graphic graphic;
+  RS_FilterDXFRW filter;
+  REQUIRE(filter.fileImport(graphic, QString::fromStdString(path),
+                            RS2::FormatDWG));
+
+  const double tx = -2230420.436, ty = 1646754.547;
+  const double tol = 50.0;
+
+  struct NearHit {
+    QString type;
+    QString layer;
+    quint32 handle = 0;
+    RS_Vector p1;
+    RS_Vector p2;
+    QString insertChain;
+    double dist = 0;
+  };
+  std::vector<NearHit> hits;
+
+  auto dist = [&](const RS_Vector &p) {
+    return std::hypot(p.x - tx, p.y - ty);
+  };
+  auto insertChain = [](RS_Entity *e) {
+    QString chain;
+    for (RS_Entity *p = e; p; p = p->getParent()) {
+      if (p->rtti() != RS2::EntityInsert)
+        continue;
+      if (!chain.isEmpty())
+        chain += " <- ";
+      chain += static_cast<RS_Insert *>(p)->getName();
+    }
+    return chain;
+  };
+  auto consider = [&](const QString &type, RS_Entity *e, const RS_Vector &p1,
+                      const RS_Vector &p2 = RS_Vector(false)) {
+    const double d = p2.valid ? std::min(dist(p1), dist(p2)) : dist(p1);
+    if (d > tol)
+      return;
+    const QString layer =
+        e->getLayer() ? e->getLayer()->getName() : QStringLiteral("(none)");
+    hits.push_back({type, layer, e->sourceHandle(), p1, p2, insertChain(e), d});
+  };
+
+  NearHit globalBest;
+  globalBest.dist = std::numeric_limits<double>::infinity();
+
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e)
+      continue;
+    const QString layer =
+        e->getLayer() ? e->getLayer()->getName() : QStringLiteral("(none)");
+    auto updateGlobal = [&](const QString &type, const RS_Vector &p) {
+      const double d = dist(p);
+      if (d < globalBest.dist)
+        globalBest = {type, layer, e->sourceHandle(), p, RS_Vector(false),
+                      insertChain(e), d};
+    };
+    switch (e->rtti()) {
+    case RS2::EntityLine: {
+      auto *l = static_cast<RS_Line *>(e);
+      consider("LINE", e, l->getStartpoint(), l->getEndpoint());
+      updateGlobal("LINE_SP", l->getStartpoint());
+      updateGlobal("LINE_EP", l->getEndpoint());
+      break;
+    }
+    case RS2::EntityPolyline: {
+      auto *pl = static_cast<RS_Polyline *>(e);
+      RS_Vector prev(false);
+      for (RS_Entity *v : *pl) {
+        if (!v)
+          continue;
+        RS_Vector pt = v->getStartpoint();
+        consider("PLINE_VTX", e, pt);
+        if (prev.valid)
+          consider("PLINE_SEG", e, prev, pt);
+        updateGlobal("PLINE_VTX", pt);
+        prev = pt;
+      }
+      break;
+    }
+    case RS2::EntityArc: {
+      auto *a = static_cast<RS_Arc *>(e);
+      consider("ARC_CTR", e, a->getCenter());
+      consider("ARC_SP", e, a->getStartpoint());
+      consider("ARC_EP", e, a->getEndpoint());
+      updateGlobal("ARC_CTR", a->getCenter());
+      updateGlobal("ARC_SP", a->getStartpoint());
+      updateGlobal("ARC_EP", a->getEndpoint());
+      break;
+    }
+    case RS2::EntityCircle:
+      consider("CIRCLE", e, static_cast<RS_Circle *>(e)->getCenter());
+      updateGlobal("CIRCLE", static_cast<RS_Circle *>(e)->getCenter());
+      break;
+    case RS2::EntityInsert:
+      consider("INSERT", e,
+               static_cast<RS_Insert *>(e)->getInsertionPoint());
+      break;
+    default:
+      break;
+    }
+  }
+
+  std::cout << "\n=== chicun stray7 (-2230420,1646754) tol=" << tol << " ===\n";
+  std::cout << "countDeep=" << graphic.countDeep() << " hits=" << hits.size()
+            << "\n";
+  for (const auto &h : hits) {
+    std::cout << "  " << h.type.toStdString() << " (" << h.p1.x << ","
+              << h.p1.y << ") dist=" << h.dist
+              << " insert=" << h.insertChain.toStdString() << "\n";
+  }
+  if (globalBest.dist < std::numeric_limits<double>::infinity()) {
+    std::cout << "global closest: " << globalBest.type.toStdString() << " ("
+              << globalBest.p1.x << "," << globalBest.p1.y
+              << ") dist=" << globalBest.dist
+              << " insert=" << globalBest.insertChain.toStdString() << "\n";
+  }
+
+  CHECK(hits.empty());
+  if (globalBest.dist < std::numeric_limits<double>::infinity())
+    CHECK(globalBest.dist > 1000.0);
+}
+
+// Broad diagnostic for stray8: all entity types, block defs, Y-mirror band.
+//   ./librecad_tests "[.dwg_chicun_stray8_diag]" -s
+TEST_CASE("DWG 2带尺寸图库: stray8 broad diagnostic",
+          "[.dwg_chicun_stray8_diag]") {
+  if (chicun::fixturePath().empty()) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+  chicun::ensureTestApp();
+  RS_Graphic graphic;
+  REQUIRE(chicun::importFixture(graphic));
+
+  const double tx = -1099671.573, ty = 492101.3029;
+  const double tol = 500.0;
+  struct Hit {
+    QString scope;
+    QString type;
+    QString blockOrChain;
+    RS_Vector p;
+    double dist = 0;
+  };
+  std::vector<Hit> hits;
+
+  auto record = [&](const QString &scope, const QString &type,
+                    const QString &chain, const RS_Vector &p) {
+    const double d = std::hypot(p.x - tx, p.y - ty);
+    if (d > tol)
+      return;
+    hits.push_back({scope, type, chain, p, d});
+  };
+
+  auto probeEntity = [&](const QString &scope, RS_Entity *e,
+                         const QString &chain) {
+    if (!e)
+      return;
+    switch (e->rtti()) {
+    case RS2::EntityLine: {
+      auto *l = static_cast<RS_Line *>(e);
+      record(scope, "LINE_SP", chain, l->getStartpoint());
+      record(scope, "LINE_EP", chain, l->getEndpoint());
+      break;
+    }
+    case RS2::EntityPolyline: {
+      auto *pl = static_cast<RS_Polyline *>(e);
+      for (RS_Entity *v : *pl) {
+        if (v)
+          record(scope, "PLINE_VTX", chain, v->getStartpoint());
+      }
+      break;
+    }
+    case RS2::EntityArc: {
+      auto *a = static_cast<RS_Arc *>(e);
+      record(scope, "ARC_CTR", chain, a->getCenter());
+      record(scope, "ARC_SP", chain, a->getStartpoint());
+      record(scope, "ARC_EP", chain, a->getEndpoint());
+      break;
+    }
+    case RS2::EntityCircle:
+      record(scope, "CIRCLE", chain,
+             static_cast<RS_Circle *>(e)->getCenter());
+      break;
+    case RS2::EntityEllipse: {
+      auto *el = static_cast<RS_Ellipse *>(e);
+      record(scope, "ELL_CTR", chain, el->getCenter());
+      break;
+    }
+    case RS2::EntitySplinePoints: {
+      auto *sp = static_cast<LC_SplinePoints *>(e);
+      for (const RS_Vector &p : sp->getPoints())
+        record(scope, "SPLINE_PT", chain, p);
+      break;
+    }
+    case RS2::EntityPoint:
+      record(scope, "POINT", chain,
+             static_cast<RS_Point *>(e)->getStartpoint());
+      break;
+    case RS2::EntityInsert:
+      record(scope, "INSERT", chain,
+             static_cast<RS_Insert *>(e)->getInsertionPoint());
+      break;
+    default:
+      break;
+    }
+  };
+
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    probeEntity("resolved", e, chicun::insertChain(e));
+  }
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveNone}.entities()) {
+    probeEntity("model", e, chicun::insertChain(e));
+  }
+  if (auto *bl = graphic.getBlockList()) {
+    for (int i = 0; i < bl->count(); ++i) {
+      RS_Block *b = bl->at(i);
+      if (!b)
+        continue;
+      const QString bname = b->getName();
+      if (!bname.contains(QStringLiteral("CUSH"))
+          && !bname.contains(QStringLiteral("sofa"))
+          && !bname.startsWith(QStringLiteral("A$C28F40C54")))
+        continue;
+      for (RS_Entity *e : *b)
+        probeEntity("block:" + bname, e, bname);
+    }
+  }
+
+  std::sort(hits.begin(), hits.end(),
+            [](const Hit &a, const Hit &b) { return a.dist < b.dist; });
+  std::cout << "\n=== stray8_diag tol=" << tol << " hits=" << hits.size()
+            << " countDeep=" << graphic.countDeep() << " ===\n";
+  for (std::size_t i = 0; i < hits.size() && i < 40; ++i) {
+    const auto &h = hits[i];
+    std::cout << "  " << h.scope.toStdString() << " " << h.type.toStdString()
+              << " (" << h.p.x << "," << h.p.y << ") dist=" << h.dist
+              << " chain=" << h.blockOrChain.toStdString() << "\n";
+  }
+
+  // Y-mirror band: any resolved point with y~492101 near sofa chain
+  int mirrorBand = 0;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!chicun::insertChain(e).contains(QStringLiteral("CUSH")))
+      continue;
+    auto check = [&](const RS_Vector &p) {
+      if (std::fabs(p.y - ty) < 200.0 && p.x < -1.0e5)
+        ++mirrorBand;
+    };
+    if (e->rtti() == RS2::EntityLine) {
+      auto *l = static_cast<RS_Line *>(e);
+      check(l->getStartpoint());
+      check(l->getEndpoint());
+    } else if (e->rtti() == RS2::EntityArc) {
+      auto *a = static_cast<RS_Arc *>(e);
+      check(a->getStartpoint());
+      check(a->getEndpoint());
+      check(a->getCenter());
+    }
+  }
+  std::cout << "CUSH chain points in y-mirror band (|y-492101|<200, x<-100k): "
+            << mirrorBand << "\n";
+
+  CHECK(hits.empty());
+}
+
+// GUI load path calls onLoadingCompleted() -> updateDimensions().
+//   ./librecad_tests "[.dwg_chicun_stray8_gui]" -s
+TEST_CASE("DWG 2带尺寸图库: stray8 after GUI onLoadingCompleted",
+          "[.dwg_chicun_stray8_gui]") {
+  if (chicun::fixturePath().empty()) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+  chicun::ensureTestApp();
+  RS_Graphic graphic;
+  REQUIRE(chicun::importFixture(graphic));
+  graphic.onLoadingCompleted();
+
+  const auto result =
+      chicun::probeResolvedGeometry(graphic, -1099671.573, 492101.3029, 50.0);
+  std::cout << "\n=== stray8_gui hits=" << result.hits.size()
+            << " countDeep=" << graphic.countDeep() << " ===\n";
+  for (const auto &h : result.hits) {
+    std::cout << "  " << h.type.toStdString() << " (" << h.p1.x << ","
+              << h.p1.y << ") dist=" << h.dist
+              << " insert=" << h.insertChain.toStdString() << "\n";
+  }
+  chicun::assertProbeEmpty(result, 1000.0);
+}
+
+// Snap-style: nearest point on CUSH-chain arc curves to phantom coordinate.
+//   ./librecad_tests "[.dwg_chicun_stray8_snap]" -s
+TEST_CASE("DWG 2带尺寸图库: stray8 nearest-on-arc snap distance",
+          "[.dwg_chicun_stray8_snap]") {
+  if (chicun::fixturePath().empty()) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+  chicun::ensureTestApp();
+  RS_Graphic graphic;
+  REQUIRE(chicun::importFixture(graphic));
+  graphic.onLoadingCompleted();
+
+  const RS_Vector target(-1099671.573, 492101.3029);
+  double best = std::numeric_limits<double>::infinity();
+  QString bestChain;
+  RS_Vector bestPt(false);
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e || e->rtti() != RS2::EntityArc)
+      continue;
+    if (!chicun::insertChain(e).contains(QStringLiteral("CUSH")))
+      continue;
+    double dist = 0.0;
+    const RS_Vector on =
+        static_cast<RS_Arc *>(e)->getNearestPointOnEntity(target, true, &dist);
+    if (dist < best) {
+      best = dist;
+      bestChain = chicun::insertChain(e);
+      bestPt = on;
+    }
+  }
+  std::cout << "\n=== stray8_snap nearest CUSH arc point: (" << bestPt.x
+            << "," << bestPt.y << ") dist=" << best
+            << " chain=" << bestChain.toStdString() << " ===\n";
+  CHECK(best > 1000.0);
+}
+
+// Second vertex of stray5-D phantom cluster (~557 units from D).
+//   ./librecad_tests "[.dwg_chicun_stray8]" -s
+TEST_CASE("DWG 2带尺寸图库: entities near (-1099671.57,492101.30)",
+          "[.dwg_chicun_stray8]") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path = std::string(home) + "/doc/dwg4/2带尺寸图库.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+
+  static int qargc = 1;
+  static char qarg0[] = "librecad_tests";
+  static char *qargv[] = {qarg0, nullptr};
+  static QCoreApplication *qapp = QCoreApplication::instance()
+                                      ? QCoreApplication::instance()
+                                      : new QCoreApplication(qargc, qargv);
+  static bool settingsReady = [] {
+    QCoreApplication::setOrganizationName("LibreCAD");
+    QCoreApplication::setApplicationName("LibreCAD-tests");
+    RS_Settings::init("LibreCAD", "LibreCAD-tests");
+    return true;
+  }();
+  (void)qapp;
+  (void)settingsReady;
+
+  RS_Graphic graphic;
+  RS_FilterDXFRW filter;
+  REQUIRE(filter.fileImport(graphic, QString::fromStdString(path),
+                            RS2::FormatDWG));
+
+  const double tx = -1099671.573, ty = 492101.3029;
+  const double tol = 50.0;
+
+  struct NearHit {
+    QString type;
+    QString layer;
+    quint32 handle = 0;
+    RS_Vector p1;
+    RS_Vector p2;
+    QString insertChain;
+    double dist = 0;
+  };
+  std::vector<NearHit> hits;
+
+  auto dist = [&](const RS_Vector &p) {
+    return std::hypot(p.x - tx, p.y - ty);
+  };
+  auto insertChain = [](RS_Entity *e) {
+    QString chain;
+    for (RS_Entity *p = e; p; p = p->getParent()) {
+      if (p->rtti() != RS2::EntityInsert)
+        continue;
+      if (!chain.isEmpty())
+        chain += " <- ";
+      chain += static_cast<RS_Insert *>(p)->getName();
+    }
+    return chain;
+  };
+  auto consider = [&](const QString &type, RS_Entity *e, const RS_Vector &p1,
+                      const RS_Vector &p2 = RS_Vector(false)) {
+    const double d = p2.valid ? std::min(dist(p1), dist(p2)) : dist(p1);
+    if (d > tol)
+      return;
+    const QString layer =
+        e->getLayer() ? e->getLayer()->getName() : QStringLiteral("(none)");
+    hits.push_back({type, layer, e->sourceHandle(), p1, p2, insertChain(e), d});
+  };
+
+  NearHit globalBest;
+  globalBest.dist = std::numeric_limits<double>::infinity();
+
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e)
+      continue;
+    const QString layer =
+        e->getLayer() ? e->getLayer()->getName() : QStringLiteral("(none)");
+    auto updateGlobal = [&](const QString &type, const RS_Vector &p) {
+      const double d = dist(p);
+      if (d < globalBest.dist)
+        globalBest = {type, layer, e->sourceHandle(), p, RS_Vector(false),
+                      insertChain(e), d};
+    };
+    switch (e->rtti()) {
+    case RS2::EntityLine: {
+      auto *l = static_cast<RS_Line *>(e);
+      consider("LINE", e, l->getStartpoint(), l->getEndpoint());
+      updateGlobal("LINE_SP", l->getStartpoint());
+      updateGlobal("LINE_EP", l->getEndpoint());
+      break;
+    }
+    case RS2::EntityPolyline: {
+      auto *pl = static_cast<RS_Polyline *>(e);
+      RS_Vector prev(false);
+      for (RS_Entity *v : *pl) {
+        if (!v)
+          continue;
+        RS_Vector pt = v->getStartpoint();
+        consider("PLINE_VTX", e, pt);
+        if (prev.valid)
+          consider("PLINE_SEG", e, prev, pt);
+        updateGlobal("PLINE_VTX", pt);
+        prev = pt;
+      }
+      break;
+    }
+    case RS2::EntityArc: {
+      auto *a = static_cast<RS_Arc *>(e);
+      consider("ARC_CTR", e, a->getCenter());
+      consider("ARC_SP", e, a->getStartpoint());
+      consider("ARC_EP", e, a->getEndpoint());
+      updateGlobal("ARC_CTR", a->getCenter());
+      updateGlobal("ARC_SP", a->getStartpoint());
+      updateGlobal("ARC_EP", a->getEndpoint());
+      break;
+    }
+    case RS2::EntityCircle:
+      consider("CIRCLE", e, static_cast<RS_Circle *>(e)->getCenter());
+      updateGlobal("CIRCLE", static_cast<RS_Circle *>(e)->getCenter());
+      break;
+    case RS2::EntityInsert:
+      consider("INSERT", e,
+               static_cast<RS_Insert *>(e)->getInsertionPoint());
+      break;
+    default:
+      break;
+    }
+  }
+
+  std::cout << "\n=== chicun stray8 (-1099671,492101) tol=" << tol << " ===\n";
+  std::cout << "countDeep=" << graphic.countDeep() << " hits=" << hits.size()
+            << "\n";
+  for (const auto &h : hits) {
+    std::cout << "  " << h.type.toStdString() << " (" << h.p1.x << ","
+              << h.p1.y << ") dist=" << h.dist
+              << " insert=" << h.insertChain.toStdString() << "\n";
+  }
+  if (globalBest.dist < std::numeric_limits<double>::infinity()) {
+    std::cout << "global closest: " << globalBest.type.toStdString() << " ("
+              << globalBest.p1.x << "," << globalBest.p1.y
+              << ") dist=" << globalBest.dist
+              << " insert=" << globalBest.insertChain.toStdString() << "\n";
+  }
+
+  CHECK(hits.empty());
+  if (globalBest.dist < std::numeric_limits<double>::infinity())
+    CHECK(globalBest.dist > 1000.0);
+}
+
+// Audit A$C446327FF / 015 insert transform (bbox west/north drivers).
+//   ./librecad_tests "[.dwg_chicun_015_audit]" -s
+TEST_CASE("DWG 2带尺寸图库: 015 insert transform audit",
+          "[.dwg_chicun_015_audit]") {
+  if (chicun::fixturePath().empty()) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+  chicun::ensureTestApp();
+  RS_Graphic graphic;
+  REQUIRE(chicun::importFixture(graphic));
+
+  RS_Block *blk015 = graphic.findBlock(QStringLiteral("015"));
+  REQUIRE(blk015 != nullptr);
+  blk015->calculateBorders();
+  std::cout << "\n=== block 015 def ===\n";
+  std::cout << "base=" << blk015->getBasePoint().x << ","
+            << blk015->getBasePoint().y << " min=(" << blk015->getMin().x
+            << "," << blk015->getMin().y << ") max=(" << blk015->getMax().x
+            << "," << blk015->getMax().y << ")\n";
+  int ell = 0;
+  for (RS_Entity *e : *blk015) {
+    if (!e || e->rtti() != RS2::EntityEllipse)
+      continue;
+    ++ell;
+    if (ell <= 3) {
+      auto *el = static_cast<RS_Ellipse *>(e);
+      std::cout << "  ell ctr=(" << el->getCenter().x << ","
+                << el->getCenter().y << ")\n";
+    }
+  }
+  std::cout << "block ellipses=" << ell << "\n";
+
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveNone}.entities()) {
+    if (!e || e->rtti() != RS2::EntityInsert)
+      continue;
+    auto *ins = static_cast<RS_Insert *>(e);
+    if (ins->getName() != QStringLiteral("A$C446327FF"))
+      continue;
+    const RS_Vector sc = ins->getScale();
+    std::cout << "top A$C446327FF ip=(" << ins->getInsertionPoint().x << ","
+              << ins->getInsertionPoint().y << ") sc=(" << sc.x << ","
+              << sc.y << "," << sc.z << ") ext.z="
+              << ins->getData().extrusion.z << " ang=" << ins->getAngle()
+              << "\n";
+    break;
+  }
+
+  RS_Vector sampleCtr(false);
+  int resolved015Ell = 0;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e)
+      continue;
+    const QString chain = chicun::insertChain(e);
+    if (!chain.contains(QStringLiteral("A$C446327FF"))
+        || !chain.contains(QStringLiteral("015")))
+      continue;
+    if (e->rtti() == RS2::EntityEllipse) {
+      ++resolved015Ell;
+      if (!sampleCtr.valid)
+        sampleCtr = static_cast<RS_Ellipse *>(e)->getCenter();
+    }
+  }
+  std::cout << "resolved 015 ellipses=" << resolved015Ell;
+  if (sampleCtr.valid)
+    std::cout << " sampleCtr=(" << sampleCtr.x << "," << sampleCtr.y << ")";
+  std::cout << "\n";
+  CHECK(resolved015Ell == 92);
+  REQUIRE(sampleCtr.valid);
+  CHECK(std::hypot(sampleCtr.x - 230585.0, sampleCtr.y - 61374.0) < 700.0);
+}
+
+// LNG-13 / A$C38DF2CE2 / A$C64247511 wipeout south-bbox audit.
+//   ./librecad_tests "[.dwg_chicun_lng13_audit]" -s
+TEST_CASE("DWG 2带尺寸图库: LNG-13 wipeout insert audit",
+          "[.dwg_chicun_lng13_audit]") {
+  if (chicun::fixturePath().empty()) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+  chicun::ensureTestApp();
+  RS_Graphic graphic;
+  REQUIRE(chicun::importFixture(graphic));
+  graphic.onLoadingCompleted();
+  graphic.calculateBorders();
+
+  const RS_Vector bmin = graphic.getMin();
+  const RS_Vector bmax = graphic.getMax();
+  std::cout << "\n=== LNG-13 audit ===\n";
+  std::cout << "bbox min=(" << bmin.x << "," << bmin.y << ") max=(" << bmax.x
+            << "," << bmax.y << ")\n";
+
+  RS_Block *lng = graphic.findBlock(QStringLiteral("LNG-13"));
+  REQUIRE(lng != nullptr);
+  lng->calculateBorders();
+  std::cout << "LNG-13 block base=(" << lng->getBasePoint().x << ","
+            << lng->getBasePoint().y << ") min=(" << lng->getMin().x << ","
+            << lng->getMin().y << ") max=(" << lng->getMax().x << ","
+            << lng->getMax().y << ")\n";
+  int wipeDef = 0;
+  for (RS_Entity *e : *lng) {
+    if (!e || e->rtti() != RS2::EntityWipeout)
+      continue;
+    e->calculateBorders();
+    std::cout << "  def wipe emin=(" << e->getMin().x << "," << e->getMin().y
+              << ") emax=(" << e->getMax().x << "," << e->getMax().y << ")\n";
+    ++wipeDef;
+  }
+  std::cout << "LNG-13 def wipeouts=" << wipeDef << "\n";
+
+  for (const char *outer : {"A$C38DF2CE2", "A$C64247511"}) {
+    RS_Block *ob = graphic.findBlock(QString::fromLatin1(outer));
+    if (!ob)
+      continue;
+    ob->calculateBorders();
+    std::cout << outer << " block base=(" << ob->getBasePoint().x << ","
+              << ob->getBasePoint().y << ") min=(" << ob->getMin().x << ","
+              << ob->getMin().y << ") max=(" << ob->getMax().x << ","
+              << ob->getMax().y << ")\n";
+    for (RS_Entity *e : *ob) {
+      if (!e || e->rtti() != RS2::EntityInsert)
+        continue;
+      auto *ins = static_cast<RS_Insert *>(e);
+      const RS_Vector sc = ins->getScale();
+      std::cout << "  " << outer << " child INSERT " << ins->getName().toStdString()
+                << " ip=(" << ins->getInsertionPoint().x << ","
+                << ins->getInsertionPoint().y << ") sc=(" << sc.x << "," << sc.y
+                << ") ang=" << ins->getAngle() << "\n";
+    }
+  }
+
+  for (const char *insName :
+       {"A$C38DF2CE2", "A$C64247511"}) {
+    for (RS_Entity *e :
+         lc::LC_ContainerTraverser{graphic, RS2::ResolveNone}.entities()) {
+      if (!e || e->rtti() != RS2::EntityInsert)
+        continue;
+      auto *ins = static_cast<RS_Insert *>(e);
+      if (ins->getName() != QString::fromLatin1(insName))
+        continue;
+      const RS_Vector sc = ins->getScale();
+      std::cout << "model INSERT " << insName << " ip=("
+                << ins->getInsertionPoint().x << ","
+                << ins->getInsertionPoint().y << ") sc=(" << sc.x << ","
+                << sc.y << "," << sc.z << ") ext.z="
+                << ins->getData().extrusion.z << " ang=" << ins->getAngle()
+                << "\n";
+    }
+  }
+
+  int southBand = 0;
+  int westBand = 0;
+  const double southY = -1.24092e6;
+  const double westX = -1.10031e6;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e || e->rtti() != RS2::EntityWipeout)
+      continue;
+    const QString chain = chicun::insertChain(e);
+    if (!chain.contains(QStringLiteral("LNG-13")))
+      continue;
+    e->calculateBorders();
+    const RS_Vector emin = e->getMin();
+    const RS_Vector emax = e->getMax();
+    if (std::fabs(emin.y - southY) < 2.0e4)
+      ++southBand;
+    if (std::fabs(emin.x - westX) < 2.0e4)
+      ++westBand;
+    if (southBand + westBand <= 6)
+      std::cout << "resolved wipe emin=(" << emin.x << "," << emin.y
+                << ") emax=(" << emax.x << "," << emax.y
+                << ") chain=" << chain.toStdString() << "\n";
+  }
+  std::cout << "resolved LNG-13 wipeouts southBand=" << southBand
+            << " westBand=" << westBand << "\n";
+
+  const auto stray4a =
+      chicun::probeResolvedGeometry(graphic, 104517.7659, -1239995.976, 50.0);
+  const auto stray4b =
+      chicun::probeResolvedGeometry(graphic, 57585.03448, -1240174.235, 50.0);
+  std::cout << "stray4A hits=" << stray4a.hits.size()
+            << " globalBest=" << stray4a.globalBest.dist
+            << " stray4B hits=" << stray4b.hits.size()
+            << " globalBest=" << stray4b.globalBest.dist << "\n";
+
+  CHECK(stray4a.hits.empty());
+  CHECK(stray4b.hits.empty());
+  SUCCEED("audit complete");
+}
+
+// ACEB10.dwg (R11/AC1009): bbox audit for misplaced INSERT/phantom extrema.
+//   ./librecad_tests "[.dwg_aceb10_bbox]" -s
+TEST_CASE("DWG ACEB10: resolved bbox audit", "[.dwg_aceb10_bbox]") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path = std::string(home) + "/doc/dwg3/ACEB10.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("ACEB10.dwg not present; skipping");
+    return;
+  }
+  chicun::ensureTestApp();
+  RS_Graphic graphic;
+  RS_FilterDXFRW filter;
+  REQUIRE(filter.fileImport(graphic, QString::fromStdString(path),
+                            RS2::FormatDWG));
+  // Display path: same container min/max sequence as zoomAuto.
+  graphic.onLoadingCompleted();
+  graphic.calculateBorders();
+
+  std::cout << "ACADVER="
+            << graphic.getVariableString("$ACADVER", "(none)").toStdString()
+            << "\n";
+
+  const RS_Vector bmin = graphic.getMin();
+  const RS_Vector bmax = graphic.getMax();
+  const double spanX = bmax.x - bmin.x;
+  const double spanY = bmax.y - bmin.y;
+  std::cout << "\n=== ACEB10 bbox ===\n";
+  std::cout << "display-path=import+updateInserts+onLoadingCompleted+"
+               "calculateBorders+getMin/getMax (zoomAuto source)\n";
+  std::cout << "min=(" << bmin.x << "," << bmin.y << ") max=(" << bmax.x
+            << "," << bmax.y << ")\n";
+  std::cout << "span=(" << spanX << "," << spanY << ")\n";
+
+  const auto corners = chicun::findBboxCornerDrivers(graphic, 5.0);
+  std::cout << "corner drivers=" << corners.size() << "\n";
+  for (std::size_t i = 0; i < corners.size() && i < 30; ++i) {
+    const auto &h = corners[i];
+    std::cout << "  corner=" << h.corner << " " << h.type.toStdString()
+              << " (" << h.p.x << "," << h.p.y << ")"
+              << " chain=" << h.insertChain.toStdString() << "\n";
+  }
+
+  const double boundTol = 5.0;
+  int envWest = 0, envEast = 0, envSouth = 0, envNorth = 0;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e)
+      continue;
+    e->calculateBorders();
+    const RS_Vector emin = e->getMin();
+    const RS_Vector emax = e->getMax();
+    if (!emin.valid || !emax.valid)
+      continue;
+    if (std::fabs(emin.x - bmin.x) < boundTol) {
+      ++envWest;
+      if (envWest <= 5)
+        std::cout << "  env-west " << rttiName(e->rtti()) << " emin=("
+                  << emin.x << "," << emin.y << ") emax=(" << emax.x << ","
+                  << emax.y << ") " << chicun::insertChain(e).toStdString()
+                  << "\n";
+    }
+    if (std::fabs(emax.x - bmax.x) < boundTol) {
+      ++envEast;
+      if (envEast <= 5)
+        std::cout << "  env-east " << rttiName(e->rtti()) << " emin=("
+                  << emin.x << "," << emin.y << ") emax=(" << emax.x << ","
+                  << emax.y << ") " << chicun::insertChain(e).toStdString()
+                  << "\n";
+    }
+    if (std::fabs(emin.y - bmin.y) < boundTol) {
+      ++envSouth;
+      if (envSouth <= 5)
+        std::cout << "  env-south " << rttiName(e->rtti()) << " emin=("
+                  << emin.x << "," << emin.y << ") emax=(" << emax.x << ","
+                  << emax.y << ") " << chicun::insertChain(e).toStdString()
+                  << "\n";
+    }
+    if (std::fabs(emax.y - bmax.y) < boundTol) {
+      ++envNorth;
+      if (envNorth <= 5)
+        std::cout << "  env-north " << rttiName(e->rtti()) << " emin=("
+                  << emin.x << "," << emin.y << ") emax=(" << emax.x << ","
+                  << emax.y << ") " << chicun::insertChain(e).toStdString()
+                  << "\n";
+    }
+  }
+  std::cout << "envelope west=" << envWest << " east=" << envEast
+            << " south=" << envSouth << " north=" << envNorth << "\n";
+
+  int modelInserts = 0;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveNone}.entities()) {
+    if (!e || e->rtti() != RS2::EntityInsert)
+      continue;
+    ++modelInserts;
+    auto *ins = static_cast<RS_Insert *>(e);
+    const RS_Vector sc = ins->getScale();
+    std::cout << "model INSERT " << ins->getName().toStdString() << " ip=("
+              << ins->getInsertionPoint().x << ","
+              << ins->getInsertionPoint().y << ") sc=(" << sc.x << "," << sc.y
+              << ") ang=" << ins->getAngle() << "\n";
+  }
+  std::cout << "model INSERT count=" << modelInserts << "\n";
+
+  int straySolids = 0;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e || e->rtti() != RS2::EntitySolid)
+      continue;
+    e->calculateBorders();
+    const RS_Vector emin = e->getMin();
+    const RS_Vector emax = e->getMax();
+    if (emin.x > -5.0)
+      continue;
+    ++straySolids;
+    if (straySolids <= 10) {
+      auto *s = static_cast<RS_Solid *>(e);
+      const RS_Vector c1 = s->getCorner(0);
+      const RS_Vector c4 = s->getCorner(3);
+      QString parents;
+      for (RS_Entity *p = e->getParent(); p; p = p->getParent()) {
+        if (!parents.isEmpty())
+          parents += " <- ";
+        parents += rttiName(p->rtti());
+        if (p->rtti() == RS2::EntityInsert)
+          parents += "(" + static_cast<RS_Insert *>(p)->getName() + ")";
+      }
+      std::cout << "stray Solid emin=(" << emin.x << "," << emin.y
+                << ") emax=(" << emax.x << "," << emax.y << ") chain="
+                << chicun::insertChain(e).toStdString() << " parents="
+                << parents.toStdString() << " c1=(" << c1.x << "," << c1.y
+                << ") c4=(" << c4.x << "," << c4.y << ")\n";
+    }
+  }
+  std::cout << "stray solids (x<-5)=" << straySolids << "\n";
+
+  int modelSolids = 0;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveNone}.entities()) {
+    if (!e || e->rtti() != RS2::EntitySolid)
+      continue;
+    ++modelSolids;
+    e->calculateBorders();
+    if (modelSolids <= 8) {
+      auto *s = static_cast<RS_Solid *>(e);
+      std::cout << "model Solid #" << modelSolids << " emin=(" << e->getMin().x
+                << "," << e->getMin().y << ") c1=(" << s->getCorner(0).x << ","
+                << s->getCorner(0).y << ")\n";
+    }
+  }
+  std::cout << "model-space solids=" << modelSolids << "\n";
+
+  int starDBlocks = 0;
+  for (int i = 0; i < graphic.getBlockList()->count(); ++i) {
+    RS_Block *blk = graphic.getBlockList()->at(i);
+    if (!blk || !blk->getName().startsWith(QStringLiteral("*D")))
+      continue;
+    ++starDBlocks;
+    blk->calculateBorders();
+    int solids = 0;
+    for (RS_Entity *e : *blk) {
+      if (e && e->rtti() == RS2::EntitySolid)
+        ++solids;
+    }
+    if (starDBlocks <= 8)
+      std::cout << "*D block " << blk->getName().toStdString() << " min=("
+                << blk->getMin().x << "," << blk->getMin().y << ") max=("
+                << blk->getMax().x << "," << blk->getMax().y << ") solids="
+                << solids << "\n";
+  }
+  std::cout << "*D blocks=" << starDBlocks << "\n";
+
+  struct SolidAuditIface : public CountingIface {
+    int blockDepth = 0;
+    QString currentBlock;
+    void addBlock(const DRW_Block &b) override {
+      CountingIface::addBlock(b);
+      currentBlock = QString::fromUtf8(b.name.c_str());
+      ++blockDepth;
+    }
+    void endBlock() override {
+      --blockDepth;
+      if (blockDepth <= 0) {
+        blockDepth = 0;
+        currentBlock.clear();
+      }
+    }
+    void addSolid(const DRW_Solid &e) override {
+      CountingIface::addSolid(e);
+      const double minX = std::min({e.basePoint.x, e.secPoint.x, e.thirdPoint.x,
+                                    e.fourPoint.x});
+      if (blockDepth == 0)
+        ++modelSolids;
+      ++solidsLogged;
+      (void)minX;
+    }
+    int solidsLogged = 0;
+    int modelSolids = 0;
+  } drwAudit;
+  const DwgResult drw = readDwg(path, false, &drwAudit);
+  std::cout << "DRW solids delivered=" << drwAudit.solidsLogged
+            << " model-scope=" << drwAudit.modelSolids << "\n";
+  REQUIRE(drw.ok);
+
+  std::cout << "RS blocks total=" << graphic.countBlocks() << "\n";
+  for (int i = 0; i < graphic.getBlockList()->count(); ++i) {
+    RS_Block *blk = graphic.getBlockList()->at(i);
+    if (!blk)
+      continue;
+    const QString n = blk->getName();
+    if (n.contains(QLatin1Char('*')) || n.startsWith(QLatin1String("EB10")))
+      std::cout << "RS block " << n.toStdString() << " ents=" << blk->count()
+                << "\n";
+  }
+
+  for (const char *blkName :
+       {"EB10-LEFT", "EB10-FRONT", "EB10-TOP", "EB10-RIGHT", "EB10-REAR",
+        "EB10-BOTTOM", "MOUNTINGKIT-EB4-LEFT", "LABEL"}) {
+    RS_Block *blk = graphic.findBlock(QString::fromLatin1(blkName));
+    if (!blk)
+      continue;
+    blk->calculateBorders();
+    std::cout << "block " << blkName << " base=(" << blk->getBasePoint().x
+              << "," << blk->getBasePoint().y << ") min=(" << blk->getMin().x
+              << "," << blk->getMin().y << ") max=(" << blk->getMax().x << ","
+              << blk->getMax().y << ") count=" << blk->count() << "\n";
+    int solids = 0;
+    for (RS_Entity *e : *blk) {
+      if (!e || e->rtti() != RS2::EntitySolid)
+        continue;
+      e->calculateBorders();
+      if (solids < 3) {
+        std::cout << "  def solid emin=(" << e->getMin().x << ","
+                  << e->getMin().y << ") emax=(" << e->getMax().x << ","
+                  << e->getMax().y << ")\n";
+      }
+      ++solids;
+    }
+    if (solids)
+      std::cout << "  def solids=" << solids << "\n";
+  }
+
+  CHECK(bmin.x > -5.0);
+  CHECK(bmax.x < 50.0);
+  CHECK(bmin.y > -1.0);
+  CHECK(bmax.y < 40.0);
+  CHECK(straySolids == 0);
+}
+
+// CUSH/sofa insert chain diagnostic.
+//   ./librecad_tests "[.dwg_chicun_cush_diag]" -s
+TEST_CASE("DWG 2带尺寸图库: CUSH sofa insert chain diagnostic",
+          "[.dwg_chicun_cush_diag]") {
+  if (chicun::fixturePath().empty()) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+  chicun::ensureTestApp();
+  RS_Graphic graphic;
+  REQUIRE(chicun::importFixture(graphic));
+
+  RS_Block *cushBlk = graphic.findBlock(QStringLiteral("CUSH"));
+  REQUIRE(cushBlk != nullptr);
+  cushBlk->calculateBorders();
+  std::cout << "\n=== CUSH block def ===\n";
+  std::cout << "base=(" << cushBlk->getBasePoint().x << ","
+            << cushBlk->getBasePoint().y << ") min=(" << cushBlk->getMin().x
+            << "," << cushBlk->getMin().y << ") max=(" << cushBlk->getMax().x
+            << "," << cushBlk->getMax().y << ")\n";
+  int arcDef = 0;
+  for (RS_Entity *e : *cushBlk) {
+    if (!e || e->rtti() != RS2::EntityArc)
+      continue;
+    auto *a = static_cast<RS_Arc *>(e);
+    std::cout << "  def ARC ctr=(" << a->getCenter().x << ","
+              << a->getCenter().y << ") ep=(" << a->getEndpoint().x << ","
+              << a->getEndpoint().y << ")\n";
+    if (++arcDef >= 4)
+      break;
+  }
+
+  auto dumpInsert = [&](const QString &name) {
+    for (RS_Entity *e :
+         lc::LC_ContainerTraverser{graphic, RS2::ResolveNone}.entities()) {
+      if (!e || e->rtti() != RS2::EntityInsert)
+        continue;
+      auto *ins = static_cast<RS_Insert *>(e);
+      if (ins->getName() != name)
+        continue;
+      const RS_Vector sc = ins->getScale();
+      std::cout << "model INSERT " << name.toStdString() << " ip=("
+                << ins->getInsertionPoint().x << ","
+                << ins->getInsertionPoint().y << ") sc=(" << sc.x << ","
+                << sc.y << ") ang=" << ins->getAngle() << "\n";
+    }
+    for (int i = 0; i < graphic.getBlockList()->count(); ++i) {
+      RS_Block *b = graphic.getBlockList()->at(i);
+      if (!b || !b->getName().contains(QStringLiteral("sofa")))
+        continue;
+      for (RS_Entity *e : *b) {
+        if (!e || e->rtti() != RS2::EntityInsert)
+          continue;
+        auto *ins = static_cast<RS_Insert *>(e);
+        if (!ins->getName().contains(QStringLiteral("CUSH")))
+          continue;
+        const RS_Vector sc = ins->getScale();
+        std::cout << "block " << b->getName().toStdString() << " INSERT "
+                  << ins->getName().toStdString() << " ip=("
+                  << ins->getInsertionPoint().x << ","
+                  << ins->getInsertionPoint().y << ") sc=(" << sc.x << ","
+                  << sc.y << ") ang=" << ins->getAngle() << "\n";
+      }
+    }
+  };
+  RS_Block *sofaBlk = graphic.findBlock(QStringLiteral("sofa 1"));
+  if (sofaBlk) {
+    for (RS_Entity *e : *sofaBlk) {
+      if (!e || e->rtti() != RS2::EntityInsert)
+        continue;
+      auto *ins = static_cast<RS_Insert *>(e);
+      if (ins->getName() != QStringLiteral("sofa 1")
+          && ins->getName() != QStringLiteral("CUSH"))
+        continue;
+      const RS_Vector sc = ins->getScale();
+      std::cout << "sofa1 block INSERT " << ins->getName().toStdString()
+                << " ip=(" << ins->getInsertionPoint().x << ","
+                << ins->getInsertionPoint().y << ") sc=(" << sc.x << ","
+                << sc.y << ") ang=" << ins->getAngle() << "\n";
+    }
+  }
+  dumpInsert(QStringLiteral("A$C28F40C54"));
+
+  int resolvedArc = 0;
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e || !chicun::insertChain(e).contains(QStringLiteral("CUSH")))
+      continue;
+    if (e->rtti() == RS2::EntityArc) {
+      auto *a = static_cast<RS_Arc *>(e);
+      std::cout << "resolved ARC ctr=(" << a->getCenter().x << ","
+                << a->getCenter().y << ") ep=(" << a->getEndpoint().x << ","
+                << a->getEndpoint().y << ") chain="
+                << chicun::insertChain(e).toStdString() << "\n";
+      if (++resolvedArc >= 6)
+        break;
+    }
+  }
+  SUCCEED("diagnostic only");
+}
+
+// tArch / architectural detail fixture (AC1021, ~104k entities, Chinese names).
+//   ./librecad_tests "[.dwg_jiedian]" -s
+TEST_CASE("DWG 全国通用节点详细解析: libdxfrw + filter load",
+          "[.dwg_jiedian]") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path =
+      std::string(home) + "/doc/dwg4/全国通用节点详细解析.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+
+  dwgR reader(path.c_str());
+  TypeTrackingIface iface;
+  REQUIRE(reader.read(&iface, true));
+  REQUIRE(reader.getError() == DRW::BAD_NONE);
+  int total = 0;
+  for (const auto &kv : iface.typeCounts)
+    total += kv.second;
+  CHECK(total >= 100000);
+  CHECK(iface.blocks >= 900);
+  CHECK(iface.layers >= 70);
+  CHECK(reader.getEntityParseFailures() == 0);
+  CHECK(iface.typeCounts["LINE"] >= 60000);
+  CHECK(iface.typeCounts["HATCH"] >= 3000);
+  CHECK(iface.layerEntities["c-装饰线"] >= 1000);
+
+  static int qargc = 1;
+  static char qarg0[] = "librecad_tests";
+  static char *qargv[] = {qarg0, nullptr};
+  static QCoreApplication *qapp = QCoreApplication::instance()
+                                      ? QCoreApplication::instance()
+                                      : new QCoreApplication(qargc, qargv);
+  static bool settingsReady = [] {
+    QCoreApplication::setOrganizationName("LibreCAD");
+    QCoreApplication::setApplicationName("LibreCAD-tests");
+    RS_Settings::init("LibreCAD", "LibreCAD-tests");
+    return true;
+  }();
+  (void)qapp;
+  (void)settingsReady;
+
+  RS_Graphic graphic;
+  RS_FilterDXFRW filter;
+  REQUIRE(filter.fileImport(graphic, QString::fromStdString(path),
+                            RS2::FormatDWG));
+  CHECK(graphic.countDeep() >= 100000);
+
+  std::cout << "\n=== 全国通用节点详细解析 load audit ===\n";
+  std::cout << "libdxfrw entities=" << total
+            << " filter countDeep=" << graphic.countDeep()
+            << " blocks=" << graphic.countBlocks()
+            << " parseFail=" << reader.getEntityParseFailures() << "\n";
+}
+
 // Scans the corpus for WIPEOUT entities (custom-class oType >= 500 with class
 // recName "WIPEOUT").  Pre-fix these were silently dropped via the
 // [custom-class-skipped] log path; this test asserts the dispatch-and-parse
@@ -3004,7 +7207,7 @@ TEST_CASE("DWG corpus: WIPEOUT entity inventory", "[.dwg_wipeout]") {
     CountingIface iface;
     try {
       dwgR reader(p.string().c_str());
-      reader.read(&iface, true);
+      (void)reader.read(&iface, true);
     } catch (...) {
       continue;
     }
@@ -3064,7 +7267,7 @@ TEST_CASE("DWG corpus: MULTILEADER entity inventory", "[.dwg_mleader]") {
       CountingIface iface;
       try {
         dwgR reader(p.string().c_str());
-        reader.read(&iface, true);
+        (void)reader.read(&iface, true);
       } catch (...) {
         continue;
       }
@@ -3293,7 +7496,7 @@ TEST_CASE("DWG acdbcolor probe: count DBCOLOR objects + resolved entity refs",
     AcDbColorIface iface;
     try {
       dwgR reader(f.path.c_str());
-      reader.read(&iface, true);
+      (void)reader.read(&iface, true);
     } catch (...) {
       std::cout << "EXCEPTION on " << f.path << "\n";
       continue;
@@ -3358,7 +7561,7 @@ TEST_CASE("DWG acdbcolor: book color load + dbColor object inventory",
   int entities = 0;
   try {
     dwgR reader(path.c_str());
-    reader.read(&iface, true);
+    (void)reader.read(&iface, true);
     err = reader.getError();
     entities = iface.modelSpaceEntities + iface.blockSpaceEntities;
   } catch (const std::exception &ex) {
@@ -3443,7 +7646,7 @@ TEST_CASE("DWG acdbcolor: layer colorName probe",
       LayerColorIface iface;
       try {
         dwgR reader(p.string().c_str());
-        reader.read(&iface, true);
+        (void)reader.read(&iface, true);
       } catch (...) {
         continue;
       }
@@ -3530,7 +7733,7 @@ TEST_CASE("DWG plotsettings probe: count PLOTSETTINGS objects per file",
       PlotSettingsIface iface;
       try {
         dwgR reader(p.string().c_str());
-        reader.read(&iface, true);
+        (void)reader.read(&iface, true);
       } catch (...) {
         continue;
       }
@@ -3656,7 +7859,7 @@ TEST_CASE("DWG transparency probe: count entities with ENC alpha set",
       TransparencyIface iface;
       try {
         dwgR reader(p.string().c_str());
-        reader.read(&iface, true);
+        (void)reader.read(&iface, true);
       } catch (...) {
         continue;
       }
@@ -3832,7 +8035,7 @@ TEST_CASE("DWG dimension field parity: measureValue + flipArrow populate",
       continue;
     FieldCaptureIface iface;
     try {
-      dwgR reader(entry.path().c_str());
+      dwgR reader(entry.path().string().c_str());
       reader.setDebug(DRW::DebugLevel::None);
       if (!reader.read(&iface, true))
         continue;
@@ -4164,10 +8367,10 @@ TEST_CASE("DWG arch_multileaders: MLEADER body parser fidelity") {
     int contentType;
     double scale;
     bool hasText;
-    duint32 styleHandleRef;
-    duint32 textStyleHandleRef; // ctx.textStyleHandle
-    duint32 leaderLineTypeHandleRef;
-    duint32 styleTextStyleHandleRef;
+    std::uint32_t styleHandleRef;
+    std::uint32_t textStyleHandleRef; // ctx.textStyleHandle
+    std::uint32_t leaderLineTypeHandleRef;
+    std::uint32_t styleTextStyleHandleRef;
   };
 
   class Iface : public TypeTrackingIface {
@@ -4275,7 +8478,7 @@ TEST_CASE("DWG arch_multileaders: MLEADER body parser fidelity") {
   int populatedStyleHandles = 0;
   int populatedTextStyleHandles = 0;
   int populatedLineLTypeHandles = 0;
-  std::set<duint32> distinctStyles;
+  std::set<std::uint32_t> distinctStyles;
   for (const auto &s : iface.snaps) {
     if (s.styleHandleRef != 0) {
       ++populatedStyleHandles;
@@ -4354,4 +8557,1648 @@ TEST_CASE("DWG arch_multileaders: SCALE table delivery") {
   CHECK(byFactor.count(24.0) == 1u);
   CHECK(byFactor.count(48.0) == 1u);
   CHECK(foundUnit); // at least one 1:1 entry present
+}
+
+TEST_CASE("DWG Mechanical and Annotative: object-context data delivery",
+          "[.dwg_object_context]") {
+  const std::string targetName = "Mechanical and Annotative.dwg";
+  std::vector<std::filesystem::path> candidates;
+
+  const std::filesystem::path manifest = "D:/data/dli/doc/dwg_files.txt";
+  if (std::filesystem::is_regular_file(manifest)) {
+    std::ifstream in(manifest);
+    std::string line;
+    while (std::getline(in, line)) {
+      if (line.find(targetName) != std::string::npos)
+        candidates.emplace_back(line);
+    }
+  }
+  candidates.emplace_back("D:/data/dli/doc/dwg3/Mechanical and Annotative.dwg");
+  if (const char *home = getenv("HOME"))
+    candidates.emplace_back(std::string(home) +
+                            "/doc/dwg3/Mechanical and Annotative.dwg");
+
+  std::filesystem::path path;
+  for (const auto &candidate : candidates) {
+    if (std::filesystem::is_regular_file(candidate)) {
+      path = candidate;
+      break;
+    }
+  }
+  if (path.empty()) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+
+  class ObjectContextIface : public TypeTrackingIface {
+  public:
+    int typedContexts = 0;
+    int textContexts = 0;
+    int dimensionContexts = 0;
+    int scaleLinkedContexts = 0;
+    int rawObjectContexts = 0;
+    std::map<DRW_ObjectContextData::Kind, int> byKind;
+
+    void addObjectContextData(const DRW_ObjectContextData &d) override {
+      ++typedContexts;
+      ++byKind[d.m_kind];
+      if (d.isTextFamily())
+        ++textContexts;
+      if (d.isDimensionFamily())
+        ++dimensionContexts;
+      if (d.m_scaleHandle != 0)
+        ++scaleLinkedContexts;
+    }
+
+    void addUnsupportedObject(const DRW_UnsupportedObject &o) override {
+      if (o.m_recordName.find("OBJECTCONTEXTDATA") != std::string::npos ||
+          o.m_className.find("ObjectContextData") != std::string::npos) {
+        ++rawObjectContexts;
+      }
+    }
+  };
+
+  ObjectContextIface iface;
+  std::unordered_map<std::string, size_t> skippedUnsupported;
+  {
+    dwgR reader(path.string().c_str());
+    REQUIRE(reader.read(&iface, true));
+    REQUIRE(reader.getError() == DRW::BAD_NONE);
+    skippedUnsupported = reader.getSkippedUnsupportedObjects();
+  }
+
+  CHECK(iface.typedContexts >= 43);
+  CHECK(iface.textContexts >= 14);
+  CHECK(iface.dimensionContexts >= 29);
+  CHECK(iface.scaleLinkedContexts >= 43);
+  CHECK(iface.rawObjectContexts >= iface.typedContexts);
+  CHECK(iface.byKind[DRW_ObjectContextData::Kind::AlignedDimension] >= 23);
+  CHECK(iface.byKind[DRW_ObjectContextData::Kind::Text] >= 11);
+  CHECK(iface.byKind[DRW_ObjectContextData::Kind::RadialDimension] >= 6);
+  CHECK(iface.byKind[DRW_ObjectContextData::Kind::MText] >= 3);
+
+  for (const auto &kv : skippedUnsupported) {
+    CHECK(kv.first.find("ALDIMOBJECTCONTEXTDATA") == std::string::npos);
+    CHECK(kv.first.find("TEXTOBJECTCONTEXTDATA") == std::string::npos);
+    CHECK(kv.first.find("RADIMOBJECTCONTEXTDATA") == std::string::npos);
+    CHECK(kv.first.find("MTEXTOBJECTCONTEXTDATA") == std::string::npos);
+  }
+}
+
+TEST_CASE("DWG arch_multileaders: OBJECTS metadata delivery") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set");
+    return;
+  }
+  const std::string path =
+      std::string(home) +
+      "/doc/dwg/architectural_-_annotation_scaling_and_multileaders.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("fixture not present; skipping");
+    return;
+  }
+
+  class MetadataIface : public TypeTrackingIface {
+  public:
+    int dictionaries = 0;
+    int dictionaryEntries = 0;
+    int dictionariesWithDefault = 0;
+    int dictionaryVars = 0;
+    int dictionaryVarsWithValue = 0;
+    int xrecords = 0;
+    int xrecordValues = 0;
+    int xrecordHandles = 0;
+    int materials = 0;
+    int materialsWithName = 0;
+    int tableStyles = 0;
+    int tableStylesWithName = 0;
+    int tableStyleFormats = 0;
+    int tableStyleBorders = 0;
+    int tableContents = 0;
+    int tableContentCells = 0;
+    int cellStyleMaps = 0;
+    int cellStyleMapStyles = 0;
+
+    void addDictionary(const DRW_Dictionary &d) override {
+      ++dictionaries;
+      dictionaryEntries += static_cast<int>(d.m_entries.size());
+    }
+    void addDictionaryWithDefault(const DRW_DictionaryWithDefault &d) override {
+      ++dictionariesWithDefault;
+      dictionaryEntries += static_cast<int>(d.m_entries.size());
+      if (d.m_defaultEntryHandle != 0)
+        ++xrecordHandles;
+    }
+    void addDictionaryVar(const DRW_DictionaryVar &d) override {
+      ++dictionaryVars;
+      if (!d.m_value.empty())
+        ++dictionaryVarsWithValue;
+    }
+    void addXRecord(const DRW_XRecord &r) override {
+      ++xrecords;
+      xrecordValues += static_cast<int>(r.m_values.size());
+      xrecordHandles += static_cast<int>(r.m_handleValues.size());
+    }
+    void addMaterial(const DRW_Material &m) override {
+      ++materials;
+      if (!m.m_name.empty())
+        ++materialsWithName;
+    }
+    void addTableStyle(const DRW_TableStyle &t) override {
+      ++tableStyles;
+      if (!t.m_name.empty())
+        ++tableStylesWithName;
+      tableStyleFormats += static_cast<int>(t.m_rowStyles.size());
+      for (const auto &style : t.m_rowStyles)
+        tableStyleBorders += static_cast<int>(style.m_borders.size());
+      if (t.m_tableCellStyle.m_hasData) {
+        ++tableStyleFormats;
+        tableStyleBorders += static_cast<int>(t.m_tableCellStyle.m_borders.size());
+      }
+      tableStyleFormats += static_cast<int>(t.m_cellStyles.size());
+      for (const auto &style : t.m_cellStyles)
+        tableStyleBorders += static_cast<int>(style.m_borders.size());
+    }
+    void addTableContent(const DRW_TableContentObject &t) override {
+      ++tableContents;
+      for (const auto &row : t.m_content.m_rows)
+        tableContentCells += static_cast<int>(row.m_cells.size());
+    }
+    void addCellStyleMap(const DRW_CellStyleMap &m) override {
+      ++cellStyleMaps;
+      cellStyleMapStyles += static_cast<int>(m.m_cellStyles.size());
+    }
+  };
+
+  MetadataIface iface;
+  std::unordered_map<std::string, size_t> skippedUnsupported;
+  {
+    dwgR reader(path.c_str());
+    REQUIRE(reader.read(&iface, true));
+    REQUIRE(reader.getError() == DRW::BAD_NONE);
+    skippedUnsupported = reader.getSkippedUnsupportedObjects();
+  }
+
+  CHECK(iface.dictionaries >= 1);
+  CHECK(iface.dictionaryEntries >= 1);
+  CHECK(iface.dictionariesWithDefault >= 1);
+  CHECK(iface.dictionaryVars >= 1);
+  CHECK(iface.dictionaryVarsWithValue >= 1);
+  CHECK(iface.xrecords >= 1);
+  CHECK((iface.xrecordValues + iface.xrecordHandles) >= 1);
+  CHECK(iface.materials >= 1);
+  CHECK(iface.materialsWithName >= 1);
+  CHECK(iface.tableStyles >= 1);
+  CHECK(iface.tableStylesWithName >= 1);
+  CHECK(iface.tableStyleFormats >= 1);
+  CHECK(iface.tableStyleBorders >= 1);
+  CHECK(skippedUnsupported.find("TABLECONTENT") == skippedUnsupported.end());
+  CHECK(skippedUnsupported.find("CELLSTYLEMAP") == skippedUnsupported.end());
+}
+
+TEST_CASE("DWG ACAD_TABLE entities render through anonymous table blocks") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping ACAD_TABLE corpus test");
+    return;
+  }
+
+  const std::string path =
+      std::string(home) + "/doc/dwg/blocks_and_tables_-_metric.dwg";
+  if (!std::filesystem::is_regular_file(path)) {
+    SUCCEED("DWG table corpus file not found at " << path << "; skipping");
+    return;
+  }
+
+  struct TableProbe : CountingIface {
+    int tables = 0;
+    int semanticTables = 0;
+    int tableColumns = 0;
+    int tableRows = 0;
+    int tableCells = 0;
+    int tableCellContents = 0;
+    int tableTextContents = 0;
+    int anonymousBlockTables = 0;
+
+    void addTable(const DRW_Table &t) override {
+      track(t);
+      ++tables;
+      if (t.m_hasSemanticContent)
+        ++semanticTables;
+      tableColumns += static_cast<int>(t.m_content.m_columns.size());
+      tableRows += static_cast<int>(t.m_content.m_rows.size());
+      for (const auto &row : t.m_content.m_rows) {
+        tableCells += static_cast<int>(row.m_cells.size());
+        for (const auto &cell : row.m_cells) {
+          tableCellContents += static_cast<int>(cell.m_contents.size());
+          for (const auto &content : cell.m_contents) {
+            if (content.m_type == 1 && (!content.m_text.empty() ||
+                content.m_value.m_value.type() != DRW_Variant::INVALID)) {
+              ++tableTextContents;
+            }
+          }
+        }
+      }
+      if (!t.name.empty() && t.name.rfind("*T", 0) == 0)
+        ++anonymousBlockTables;
+    }
+  };
+
+  TableProbe iface;
+  dwgR reader(path.c_str());
+  REQUIRE(reader.read(&iface, true));
+  REQUIRE(reader.getError() == DRW::BAD_NONE);
+
+  const auto skipped = reader.getSkippedCustomClasses();
+  CHECK(skipped.find("ACAD_TABLE") == skipped.end());
+  CHECK(iface.tables >= 1);
+  CHECK(iface.semanticTables >= 1);
+  CHECK(iface.anonymousBlockTables >= 1);
+  CHECK(iface.tableColumns >= 1);
+  CHECK(iface.tableRows >= 1);
+  CHECK(iface.tableCells >= 1);
+  CHECK(iface.tableCellContents >= 1);
+  CHECK(iface.tableTextContents >= 1);
+}
+
+// ── R2004+ section buffer-model regression pins (deep-review 2026-06-12) ──────
+// These pin the num_pages x maxSize input-bounded buffer model that unlocked
+// R2004/R2010/R2013 reads. They depend on the dwg_samples corpus and skip
+// gracefully when it is absent (the fixtures are not committed).
+namespace {
+bool readSample(const char* file, DwgResult& out) {
+  const char* home = std::getenv("HOME");
+  if (!home) return false;
+  const std::string path = std::string(home) + "/dev/dwg_samples/" + file;
+  if (!std::filesystem::exists(path)) return false;
+  out = readDwg(path, /*verbose=*/false);
+  return true;
+}
+}  // namespace
+
+TEST_CASE("DWG R2004 multi-page section (AcDbObjects at 3 x 0x7400) reads",
+          "[dwg][r2004][buffermodel]") {
+  // arc_2004's AcDbObjects page sits at startOffset 0x15C00 == 3 x 0x7400, so a
+  // load that yields entities proves the multi-page (k x maxSize) buffer model.
+  DwgResult r;
+  if (!readSample("arc_2004.dwg", r)) {
+    SUCCEED("~/dev/dwg_samples/arc_2004.dwg absent; skipping multi-page pin");
+    return;
+  }
+  CHECK(r.error == DRW::BAD_NONE);
+  CHECK(r.version == DRW::AC1018);
+  CHECK(r.entities >= 1);
+}
+
+TEST_CASE("DWG R2010 CLASSES content past page uSize decodes",
+          "[dwg][r2010][buffermodel]") {
+  // arc_2010's CLASSES string stream lives past the page-header uSize (992);
+  // a successful read with entities proves the output window is maxSize, not
+  // uSize (the old uSize cap zeroed the string stream -> BAD_READ_CLASSES).
+  DwgResult r;
+  if (!readSample("arc_2010.dwg", r)) {
+    SUCCEED("~/dev/dwg_samples/arc_2010.dwg absent; skipping past-uSize pin");
+    return;
+  }
+  CHECK(r.error == DRW::BAD_NONE);
+  CHECK(r.version == DRW::AC1024);
+  CHECK(r.entities >= 1);
+}
+
+TEST_CASE("DWG R2013 reads (dwgReader27 inherits the buffer-model fixes)",
+          "[dwg][r2013][buffermodel]") {
+  DwgResult r;
+  if (!readSample("arc_2013.dwg", r)) {
+    SUCCEED("~/dev/dwg_samples/arc_2013.dwg absent; skipping R2013 pin");
+    return;
+  }
+  CHECK(r.error == DRW::BAD_NONE);
+  CHECK(r.version == DRW::AC1027);
+  CHECK(r.entities >= 1);
+}
+
+// Regression pin for the pre-2004 (R13/R14/R2000) BLOCKS-walk fix: a broken
+// nextEntLink at the *Model_Space chain end used to set ret=false and report
+// BAD_READ_BLOCKS even though every drawable entity was delivered (recovered
+// by the readDwgEntities sweep). The canonical libdxfrw sample files
+// example_r13/r14/2000.dwg + TS1.dwg all tripped it; libreDWG reads them fine.
+// Fixtures live in ~/doc/dwg{,2,3} (not committed) -> skip gracefully if absent.
+TEST_CASE("DWG R13/R14/R2000 sample files read OK (BLOCKS-walk regression)",
+          "[dwg][r2000][blockswalk]") {
+  const char* home = std::getenv("HOME");
+  if (!home) { SUCCEED("no HOME"); return; }
+  struct Want { const char* file; DRW::Version ver; };
+  const Want wants[] = {
+    {"example_r13.dwg",  DRW::AC1012},
+    {"example_r14.dwg",  DRW::AC1014},
+    {"example_2000.dwg", DRW::AC1015},
+    {"TS1.dwg",          DRW::AC1015},
+  };
+  int checked = 0;
+  for (const Want& w : wants) {
+    std::string path;
+    for (const std::string& dir : {std::string(home) + "/doc/dwg",
+                                   std::string(home) + "/doc/dwg2",
+                                   std::string(home) + "/doc/dwg3"}) {
+      std::string cand = dir + "/" + w.file;
+      if (std::filesystem::exists(cand)) { path = cand; break; }
+    }
+    if (path.empty()) continue;
+    ++checked;
+    DwgResult r = readDwg(path, /*verbose=*/false);
+    INFO(w.file);
+    CHECK(r.error == DRW::BAD_NONE);   // was BAD_READ_BLOCKS before the fix
+    CHECK(r.version == w.ver);
+    CHECK(r.entities >= 1);
+  }
+  if (checked == 0)
+    SUCCEED("~/doc/dwg{,2,3} canonical samples absent; skipping BLOCKS-walk pin");
+}
+
+
+// ============================================================================
+// READ FEATURE-COVERAGE scans (hidden, corpus-dependent, skip-when-absent).
+// ============================================================================
+
+// Aggregate skipped-class / skipped-object telemetry + handled-type histogram
+// across ~/doc/dwg{,2,3}. Diagnostic (no hard assertions) — surfaces what the
+// reader still drops so coverage work can be prioritized.
+TEST_CASE("DWG coverage scan: aggregate skip telemetry across corpus",
+          "[.coverage]") {
+  const char* home = std::getenv("HOME");
+  if (!home) { SUCCEED("no HOME"); return; }
+  std::map<std::string, std::size_t> skippedClasses, skippedObjects;
+  std::map<std::string, int> handledTypes;
+  int files = 0, okFiles = 0;
+  for (const std::string& dir : {std::string(home) + "/doc/dwg",
+                                 std::string(home) + "/doc/dwg2",
+                                 std::string(home) + "/doc/dwg3"}) {
+    if (!std::filesystem::exists(dir)) continue;
+    for (const auto& de : std::filesystem::directory_iterator(dir)) {
+      const auto ext = de.path().extension().string();
+      if (ext != ".dwg" && ext != ".DWG") continue;
+      ++files;
+      DRW::setCustomDebugPrinter(new DRW::DebugPrinter());
+      TypeTrackingIface iface;
+      try {
+        dwgR reader(de.path().string().c_str());
+        if (reader.read(&iface, true) && reader.getError() == DRW::BAD_NONE)
+          ++okFiles;
+        for (const auto& kv : reader.getSkippedCustomClasses())
+          skippedClasses[kv.first] += kv.second;
+        for (const auto& kv : reader.getSkippedUnsupportedObjects())
+          skippedObjects[kv.first] += kv.second;
+        for (const auto& kv : iface.typeCounts)
+          handledTypes[kv.first] += kv.second;
+      } catch (...) {}
+    }
+  }
+  if (files == 0) { SUCCEED("~/doc/dwg{,2,3} absent; skipping coverage scan"); return; }
+  auto dump = [](const char* title, std::map<std::string, std::size_t> m) {
+    std::vector<std::pair<std::string, std::size_t>> v(m.begin(), m.end());
+    std::sort(v.begin(), v.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    std::cerr << title << " (" << v.size() << " distinct):\n";
+    for (const auto& kv : v) std::cerr << "  " << kv.second << "  " << kv.first << "\n";
+  };
+  std::cerr << "\nCOVERAGE: files=" << files << " ok=" << okFiles << "\n";
+  std::cerr << "-- handled entity types --\n";
+  for (const auto& kv : handledTypes) std::cerr << "  " << kv.second << "  " << kv.first << "\n";
+  dump("-- skipped CUSTOM CLASSES (renderable-ish gaps)", skippedClasses);
+  dump("-- skipped UNSUPPORTED OBJECTS (mostly metadata)", skippedObjects);
+  SUCCEED("coverage scan complete");
+}
+
+// Per-file corpus audit: one TSV line per .dwg in ~/doc/dwg{,2,3} so an external
+// script can join libdxfrw's read result against the LibreDWG oracle and flag
+// real failures (oracle ok, we error) and incomplete reads (entity-count
+// divergence). Counts EVERY delivery path. Run: ./librecad_tests "[.audit]" -s
+TEST_CASE("DWG corpus audit: per-file TSV vs oracle", "[.audit]") {
+  const char* home = std::getenv("HOME");
+  if (!home) { SUCCEED("no HOME"); return; }
+  struct AuditIface : public TypeTrackingIface {
+    int meshes = 0, modelerGeoms = 0, unsupported = 0;
+    void addMesh(const DRW_Mesh& e) override { trackT(e, "MESH"); ++meshes; }
+    void addModelerGeometry(const DRW_ModelerGeometry&) override { ++modelerGeoms; }
+    void addUnsupportedObject(const DRW_UnsupportedObject&) override { ++unsupported; }
+  };
+  std::cout << "AUDIT\tdir\tfile\tversion\terror\tentities\tblocks\tlayers"
+               "\tmodeler\tmeshes\tunsupported\tproxyPrims\tskippedClasses\n";
+  for (const std::string& dir : {std::string(home) + "/doc/dwg",
+                                 std::string(home) + "/doc/dwg2",
+                                 std::string(home) + "/doc/dwg3"}) {
+    if (!std::filesystem::exists(dir)) continue;
+    std::vector<std::filesystem::path> files;
+    for (const auto& de : std::filesystem::directory_iterator(dir)) {
+      const auto ext = de.path().extension().string();
+      if (ext != ".dwg" && ext != ".DWG") continue;
+      if (de.path().filename().string().front() == '#') continue;
+      files.push_back(de.path());
+    }
+    std::sort(files.begin(), files.end());
+    const std::string dirName = std::filesystem::path(dir).filename().string();
+    for (const auto& p : files) {
+      DRW::setCustomDebugPrinter(new DRW::DebugPrinter());
+      AuditIface iface;
+      DRW::error err = DRW::BAD_UNKNOWN;
+      DRW::Version ver = DRW::UNKNOWNV;
+      std::size_t proxyPrims = 0;
+      std::string skipped;
+      try {
+        dwgR reader(p.string().c_str());
+        (void)reader.read(&iface, true);
+        err = reader.getError();
+        ver = reader.getVersion();
+        proxyPrims = reader.getDecodedProxyPrimitives();
+        for (const auto& kv : reader.getSkippedCustomClasses())
+          skipped += kv.first + ":" + std::to_string(kv.second) + ",";
+      } catch (...) { err = DRW::BAD_UNKNOWN; }
+      const int totalEnt = iface.total() + iface.modelerGeoms;
+      std::cout << "AUDIT\t" << dirName << "\t" << p.filename().string() << "\t"
+                << versionStr(ver) << "\t" << errorStr(err) << "\t" << totalEnt
+                << "\t" << iface.blocks << "\t" << iface.layers << "\t"
+                << iface.modelerGeoms << "\t" << iface.meshes << "\t"
+                << iface.unsupported << "\t" << proxyPrims << "\t"
+                << (skipped.empty() ? "-" : skipped) << "\n";
+    }
+  }
+  SUCCEED("audit complete");
+}
+
+// MESH is now decoded (not raw-netted): across the corpus, no file should still
+// report MESH/AcDbSubDMesh in getSkippedCustomClasses(), and where MESH exists
+// it must deliver geometry. Skip-when-absent (corpus is developer-local).
+TEST_CASE("DWG MESH decoded + delivered, not skipped", "[.dwg_readback_corpus]") {
+  const char* home = std::getenv("HOME");
+  if (!home) { SUCCEED("no HOME"); return; }
+  struct MeshProbe : public TypeTrackingIface {
+    int meshCount = 0;
+    std::size_t meshVertices = 0, meshFaces = 0;
+    void addMesh(const DRW_Mesh& d) override {
+      ++meshCount;
+      meshVertices += d.vertices.size();
+      meshFaces += d.faces.size();
+    }
+  };
+  int meshCount = 0, filesStillSkippingMesh = 0;
+  std::size_t meshVerts = 0;
+  bool anyFile = false;
+  // Proxy-graphics telemetry (Part 2): a STDPART2D carrier must yield decoded
+  // primitives — previously-invisible cached geometry now rendered.
+  std::size_t proxyPrims = 0, filesWithStdpart = 0, stdpartFilesWithProxy = 0;
+  for (const std::string& dir : {std::string(home) + "/doc/dwg",
+                                 std::string(home) + "/doc/dwg2",
+                                 std::string(home) + "/doc/dwg3"}) {
+    if (!std::filesystem::exists(dir)) continue;
+    for (const auto& de : std::filesystem::directory_iterator(dir)) {
+      const auto ext = de.path().extension().string();
+      if (ext != ".dwg" && ext != ".DWG") continue;
+      anyFile = true;
+      DRW::setCustomDebugPrinter(new DRW::DebugPrinter());
+      MeshProbe probe;
+      try {
+        dwgR reader(de.path().string().c_str());
+        (void)reader.read(&probe, true);
+        meshCount += probe.meshCount;
+        meshVerts += probe.meshVertices;
+        const auto sk = reader.getSkippedCustomClasses();
+        if (sk.find("MESH") != sk.end() || sk.find("AcDbSubDMesh") != sk.end())
+          ++filesStillSkippingMesh;
+        const std::size_t np = reader.getDecodedProxyPrimitives();
+        proxyPrims += np;
+        if (sk.find("STDPART2D") != sk.end()) {
+          ++filesWithStdpart;            // STDPART2D still raw-netted (round-trip)
+          if (np > 0) ++stdpartFilesWithProxy;
+        }
+      } catch (...) {}
+    }
+  }
+  if (!anyFile) { SUCCEED("~/doc/dwg{,2,3} absent; skipping MESH probe"); return; }
+  std::cerr << "\nMESH probe: meshCount=" << meshCount << " vertices=" << meshVerts
+            << " filesStillSkippingMESH=" << filesStillSkippingMesh << "\n";
+  std::cerr << "PROXY probe: decodedPrimitives=" << proxyPrims
+            << " filesWithSTDPART2D=" << filesWithStdpart
+            << " ofThoseWithDecodedProxy=" << stdpartFilesWithProxy << "\n";
+  CHECK(filesStillSkippingMesh == 0);  // MESH no longer falls to the raw net
+  // Every STDPART2D file should now surface decoded proxy primitives while the
+  // raw object is still preserved for round-trip.
+  if (filesWithStdpart > 0) CHECK(stdpartFilesWithProxy == filesWithStdpart);
+  if (meshCount == 0) { SUCCEED("no MESH entities in local corpus"); return; }
+  CHECK(meshVerts >= 1);  // geometry actually delivered
+}
+
+// Durable, CI-safe unit pin for the proxy-graphics decoder: a hand-crafted
+// blob (8-byte header + one CIRCLE chunk + one CIRCULAR_ARC chunk) exercising
+// the framing loop, the byte-aligned little-endian ByteStream, the 4-byte
+// alignment and the CIRCLE/ARC emission.  Coordinates are checked exactly —
+// this pins the field byte-orders the ezdxf port depends on.  Verified byte-
+// identical against ezdxf's own ProxyGraphic on a real corpus STDPART2D blob.
+TEST_CASE("proxy graphics decoder unit", "[proxy]") {
+  auto putU32 = [](std::string& s, std::uint32_t v) {
+    for (int i = 0; i < 4; ++i) s.push_back(char((v >> (8 * i)) & 0xFF));
+  };
+  auto putD = [](std::string& s, double v) {
+    char b[8]; std::memcpy(b, &v, 8); s.append(b, 8); // host LE
+  };
+  std::string blob(8, '\0');                 // 8-byte header (skipped)
+  // CIRCLE (type 2): center(3d) + radius(d) + normal(3d) = 56-byte payload
+  putU32(blob, 8 + 56); putU32(blob, 2);
+  putD(blob, 10.0); putD(blob, 20.0); putD(blob, 0.0);   // center
+  putD(blob, 5.0);                                       // radius
+  putD(blob, 0.0); putD(blob, 0.0); putD(blob, 1.0);     // normal
+  // CIRCULAR_ARC (type 4): center(3d)+radius(d)+normal(3d)+startVec(3d)+sweep(d)
+  // = 24+8+24+24+8 = 88-byte payload.
+  putU32(blob, 8 + 88); putU32(blob, 4);
+  putD(blob, 1.0); putD(blob, 2.0); putD(blob, 0.0);     // center
+  putD(blob, 3.0);                                       // radius
+  putD(blob, 0.0); putD(blob, 0.0); putD(blob, 1.0);     // normal (Z)
+  putD(blob, 1.0); putD(blob, 0.0); putD(blob, 0.0);     // start vec → angle 0
+  putD(blob, M_PI / 2.0);                                // sweep = 90°
+
+  struct Cap : public TypeTrackingIface {
+    int circles = 0, arcs = 0;
+    DRW_Circle lastC; DRW_Arc lastA;
+    void addCircle(const DRW_Circle& e) override { ++circles; lastC = e; }
+    void addArc(const DRW_Arc& e) override { ++arcs; lastA = e; }
+  } cap;
+  DRW_Point parent;
+  int n = DRW_ProxyGraphicDecoder::decode(blob, DRW::AC1024, cap, parent);
+
+  REQUIRE(n == 2);
+  REQUIRE(cap.circles == 1);
+  REQUIRE(cap.arcs == 1);
+  CHECK(cap.lastC.basePoint.x == Catch::Approx(10.0));
+  CHECK(cap.lastC.basePoint.y == Catch::Approx(20.0));
+  CHECK(cap.lastC.radious == Catch::Approx(5.0));
+  CHECK(cap.lastA.basePoint.x == Catch::Approx(1.0));
+  CHECK(cap.lastA.radious == Catch::Approx(3.0));
+  CHECK(cap.lastA.staangle == Catch::Approx(0.0));           // start vec (1,0) → 0 rad
+  CHECK(cap.lastA.endangle == Catch::Approx(M_PI / 2.0));    // 0 + 90° sweep
+}
+
+// Transform stack: op29 PUSH_MATRIX … op31 POP_MATRIX.  Primitives nested
+// inside a matrix must be emitted in the transformed frame, and the matrix must
+// stop applying after the pop.  Before this was handled, every proxy primitive
+// under a matrix decoded fine (so counts looked right) but rendered at the
+// wrong position — a silent geometry error.  The wire layout is 16 row-major
+// doubles with the translation in the 4th column (verified against corpus
+// op29 chunks, whose bottom row is 0,0,0,1).
+TEST_CASE("proxy transform stack push/pop matrix", "[proxy]") {
+  auto putU32 = [](std::string& s, std::uint32_t v) {
+    for (int i = 0; i < 4; ++i) s.push_back(char((v >> (8 * i)) & 0xFF));
+  };
+  auto putD = [](std::string& s, double v) {
+    char b[8]; std::memcpy(b, &v, 8); s.append(b, 8); // host LE
+  };
+  std::string blob(8, '\0');                 // 8-byte header (skipped)
+  // PUSH_MATRIX (29): scale x2, translate (100,200). 16 doubles = 128 bytes.
+  putU32(blob, 8 + 128); putU32(blob, 29);
+  putD(blob, 2.0); putD(blob, 0.0); putD(blob, 0.0); putD(blob, 100.0);
+  putD(blob, 0.0); putD(blob, 2.0); putD(blob, 0.0); putD(blob, 200.0);
+  putD(blob, 0.0); putD(blob, 0.0); putD(blob, 1.0); putD(blob, 0.0);
+  putD(blob, 0.0); putD(blob, 0.0); putD(blob, 0.0); putD(blob, 1.0);
+  // CIRCLE under the matrix: centre (10,20) r=5 → (120,240) r=10
+  putU32(blob, 8 + 56); putU32(blob, 2);
+  putD(blob, 10.0); putD(blob, 20.0); putD(blob, 0.0);
+  putD(blob, 5.0);
+  putD(blob, 0.0); putD(blob, 0.0); putD(blob, 1.0);
+  // POLYLINE under the matrix: L count + 2×3d = 52-byte payload.
+  // (0,0)→(100,200) and (1,1)→(102,202)
+  putU32(blob, 8 + 52); putU32(blob, 6);
+  putU32(blob, 2);
+  putD(blob, 0.0); putD(blob, 0.0); putD(blob, 0.0);
+  putD(blob, 1.0); putD(blob, 1.0); putD(blob, 0.0);
+  // POP_MATRIX (31): empty payload.
+  putU32(blob, 8); putU32(blob, 31);
+  // CIRCLE after the pop: must be emitted untransformed.
+  putU32(blob, 8 + 56); putU32(blob, 2);
+  putD(blob, 1.0); putD(blob, 2.0); putD(blob, 0.0);
+  putD(blob, 3.0);
+  putD(blob, 0.0); putD(blob, 0.0); putD(blob, 1.0);
+
+  struct Cap : public TypeTrackingIface {
+    std::vector<DRW_Circle> circles;
+    std::vector<DRW_Polyline> plines;
+    void addCircle(const DRW_Circle& e) override { circles.push_back(e); }
+    void addPolyline(const DRW_Polyline& e) override { plines.push_back(e); }
+  } cap;
+  DRW_Point parent;
+  int n = DRW_ProxyGraphicDecoder::decode(blob, DRW::AC1024, cap, parent);
+
+  REQUIRE(n == 3);
+  REQUIRE(cap.circles.size() == 2);
+  REQUIRE(cap.plines.size() == 1);
+  // Under the matrix: point scaled+translated, radius scaled.
+  CHECK(cap.circles[0].basePoint.x == Catch::Approx(120.0));
+  CHECK(cap.circles[0].basePoint.y == Catch::Approx(240.0));
+  CHECK(cap.circles[0].radious == Catch::Approx(10.0));
+  REQUIRE(cap.plines[0].vertlist.size() == 2);
+  CHECK(cap.plines[0].vertlist[0]->basePoint.x == Catch::Approx(100.0));
+  CHECK(cap.plines[0].vertlist[0]->basePoint.y == Catch::Approx(200.0));
+  CHECK(cap.plines[0].vertlist[1]->basePoint.x == Catch::Approx(102.0));
+  CHECK(cap.plines[0].vertlist[1]->basePoint.y == Catch::Approx(202.0));
+  // After POP_MATRIX the transform must no longer apply.
+  CHECK(cap.circles[1].basePoint.x == Catch::Approx(1.0));
+  CHECK(cap.circles[1].basePoint.y == Catch::Approx(2.0));
+  CHECK(cap.circles[1].radious == Catch::Approx(3.0));
+}
+
+// Proxy SHELL (op9) → DRW_Mesh. Layout: RL vertex count, count×3d vertices, RL
+// face-entry count (longs in the face stream), then [signed edge_count, idx…]
+// entries (0-based indices). Verified against the ezdxf shell() reference and
+// gh109_1.dwg (3 shells decoded). Also checks the transform stack applies to
+// the mesh vertices.
+TEST_CASE("proxy SHELL op9 -> mesh", "[proxy]") {
+  auto putU32 = [](std::string& s, std::uint32_t v) {
+    for (int i = 0; i < 4; ++i) s.push_back(char((v >> (8 * i)) & 0xFF));
+  };
+  auto putD = [](std::string& s, double v) {
+    char b[8]; std::memcpy(b, &v, 8); s.append(b, 8);
+  };
+  // A unit quad (4 verts) with one 4-edge face [0,1,2,3], under translate(10,20).
+  std::string blob(8, '\0');
+  putU32(blob, 8 + 128); putU32(blob, 29);          // PUSH_MATRIX translate(10,20)
+  putD(blob, 1); putD(blob, 0); putD(blob, 0); putD(blob, 10);
+  putD(blob, 0); putD(blob, 1); putD(blob, 0); putD(blob, 20);
+  putD(blob, 0); putD(blob, 0); putD(blob, 1); putD(blob, 0);
+  putD(blob, 0); putD(blob, 0); putD(blob, 0); putD(blob, 1);
+  // SHELL payload: 4 (RL) + 4×24 verts + 5 (RL faceEntries) + [4,0,1,2,3] (5 RL)
+  std::string pay;
+  putU32(pay, 4);
+  putD(pay, 0); putD(pay, 0); putD(pay, 0);
+  putD(pay, 1); putD(pay, 0); putD(pay, 0);
+  putD(pay, 1); putD(pay, 1); putD(pay, 0);
+  putD(pay, 0); putD(pay, 1); putD(pay, 0);
+  putU32(pay, 5);                                   // face_entry_count (longs)
+  putU32(pay, 4);                                   // edge_count
+  putU32(pay, 0); putU32(pay, 1); putU32(pay, 2); putU32(pay, 3);
+  putU32(blob, static_cast<std::uint32_t>(8 + pay.size())); putU32(blob, 9);
+  blob += pay;
+  putU32(blob, 8); putU32(blob, 31);                // POP_MATRIX
+
+  struct Cap : public TypeTrackingIface {
+    std::vector<DRW_Mesh> meshes;
+    void addMesh(const DRW_Mesh& e) override { meshes.push_back(e); }
+  } cap;
+  DRW_Point parent;
+  int n = DRW_ProxyGraphicDecoder::decode(blob, DRW::AC1024, cap, parent);
+
+  REQUIRE(n == 1);
+  REQUIRE(cap.meshes.size() == 1);
+  REQUIRE(cap.meshes[0].vertices.size() == 4);
+  REQUIRE(cap.meshes[0].faces.size() == 1);
+  CHECK(cap.meshes[0].faces[0].size() == 4);
+  // Vertices translated by (10,20).
+  CHECK(cap.meshes[0].vertices[0].x == Catch::Approx(10.0));
+  CHECK(cap.meshes[0].vertices[0].y == Catch::Approx(20.0));
+  CHECK(cap.meshes[0].vertices[2].x == Catch::Approx(11.0));
+  CHECK(cap.meshes[0].vertices[2].y == Catch::Approx(21.0));
+  CHECK(cap.meshes[0].faces[0][0] == 0);
+  CHECK(cap.meshes[0].faces[0][3] == 3);
+}
+
+// DXF parity (Part 2.3): an unmodeled DXF entity carrying proxy graphics
+// (group 92 length + group 310 hex) is decoded into render primitives on read,
+// via DRW_Entity::parseCode + dxfRW::processRawEntity. Mirrors the DWG path.
+TEST_CASE("proxy graphics decoded from DXF", "[proxy]") {
+  // Build the same CIRCLE blob as the unit test, then hex-encode it.
+  auto putU32 = [](std::string& s, std::uint32_t v) {
+    for (int i = 0; i < 4; ++i) s.push_back(char((v >> (8 * i)) & 0xFF));
+  };
+  auto putD = [](std::string& s, double v) { char b[8]; std::memcpy(b, &v, 8); s.append(b, 8); };
+  std::string blob(8, '\0');
+  putU32(blob, 8 + 56); putU32(blob, 2);
+  putD(blob, 100.0); putD(blob, 200.0); putD(blob, 0.0);   // center
+  putD(blob, 7.5);                                         // radius
+  putD(blob, 0.0); putD(blob, 0.0); putD(blob, 1.0);       // normal
+  std::string hex;
+  static const char* H = "0123456789ABCDEF";
+  for (unsigned char c : blob) { hex.push_back(H[c >> 4]); hex.push_back(H[c & 0xF]); }
+
+  std::string dxf =
+      "0\nSECTION\n2\nENTITIES\n"
+      "0\nACAD_PROXY_ENTITY\n8\nproxylayer\n"
+      "92\n" + std::to_string(blob.size()) + "\n"
+      "310\n" + hex + "\n"
+      "0\nENDSEC\n0\nEOF\n";
+  const std::string path =
+      (std::filesystem::temp_directory_path() / "proxy_parity.dxf").string();
+  { std::ofstream out(path); out << dxf; }
+
+  struct Cap : public TypeTrackingIface {
+    int circles = 0; DRW_Circle last;
+    void addCircle(const DRW_Circle& e) override { ++circles; last = e; }
+  } cap;
+  dxfRW reader(path.c_str());
+  REQUIRE(reader.read(&cap, false));
+  REQUIRE(cap.circles == 1);
+  CHECK(cap.last.basePoint.x == Catch::Approx(100.0));
+  CHECK(cap.last.basePoint.y == Catch::Approx(200.0));
+  CHECK(cap.last.radious == Catch::Approx(7.5));
+}
+
+// ---- proxy decoder: remaining-opcode unit pins (CI-safe, hand-crafted) ----
+namespace {
+void pgU32(std::string& s, std::uint32_t v) {
+  for (int i = 0; i < 4; ++i) s.push_back(char((v >> (8 * i)) & 0xFF));
+}
+void pgD(std::string& s, double v) { char b[8]; std::memcpy(b, &v, 8); s.append(b, 8); }
+// Append a chunk: 4-byte size (=8+payload) + 4-byte type + payload bytes.
+void pgChunk(std::string& s, std::uint32_t type, const std::string& payload) {
+  pgU32(s, static_cast<std::uint32_t>(8 + payload.size())); pgU32(s, type); s += payload;
+}
+std::string pgCirclePayload() { // CIRCLE: center+radius+normal
+  std::string p; pgD(p,0); pgD(p,0); pgD(p,0); pgD(p,1.0); pgD(p,0); pgD(p,0); pgD(p,1.0); return p;
+}
+struct PgColorCap : public TypeTrackingIface {
+  DRW_Circle last; int n = 0;
+  void addCircle(const DRW_Circle& e) override { last = e; ++n; }
+};
+} // namespace
+
+// op22 ATTRIBUTE_TRUE_COLOR: the high flag byte selects RGB/ACI/BYLAYER/BYBLOCK
+// (was unconditionally masked as RGB — 100% of corpus chunks mis-rendered).
+TEST_CASE("proxy op22 true-color flag dispatch", "[proxy]") {
+  auto runWithColor = [](std::uint32_t raw) {
+    std::string blob(8, '\0');
+    std::string cp; pgU32(cp, raw);
+    pgChunk(blob, 22, cp);                 // ATTRIBUTE_TRUE_COLOR
+    pgChunk(blob, 2, pgCirclePayload());   // CIRCLE inherits the colour state
+    PgColorCap cap; DRW_Point parent;      // parent.color defaults to ByLayer
+    DRW_ProxyGraphicDecoder::decode(blob, DRW::AC1024, cap, parent);
+    return cap.last;
+  };
+  SECTION("RGB (0xC2) → color24") {
+    DRW_Circle c = runWithColor(0xC2FF8040u);
+    CHECK(c.color24 == 0xFF8040);
+  }
+  SECTION("ACI (0xC3) → indexed color") {
+    DRW_Circle c = runWithColor(0xC3000007u);
+    CHECK(c.color == 7);
+    CHECK(c.color24 == -1);   // not stored as RGB
+  }
+  SECTION("BYLAYER (0xC0) → no spurious black RGB") {
+    DRW_Circle c = runWithColor(0xC0000000u);
+    CHECK(c.color24 == -1);   // the old bug stored 0 (black) here
+  }
+}
+
+// op5 CIRCULAR_ARC_3P: ASYMMETRIC pin (p1 at 0°, p3 at 90°, p2 at 45° on the
+// minor-arc side) so a p2/p3 wire-arg swap or start/end mix-up is caught.
+TEST_CASE("proxy op5 circular-arc-3p remap", "[proxy]") {
+  const double s = 5.0 / std::sqrt(2.0);
+  std::string pay;
+  pgD(pay, 5.0); pgD(pay, 0.0); pgD(pay, 0.0); // p1 (start) @ 0°
+  pgD(pay, s);   pgD(pay, s);   pgD(pay, 0.0); // p2 (def) @ 45°
+  pgD(pay, 0.0); pgD(pay, 5.0); pgD(pay, 0.0); // p3 (end) @ 90°
+  std::string blob(8, '\0'); pgChunk(blob, 5, pay);
+  struct Cap : public TypeTrackingIface {
+    DRW_Arc last; int n = 0;
+    void addArc(const DRW_Arc& e) override { last = e; ++n; }
+  } cap;
+  DRW_Point parent;
+  int n = DRW_ProxyGraphicDecoder::decode(blob, DRW::AC1024, cap, parent);
+  REQUIRE(n == 1);
+  CHECK(cap.last.basePoint.x == Catch::Approx(0.0).margin(1e-9)); // circumcenter
+  CHECK(cap.last.basePoint.y == Catch::Approx(0.0).margin(1e-9));
+  CHECK(cap.last.radious == Catch::Approx(5.0));
+  CHECK(cap.last.staangle == Catch::Approx(0.0).margin(1e-9));        // from p1
+  CHECK(cap.last.endangle == Catch::Approx(M_PI / 2.0));             // from WIRE p3, not p2
+}
+
+// op11 TEXT2 + op38 UNICODE_TEXT2: string is read FIRST, then the
+// <2l>/<4d>/<5L> metadata block.  Pins the field order + UTF-16LE transcode.
+TEST_CASE("proxy op11/op38 text2", "[proxy]") {
+  struct Cap : public TypeTrackingIface {
+    std::vector<DRW_Text> texts;
+    void addText(const DRW_Text& e) override { texts.push_back(e); }
+  };
+  auto textTail = [](std::string& p, double h) {
+    pgU32(p, 0); pgU32(p, 0);                        // <2l> ignore_len, raw
+    pgD(p, h); pgD(p, 1.0); pgD(p, 0.0); pgD(p, 0.0); // <4d> height,width,oblique,tracking
+    for (int i = 0; i < 5; ++i) pgU32(p, 0);          // <5L> flags
+  };
+  SECTION("op11 TEXT2 (cp1252)") {
+    std::string p;
+    pgD(p,1.0); pgD(p,2.0); pgD(p,0.0);   // start
+    pgD(p,0.0); pgD(p,0.0); pgD(p,1.0);   // normal
+    pgD(p,1.0); pgD(p,0.0); pgD(p,0.0);   // dir → angle 0
+    p += "AB"; p.push_back('\0');         // padded string
+    while (p.size() % 4) p.push_back('\0'); // align to 4
+    textTail(p, 7.0);
+    std::string blob(8, '\0'); pgChunk(blob, 11, p);
+    Cap cap; DRW_Point parent;
+    int n = DRW_ProxyGraphicDecoder::decode(blob, DRW::AC1024, cap, parent);
+    REQUIRE(n == 1); REQUIRE(cap.texts.size() == 1);
+    CHECK(cap.texts[0].text == "AB");
+    CHECK(cap.texts[0].basePoint.x == Catch::Approx(1.0));
+    CHECK(cap.texts[0].height == Catch::Approx(7.0));
+    CHECK(cap.texts[0].angle == Catch::Approx(0.0));
+  }
+  SECTION("op38 UNICODE_TEXT2 (UTF-16LE)") {
+    std::string p;
+    pgD(p,0.0); pgD(p,0.0); pgD(p,0.0);   // start
+    pgD(p,0.0); pgD(p,0.0); pgD(p,1.0);   // normal
+    pgD(p,1.0); pgD(p,0.0); pgD(p,0.0);   // dir
+    // "Hi" in UTF-16LE + double-NUL terminator, then align to 4
+    p.push_back('H'); p.push_back('\0'); p.push_back('i'); p.push_back('\0');
+    p.push_back('\0'); p.push_back('\0');
+    while (p.size() % 4) p.push_back('\0');
+    textTail(p, 3.0);
+    std::string blob(8, '\0'); pgChunk(blob, 38, p);
+    Cap cap; DRW_Point parent;
+    int n = DRW_ProxyGraphicDecoder::decode(blob, DRW::AC1024, cap, parent);
+    REQUIRE(n == 1); REQUIRE(cap.texts.size() == 1);
+    CHECK(cap.texts[0].text == "Hi");
+    CHECK(cap.texts[0].height == Catch::Approx(3.0));
+  }
+}
+
+// op16/op18/op23 attribute resolution: layer/linetype by index (offset 0 for
+// libdxfrw, NOT ezdxf's +2), sentinels, and the lineweight two's-complement.
+TEST_CASE("proxy op16/18/23 attribute resolution", "[proxy]") {
+  std::vector<std::string> layers = {"L0", "L1", "L2"};
+  std::vector<std::string> ltypes = {"DASHED", "DOTTED"};
+  auto run = [&](std::uint32_t layIdx, std::uint32_t ltIdx, std::uint32_t lw) {
+    std::string blob(8, '\0');
+    std::string a; pgU32(a, layIdx); pgChunk(blob, 16, a);
+    std::string b; pgU32(b, ltIdx);  pgChunk(blob, 18, b);
+    std::string c; pgU32(c, lw);     pgChunk(blob, 23, c);
+    pgChunk(blob, 2, pgCirclePayload());
+    PgColorCap cap; DRW_Point parent;
+    DRW_ProxyGraphicDecoder::decode(blob, DRW::AC1024, cap, parent, layers, ltypes);
+    return cap.last;
+  };
+  SECTION("by-index, offset 0") {
+    DRW_Circle c = run(2, 1, 13);
+    CHECK(c.layer == "L2");
+    CHECK(c.lineType == "DOTTED");          // index 1 → ltypes[1], NOT ltypes[3]
+    CHECK(c.lWeight == DRW_LW_Conv::dxfInt2lineWidth(13));
+  }
+  SECTION("linetype sentinels") {
+    CHECK(run(0, 32766u, 0).lineType == "BYBLOCK");
+    CHECK(run(0, 32767u, 0).lineType == "BYLAYER");
+  }
+  SECTION("out-of-range layer inherits parent") {
+    DRW_Circle c = run(99u, 1, 0);
+    CHECK(c.layer == "0");                  // parent default, not garbage
+  }
+}
+
+// Dev-local regression pin for the op16/op18 index→name mapping: libdxfrw's
+// layer / linetype storage order MUST equal the dwgread/LibreDWG oracle order
+// (offset 0), else resolved proxy attributes would be silently wrong-but-in-
+// range.  Ground truth baked from the oracle cross-check on gripper.dwg.
+TEST_CASE("proxy attr layer-order oracle pin", "[.dwg_proxy_attr]") {
+  const char* home = std::getenv("HOME");
+  if (!home) { SUCCEED("no HOME"); return; }
+  const std::string f = std::string(home) + "/doc/dwg2/gripper.dwg";
+  if (!std::filesystem::exists(f)) { SUCCEED("gripper.dwg absent"); return; }
+  TypeTrackingIface iface;
+  dwgR reader(f.c_str());
+  REQUIRE(reader.read(&iface, true));
+  const auto& L = reader.getLayerNameOrder();
+  const auto& T = reader.getLtypeNameOrder();
+  REQUIRE(L.size() == 21);
+  CHECK(L[0]  == "0");    CHECK(L[1]  == "AM_0"); CHECK(L[2] == "3");
+  CHECK(L[15] == "AM_7"); CHECK(L[17] == "AM_4"); CHECK(L[20] == "BV1");
+  REQUIRE(T.size() >= 21);
+  CHECK(T[0] == "Continuous");
+  CHECK(T[5] == "AM_ISO08W050x2"); // offset-0: ezdxf's +2 would name T[7]
+}
+
+// Pre-R13 (AC1009/R11) minimal read support. The corpus lives in the
+// developer-local LibreDWG checkout; skip gracefully if absent. dwgReaderR11
+// reads the ENTITIES section's non-chained geometry (LINE/POINT/CIRCLE/ARC/
+// TEXT/SOLID/TRACE/3DLINE/3DFACE); INSERT/POLYLINE/blocks are a follow-up.
+TEST_CASE("DWG pre-R13: read AC1009/R11 entities section") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping pre-R13 test");
+    return;
+  }
+  const std::string dir =
+      std::string(home) + "/dev/libredwg/test/test-data/r11/";
+  const std::string path = dir + "entities-2d.dwg";
+  std::ifstream probe(path, std::ios::binary);
+  if (!probe.good()) {
+    SUCCEED("pre-R13 corpus absent; skipping");
+    return;
+  }
+  probe.close();
+
+  const DwgResult r = readDwg(path);
+  CHECK(r.ok);                          // was BAD_VERSION before R11 support
+  CHECK(r.version == DRW::AC1009);
+  CHECK(r.entities >= 23);              // + inserts + attrib/attdef + dimension block
+  CHECK(r.blocks >= 3);                 // BLOCK1 / BLOCK2 / *D
+}
+
+namespace {
+struct R11LineCollector : public CountingIface {
+  std::vector<DRW_Line> lines;
+  void addLine(const DRW_Line &e) override {
+    CountingIface::addLine(e);
+    lines.push_back(e);
+  }
+};
+}  // namespace
+
+TEST_CASE("DWG pre-R13: map R11 3DLINE to DRW_Line") {
+  const std::string path = libredwgFixturePath("r11", "entities-3d.dwg");
+  if (path.empty()) {
+    SUCCEED("pre-R13 corpus root absent; skipping");
+    return;
+  }
+  std::ifstream probe(path, std::ios::binary);
+  if (!probe.good()) {
+    SUCCEED("entities-3d.dwg absent; skipping");
+    return;
+  }
+  probe.close();
+
+  R11LineCollector iface;
+  const DwgResult r = readDwg(path, /*verbose=*/false, &iface);
+  REQUIRE(r.ok);
+  REQUIRE(r.version == DRW::AC1009);
+
+  bool found3DLine = false;
+  auto near = [](double a, double b) { return std::abs(a - b) < 1e-12; };
+  for (const auto &line : iface.lines) {
+    if (near(line.basePoint.x, 2.0) && near(line.basePoint.y, 3.0) &&
+        near(line.basePoint.z, 4.0) && near(line.secPoint.x, 3.0) &&
+        near(line.secPoint.y, 4.0) && near(line.secPoint.z, 5.0)) {
+      found3DLine = true;
+      break;
+    }
+  }
+  // Oracle: LibreDWG r11/entities-3d.dxf from the same corpus emits this
+  // legacy DWG type-21 record as a DXF LINE with 3D endpoints.
+  CHECK(found3DLine);
+}
+
+// Pre-R13 R11 typed DIMENSION (LINEAR + ALIGNED). Phase 4 swaps the previous
+// "render the *D block as an INSERT" path for a typed DRW_DimLinear /
+// DRW_DimAligned for the handled dimtypes (LINEAR=0, ALIGNED=1), keeping the
+// INSERT fallback for ANG2LN/ANG3PT/RADIUS/DIAMETER/ORDINATE (no R11 oracle
+// file exists for those types in the LibreDWG corpus). The swap is the
+// load-bearing check: a typed dim AND a *D INSERT for the same record would
+// double-render.
+namespace {
+struct DimCollector : public CountingIface {
+  std::vector<DRW_DimLinear> lin;
+  std::vector<DRW_DimAligned> ali;
+  int starDInserts = 0;
+  void addDimLinear(const DRW_DimLinear *e) override {
+    CountingIface::addDimLinear(e);
+    lin.push_back(*e);
+  }
+  void addDimAlign(const DRW_DimAligned *e) override {
+    CountingIface::addDimAlign(e);
+    ali.push_back(*e);
+  }
+  void addInsert(const DRW_Insert &e) override {
+    CountingIface::addInsert(e);
+    // Anonymous dim-graphics block name starts with "*D" (case-sensitive in
+    // libredwg). A non-zero count means the typed-dim swap is double-rendering.
+    if (e.name.size() >= 2 && e.name[0] == '*' && e.name[1] == 'D')
+      ++starDInserts;
+  }
+};
+}  // namespace
+
+TEST_CASE("DWG pre-R13: R11 typed DIMENSION (LINEAR + ALIGNED)") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  SECTION("entities-2d.dwg — 1 ALIGNED dim, no double-render") {
+    const std::string path =
+        std::string(home) + "/dev/libredwg/test/test-data/r11/entities-2d.dwg";
+    std::ifstream probe(path, std::ios::binary);
+    if (!probe.good()) { SUCCEED("entities-2d.dwg absent"); return; }
+    probe.close();
+    DimCollector iface;
+    const DwgResult r = readDwg(path, /*verbose=*/false, &iface);
+    REQUIRE(r.ok);
+    REQUIRE(r.version == DRW::AC1009);
+    CHECK(iface.lin.size() == 0);
+    REQUIRE(iface.ali.size() == 1);
+    // Oracle (dwgread -O JSON): def_pt=[8,8,0], text_midpt=[0,0],
+    // xline1_pt=[6,8,2], xline2_pt=[7,7,3], dimtype=1=ALIGNED.
+    // The raw on-disk doubles are at one ULP below the integers (e.g.
+    // def_pt.x bytes = fe ff ff ff ff ff 1f 40 = 7.999...); dwgread/jq
+    // pretty-prints them as "8.0" but a bit-exact reader yields
+    // 7.99999999999999822. Compare with a ULP-tolerant near().
+    const auto &d = iface.ali[0];
+    auto near = [](double a, double b) { return std::abs(a - b) < 1e-12; };
+    CHECK(near(d.getDefPoint().x, 8.0));
+    CHECK(near(d.getDefPoint().y, 8.0));
+    CHECK(near(d.getDef1Point().x, 6.0));
+    CHECK(near(d.getDef1Point().y, 8.0));
+    CHECK(near(d.getDef1Point().z, 2.0));
+    CHECK(near(d.getDef2Point().x, 7.0));
+    CHECK(near(d.getDef2Point().y, 7.0));
+    CHECK(near(d.getDef2Point().z, 3.0));
+    // Swap invariant: no `*D` INSERTs for handled dimtypes (would
+    // double-render with the typed dim).
+    CHECK(iface.starDInserts == 0);
+  }
+  SECTION("ACEB10.dwg — 15 LINEAR dims, no double-render") {
+    const std::string path =
+        std::string(home) + "/dev/libredwg/test/test-data/r11/ACEB10.dwg";
+    std::ifstream probe(path, std::ios::binary);
+    if (!probe.good()) { SUCCEED("ACEB10.dwg absent"); return; }
+    probe.close();
+    DimCollector iface;
+    const DwgResult r = readDwg(path, /*verbose=*/false, &iface);
+    REQUIRE(r.ok);
+    REQUIRE(r.version == DRW::AC1009);
+    CHECK(iface.lin.size() == 15);
+    CHECK(iface.ali.size() == 0);
+    CHECK(iface.starDInserts == 0);
+    // Spot-check first LINEAR dim against the oracle.
+    const auto &d = iface.lin[0];
+    auto near = [](double a, double b) { return std::abs(a - b) < 1e-12; };
+    CHECK(near(d.getDefPoint().x, 13.62245609657801));
+    CHECK(near(d.getDefPoint().y, 4.1236674739085));
+    CHECK(d.getDefPoint().z == 0.0);
+    CHECK(near(d.getDef1Point().x, 12.62245609657801));
+    CHECK(near(d.getDef2Point().x, 13.62245609657801));
+    CHECK(d.getAngle() == 0.0);
+  }
+}
+
+// Pre-R13 R11/R10 SHAPE style_id + ATTDEF/ATTRIB rotation decode (Phase 4b).
+// Two spec-grounded read-width / opt-bit fixes in dwgReaderR11.cpp:
+//   (a) SHAPE style_id is an RC (1 byte; dwg.spec:2338 FIELD_CAST(style_id,RC,
+//       BS,0)). Reading it as a 2-byte RS over-consumed one byte and desynced
+//       the following rotation RD -> garbage m_rotation. The fix stores it in
+//       DRW_Shape::m_shapeIndex (previously read-and-discarded).
+//   (b) ATTDEF/ATTRIB rotation is gated on R11OPTS(2) (opts & 0x02; dwg.spec
+//       :216 ATTRIB / :419 ATTDEF), NOT opts & 0x01. Every ATTDEF/ATTRIB in
+//       the corpus has opts bit0 CLEAR + bit1 SET (dwgread trace: r11 opts=0x2,
+//       r10 ATTRIB opts=0x6), so the old `opts & 0x01` gate SKIPPED the read
+//       and the rendered TEXT angle came through as 0.
+// Ground truth: `dwgread -O JSON` on r11/entities-2d.dwg and r10/entities.dwg
+// (SHAPE + ATTDEF(9,5) + ATTRIB(2,2) are byte-identical across the two files).
+namespace {
+struct R11ShapeAttribCollector : public CountingIface {
+  std::vector<DRW_Shape> shapes;
+  std::vector<DRW_Text> texts;
+  void addShape(const DRW_Shape &e) override {
+    ++entities;                 // CountingIface has no addShape override
+    shapes.push_back(e);
+  }
+  void addText(const DRW_Text &e) override {
+    CountingIface::addText(e);  // increments `entities` via track()
+    texts.push_back(e);
+  }
+};
+}  // namespace
+
+TEST_CASE("DWG pre-R13: R11/R10 SHAPE style_id + ATTDEF/ATTRIB rotation") {
+  auto near = [](double a, double b) { return std::abs(a - b) < 1e-9; };
+
+  auto checkFixture = [&](const char *release, const char *file,
+                          DRW::Version expectVer) {
+    const std::string path = libredwgFixturePath(release, file);
+    if (path.empty()) {
+      SUCCEED("pre-R13 corpus root absent; skipping");
+      return;
+    }
+    std::ifstream probe(path, std::ios::binary);
+    if (!probe.good()) {
+      SUCCEED(std::string(file) + " absent; skipping");
+      return;
+    }
+    probe.close();
+
+    R11ShapeAttribCollector iface;
+    const DwgResult r = readDwg(path, /*verbose=*/false, &iface);
+    REQUIRE(r.ok);
+    REQUIRE(r.version == expectVer);
+
+    // ---- (a) SHAPE: style_id read as 1B RC; rotation not desynced ----------
+    // Oracle (dwgread -O JSON): ins_pt=[6,6], scale=1.0, style_id=131,
+    // rotation=0.5235987755983 (== pi/6). Before the fix, style_id was read as
+    // a 2-byte RS which shifted the rotation read by one byte -> garbage, and
+    // m_shapeIndex stayed 0 (the value was discarded).
+    REQUIRE(iface.shapes.size() == 1);
+    const DRW_Shape &s = iface.shapes[0];
+    CHECK(near(s.m_insertionPoint.x, 6.0));
+    CHECK(near(s.m_insertionPoint.y, 6.0));
+    CHECK(near(s.m_scale, 1.0));
+    CHECK(s.m_shapeIndex == 131);                 // was 0 (discarded)
+    CHECK(near(s.m_rotation, 0.5235987755983));   // was garbage (desynced)
+
+    // ---- (b) ATTDEF/ATTRIB rotation via opts & 0x02 ------------------------
+    // ATTDEF/ATTRIB render as DRW_Text in the R11 reader. Find the unique
+    // ATTRIB (text "4", ins_pt [2,2], height 0.1) and one ATTDEF (text "3",
+    // ins_pt [9,5], height 0.2). Oracle rotations: ATTRIB=1.5707963267949
+    // (pi/2), ATTDEF=1.0471975511966 (pi/3). Before the fix (opts & 0x01, bit0
+    // clear) the read was skipped and both angles were 0.
+    const DRW_Text *attrib = nullptr;
+    const DRW_Text *attdef = nullptr;
+    for (const auto &t : iface.texts) {
+      if (t.text == "4" && near(t.basePoint.x, 2.0) && near(t.basePoint.y, 2.0))
+        attrib = &t;
+      if (t.text == "3" && near(t.basePoint.x, 9.0) && near(t.basePoint.y, 5.0))
+        attdef = &t;
+    }
+    REQUIRE(attrib != nullptr);
+    CHECK(near(attrib->height, 0.1));
+    CHECK(near(attrib->angle, 1.5707963267949));  // was 0.0 (gate skipped)
+    REQUIRE(attdef != nullptr);
+    CHECK(near(attdef->height, 0.2));
+    CHECK(near(attdef->angle, 1.0471975511966));  // was 0.0 (gate skipped)
+  };
+
+  SECTION("r11/entities-2d.dwg (AC1009)") {
+    checkFixture("r11", "entities-2d.dwg", DRW::AC1009);
+  }
+  SECTION("r10/entities.dwg (AC1006)") {
+    checkFixture("r10", "entities.dwg", DRW::AC1006);
+  }
+}
+
+// Pre-R13 R10 (AC1006) routing parity. The R10 container is byte-identical to
+// R11 except for the LTYPE handle width in the entity common header (R10=1B
+// RC; R11=2B RS). dwgReaderR11 branches on `version`; this test exercises the
+// 1-byte path. Because the reader self-heals via setPosition(recEnd), a wrong
+// LTYPE-handle width would not change SUCCESS/entFail — geometry must be
+// bit-diffed instead. Verified vs `dwgread -O JSON` on the same file.
+namespace {
+struct R10LineCollector : public CountingIface {
+  std::vector<DRW_Line> lines;
+  void addLine(const DRW_Line &e) override {
+    CountingIface::addLine(e);
+    lines.push_back(e);
+  }
+};
+}  // namespace
+
+TEST_CASE("DWG pre-R13: read AC1006/R10 entities section") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping pre-R13 R10 test");
+    return;
+  }
+  const std::string path =
+      std::string(home) + "/dev/libredwg/test/test-data/r10/entities.dwg";
+  std::ifstream probe(path, std::ios::binary);
+  if (!probe.good()) {
+    SUCCEED("pre-R13 R10 corpus absent; skipping");
+    return;
+  }
+  probe.close();
+
+  R10LineCollector iface;
+  const DwgResult r = readDwg(path, /*verbose=*/false, &iface);
+  CHECK(r.ok);                          // was BAD_VERSION before R10 routing
+  CHECK(r.version == DRW::AC1006);
+  // Oracle (dwgread -O JSON): 6 LINEs reachable from ENTITIES + BLOCKS
+  // (the 7th is past a JUMP/3DLINE pair that the reader does not chase).
+  REQUIRE(iface.lines.size() >= 6);
+  // Bit-exact check on a layered-LTYPE LINE — proves the 1B LTYPE-handle
+  // branch did NOT consume a phantom byte (would desync the body geometry).
+  // Endpoints lifted from `dwgread -O JSON` on r10/entities.dwg.
+  bool found_2_3_to_3_4 = false;
+  bool found_irrational = false;
+  for (const auto &L : iface.lines) {
+    if (L.basePoint.x == 2.0 && L.basePoint.y == 3.0 &&
+        L.secPoint.x == 3.0 && L.secPoint.y == 4.0) {
+      found_2_3_to_3_4 = true;
+    }
+    // Irrational endpoints — must be byte-exact (within ~1 ULP) to prove the
+    // 1B-vs-2B LTYPE branch read the right field width.
+    auto near = [](double a, double b) { return std::abs(a - b) < 1e-12; };
+    if (near(L.basePoint.x, 6.04419417382416) &&
+        near(L.basePoint.y, 8.04419417382416) &&
+        near(L.secPoint.x, 7.12727922061358) &&
+        near(L.secPoint.y, 9.12727922061358)) {
+      found_irrational = true;
+    }
+  }
+  CHECK(found_2_3_to_3_4);
+  CHECK(found_irrational);
+}
+
+// Pre-R13 R11 table-record decode (LTYPE/STYLE/LAYER): asserts the per-record
+// fields delivered through addLType/addLayer/addTextStyle. Ground truth from
+// `dwgread -O JSON` on the same files. The HIDDENX2 truncation assertion is
+// the load-bearing detail — the on-disk LTYPE record has 12 fixed double
+// slots, only the first `numdashes` are valid; the rest are uninitialised
+// garbage that MUST be dropped.
+namespace {
+struct R11TableCollector : public CountingIface {
+  std::vector<DRW_Layer> layers;
+  std::vector<DRW_LType> ltypes;
+  std::vector<DRW_Textstyle> styles;
+  void addLayer(const DRW_Layer &e) override {
+    CountingIface::addLayer(e);
+    layers.push_back(e);
+  }
+  void addLType(const DRW_LType &e) override {
+    CountingIface::addLType(e);
+    ltypes.push_back(e);
+  }
+  void addTextStyle(const DRW_Textstyle &e) override {
+    CountingIface::addTextStyle(e);
+    styles.push_back(e);
+  }
+};
+}  // namespace
+
+// Helper: pull a DRW_Variant scalar out of a header var map (by key).
+namespace {
+const DRW_Variant *hdrVar(const DRW_Header &h, const char *k) {
+  auto it = h.vars.find(k);
+  return it == h.vars.end() ? nullptr : it->second;
+}
+struct HdrCollector : public CountingIface {
+  DRW_Header hdr;
+  void addHeader(const DRW_Header *h) override { hdr = *h; }
+};
+}  // namespace
+
+// Pre-R13 R11 header-variables decode. The R11 header layout starts at file
+// offset 0x5E (5 leading 10-byte table-section headers end there) and is
+// SEQUENTIAL — every field offset is the running sum of prior widths. We
+// read the high-value drawing-state vars through PLINEWID (post-cursor
+// 0x36f); the long DIMxx/UCS/VPORT tail is intentionally skipped.
+//
+// CRITICAL: dwgRW::processDwg() calls readDwgHeader BEFORE readDwgTables,
+// so the LAYER/STYLE/LTYPE name vectors are empty at header-read time.
+// The fix is to eagerly read the table NAMES inside readDwgHeader before
+// resolving CLAYER/TEXTSTYLE/CELTYPE. The ACEB10 SECTION below is the
+// load-bearing case for this fix: its CLAYER index is 8 (== "BORDER"), so
+// a buggy "no eager read" path would silently fall back instead of
+// returning the right name (entities-2d masks the bug because CLAYER=0
+// happens to coincide with the default "0").
+TEST_CASE("DWG pre-R13: R11 header variables decode") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  SECTION("entities-2d.dwg (defaults — minimal coverage)") {
+    const std::string path =
+        std::string(home) + "/dev/libredwg/test/test-data/r11/entities-2d.dwg";
+    std::ifstream probe(path, std::ios::binary);
+    if (!probe.good()) { SUCCEED("entities-2d.dwg absent"); return; }
+    probe.close();
+    HdrCollector iface;
+    const DwgResult r = readDwg(path, /*verbose=*/false, &iface);
+    REQUIRE(r.ok);
+    REQUIRE(r.version == DRW::AC1009);
+    // doubles
+    auto *dimscale = hdrVar(iface.hdr, "DIMSCALE");
+    REQUIRE(dimscale != nullptr);
+    CHECK(dimscale->content.d == 1.0);
+    auto *ltscale = hdrVar(iface.hdr, "LTSCALE");
+    REQUIRE(ltscale != nullptr);
+    CHECK(ltscale->content.d == 1.0);
+    auto *textsize = hdrVar(iface.hdr, "TEXTSIZE");
+    REQUIRE(textsize != nullptr);
+    CHECK(textsize->content.d == 0.2);
+    // ints (CECOLOR=256 was the load-bearing oldCECOLOR-decoy trap)
+    auto *cecolor = hdrVar(iface.hdr, "CECOLOR");
+    REQUIRE(cecolor != nullptr);
+    CHECK(cecolor->content.i == 256);
+    auto *lunits = hdrVar(iface.hdr, "LUNITS");
+    REQUIRE(lunits != nullptr);
+    CHECK(lunits->content.i == 2);
+    auto *pdmode = hdrVar(iface.hdr, "PDMODE");
+    REQUIRE(pdmode != nullptr);
+    CHECK(pdmode->content.i == 0);
+    // coord (EXTMAX bit-exact to ~1 ULP; literal-precision round-trip is loose)
+    auto *extmax = hdrVar(iface.hdr, "EXTMAX");
+    REQUIRE(extmax != nullptr);
+    REQUIRE(extmax->type() == DRW_Variant::COORD);
+    auto near = [](double a, double b) { return std::abs(a - b) < 1e-12; };
+    CHECK(near(extmax->content.v->x, 9.43333333333333));
+    CHECK(near(extmax->content.v->y, 9.12727922061358));
+    CHECK(extmax->content.v->z == 5.0);
+    // resolved names
+    auto *clayer = hdrVar(iface.hdr, "CLAYER");
+    REQUIRE(clayer != nullptr);
+    CHECK(*clayer->content.s == "0");
+    auto *celtype = hdrVar(iface.hdr, "CELTYPE");
+    REQUIRE(celtype != nullptr);
+    CHECK(*celtype->content.s == "BYLAYER");
+  }
+  SECTION("ACEB10.dwg (CLAYER!=0 — exercises eager table-read fix)") {
+    const std::string path =
+        std::string(home) + "/dev/libredwg/test/test-data/r11/ACEB10.dwg";
+    std::ifstream probe(path, std::ios::binary);
+    if (!probe.good()) { SUCCEED("ACEB10.dwg absent"); return; }
+    probe.close();
+    HdrCollector iface;
+    const DwgResult r = readDwg(path, /*verbose=*/false, &iface);
+    REQUIRE(r.ok);
+    REQUIRE(r.version == DRW::AC1009);
+    auto *clayer = hdrVar(iface.hdr, "CLAYER");
+    REQUIRE(clayer != nullptr);
+    // Oracle CLAYER index = 8, m_layerNames[8] = "BORDER".
+    CHECK(*clayer->content.s == "BORDER");
+    auto *textstyle = hdrVar(iface.hdr, "TEXTSTYLE");
+    REQUIRE(textstyle != nullptr);
+    // Oracle TEXTSTYLE index = 1, m_styleNames[1] = "ADESK1".
+    CHECK(*textstyle->content.s == "ADESK1");
+    auto *pdmode = hdrVar(iface.hdr, "PDMODE");
+    REQUIRE(pdmode != nullptr);
+    CHECK(pdmode->content.i == 3);
+  }
+}
+
+TEST_CASE("DWG pre-R13: R11 LAYER/LTYPE/STYLE table records") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  SECTION("entities-2d.dwg (minimal: 2 layers, 1 ltype, 2 styles)") {
+    const std::string path =
+        std::string(home) + "/dev/libredwg/test/test-data/r11/entities-2d.dwg";
+    std::ifstream probe(path, std::ios::binary);
+    if (!probe.good()) {
+      SUCCEED("entities-2d.dwg absent");
+      return;
+    }
+    probe.close();
+    R11TableCollector iface;
+    const DwgResult r = readDwg(path, /*verbose=*/false, &iface);
+    REQUIRE(r.ok);
+    REQUIRE(r.version == DRW::AC1009);
+    CHECK(iface.layers.size() == 2);
+    CHECK(iface.ltypes.size() == 1);
+    CHECK(iface.styles.size() == 2);
+    // CONTINUOUS: numdashes=0, no values in path.
+    auto cont = std::find_if(iface.ltypes.begin(), iface.ltypes.end(),
+                             [](const DRW_LType &l) { return l.name == "CONTINUOUS"; });
+    REQUIRE(cont != iface.ltypes.end());
+    CHECK(cont->desc == "Solid line");
+    CHECK(cont->size == 0);
+    CHECK(cont->path.empty());
+    // STANDARD style: font=txt, lastHeight=0.2 (height/textSize=0 means unset).
+    auto std_ = std::find_if(iface.styles.begin(), iface.styles.end(),
+                             [](const DRW_Textstyle &s) { return s.name == "STANDARD"; });
+    REQUIRE(std_ != iface.styles.end());
+    CHECK(std_->font == "txt");
+    CHECK(std_->bigFont == "");
+    CHECK(std_->lastHeight == 0.2);
+    CHECK(std_->width == 1.0);
+  }
+  SECTION("ACEB10.dwg (rich: 13 layers, 2 ltypes incl HIDDENX2, 3 styles)") {
+    const std::string path =
+        std::string(home) + "/dev/libredwg/test/test-data/r11/ACEB10.dwg";
+    std::ifstream probe(path, std::ios::binary);
+    if (!probe.good()) {
+      SUCCEED("ACEB10.dwg absent");
+      return;
+    }
+    probe.close();
+    R11TableCollector iface;
+    const DwgResult r = readDwg(path, /*verbose=*/false, &iface);
+    REQUIRE(r.ok);
+    REQUIRE(r.version == DRW::AC1009);
+    CHECK(iface.layers.size() == 13);
+    CHECK(iface.ltypes.size() == 2);
+    CHECK(iface.styles.size() == 3);
+    // MOUNTINGKIT-EB35DIN and MOUNTINGKIT-EB4 have signed color = -7 (off).
+    int negCount = 0;
+    for (const auto &l : iface.layers)
+      if (l.color < 0) ++negCount;
+    CHECK(negCount == 2);
+    // HIDDENX2: numdashes=2, path is exactly [0.5, -0.25] — the on-disk slots
+    // 2..11 are NaN garbage and must be truncated.
+    auto h2 = std::find_if(iface.ltypes.begin(), iface.ltypes.end(),
+                           [](const DRW_LType &l) { return l.name == "HIDDENX2"; });
+    REQUIRE(h2 != iface.ltypes.end());
+    CHECK(h2->size == 2);
+    CHECK(h2->length == 0.75);
+    REQUIRE(h2->path.size() == 2);
+    CHECK(h2->path[0] == 0.5);
+    CHECK(h2->path[1] == -0.25);
+    // ADESK1 style: font=romans, lastHeight=0.095.
+    auto a1 = std::find_if(iface.styles.begin(), iface.styles.end(),
+                           [](const DRW_Textstyle &s) { return s.name == "ADESK1"; });
+    REQUIRE(a1 != iface.styles.end());
+    CHECK(a1->font == "romans");
+    CHECK(a1->lastHeight == 0.095);
+  }
+}
+
+// Pre-R13 codepage end-to-end: ACEB10.dwg stores $DWGCODEPAGE = 30 (ANSI_1252)
+// at the fixed file offset 0x3f9 (numheader_vars=205 @0x11 > 129). dwgread -O
+// JSON reports "codepage": 30. This asserts readFileHeader() reads 0x3f9 and
+// resolves it through preR13CodePageName()/setCodePage(). The value equals the
+// hard-coded readMetaData default, so it also regression-guards the seek path.
+TEST_CASE("DWG pre-R13: ACEB10 resolves $DWGCODEPAGE = ANSI_1252",
+          "[dwg][prer13][codepage]") {
+  const char *home = getenv("HOME");
+  if (!home) { SUCCEED("HOME not set; skipping"); return; }
+  const std::string path =
+      std::string(home) + "/dev/libredwg/test/test-data/r11/ACEB10.dwg";
+  std::ifstream probe(path, std::ios::binary);
+  if (!probe.good()) { SUCCEED("ACEB10.dwg absent"); return; }
+  probe.close();
+  CountingIface iface;
+  dwgR reader(path.c_str());
+  const bool ok = reader.read(&iface, true);
+  REQUIRE(ok);
+  REQUIRE(reader.getVersion() == DRW::AC1009);
+  // cp id 30 -> "ANSI_1252" (dwgread oracle: HEADER.codepage == 30).
+  CHECK(reader.getCodePage() == "ANSI_1252");
+}
+
+// Pre-R13 R10 (AC1006) parity: the table records and header variables are
+// byte-identical to R11 EXCEPT each table record omits the 2-byte `used` field
+// (recSizes R10 37/194/187 vs R11 41/198/191), and the header subset
+// (0x5E..PLINEWID) is byte-identical. Ground truth from `dwgread -O JSON` on
+// r10/entities.dwg. This is the case that proves R10 reached parity with R11.
+TEST_CASE("DWG pre-R13: R10 LAYER/LTYPE/STYLE table records + header") {
+  const char *home = getenv("HOME");
+  if (!home) {
+    SUCCEED("HOME not set; skipping");
+    return;
+  }
+  const std::string path =
+      std::string(home) + "/dev/libredwg/test/test-data/r10/entities.dwg";
+  std::ifstream probe(path, std::ios::binary);
+  if (!probe.good()) {
+    SUCCEED("pre-R13 R10 corpus absent; skipping");
+    return;
+  }
+  probe.close();
+  SECTION("table records (used field absent in R10)") {
+    R11TableCollector iface;
+    const DwgResult r = readDwg(path, /*verbose=*/false, &iface);
+    REQUIRE(r.ok);
+    REQUIRE(r.version == DRW::AC1006);
+    CHECK(iface.layers.size() == 2);
+    CHECK(iface.ltypes.size() == 1);
+    CHECK(iface.styles.size() == 2);
+    // LAYER "0" color 7; "DEFPOINTS" signed color -7 (OFF) — proves the missing
+    // `used` field did not shift the color/ltype reads.
+    auto l0 = std::find_if(iface.layers.begin(), iface.layers.end(),
+                           [](const DRW_Layer &l) { return l.name == "0"; });
+    REQUIRE(l0 != iface.layers.end());
+    CHECK(l0->color == 7);
+    auto ldp = std::find_if(iface.layers.begin(), iface.layers.end(),
+                            [](const DRW_Layer &l) { return l.name == "DEFPOINTS"; });
+    REQUIRE(ldp != iface.layers.end());
+    CHECK(ldp->color == -7);
+    // CONTINUOUS ltype, STANDARD style — same field offsets as R11 minus 2.
+    auto cont = std::find_if(iface.ltypes.begin(), iface.ltypes.end(),
+                             [](const DRW_LType &l) { return l.name == "CONTINUOUS"; });
+    REQUIRE(cont != iface.ltypes.end());
+    CHECK(cont->desc == "Solid line");
+    CHECK(cont->size == 0);
+    auto std_ = std::find_if(iface.styles.begin(), iface.styles.end(),
+                             [](const DRW_Textstyle &s) { return s.name == "STANDARD"; });
+    REQUIRE(std_ != iface.styles.end());
+    CHECK(std_->font == "txt");
+    CHECK(std_->lastHeight == 0.2);
+    CHECK(std_->width == 1.0);
+  }
+  SECTION("header variables (byte-identical to R11 in subset)") {
+    HdrCollector iface;
+    const DwgResult r = readDwg(path, /*verbose=*/false, &iface);
+    REQUIRE(r.ok);
+    REQUIRE(r.version == DRW::AC1006);
+    auto *lunits = hdrVar(iface.hdr, "LUNITS");
+    REQUIRE(lunits != nullptr);
+    CHECK(lunits->content.i == 2);
+    auto *cecolor = hdrVar(iface.hdr, "CECOLOR");
+    REQUIRE(cecolor != nullptr);
+    CHECK(cecolor->content.i == 256);
+    auto *ltscale = hdrVar(iface.hdr, "LTSCALE");
+    REQUIRE(ltscale != nullptr);
+    CHECK(ltscale->content.d == 1.0);
+    auto *pdmode = hdrVar(iface.hdr, "PDMODE");
+    REQUIRE(pdmode != nullptr);
+    CHECK(pdmode->content.i == 0);
+    // EXTMAX z=1.0 for R10 (R11's entities-2d had z=5.0) — bit-exact x/y.
+    auto *extmax = hdrVar(iface.hdr, "EXTMAX");
+    REQUIRE(extmax != nullptr);
+    REQUIRE(extmax->type() == DRW_Variant::COORD);
+    auto near = [](double a, double b) { return std::abs(a - b) < 1e-12; };
+    CHECK(near(extmax->content.v->x, 9.43333333333333));
+    CHECK(extmax->content.v->y == 10.0);
+    CHECK(extmax->content.v->z == 1.0);
+    // CLAYER resolves to "0" via the eager name-table read on the R10 path.
+    auto *clayer = hdrVar(iface.hdr, "CLAYER");
+    REQUIRE(clayer != nullptr);
+    CHECK(*clayer->content.s == "0");
+  }
+}
+
+// MDI graphic-view resize path (QG_GraphicView::resizeEvent →
+// adjustOffsetControls → forcedCalculateBorders) vs zoomAuto
+// (LC_GraphicViewport::zoomAuto → calculateBorders).
+TEST_CASE("DWG chicun WNS2 drivers", "[.dwg_chicun_wns2]") {
+  if (chicun::fixturePath().empty()) { SUCCEED("skip"); return; }
+  chicun::ensureTestApp();
+  RS_Graphic graphic;
+  REQUIRE(chicun::importFixture(graphic));
+  graphic.onLoadingCompleted();
+
+  // Path A: zoomAuto (visible-only calculateBorders)
+  graphic.calculateBorders();
+  const RS_Vector zmin = graphic.getMin(), zmax = graphic.getMax();
+  std::cout << std::setprecision(12)
+            << "zoomAuto-path calculateBorders min=(" << zmin.x << "," << zmin.y
+            << ") max=(" << zmax.x << "," << zmax.y << ") span=("
+            << (zmax.x - zmin.x) << "," << (zmax.y - zmin.y) << ")\n";
+
+  // Path B: MDI graphic-view resize → adjustOffsetControls → forcedCalculateBorders
+  graphic.forcedCalculateBorders();
+  const RS_Vector fmin = graphic.getMin(), fmax = graphic.getMax();
+  std::cout << "resize-path forcedCalculateBorders min=(" << fmin.x << ","
+            << fmin.y << ") max=(" << fmax.x << "," << fmax.y << ") span=("
+            << (fmax.x - fmin.x) << "," << (fmax.y - fmin.y) << ")\n";
+
+  // Path C: LC_GraphicViewport::zoomAuto exactly (as QC_MDIWindow::zoomAuto)
+  LC_GraphicViewport vp;
+  vp.setDocument(&graphic);
+  vp.setSize(1200, 800);
+  vp.zoomAuto(false, true);
+  const RS_Vector vmin = graphic.getMin(), vmax = graphic.getMax();
+  std::cout << "after LC_GraphicViewport::zoomAuto min=(" << vmin.x << ","
+            << vmin.y << ") max=(" << vmax.x << "," << vmax.y << ") span=("
+            << (vmax.x - vmin.x) << "," << (vmax.y - vmin.y) << ")\n";
+  std::cout << "viewport factor=(" << vp.getFactor().x << "," << vp.getFactor().y
+            << ") offset=(" << vp.getOffsetX() << "," << vp.getOffsetY() << ")\n";
+
+  // Re-force for driver dump (zoomAuto rewrote borders to visible-only)
+  graphic.forcedCalculateBorders();
+  const RS_Vector bmin = graphic.getMin(), bmax = graphic.getMax();
+  const double tol = 50;
+  std::cout << "=== forced side drivers (resize-path) ===\n";
+  int counts[4] = {0, 0, 0, 0};
+  for (RS_Entity *e :
+       lc::LC_ContainerTraverser{graphic, RS2::ResolveAll}.entities()) {
+    if (!e || e->isContainer())
+      continue;
+    e->calculateBorders();
+    const RS_Vector mn = e->getMin(), mx = e->getMax();
+    if (!mn.valid || !mx.valid)
+      continue;
+    char side = 0;
+    int si = -1;
+    if (std::fabs(mn.x - bmin.x) < tol) {
+      side = 'W';
+      si = 0;
+    } else if (std::fabs(mx.x - bmax.x) < tol) {
+      side = 'E';
+      si = 1;
+    } else if (std::fabs(mn.y - bmin.y) < tol) {
+      side = 'S';
+      si = 2;
+    } else if (std::fabs(mx.y - bmax.y) < tol) {
+      side = 'N';
+      si = 3;
+    } else
+      continue;
+    if (counts[si]++ >= 5)
+      continue;
+    RS_Layer *ly = e->getLayer();
+    std::cout << "  " << side << " " << rttiName(e->rtti())
+              << " vis=" << e->isVisible()
+              << " chain=" << chicun::insertChain(e).toStdString()
+              << " layer=" << (ly ? ly->getName().toStdString() : "?")
+              << " box=(" << mn.x << "," << mn.y << ")-(" << mx.x << ","
+              << mx.y << ")\n";
+  }
+
+  std::cout << "=== top-level forced extremes ===\n";
+  for (RS_Entity *e : graphic) {
+    if (!e)
+      continue;
+    if (e->isContainer())
+      static_cast<RS_EntityContainer *>(e)->forcedCalculateBorders();
+    else
+      e->calculateBorders();
+    const RS_Vector mn = e->getMin(), mx = e->getMax();
+    if (!mn.valid || !mx.valid)
+      continue;
+    if (!(std::fabs(mn.x - bmin.x) < tol || std::fabs(mx.x - bmax.x) < tol
+          || std::fabs(mn.y - bmin.y) < tol
+          || std::fabs(mx.y - bmax.y) < tol))
+      continue;
+    QString name;
+    if (e->rtti() == RS2::EntityInsert)
+      name = static_cast<RS_Insert *>(e)->getName();
+    std::cout << "  top " << rttiName(e->rtti()) << " " << name.toStdString()
+              << " vis=" << e->isVisible() << " count="
+              << (e->isContainer()
+                      ? static_cast<RS_EntityContainer *>(e)->count()
+                      : 0)
+              << " box=(" << mn.x << "," << mn.y << ")-(" << mx.x << ","
+              << mx.y << ")\n";
+  }
 }

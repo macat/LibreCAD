@@ -23,6 +23,7 @@
 #ifndef LC_WORKSPACELISTBUTTON_H
 #define LC_WORKSPACELISTBUTTON_H
 
+#include <QIcon>
 #include <QToolButton>
 
 class QC_ApplicationWindow;
@@ -41,4 +42,4 @@ protected slots:
     void fillMenu();
     void menuTriggered(bool checked = false) const;
 };
-#endif // LC_WORKSPACELISTBUTTON_H
+#endif

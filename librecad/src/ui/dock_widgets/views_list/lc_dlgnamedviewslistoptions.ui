@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>393</width>
-    <height>412</height>
+    <width>422</width>
+    <height>386</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -49,36 +49,6 @@
       <string>Display</string>
      </property>
      <layout class="QGridLayout" name="gridLayout_3">
-      <item row="5" column="0">
-       <widget class="QCheckBox" name="cbShowTooltip">
-        <property name="toolTip">
-         <string>If show, tooltip with additional information about view will be shown for table item.</string>
-        </property>
-        <property name="text">
-         <string>Tooltip with view details for table items</string>
-        </property>
-       </widget>
-      </item>
-      <item row="4" column="0">
-       <widget class="QCheckBox" name="cbColumnUCSDetails">
-        <property name="toolTip">
-         <string>If checked, the column with details of view's coordinate system will be show.</string>
-        </property>
-        <property name="text">
-         <string>UCS Details column</string>
-        </property>
-       </widget>
-      </item>
-      <item row="1" column="0">
-       <widget class="QCheckBox" name="cbColumnGridType">
-        <property name="toolTip">
-         <string>If checked, type of grid for saved view will be shown.</string>
-        </property>
-        <property name="text">
-         <string>Grid Type icon column</string>
-        </property>
-       </widget>
-      </item>
       <item row="0" column="0">
        <widget class="QCheckBox" name="cbShowViewTypeIcon">
         <property name="toolTip">
@@ -89,7 +59,57 @@
         </property>
        </widget>
       </item>
-      <item row="2" column="0">
+      <item row="6" column="0">
+       <widget class="QCheckBox" name="cbShowColumnVIewDetails">
+        <property name="toolTip">
+         <string>If checked, the column with view details will be shown in the table.</string>
+        </property>
+        <property name="text">
+         <string>View Details column</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="0">
+       <widget class="QCheckBox" name="cbColumnUCSDetails">
+        <property name="toolTip">
+         <string>If checked, the column with details of view's coordinate system will be shown.</string>
+        </property>
+        <property name="text">
+         <string>UCS Details column</string>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="0">
+       <widget class="QCheckBox" name="cbColumnGridType">
+        <property name="toolTip">
+         <string>If checked, type of grid for saved view will be shown.</string>
+        </property>
+        <property name="text">
+         <string>Grid Type icon column</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QCheckBox" name="cbShowTooltip">
+        <property name="toolTip">
+         <string>If show, tooltip with additional information about view will be shown for table item.</string>
+        </property>
+        <property name="text">
+         <string>Toolip with view details for table items</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QCheckBox" name="cbShowGrid">
+        <property name="toolTip">
+         <string>If selected, grid lines will be drawn</string>
+        </property>
+        <property name="text">
+         <string>Show grid</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
        <widget class="QCheckBox" name="cbColumnUCSType">
         <property name="toolTip">
          <string>If checked, the column with icon for type of coordinate system for the view will be shown.</string>
@@ -99,26 +119,16 @@
         </property>
        </widget>
       </item>
-      <item row="3" column="0">
-       <widget class="QCheckBox" name="cbShowColumnVIewDetails">
-        <property name="toolTip">
-         <string>If checked, the column with view details will be shown in the table.</string>
-        </property>
-        <property name="text">
-         <string>VIew Details column</string>
-        </property>
-       </widget>
-      </item>
      </layout>
     </widget>
    </item>
    <item row="6" column="0" colspan="3">
     <widget class="QDialogButtonBox" name="buttonBox">
      <property name="orientation">
-      <enum>Qt::Horizontal</enum>
+      <enum>Qt::Orientation::Horizontal</enum>
      </property>
      <property name="standardButtons">
-      <set>QDialogButtonBox::Cancel|QDialogButtonBox::Ok</set>
+      <set>QDialogButtonBox::StandardButton::Cancel|QDialogButtonBox::StandardButton::Ok</set>
      </property>
      <property name="centerButtons">
       <bool>false</bool>
@@ -134,7 +144,7 @@
       <item row="1" column="0">
        <widget class="QLabel" name="lblDoubleClick">
         <property name="text">
-         <string>On double-click on table item</string>
+         <string>On double-click:</string>
         </property>
        </widget>
       </item>
@@ -168,7 +178,7 @@
       <item row="1" column="2">
        <spacer name="horizontalSpacer">
         <property name="orientation">
-         <enum>Qt::Horizontal</enum>
+         <enum>Qt::Orientation::Horizontal</enum>
         </property>
         <property name="sizeHint" stdset="0">
          <size>
@@ -184,7 +194,7 @@
          <string>If enabled, click on the view table item will restore view. Otherwise, view should be restored explicitly.</string>
         </property>
         <property name="text">
-         <string>Restore view on single click by table item</string>
+         <string>Restore view on single click of table item</string>
         </property>
        </widget>
       </item>

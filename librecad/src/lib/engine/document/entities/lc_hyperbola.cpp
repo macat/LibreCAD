@@ -1,4 +1,3 @@
-// lc_hyperbola.cpp
 /*******************************************************************************
  *
  This file is part of the LibreCAD project, a 2D CAD program
@@ -795,7 +794,7 @@ void LC_Hyperbola::adaptiveSample(std::vector<RS_Vector> &out, double phiStart,
  * @return               Point in the middle 50% of the arc closest to `coord`,
  *                       or RS_Vector(false) if hyperbola is invalid/unbounded
  */
-RS_Vector LC_Hyperbola::getNearestMiddle(const RS_Vector& coord,
+RS_Vector LC_Hyperbola::doGetNearestMiddle(const RS_Vector& coord,
                                          double* dist,
                                          int middlePoints) const
 {
@@ -1011,7 +1010,7 @@ double LC_Hyperbola::getArcLength(double phi1, double phi2) const {
  * @param dist       Optional: computed arc distance from start to returned point
  * @return Point at requested distance, or invalid on failure
  */
-RS_Vector LC_Hyperbola::getNearestDist(double distance,
+RS_Vector LC_Hyperbola::doGetNearestDist(double distance,
                                        const RS_Vector& coord,
                                        double* dist) const
 {
@@ -1195,8 +1194,7 @@ void LC_Hyperbola::revertDirection() {
 //=====================================================================
 // Minimal overrides
 //=====================================================================
-RS_Vector LC_Hyperbola::getNearestCenter(const RS_Vector &coord,
-                                         double *dist) const {
+RS_Vector LC_Hyperbola::doGetNearestCenter(const RS_Vector& coord, double* dist, RS_Entity** entity) const {
   if (!m_valid || !coord.valid) {
     if (dist)
       *dist = RS_MAXDOUBLE;
@@ -1207,8 +1205,7 @@ RS_Vector LC_Hyperbola::getNearestCenter(const RS_Vector &coord,
   return m_data.center;
 }
 
-RS_Vector LC_Hyperbola::getNearestEndpoint(const RS_Vector &coord,
-                                           double *dist) const {
+RS_Vector LC_Hyperbola::doGetNearestEndpoint(const RS_Vector &coord, double *dist, RS_Entity** entity) const {
   if (dist)
     *dist = RS_MAXDOUBLE;
   if (!m_valid || !coord.valid) {
@@ -1237,7 +1234,7 @@ RS_Vector LC_Hyperbola::getNearestEndpoint(const RS_Vector &coord,
 }
 
 //=====================================================================
-RS_Vector LC_Hyperbola::getNearestPointOnEntity(const RS_Vector &coord,
+RS_Vector LC_Hyperbola::doGetNearestPointOnEntity(const RS_Vector &coord,
                                                 bool onEntity, double *dist,
                                                 RS_Entity **entity) const {
   if (!m_valid || !coord.valid) {
@@ -1304,22 +1301,31 @@ RS_Vector LC_Hyperbola::getNearestPointOnEntity(const RS_Vector &coord,
   double dx = cx + A - px;
   double dy = cy + C - py;
 
-  double p = 4.0 * (A * dx + C * dy) / (B * dx + D * dy);
-  double q = (dx * dx + dy * dy - aa * aa + bb * bb) / (B * dx + D * dy) * 2.0 -
-             p * p / 2.0 - 3.0;
-  double r = -p * (q + 5.0);
-  double s = -(dx * dx + dy * dy - aa * aa - bb * bb) / (B * dx + D * dy) - q;
+  // Every coefficient below divides by this. It is zero when coord lies on a
+  // vertex: the vertex is at (cx + A, cy + C), so dx and dy are both zero
+  // there, and the divisions yield NaN. The loop below already declined to use
+  // any root in that case, but only after the solver had run - and a NaN
+  // coefficient reaches std::polar() with a NaN modulus inside the complex
+  // cubic step, which aborts when the standard library is built with
+  // _GLIBCXX_ASSERTIONS. Leave the roots empty instead; the endpoint and
+  // initial-guess candidates already computed above remain the answer.
+  const double denom = B * dx + D * dy;
 
-  std::vector<double> ce = {s, r, q, p,
-                            1.0}; // t^4 + p t^3 + q t^2 + r t + s = 0
+  std::vector<double> roots;
+  if (std::abs(denom) >= RS_TOLERANCE) {
+    double p = 4.0 * (A * dx + C * dy) / denom;
+    double q = (dx * dx + dy * dy - aa * aa + bb * bb) / denom * 2.0 -
+               p * p / 2.0 - 3.0;
+    double r = -p * (q + 5.0);
+    double s = -(dx * dx + dy * dy - aa * aa - bb * bb) / denom - q;
 
-  std::vector<double> roots = RS_Math::quarticSolverFull(ce);
+    std::vector<double> ce = {s, r, q, p,
+                              1.0}; // t^4 + p t^3 + q t^2 + r t + s = 0
+    roots = RS_Math::quarticSolverFull(ce);
+  }
 
   // Evaluate all valid real roots
   for (double t : roots) {
-    if (std::abs(B * dx + D * dy) < RS_TOLERANCE)
-      continue; // degenerate case skipped
-
     double phi = std::atanh(t);
     if (std::isnan(phi) || std::isinf(phi))
       continue;
@@ -1378,7 +1384,7 @@ RS_Vector LC_Hyperbola::getNearestPointOnEntity(const RS_Vector &coord,
 }
 
 //=====================================================================
-double LC_Hyperbola::getDistanceToPoint(const RS_Vector &coord,
+double LC_Hyperbola::doGetDistanceToPoint(const RS_Vector &coord,
                                         RS_Entity **entity,
                                         RS2::ResolveLevel /*level*/,
                                         double /*solidDist*/) const {
@@ -1400,7 +1406,7 @@ double LC_Hyperbola::getDistanceToPoint(const RS_Vector &coord,
 }
 
 //=====================================================================
-bool LC_Hyperbola::isPointOnEntity(const RS_Vector &coord,
+bool LC_Hyperbola::doIsPointOnEntity(const RS_Vector &coord,
                                    double tolerance) const {
   if (!m_valid || !coord.valid)
     return false;
@@ -1429,16 +1435,16 @@ LC_Quadratic LC_Hyperbola::getQuadratic() const {
 
 //=====================================================================
 void LC_Hyperbola::calculateBorders() {
-  minV = RS_Vector(RS_MAXDOUBLE, RS_MAXDOUBLE);
-  maxV = RS_Vector(RS_MINDOUBLE, RS_MINDOUBLE);
+  m_minV = RS_Vector(RS_MAXDOUBLE, RS_MAXDOUBLE);
+  m_maxV = RS_Vector(RS_MINDOUBLE, RS_MINDOUBLE);
 
   if (!m_valid)
     return;
 
   // Full unbounded hyperbola → infinite bounds
   if (isInfinite()) {
-    minV = RS_Vector(-RS_MAXDOUBLE, -RS_MAXDOUBLE);
-    maxV = RS_Vector(RS_MAXDOUBLE, RS_MAXDOUBLE);
+    m_minV = RS_Vector(-RS_MAXDOUBLE, -RS_MAXDOUBLE);
+    m_maxV = RS_Vector(RS_MAXDOUBLE, RS_MAXDOUBLE);
     return;
   }
 
@@ -1476,8 +1482,8 @@ void LC_Hyperbola::calculateBorders() {
           phi_cand <= phiEnd + RS_TOLERANCE) {
         RS_Vector p = getPoint(phi_cand, m_data.reversed);
         if (p.valid) {
-          minV = RS_Vector::minimum(minV, p);
-          maxV = RS_Vector::maximum(maxV, p);
+          m_minV = RS_Vector::minimum(m_minV, p);
+          m_maxV = RS_Vector::maximum(m_maxV, p);
         }
       }
     }
@@ -1490,18 +1496,18 @@ void LC_Hyperbola::calculateBorders() {
   RS_Vector start = getPoint(phiStart, m_data.reversed);
   RS_Vector end = getPoint(phiEnd, m_data.reversed);
   if (start.valid) {
-    minV = RS_Vector::minimum(minV, start);
-    maxV = RS_Vector::maximum(maxV, start);
+    m_minV = RS_Vector::minimum(m_minV, start);
+    m_maxV = RS_Vector::maximum(m_maxV, start);
   }
   if (end.valid) {
-    minV = RS_Vector::minimum(minV, end);
-    maxV = RS_Vector::maximum(maxV, end);
+    m_minV = RS_Vector::minimum(m_minV, end);
+    m_maxV = RS_Vector::maximum(m_maxV, end);
   }
 
   // Safety expansion
   double expand = RS_TOLERANCE * 100.0;
-  minV -= RS_Vector(expand, expand);
-  maxV += RS_Vector(expand, expand);
+  m_minV -= RS_Vector(expand, expand);
+  m_maxV += RS_Vector(expand, expand);
 }
 
 //=====================================================================
@@ -1513,7 +1519,7 @@ double LC_Hyperbola::getLength() const {
 }
 
 void LC_Hyperbola::updateLength() {
-  cachedLength = LC_Hyperbola::getLength();
+  m_cachedLength = LC_Hyperbola::getLength();
 }
 
 //=====================================================================

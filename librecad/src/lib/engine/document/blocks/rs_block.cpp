@@ -24,7 +24,13 @@
 **
 **********************************************************************/
 
-#include<iostream>
+#include <cstddef>
+#include <iostream>
+#include <limits>
+#include <vector>
+
+#include <QSet>
+
 #include "rs_block.h"
 
 #include "rs_blocklist.h"
@@ -32,37 +38,60 @@
 #include "rs_insert.h"
 #include "rs_line.h"
 
-RS_BlockData::RS_BlockData(const QString& _name,
-                           const RS_Vector& _basePoint,
-                           bool _frozen):
-    name(_name)
-    ,basePoint(_basePoint)
-    ,frozen(_frozen){
+namespace {
+
+// Presentation-only color for BLOCK definition previews; it is not serialized
+// BLOCK geometry and must not participate in INSERT transform decisions.
+constexpr int kBlockPreviewGrayChannel = 128;
+
+RS_Pen blockDefinitionPreviewPen() {
+    return {RS_Color(kBlockPreviewGrayChannel, kBlockPreviewGrayChannel,
+                     kBlockPreviewGrayChannel),
+            RS2::Width01, RS2::SolidLine};
 }
 
-bool RS_BlockData::isValid() const{
-	return (!name.isEmpty() && basePoint.valid);
+} // namespace
+
+RS_BlockData::RS_BlockData(const QString& name, const RS_Vector& basePoint, const bool frozen) : name(name), basePoint(basePoint),
+    frozen(frozen) {
+}
+
+bool RS_BlockData::isValid() const {
+    return !name.isEmpty() && basePoint.valid;
 }
 
 /**
  * @param parent The graphic this block belongs to.
- * @param name The name of the block used as an identifier.
- * @param basePoint Base point (offset) of the block.
+ * @param blockData
  */
-RS_Block::RS_Block(RS_EntityContainer* parent,
-                   const RS_BlockData& d)
-    : RS_Document(parent), data(d){
-    setPen({RS_Color(128,128,128), RS2::Width01, RS2::SolidLine});
+RS_Block::RS_Block(RS_EntityContainer* parent, const RS_BlockData& blockData)
+    : RS_Document(parent), m_data(blockData) {
+    setPen(blockDefinitionPreviewPen());
 }
 
 RS_Entity* RS_Block::clone() const {
-    auto blk = new RS_Block(*this);
-    blk->setOwner(isOwner());
+    const auto blk = new RS_Block(getParent(), RS_BlockData(m_data));
+    blk->setGraphicView(getGraphicView()); // fixme - remove this dependency
+
+    if (isOwner()) {
+        const auto entitylist = getEntityList();
+        for (const RS_Entity* entity : entitylist) {
+            if (entity != nullptr) {
+                blk->push_back(entity->clone());
+            }
+        }
+    }
+    else {
+        const auto entitylist = getEntityList();
+        for (RS_Entity* entity : entitylist) {
+            if (entity != nullptr) {
+                blk->push_back(entity);
+            }
+        }
+    }
     blk->detach();
     return blk;
 }
-
-
 
 RS_LayerList* RS_Block::getLayerList() {
     RS_Graphic* g = getGraphic();
@@ -70,6 +99,11 @@ RS_LayerList* RS_Block::getLayerList() {
 }
 
 RS_BlockList* RS_Block::getBlockList() {
+    RS_Graphic* g = getGraphic();
+    return (g != nullptr) ? g->getBlockList() : nullptr;
+}
+
+const RS_BlockList* RS_Block::getBlockList() const {
     RS_Graphic* g = getGraphic();
     return (g != nullptr) ? g->getBlockList() : nullptr;
 }
@@ -102,15 +136,26 @@ LC_TextStyleList* RS_Block::getTextStyleList() {
 //     }
 // }
 
+bool RS_Block::isVisible() const {
+    if (!getFlag(RS2::FlagVisible)) {
+        return false;
+    }
+
+    if (isDeleted()) {
+        return false;
+    }
+    return true;
+}
+
 /**
  * Sets the parent documents modified status to 'm'.
  */
-void RS_Block::setModified(bool m) {
+void RS_Block::setModified(const bool m) {
     RS_Graphic* p = getGraphic();
-    if (p) {
+    if (p != nullptr) {
         p->setModified(m);
     }
-    modified = m;
+    m_modified = m;
 }
 
 /**
@@ -118,15 +163,15 @@ void RS_Block::setModified(bool m) {
  *
  * @param v true: visible, false: invisible
  */
-void RS_Block::visibleInBlockList(bool v) {
-    data.visibleInBlockList = v;
+void RS_Block::visibleInBlockList(const bool v) const {
+    m_data.visibleInBlockList = v;
 }
 
 /**
  * Returns the visibility of the Block in block list
  */
 bool RS_Block::isVisibleInBlockList() const {
-    return data.visibleInBlockList;
+    return m_data.visibleInBlockList;
 }
 
 /**
@@ -134,15 +179,15 @@ bool RS_Block::isVisibleInBlockList() const {
  *
  * @param v true: selected, false: deselected
  */
-void RS_Block::selectedInBlockList(bool v) const {
-    data.selectedInBlockList = v;
+void RS_Block::selectedInBlockList(const bool v) const {
+    m_data.selectedInBlockList = v;
 }
 
 /**
  * Returns selection state of the block in block list
  */
 bool RS_Block::isSelectedInBlockList() const {
-    return data.selectedInBlockList;
+    return m_data.selectedInBlockList;
 }
 
 /**
@@ -154,50 +199,71 @@ bool RS_Block::isSelectedInBlockList() const {
  *
  * @return block name chain to the block that contain searched insert
  */
-QStringList RS_Block::findNestedInsert(const QString& bName) {
+QStringList RS_Block::findNestedInsert(const QString& bName) const {
+    struct BlockSearchFrame {
+        const RS_Block* block = nullptr;
+        std::size_t nextEntityIndex = 0U;
+    };
 
-    QStringList bnChain;
+    QSet<const RS_Block*> activeBlocks;
+    std::vector<BlockSearchFrame> work;
+    work.push_back({this, 0});
+    activeBlocks.insert(this);
 
-    for (RS_Entity* e: *this) {
-        if (e->rtti()==RS2::EntityInsert) {
-            RS_Insert* i = ((RS_Insert*)e);
-            QString iName = i->getName();
-            if (iName == bName) {
-                bnChain << data.name;
-                break;
-            } else {
-                RS_BlockList* bList = getBlockList();
-                if (bList) {
-                    RS_Block* nestedBlock = bList->find(iName);
-                    if (nestedBlock) {
-                        QStringList nestedChain;
-                        nestedChain = nestedBlock->findNestedInsert(bName);
-                        if (!nestedChain.empty()) {
-                            bnChain << data.name;
-                            bnChain << nestedChain;
-                            break;
-                        }
-                    }
-                }
-            }
+    while (!work.empty()) {
+        BlockSearchFrame& frame = work.back();
+        if (frame.block == nullptr
+            || frame.nextEntityIndex >= static_cast<std::size_t>(frame.block->count())) {
+            activeBlocks.remove(frame.block);
+            work.pop_back();
+            continue;
         }
-    }
 
-    return bnChain;
+        if (frame.nextEntityIndex > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+            return {};
+        const RS_Entity* entity = frame.block->entityAt(
+            static_cast<int>(frame.nextEntityIndex++));
+        if (entity == nullptr || entity->rtti() != RS2::EntityInsert)
+            continue;
+
+        const auto& insert = static_cast<const RS_Insert&>(*entity);
+        if (insert.getName() == bName) {
+            QStringList result;
+            for (const BlockSearchFrame& pathFrame : work)
+                result.push_back(pathFrame.block->m_data.name);
+            return result;
+        }
+
+        const RS_Block* nestedBlock = insert.getBlockForInsert();
+        if (nestedBlock == nullptr || activeBlocks.contains(nestedBlock))
+            continue;
+        activeBlocks.insert(nestedBlock);
+        work.push_back({nestedBlock, 0});
+    }
+    return {};
 }
 
 void RS_Block::addByBlockLine(const RS_Vector& start, const RS_Vector& end) {
-    addByBlockEntity(new RS_Line(start, end));
+    addByBlockEntity(std::make_unique<RS_Line>(start, end));
+}
+
+void RS_Block::addByBlockEntity(std::unique_ptr<RS_Entity> entity) {
+    if (entity == nullptr)
+        return;
+    addByBlockEntity(entity.release());
 }
 
 void RS_Block::addByBlockEntity(RS_Entity* entity) {
-    RS_Pen byBlockPen(RS2::FlagByBlock,  RS2::WidthByBlock, RS2::LineByBlock);
+    if (entity == nullptr)
+        return;
+    const RS_Pen byBlockPen(RS2::FlagByBlock, RS2::WidthByBlock, RS2::LineByBlock);
     entity->setPen(byBlockPen);
     addEntity(entity);
 }
 
-std::ostream& operator << (std::ostream& os, const RS_Block& b) {
+std::ostream& operator <<(std::ostream& os, const RS_Block& b) {
     os << " name: " << b.getName().toLatin1().data() << "\n";
-    os << " entities: " << (RS_EntityContainer&)b << "\n";
+    auto asContainer = static_cast<const RS_EntityContainer&>(b);
+    os << " entities: " << asContainer << "\n";
     return os;
 }

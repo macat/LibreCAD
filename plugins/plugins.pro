@@ -19,7 +19,7 @@ SUBDIRS     = \
         picfile \
         plotequation \
         pointstocsv \
-        gear
+        gear \
 
 TRANSLATIONS = ./ts/plugins_ar.ts \
     ./ts/plugins_ca.ts \
@@ -56,10 +56,10 @@ TRANSLATIONS = ./ts/plugins_ar.ts \
     ./ts/plugins_gl.ts \
     ./ts/plugins_hi.ts \
     ./ts/plugins_hu.ts \
-    ./ts/plugins_id_id.ts \
     ./ts/plugins_it.ts \
     ./ts/plugins_ja.ts \
     ./ts/plugins_ko.ts \
+    ./ts/plugins_lo.ts \
     ./ts/plugins_lv.ts \
     ./ts/plugins_mk.ts \
     ./ts/plugins_nl.ts \

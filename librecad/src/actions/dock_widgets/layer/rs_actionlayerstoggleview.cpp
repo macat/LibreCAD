@@ -30,6 +30,8 @@
 
 #include "rs_actionlayerstoggleview.h"
 
+#include <QList>
+
 #include "rs_debug.h"
 #include "rs_graphic.h"
 #include "rs_layer.h"
@@ -42,28 +44,27 @@ RS_ActionLayersToggleView::RS_ActionLayersToggleView(LC_ActionContext *actionCon
 
 void RS_ActionLayersToggleView::trigger() {
     RS_DEBUG->print("toggle layer");
-    if (m_graphic) {
+    if (m_graphic != nullptr) {
         RS_LayerList* ll = m_graphic->getLayerList();
-        unsigned cnt = 0;
+        QList<RS_Layer*> layersToToggle;
         // toggle selected layers
-        for (auto layer: *ll) {
-            if (!layer) continue;
-            if (!layer->isVisibleInLayerList()) continue;
-            if (!layer->isSelectedInLayerList()) continue;
-            m_graphic->toggleLayer(layer);
-            cnt++;
+        for (const auto layer : *ll) {
+            if (layer == nullptr || !layer->isVisibleInLayerList() || !layer->isSelectedInLayerList()) {
+                continue;
+            }
+            layersToToggle.append(layer);
         }
         // if there wasn't selected layers, toggle active layer
-        if (!cnt) {
+        if (layersToToggle.isEmpty()) {
             m_graphic->toggleLayer(m_layer);
+        } else {
+            m_graphic->toggleFreezeLayers(layersToToggle);
         }
-        m_graphic->updateInserts();
-        m_container->calculateBorders();
     }
-    finish(false);
+    finish();
 }
 
-void RS_ActionLayersToggleView::init(int status) {
+void RS_ActionLayersToggleView::init(const int status) {
     RS_ActionInterface::init(status);
     trigger();
 }

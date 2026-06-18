@@ -26,6 +26,7 @@
 #include "rs_debug.h"
 
 #include <QDateTime>
+#include <QIODevice>
 #include <QString>
 #include <QTextStream>
 #include <iostream>
@@ -39,7 +40,7 @@ FILE *s_logStream = nullptr;
 // The implementation to delegate methods to QTextStream
 struct RS_Debug::LogStream::StreamImpl : public QTextStream {
     StreamImpl(RS_Debug::RS_DebugLevel level) :
-        QTextStream{&m_string, QIODeviceBase::WriteOnly}
+        QTextStream{&m_string, QIODevice::WriteOnly}
       , m_debugLevel{level}
     {
     }
@@ -200,10 +201,9 @@ RS_Debug::~RS_Debug() {
     try {
         if (s_logStream != nullptr && s_logStream != stderr && s_logStream != stdout)
             fclose(s_logStream);
-    }
+        }
     catch(...) {
         std::cerr<<"RS_Debug::"<<__func__<<":: Failed to close stream";
-
     }
 }
 
@@ -233,7 +233,7 @@ RS_Debug::RS_DebugLevel RS_Debug::getLevel() { return m_debugLevel; }
 /**
  * Prints the given message to stdout.
  */
-void RS_Debug::print(const char *format...) {
+void RS_Debug::print(const char *format...)  {
     if (m_debugLevel == D_DEBUGGING) {
         va_list ap;
         va_start(ap, format);

@@ -24,11 +24,11 @@
 **
 **********************************************************************/
 
-
 #ifndef RS_FILTERDXFRW_H
 #define RS_FILTERDXFRW_H
 
 #include <set>
+#include <vector>
 
 #include "drw_interface.h"
 #include "lc_extentitydata.h"
@@ -44,7 +44,9 @@ class DL_WriterA;
 class LC_DimStyle;
 class LC_Hyperbola;
 class LC_MLeader;
+class LC_Parabola;
 class LC_SplinePoints;
+class LC_Tolerance;
 class LC_Wipeout;
 class RS_Arc;
 class RS_Circle;
@@ -52,6 +54,7 @@ class RS_Ellipse;
 class RS_Hatch;
 class RS_Image;
 class RS_Insert;
+class RS_Layer;
 class RS_Leader;
 class RS_Line;
 class RS_MText;
@@ -62,6 +65,16 @@ class RS_Solid;
 class RS_Spline;
 class RS_Text;
 
+struct DRW_AcisBrep;
+
+// test-only friend; defined in tests/dwg_header_app_vars_tests.cpp. Grants
+// the header-var regression suite access to the private m_graphic/
+// m_currentContainer so it can exercise addHeader against a real RS_Graphic.
+class RsFilterDxfRwHeaderTestAccess;
+// test-only friend; defined in tests/family_exposure_tests.cpp. Grants access
+// to m_graphic for cross-read filter exposure / Navisworks metadata tests.
+class RsFilterDxfRwExposureTestAccess;
+
 /**
  * This format filter class can import and export DXF files.
  * It depends on the libdxfrw library.
@@ -69,24 +82,29 @@ class RS_Text;
  * @author Rallaz
  */
 class RS_FilterDXFRW : public RS_FilterInterface, DRW_Interface {
+    friend class RsFilterDxfRwHeaderTestAccess;
+    friend class RsFilterDxfRwExposureTestAccess;
 public:
     RS_FilterDXFRW();
-    ~RS_FilterDXFRW();
+    ~RS_FilterDXFRW() override;
 
-    bool canImport(const QString &/*fileName*/, RS2::FormatType t) const override {
+    bool canImport(const QString&/*fileName*/, const RS2::FormatType t) const override {
 #ifdef DWGSUPPORT
-        return (t==RS2::FormatDXFRW || t==RS2::FormatDWG);
+        return t == RS2::FormatDXFRW || t == RS2::FormatDWG;
 #else
-        return (t==RS2::FormatDXFRW);
+        return (t == RS2::FormatDXFRW);
 #endif
     }
 
-    bool canExport(const QString &/*fileName*/, RS2::FormatType t) const override {
+    bool canExport(const QString&/*fileName*/, const RS2::FormatType t) const override {
 #ifdef DWGSUPPORT
-        if (t == RS2::FormatDWG) return true;
+        if (t == RS2::FormatDWG || t == RS2::FormatDWG2004
+            || t == RS2::FormatDWG2010 || t == RS2::FormatDWG2013
+            || t == RS2::FormatDWG2018)
+            return true;
 #endif
-        return (t==RS2::FormatDXFRW || t==RS2::FormatDXFRW2004 || t==RS2::FormatDXFRW2000
-                || t==RS2::FormatDXFRW14 || t==RS2::FormatDXFRW12);
+        return (t==RS2::FormatDXFRW2018 || t==RS2::FormatDXFRW || t==RS2::FormatDXFRW2004
+                || t==RS2::FormatDXFRW2000 || t==RS2::FormatDXFRW14 || t==RS2::FormatDXFRW12);
     }
 
     // Error messages
@@ -97,17 +115,29 @@ public:
 
     // Methods from DRW_CreationInterface:
     void addHeader(const DRW_Header* data) override;
-    void addLType(const DRW_LType& /*data*/) override{};
+
+    void addLType(const DRW_LType& /*data*/) override {
+    }
+
     void addLayer(const DRW_Layer& data) override;
     void addDimStyle(const DRW_Dimstyle& data) override;
     void addVport(const DRW_Vport& data) override;
-    void addView(const DRW_View &data) override;
-    void addUCS(const DRW_UCS &data) override;
+    void addView(const DRW_View& data) override;
+    void addUCS(const DRW_UCS& data) override;
+    void addVisualStyle(const DRW_VisualStyle& data) override;
 public:
+    struct TableFallbackRenderSummary {
+        size_t gridEntityCount = 0;
+        size_t textEntityCount = 0;
+        size_t placeholderEntityCount = 0;
+        size_t unresolvedTextStyleCount = 0;
+        size_t clampedDimensionCount = 0;
+    };
+
     void addTextStyle(const DRW_Textstyle& /*data*/) override{}
     void addAppId(const DRW_AppId& /*data*/) override{}
     void addBlock(const DRW_Block& data) override;
-    void setBlock(const int handle) override;
+    void setBlock(int handle) override;
     void endBlock() override;
     void addPoint(const DRW_Point& data) override;
     void addLine(const DRW_Line& data) override;
@@ -121,14 +151,35 @@ public:
     void addMLineStyle(const DRW_MLineStyle &data) override;
     void addUnderlay(const DRW_Underlay *data) override;
     void linkUnderlay(const DRW_UnderlayDefinition *data) override;
+    void addShape(const DRW_Shape &data) override;
+    void addOle2Frame(const DRW_Ole2Frame &data) override;
     void addText(const DRW_Text& data) override;
+    void addAttDef(const DRW_Attdef& data) override;
     void addPolyline(const DRW_Polyline& data) override;
     void addSpline(const DRW_Spline* data) override;
+    void addHelix(const DRW_Helix* data) override;
     void addKnot(const DRW_Entity&) override{}
     void addInsert(const DRW_Insert& data) override;
+    void addTable(const DRW_Table& data) override;
+    bool addTableFallback(const DRW_Table& data,
+                          TableFallbackRenderSummary *summary = nullptr);
     void addTrace(const DRW_Trace& data) override;
-    void addTolerance(const DRW_Tolerance& tol) override;
+    void addTolerance(const DRW_Tolerance& data) override;
     void addSolid(const DRW_Solid& data) override;
+    void addModelerGeometry(const DRW_ModelerGeometry &data) override;
+    void addMesh(const DRW_Mesh &data) override;
+    void addSurface(const DRW_Surface *data) override;
+    //! Convert a decoded ACIS wireframe into RS_* entities, parented to and added
+    //! into `container` (projected to 2D by dropping Z, exactly like addMesh).
+    //! Straight edges -> RS_Line, ellipse edges -> RS_Ellipse (line fallback when
+    //! degenerate), intcurve edges -> RS_Spline through the control polygon (line
+    //! fallback), isolated vertices -> RS_Point. Returns the created entities
+    //! WITHOUT attributes applied, so callers can post-process them (e.g.
+    //! setEntityAttributes). Static + container-scoped so it is unit-testable
+    //! without a full DXF import (no m_graphic needed).
+    static std::vector<RS_Entity*> acisWireframeToEntities(
+        const DRW_AcisBrep &brep, RS_EntityContainer *container);
+    void addLight(const DRW_Light &data) override;
     void addMText(const DRW_MText& data) override;
     /** Build an RS_MText from a DRW_MText payload, handling alignment / drawing
      *  direction / line spacing / oldMText legacy correction.  Caller takes
@@ -141,14 +192,73 @@ public:
     void addDimAngular(const DRW_DimAngular *data) override;
     void addDimAngular3P(const DRW_DimAngular3p *data) override;
     void addDimOrdinate(const DRW_DimOrdinate *data) override;
+    void addDimArc(const DRW_DimArc *data) override;
     void addLeader(const DRW_Leader *data) override;
     void addHatch(const DRW_Hatch* data) override;
-    void addViewport(const DRW_Viewport& /*data*/) override{}
+
+    void addViewport(const DRW_Viewport& /*data*/) override {
+    }
+
     void addImage(const DRW_Image* data) override;
     void linkImage(const DRW_ImageDef* data) override;
-    void addWipeout(const DRW_Image *data) override;
+    void addWipeout(const DRW_Wipeout *data) override;
     void addMLeader(const DRW_MLeader *data) override;
     void addMLeaderStyle(const DRW_MLeaderStyle *data) override;
+    void addDetailViewStyle(const DRW_DetailViewStyle &data) override;
+    void addSectionViewStyle(const DRW_SectionViewStyle &data) override;
+    void addBreakData(const DRW_BreakData &data) override;
+    void addBreakPointRef(const DRW_BreakPointRef &data) override;
+    void addGroup(const DRW_Group &data) override;
+    void addImageDefinitionReactor(const DRW_ImageDefinitionReactor &data) override;
+    void addRasterVariables(const DRW_RasterVariables &data) override;
+    void addWipeoutVariables(const DRW_WipeoutVariables &data) override;
+    void addSpatialFilter(const DRW_SpatialFilter &data) override;
+    void addGeoData(const DRW_GeoData &data) override;
+    void addTableGeometry(const DRW_TableGeometry &data) override;
+    void addTableStyle(const DRW_TableStyle &data) override;
+    void addTableContent(const DRW_TableContentObject &data) override;
+    void addObjectContextData(const DRW_ObjectContextData &data) override;
+    void addCellStyleMap(const DRW_CellStyleMap &data) override;
+    void addUnsupportedObject(const DRW_UnsupportedObject &data) override;
+    void addRawDwgSection(const DRW_RawDwgSection &data) override;
+    void addDataStorage(const DRW_DataStorageSection &data) override;
+    void addRawDxfObject(const DRW_RawDxfObject &data) override;
+    void addRawDxfEntity(const DRW_RawDxfObject &data) override;
+    void addDxfClass(const DRW_Class &data) override;
+    void addAcDbPlaceholder(const DRW_AcDbPlaceholder &data) override;
+    void addSun(const DRW_Sun &data) override;
+    // Cross-read parity: metadata-only exposure (PR-4a/4c) — no document geometry
+    void addPointCloud(const DRW_PointCloud *data) override;
+    void addPointCloudEx(const DRW_PointCloudEx *data) override;
+    void addPointCloudDef(const DRW_PointCloudDef &data) override;
+    void addBackground(const DRW_Background &data) override;
+    void addMaterial(const DRW_Material &data) override;
+    void addRenderSettings(const DRW_RenderSettings &data) override;
+    void addSunStudy(const DRW_SunStudy &data) override;
+    void addDbColor(const DRW_DbColor &data) override;
+    void addDimensionAssociation(const DRW_DimensionAssociation &data) override;
+    void addEvaluationGraph(const DRW_EvaluationGraph &data) override;
+    void addSection(const DRW_Section &data) override;
+    void addSectionObject(const DRW_SectionObject &data) override;
+    void addMPolygon(const DRW_MPolygon *data) override;
+    void addDictionary(const DRW_Dictionary &data) override;
+    void addXRecord(const DRW_XRecord &data) override;
+    void addLayout(const DRW_Layout &data) override;
+    // PR 8d.2a — five small no-storage OBJECTS families.
+    void addScale(const DRW_Scale &data) override;
+    void addIDBuffer(const DRW_IDBuffer &data) override;
+    void addLayerIndex(const DRW_LayerIndex &data) override;
+    void addSpatialIndex(const DRW_SpatialIndex &data) override;
+    void addDictionaryVar(const DRW_DictionaryVar &data) override;
+    // PR 8d.2b — four larger no-storage OBJECTS families.
+    void addDictionaryWithDefault(const DRW_DictionaryWithDefault &data) override;
+    void addSortEntsTable(const DRW_SortEntsTable &data) override;
+    void addFieldList(const DRW_FieldList &data) override;
+    void addDataTable(const DRW_DataTable &data) override;
+    void addDynamicBlockObject(const DRW_DynamicBlockObject &data) override;
+    void addField(const DRW_Field &data) override;
+    void addAssociativeObject(const DRW_AssociativeObject &data) override;
+    void addAcShHistoryObject(const DRW_AcShHistoryObject &data) override;
 
     void add3dFace(const DRW_3Dface& data) override;
     void addComment(const char*) override;
@@ -157,10 +267,16 @@ public:
 
     // Export:
     bool fileExport(RS_Graphic& g, const QString& file, RS2::FormatType type) override;
+#ifdef DWGSUPPORT
+    dwgRW::WriteSkipCounters lastDwgWriteSkipCounters() const {
+        return m_lastDwgWriteSkipCounters;
+    }
+#endif
 
     void writeHeader(DRW_Header& data) override;
-    void writeLType(const std::string& lTypeName, const std::string& ltDescription, int ltSize, double ltLength,
-                    const std::vector<double>& ltPath);
+    void writeDwgClasses() override;
+    void writeLType(const UTF8STRING& lTypeName, const UTF8STRING& ltDescription, int ltSize,
+                                double ltLength, const std::vector<double>& ltPath);
     void writeEntities() override;
     void writeLTypes() override;
     void writeLayers() override;
@@ -171,51 +287,53 @@ public:
     void writeBlockRecords() override;
     void writeBlocks() override;
     void writeDimstyles() override;
-    void prepareDRWDimStyleZerosSuppression(DRW_Dimstyle& d, LC_DimStyle* ds);
-    void prepareDRWDimStyleArrows(DRW_Dimstyle& d, LC_DimStyle* ds);
-    void prepareDRWDimStyleScaling(DRW_Dimstyle& d, LC_DimStyle* ds);
-    void prepareDRWDimStyleExtLine(DRW_Dimstyle& d, LC_DimStyle* ds);
-    void prepareDRWDimStyleDimLine(DRW_Dimstyle& d, LC_DimStyle* ds);
+    void prepareDRWDimStyleZerosSuppression(DRW_Dimstyle& d, const LC_DimStyle* ds);
+    void prepareDRWDimStyleArrows(DRW_Dimstyle& d, const LC_DimStyle* ds);
+    void prepareDRWDimStyleScaling(DRW_Dimstyle& d, const LC_DimStyle* ds);
+    void prepareDRWDimStyleExtLine(DRW_Dimstyle& d, const LC_DimStyle* ds);
+    void prepareDRWDimStyleDimLine(DRW_Dimstyle& d, const LC_DimStyle* ds);
     int findLineTypeHandleToWrite(const QString& name) const;
-    void prepareDRWDimStyleText(DRW_Dimstyle& d, LC_DimStyle* ds);
-    void prepareDRWDimStyleLinearFormat(DRW_Dimstyle& d, LC_DimStyle* ds);
-    void prepareDRWDimStyleFractions(DRW_Dimstyle& d, LC_DimStyle* ds);
-    void prepareDRWDimStyleAngularFormat(DRW_Dimstyle& d, LC_DimStyle* ds);
-    void prepareDRWDimStyleRadial(DRW_Dimstyle& d, LC_DimStyle* ds);
-    void prepareDRWDimStyleTolerance(DRW_Dimstyle& d, LC_DimStyle* ds);
-    void prepareDRWDimStyleArc(DRW_Dimstyle& d, LC_DimStyle* ds);
-    void prepareDRWDimStyleLeader(DRW_Dimstyle& d, LC_DimStyle* ds);
-    void prepareDRWDimStyleExtData(DRW_Dimstyle& d, LC_DimStyle* ds);
-    void prepareDRWDimStyle(DRW_Dimstyle &d, LC_DimStyle* ds);
+    void prepareDRWDimStyleText(DRW_Dimstyle& d, const LC_DimStyle* ds);
+    void prepareDRWDimStyleLinearFormat(DRW_Dimstyle& d, const LC_DimStyle* ds);
+    void prepareDRWDimStyleFractions(DRW_Dimstyle& d, const LC_DimStyle* ds);
+    void prepareDRWDimStyleAngularFormat(DRW_Dimstyle& d, const LC_DimStyle* ds);
+    void prepareDRWDimStyleRadial(DRW_Dimstyle& d, const LC_DimStyle* ds);
+    void prepareDRWDimStyleTolerance(DRW_Dimstyle& d, const LC_DimStyle* ds);
+    void prepareDRWDimStyleArc(DRW_Dimstyle& d, const LC_DimStyle* ds);
+    void prepareDRWDimStyleLeader(DRW_Dimstyle& d, const LC_DimStyle* ds);
+    void prepareDRWDimStyleExtData(DRW_Dimstyle& d, const LC_DimStyle* ds);
+    void prepareDRWDimStyle(DRW_Dimstyle& d, const LC_DimStyle* ds);
 
     void prepareTextStyleName(QString& sty) const;
     void writeObjects() override;
     void writeAppId() override;
 
-    void writePoint(RS_Point* p);
-    void writeLine(RS_Line* l);
-    void writeCircle(RS_Circle* c);
-    void writeArc(RS_Arc* a);
-    void writeEllipse(RS_Ellipse* s);
+    void writePoint(const RS_Point* p);
+    void writeLine(const RS_Line* l);
+    void writeCircle(const RS_Circle* c);
+    void writeArc(const RS_Arc* a);
+    void writeEllipse(const RS_Ellipse* s);
     void writeHyperbola(LC_Hyperbola* h);
+    void writeParabola(LC_Parabola* p);
     void writeSolid(RS_Solid* s);
     void writeLWPolyline(RS_Polyline* l);
     void writeSpline(RS_Spline* s);
-    void writeSplinePoints(LC_SplinePoints *s);
-    void writeInsert(RS_Insert* i);
-    void writeMText(RS_MText* t);
+    void writeSplinePoints(LC_SplinePoints* s);
+    void writeInsert(const RS_Insert* i);
+    void writeMText(const RS_MText* t);
     void writeText(RS_Text* t);
     void writeHatch(RS_Hatch* h);
-    void writeImage(RS_Image* i);
+    void writeImage(const RS_Image* i);
     void writeWipeout(LC_Wipeout *w);
     void writeMLeader(LC_MLeader *m);
-    void writeLeader(RS_Leader* l);
+    void writeLeader(const RS_Leader* l);
     void writeDimension(RS_Dimension* d);
-    void writePolyline(RS_Polyline* p);
+    void writeTolerance(LC_Tolerance* t);
+    void writePolyline(const RS_Polyline* p);
 
     /*	void writeEntityContainer(DL_WriterA& dw, RS_EntityContainer* con,
                     const DRW_Entity& attrib);
-            void writeAtomicEntities(DL_WriterA& dw, RS_EntityContainer* c,
+        void writeAtomicEntities(DL_WriterA& dw, RS_EntityContainer* c,
                     const DRW_Entity& attrib, RS2::ResolveLevel level);*/
 
     void setEntityAttributes(RS_Entity* entity, const DRW_Entity* attrib);
@@ -240,11 +358,24 @@ public:
     RS_Pen attributesToPen(const DRW_Layer* att) const;
 
     static RS_Color numberToColor(int num);
-    static int colorToNumber(const RS_Color& col, int *rgb);
+    static int colorToNumber(const RS_Color& col, int* rgb);
 
     static RS2::LineType nameToLineType(const QString& name);
     static QString lineTypeToName(RS2::LineType lineType);
     //static QString lineTypeToDescription(RS2::LineType lineType);
+
+    /// True when raw-preserved OBJECT bytes captured at DWG version `src` can be
+    /// replayed verbatim into a file being written at version `tgt` — i.e. both
+    /// share the same object-body encoding family:
+    ///   {AC1015,AC1018}  R2000/R2004 — strings inline, no bodyBitSize marker
+    ///   {AC1021}         R2007 — separate string stream (its own family; note
+    ///                    there is no AC1021 write target, so it never matches)
+    ///   {AC1024,AC1027,AC1032}  R2010+ — three-stream + bodyBitSize marker
+    /// Identity always matches. Used to widen the raw-object replay version gate
+    /// from strict source==target to same-family, restoring metadata
+    /// preservation across in-family upgrades (e.g. R2000->R2004, R2010->R2018).
+    /// (Raw SECTIONS are container-level and stay strict — not covered here.)
+    static bool sameRawObjectEncodingFamily(DRW::Version src, DRW::Version tgt);
 
     static RS2::LineWidth numberToWidth(DRW_LW_Conv::lineWidth lw);
     static DRW_LW_Conv::lineWidth widthToNumber(RS2::LineWidth width);
@@ -257,27 +388,32 @@ public:
 
     static bool isVariableTwoDimensional(const QString& var);
 
-    static RS_FilterInterface* createFilter(){return new RS_FilterDXFRW();}
+    static RS_FilterInterface* createFilter() {
+        return new RS_FilterDXFRW();
+    }
+
 protected:
     void parseDimStyleExtData(const DRW_Dimstyle& s, LC_DimStyle* result);
-    bool resolveBlockNameByHandle(duint32 handle, QString& block_name) const;
+    bool resolveBlockNameByHandle(std::uint32_t handle, QString& block_name) const;
     LC_DimStyle* parseDimStyleOverride(LC_ExtEntityData* data) const;
     RS_DimensionData convDimensionData(const DRW_Dimension* data);
     void fillEntityExtData(std::vector<std::shared_ptr<DRW_Variant>>& extData, LC_ExtEntityData* entityData);
     LC_ExtEntityData* extractEntityExtData(const std::vector<std::shared_ptr<DRW_Variant>>& extData);
-    bool shouldGenerateExtEntityData(RS_Dimension* entity);
+    bool shouldGenerateExtEntityData(const RS_Dimension* entity);
     QString toHexStr(int n);
     void addDimStyleOverrideToExtendedData(LC_ExtEntityData* extEntityData, LC_DimStyle* styleOverride);
+    RS_Layer *importLayerForEntity(const QString &layName,
+                                   const std::string &rawLayerName);
+
 private:
     void prepareBlocks();
     void writeEntity(RS_Entity* e);
 #ifdef DWGSUPPORT
     void printDwgError(int le);
-    QString strVal(DRW_Variant* var);
+    QString strVal(const DRW_Variant* var);
     QString printDwgVersion(int v);
 #endif
 
-private:
     /** Pointer to the m_graphic we currently operate on. */
     RS_Graphic* m_graphic = nullptr;
     /** File name. Used to find out the full path of images. */
@@ -289,11 +425,29 @@ private:
      *  per-element offsets when decomposing the MLINE into N polylines. */
     std::map<QString, DRW_MLineStyle> m_mlineStyleCache;
 
+    /** DXF export: raw-net OBJECT handles to NOT re-emit because the codec
+     *  regenerates them (the source ACAD_GROUP dictionary, and any object
+     *  colliding with the fixed root/group handles C/D). Computed in fileExport
+     *  before write(), consumed by the rawDxfObjects re-emit in writeObjects. */
+    std::set<std::uint32_t> m_dxfSuppressedObjectHandles;
+
+    /** DXF export (DWG->DXF): SOURCE handles of the named parent dictionaries
+     *  emitted via setNamedDictObjects (F4-followup). Computed in fileExport,
+     *  consumed by the data-only OBJECT emitters in writeObjects: a data-only
+     *  record whose 330 parent is in this set (or 0, or a raw-net handle) keeps
+     *  it; otherwise the parent is zeroed so writeObjectOwner emits C and the
+     *  object is never a dangling-owner reference. */
+    std::set<std::uint32_t> m_dxfEmittedNamedDictHandles;
+
     /** UNDERLAYDEFINITION cache: handle → definition (filename, sheet, kind).
      *  Populated by linkUnderlay (OBJECTS section, after entities are
      *  parsed). Consumed at export time + by future UI surfaces that
      *  want the filename for a given underlay. Cleared per import. */
-    std::map<duint32, DRW_UnderlayDefinition> m_underlayDefMap;
+    std::map<std::uint32_t, DRW_UnderlayDefinition> m_underlayDefMap;
+
+    /** Raw unsupported DWG payloads kept during import for diagnostics and
+     *  future round-trip/semantic decoders. */
+    std::vector<DRW_UnsupportedObject> m_unsupportedDwgObjects;
 
     /** Recursion guard for embedXref. Holds the absolute paths of files
      *  currently being loaded (the host file plus any in-progress XREF
@@ -334,6 +488,15 @@ private:
     void reconstructMLines(RS_EntityContainer *container,
                            std::set<RS_Entity *> &consumed);
 
+    /** Scan @p container for RS_Polyline fallback geometry carrying
+     *  LibreCAD_POLYLINE_MESH / LibreCAD_POLYLINE_PFACE XDATA and
+     *  reconstruct native old-style POLYLINE entities when the complete
+     *  decomposed group is still present and matches the preserved source
+     *  topology. Consumed polylines are written into @p consumed so the
+     *  normal entity-write loop skips them. */
+    void reconstructPolylineSidecars(RS_EntityContainer *container,
+                                     std::set<RS_Entity *> &consumed);
+
     /** Scan @p container for RS_Polyline entities carrying
      *  LibreCAD_UNDERLAY XDATA and reconstruct DRW_Underlay entities.
      *  Each polyline maps 1:1 to an underlay (no group). Consumed
@@ -342,6 +505,15 @@ private:
      *  through as plain LWPOLYLINEs. */
     void reconstructUnderlays(RS_EntityContainer *container,
                               std::set<RS_Entity *> &consumed);
+
+    /** Scan @p container for RS entities carrying a F2 type-fidelity
+     *  sidecar (LibreCAD_RAY / _XLINE / _TRACE / _3DFACE XDATA), rebuild the
+     *  native DRW type with full geometry (incl. Z) via the existing
+     *  writeRay/writeXline/writeTrace/write3dface, and record the consumed
+     *  RS entity so the normal entity-write loop skips it. Entities without
+     *  the marker fall through to their lossy default write. */
+    void reconstructTypedConversions(RS_EntityContainer *container,
+                                     std::set<RS_Entity *> &consumed);
     /** File m_codePage. Used to find the text coder. */
     QString m_codePage;
     /** File version. */
@@ -349,30 +521,51 @@ private:
     int m_version = 0;
     /** Library File version. */
 #define LIBDXFRW_VERSION(version,release,patch) (((version) << 16) | ((release) << 8) | (patch))
-    bool m_isLibDxfRw {false};
+    bool m_isLibDxfRw{false};
     uint m_libDxfRwVersion = 0;
     /** dimension style. */
     QString m_dimStyle;
     /** text style. */
     QString m_textStyle;
     /** Temporary list to handle unnamed blocks to write R12 dxf. */
-    QHash <RS_Entity*, QString> m_noNameBlock;
-    QHash <QString, QString> m_fontList;
+    QHash<RS_Entity*, QString> m_noNameBlock;
+    QHash<QString, QString> m_fontList;
     bool m_oldMText = false;
-    dxfRW *m_dxfW {nullptr};
-    dxfRW *m_dxfR {nullptr};
+    dxfRW* m_dxfW{nullptr};
+    dxfRW* m_dxfR{nullptr};
 #ifdef DWGSUPPORT
     dwgRW *m_dwgW {nullptr};
+    dwgRW::WriteSkipCounters m_lastDwgWriteSkipCounters;
+    // Preserved-OBJECT handles that collide with the DWG writer's fixed
+    // structural handles (control objects, canonical table records), mapped
+    // to fresh handles above the preserved high-water mark. Built by
+    // fileExport before write(), applied by writeObjects at emission time.
+    std::map<std::uint32_t, std::uint32_t> m_dwgWriteHandleRemap;
 #endif
+    // DRW_Interface write callbacks are void. Preserve callback failures until
+    // fileExport can return them to the caller instead of reporting success.
+    bool m_writeFailed {false};
     /** If saved version are 2004 or above can save color in RGB value. */
     bool m_exactColor = false;
     /** hash of block containers and handleBlock numbers to read dwg files */
     QHash<int, RS_EntityContainer*> m_blockHash;
+    /** Per-import layer cache keyed by NFC-normalized name. */
+    QHash<QString, RS_Layer *> m_importLayerCache;
+    /** Fast-path mirror of m_importLayerCache keyed by the RAW (pre-
+     *  normalization) name, checked first in importLayerForEntity() so a
+     *  repeated layer name (the common case: few distinct layers, many
+     *  entities) skips the NFC-normalization pass entirely on a hit. Falls
+     *  back to m_importLayerCache (which does normalize) on a miss, so this
+     *  is purely additive -- never the only source of truth for a name. */
+    QHash<QString, RS_Layer *> m_importLayerRawCache;
     /** Pointer to entity container to store possible orphan entities like paper space */
     RS_EntityContainer* m_dummyContainer = nullptr;
-    void applyParsedDimStyleExtData(LC_DimStyle* dimStyle, const QString& appName, const std::vector<DRW_Variant>& vector);
-    LC_DimStyle *createDimStyle(const DRW_Dimstyle &s);
-    void addPolylineSegment(RS_Polyline& polyline, RS_Vector prev_pos, RS_Vector curr_pos, double bulge, const std::vector<std::shared_ptr<DRW_Variant>>& extData, bool isClosedSegment);
+    void applyParsedDimStyleExtData(const LC_DimStyle* dimStyle, const QString& appName, const std::vector<DRW_Variant>& vector);
+    LC_DimStyle* createDimStyle(const DRW_Dimstyle& s);
+    void addPolylineSegment(RS_Polyline& polyline, const RS_Vector& previousPosition,
+                            const RS_Vector& currentPosition, double segmentBulge,
+                            double nextBulge,
+                            const std::vector<std::shared_ptr<DRW_Variant>>& extData);
     /**
      * Handle degree-2 SPLINE with exactly 3 control points (rational quadratic conic).
      * @return true if a conic entity (hyperbola or parabola) was created and handled

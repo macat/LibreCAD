@@ -66,10 +66,10 @@ set(PLUGIN_TS_FILES
     plugins_gl.ts
     plugins_hi.ts
     plugins_hu.ts
-    plugins_id_id.ts
     plugins_it.ts
     plugins_ja.ts
     plugins_ko.ts
+    plugins_lo.ts
     plugins_lv.ts
     plugins_mk.ts
     plugins_nl.ts
@@ -105,11 +105,15 @@ add_subdirectory(picfile)
 add_subdirectory(plotequation)
 add_subdirectory(pointstocsv)
 add_subdirectory(gear)
+# importshp plugin removed in Phase 5 of docs/plan_shp_native_filter.md;
+# superseded by the native RS_FilterSHP filter (File->Open path).
 
 # Compile plugin translations (.ts → .qm)
-set(PLUGIN_TS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ts)
-list(TRANSFORM PLUGIN_TS_FILES PREPEND "${PLUGIN_TS_DIR}/")
-qt_add_translations(align
-    TS_FILE_DIR ${PLUGIN_TS_DIR}
-    TS_FILES ${PLUGIN_TS_FILES}
-)
+# Note: qt_add_translations is commented out to avoid duplicate resource definition
+# conflicts with CMAKE_AUTORCC ON in the main CMakeLists.txt
+# set(PLUGIN_TS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ts)
+# list(TRANSFORM PLUGIN_TS_FILES PREPEND "${PLUGIN_TS_DIR}/")
+# qt_add_translations(align
+#     TS_FILE_DIR ${PLUGIN_TS_DIR}
+#     TS_FILES ${PLUGIN_TS_FILES}
+# )
