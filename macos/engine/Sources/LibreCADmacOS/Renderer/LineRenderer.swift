@@ -263,6 +263,15 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     /// re-culls. Single source of truth in `RendererCull`.
     private static let cullMargin = RendererCull.defaultMargin
 
+    // MARK: - Renderer dirty-set (Wave P5)
+
+    /// Per-entity geometry cache for dirty rebuild — only re-resolves
+    /// `dirty ∩ visible`, reuses the rest. Keyed by `EntityID`, value is
+    /// the packed geometry that entity contributed at its `resolveVersion`.
+    private var entityGeometryCache: [EntityID: RendererGeometry.CachedEntityGeometry] = [:]
+    /// The ordered visible ids the cache was last built for (for dirty diff).
+    private var lastVisibleOrdered: [EntityID] = []
+
     // MARK: Cull scratch (reused; no per-frame heap allocation, §2.3)
 
     /// Persistent scratch the cull rebuild packs into, cleared with
@@ -590,13 +599,14 @@ final class LineRenderer: NSObject, MTKViewDelegate {
     private func refreshRenderPrefs() {
         let fresh = RenderPrefs.fromDefaults()
         guard fresh != renderPrefs else { return }
-        // The half-width (width + AA) feeds the packed line/fill instances; the LOD
-        // feeds the resolve tolerance. A change in EITHER must re-pack / re-resolve, so
-        // invalidate both caches — the next `rebuildLineInstancesIfNeeded` sees a
-        // version mismatch and rebuilds with the new prefs.
         renderPrefs = fresh
         builtModelVersion = -1
         resolveContextVersion = -1
+        // Dirty-set cache is keyed on halfWidth / tessellation as well (via the
+        // packed geometry). A pref change stales it, so invalidate for the next
+        // rebuild to fall back to full (correctness first).
+        entityGeometryCache.removeAll(keepingCapacity: true)
+        lastVisibleOrdered.removeAll(keepingCapacity: true)
     }
 
     // MARK: - Buffer (re)builds
@@ -622,53 +632,115 @@ final class LineRenderer: NSObject, MTKViewDelegate {
 
         // Reuse the persistent scratch (no per-frame heap allocation, §2.3) and the
         // cached resolve context (rebuilt only on model change, not per cull).
+        let ctx = resolveContext(modelChanged: modelChanged)
+        let origin = model.renderOrigin
+        let layers = model.drawing.layers
+        let activeSpace = model.activeSpace
+        let activeLayout = model.activeLayout
+        let blockMembers: Set<EntityID> =
+            (activeSpace == .model && model.editingBlock == nil)
+            ? model.drawing.blockMemberIDs : []
+        let halfWidthPx = renderPrefs.lineHalfWidthPx(backingScale: backingScale)
+        let identity: (SIMD4<Float>) -> SIMD4<Float> = { $0 }
+        let colorTransform: (SIMD4<Float>) -> SIMD4<Float> =
+            OverlayStyle.invertNearWhiteEntities ? RendererGeometry.autoInvertWhite : identity
+
+        // Ordered visible ids (draw-order sorted, or activeSpace fallback).
+        let rawVisibleIDs = model.quadtree.query(region: cullRect)
+        let orderedVisibleIDs: [EntityID]
+        if rawVisibleIDs.isEmpty && model.quadtree.isEmpty {
+            orderedVisibleIDs = model.activeSpaceEntities.map(\.id)
+        } else {
+            orderedVisibleIDs = rawVisibleIDs.sorted {
+                (model.drawing.storageIndex(of: $0) ?? 0) < (model.drawing.storageIndex(of: $1) ?? 0)
+            }
+        }
+
+        // --- Dirty-set incremental path (Wave P5) ---
+        // When the model changed and we have a prior cache, try to rebuild only
+        // `dirty ∩ visible`. On first frame, empty dirty, or oversized dirty,
+        // fall back to the full rebuild (correctness first).
+        if modelChanged && !orderedVisibleIDs.isEmpty {
+            let visibleSet = Set(orderedVisibleIDs)
+            let lastVersions = Dictionary(uniqueKeysWithValues: entityGeometryCache.map { ($0.key, $0.value.version) })
+            let lastVisibleSet = Set(lastVisibleOrdered)
+            let dirtySet = DirtySet.computeDirty(drawing: model.drawing,
+                                                 visibleIDs: visibleSet,
+                                                 lastVersions: lastVersions,
+                                                 lastVisible: lastVisibleSet)
+            let isFirstFrame = entityGeometryCache.isEmpty
+            if !dirtySet.shouldFallback(visibleCount: orderedVisibleIDs.count, isFirstFrame: isFirstFrame) {
+                let previousCount = lineInstanceCount
+                var cache = entityGeometryCache
+                let result = RendererGeometry.rebuildDirty(
+                    visibleIDs: orderedVisibleIDs,
+                    dirtyIDs: dirtySet.ids,
+                    lookup: { [drawing = model.drawing] id in drawing.entity(id) },
+                    ctx: ctx, renderOrigin: origin, layers: layers,
+                    activeSpace: activeSpace, activeLayout: activeLayout,
+                    blockMembers: blockMembers,
+                    halfWidthPx: halfWidthPx, backingScale: backingScale,
+                    colorTransform: colorTransform, cache: &cache)
+
+                // If rebuildDirty did NOT fall back, it already produced the
+                // fully ordered visible arrays via the cache. Append viewports
+                // and tables (which are not per-entity cached) then do a
+                // partial or full upload.
+                if !result.didFallback {
+                    entityGeometryCache = cache
+                    instanceScratch = result.lineInstances
+                    fillScratch = result.fillVerts
+                    wipeoutScratch = result.wipeoutVerts
+                    imageScratch = result.imageQuads
+
+                    // Viewport contents and tables are not dirtied per-entity;
+                    // they are always re-packed. For a model-space typical
+                    // drawing they are empty, so this is no-op.
+                    if activeSpace == .paper, let layout = model.activeLayoutRecord, !layout.viewports.isEmpty {
+                        packViewportContents(layout.viewports, ctx: ctx, origin: origin, layers: layers)
+                    }
+                    packTables(origin: origin)
+
+                    // Partial upload when the entity part was small and counts stable.
+                    let hasViewportOrTables = (activeSpace == .paper && !(model.activeLayoutRecord?.viewports.isEmpty ?? true))
+                        || !model.drawing.tables.isEmpty
+                    if !hasViewportOrTables, !result.dirtyLineRanges.isEmpty,
+                       instanceScratch.count == previousCount,
+                       result.dirtyLineRanges.reduce(0, { $0 + $1.count }) * 2 < instanceScratch.count {
+                        uploadLineInstancesDirty(instanceScratch, dirtyRanges: result.dirtyLineRanges, previousCount: previousCount)
+                    } else {
+                        uploadLineInstances(instanceScratch)
+                    }
+                    uploadFillVertices(fillScratch)
+                    lastVisibleOrdered = orderedVisibleIDs
+                    builtModelVersion = model.modelVersion
+                    builtVisibleRect = cullRect
+                    model.modelDirty = false
+                    return
+                } else {
+                    // rebuildDirty fell back to full (oversized); update cache
+                    // and fall through to the full path below (which will rebuild
+                    // consistently via the entity loop).
+                    entityGeometryCache = cache
+                }
+            }
+        }
+
+        // --- Full rebuild (fallback / first frame / oversized / viewport escape) ---
         instanceScratch.removeAll(keepingCapacity: true)
         fillScratch.removeAll(keepingCapacity: true)
         wipeoutScratch.removeAll(keepingCapacity: true)
         imageScratch.removeAll(keepingCapacity: true)
-        let ctx = resolveContext(modelChanged: modelChanged)
-        let origin = model.renderOrigin
-        let layers = model.drawing.layers
-        // Paper-space P2: pack ONLY the active space's entities. The quadtree is
-        // already scoped to the active space (so the cull query returns only its
-        // ids), but the degenerate-index FALLBACK below iterates the raw drawing, and
-        // a stale id could in theory survive a lagging index — so the per-entity
-        // space gate in `packEntity` is the authoritative filter (model space ⇒
-        // model entities; a layout ⇒ only that layout's paper entities).
-        let activeSpace = model.activeSpace
-        let activeLayout = model.activeLayout
-        // Block-member exclusion (computed ONCE per rebuild, not per entity): in MODEL
-        // space outside a block-edit session, a block definition's owned members must
-        // not draw directly (they draw via the INSERT / inside the Block Editor). Inside
-        // a session the active space IS the block's members, so they MUST draw — hence
-        // the empty set there; paper space carries no block members, so empty there too.
-        let blockMembers: Set<EntityID> =
-            (activeSpace == .model && model.editingBlock == nil)
-            ? model.drawing.blockMemberIDs : []
-        let visibleIDs = model.quadtree.query(region: cullRect)
 
-        if visibleIDs.isEmpty && model.quadtree.isEmpty {
-            // Index empty (e.g. entities with degenerate boxes / no model) — fall
-            // back to resolving the ACTIVE space's entities so a small/degenerate
-            // drawing still shows. Cheap for tiny drawings; large ones populate the
-            // index.
+        if rawVisibleIDs.isEmpty && model.quadtree.isEmpty {
             for e in model.activeSpaceEntities {
                 packEntity(e, ctx: ctx, origin: origin, layers: layers,
                            activeSpace: activeSpace, activeLayout: activeLayout,
                            blockMembers: blockMembers)
             }
         } else {
-            // Honor DRAW ORDER (F16): the spatial query returns ids in quadtree-
-            // traversal order, NOT the model's storage order, so pack the culled set
-            // sorted by each entity's storage index (front-most == highest index ==
-            // painted last → on top). This makes the Arrange (raise/lower/front/back)
-            // ops actually change the visible stacking. The sort is over the small
-            // CULLED set (not the whole drawing), and `storageIndex` is O(1).
-            instanceScratch.reserveCapacity(visibleIDs.count * 2)
-            let ordered = visibleIDs.sorted {
-                (model.drawing.storageIndex(of: $0) ?? 0) < (model.drawing.storageIndex(of: $1) ?? 0)
-            }
-            for id in ordered {
+            instanceScratch.reserveCapacity(orderedVisibleIDs.count * 2)
+            for id in orderedVisibleIDs {
                 guard let e = model.drawing.entity(id) else { continue }
                 packEntity(e, ctx: ctx, origin: origin, layers: layers,
                            activeSpace: activeSpace, activeLayout: activeLayout,
@@ -676,29 +748,39 @@ final class LineRenderer: NSObject, MTKViewDelegate {
             }
         }
 
-        // Paper-space P3: when a layout is active, draw each viewport's CONTENTS —
-        // the model-space drawing seen through the viewport, scaled into its paper
-        // frame and clipped to it. Pure geometry (no Metal scissor): each model
-        // entity is resolved, mapped into paper space by the viewport's affine,
-        // Cohen–Sutherland-clipped to the frame, and fed through the SAME line-
-        // instance path. v1: DRAW-ONLY (not snap/select-through), so this packs into
-        // `instanceScratch` only and the quadtree stays scoped to the active space.
         if activeSpace == .paper, let layout = model.activeLayoutRecord, !layout.viewports.isEmpty {
             packViewportContents(layout.viewports, ctx: ctx, origin: origin, layers: layers)
         }
-
-        // Wire-wave-1: TABLES. Tables are NOT entities (they live in `drawing.tables`,
-        // off `EntityKind`), so the entity pack above never touches them. Pack each
-        // active-space table's materialized geometry — grid lines + cell text shaped
-        // through the shared TextShaper — into the SAME line/fill scratch the entities
-        // use, so a placed table appears on the canvas. The model scopes the set to
-        // model space (the MVP), so this is empty on a paper layout / in a block edit.
         packTables(origin: origin)
+
+        // Refresh the per-entity cache for the next dirty pass (model-space only).
+        // Rebuild it from the currently visible ordered set so future dirty
+        // detection is accurate. This is O(visible) but only on full rebuilds.
+        if activeSpace == .model {
+            var newCache: [EntityID: RendererGeometry.CachedEntityGeometry] = [:]
+            newCache.reserveCapacity(orderedVisibleIDs.count)
+            for id in orderedVisibleIDs {
+                guard let rec = model.drawing.entity(id),
+                      let entry = RendererGeometry.cachedGeometry(
+                        for: rec, ctx: ctx, renderOrigin: origin, layers: layers,
+                        activeSpace: activeSpace, activeLayout: activeLayout,
+                        blockMembers: blockMembers, halfWidthPx: halfWidthPx,
+                        backingScale: backingScale, colorTransform: colorTransform) else { continue }
+                newCache[id] = entry
+            }
+            entityGeometryCache = newCache
+            lastVisibleOrdered = orderedVisibleIDs
+        } else {
+            // Paper space / block edit: cache not used (geometry is viewport-mapped);
+            // keep last ordering for dirty diff but clear entity cache.
+            entityGeometryCache.removeAll(keepingCapacity: true)
+            lastVisibleOrdered = orderedVisibleIDs
+        }
 
         uploadLineInstances(instanceScratch)
         uploadFillVertices(fillScratch)
         builtModelVersion = model.modelVersion
-        builtVisibleRect = cullRect   // cache the PADDED rect we culled
+        builtVisibleRect = cullRect
         model.modelDirty = false
     }
 
@@ -917,6 +999,53 @@ final class LineRenderer: NSObject, MTKViewDelegate {
                 buf.contents().copyMemory(from: raw.baseAddress!, byteCount: raw.count)
             }
         }
+    }
+
+    /// Incremental upload: only memcpy the dirty ranges (Wave P5).
+    /// Falls back to a full copy when the count changed (offsets shifted)
+    /// or the dirty payload is >50% of the buffer.
+    private func uploadLineInstancesDirty(_ instances: [LineInstance],
+                                          dirtyRanges: [Range<Int>],
+                                          previousCount: Int) {
+        let needed = instances.count
+        // Count changed ⇒ offsets shifted for the tail, so full copy.
+        if needed != previousCount {
+            uploadLineInstances(instances)
+            return
+        }
+        // Empty or trivial dirty ⇒ full copy (correctness).
+        if dirtyRanges.isEmpty {
+            uploadLineInstances(instances)
+            return
+        }
+        let dirtyCount = dirtyRanges.reduce(0) { $0 + $1.count }
+        if dirtyCount == 0 || dirtyCount * 2 > needed {
+            uploadLineInstances(instances)
+            return
+        }
+        // Ensure buffer exists and is large enough (no realloc path here —
+        // if we need to grow we do a full upload).
+        if lineInstanceBuffer == nil || needed > lineBufferCapacity {
+            uploadLineInstances(instances)
+            return
+        }
+        guard let buf = lineInstanceBuffer else {
+            uploadLineInstances(instances)
+            return
+        }
+        instances.withUnsafeBytes { raw in
+            let base = raw.baseAddress!
+            let stride = MemoryLayout<LineInstance>.stride
+            for range in dirtyRanges {
+                guard range.lowerBound >= 0, range.upperBound <= needed else { continue }
+                let byteOffset = range.lowerBound * stride
+                let byteCount = range.count * stride
+                let src = base.advanced(by: byteOffset)
+                let dst = buf.contents().advanced(by: byteOffset)
+                dst.copyMemory(from: src, byteCount: byteCount)
+            }
+        }
+        lineInstanceCount = needed
     }
 
     /// Uploads `verts` (triangle vertices, 3 per triangle) into the persistent fill
