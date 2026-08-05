@@ -13,10 +13,21 @@
 //    • `connectedComponent(of:)`— the set of entities transitively coupled to a
 //                                 seed entity by shared constraints (the unit the
 //                                 solver solves at once).
+//    • `touchedComponents(containing:)` — the DISTINCT components that intersect a
+//                                 set of edited ids (dirty-component incremental
+//                                 re-solve: only these need the solver; the rest
+//                                 of the drawing is untouched).
 //    • `dropDangling(removedID:)`— drop every constraint that references a deleted
 //                                 entity (the entity-remove hook keeps the table
 //                                 consistent — no constraint ever points at a gone
 //                                 entity).
+//
+//  Wave 3 — sparsity + incremental: the solver is PURE (value in, value out) and
+//  solves ONE connected component at a time. Callers (e.g. CanvasModel) MUST use
+//  `touchedComponents(containing:)` to find the dirty components after an edit and
+//  invoke `ConstraintSolver` only on those — never the whole table. This keeps a
+//  single-entity edit O(component size) instead of O(table size) and preserves the
+//  solver's pure contract (no global state, no incremental cache inside the solver).
 //
 //  GPLv2-or-later (LibreCAD derivative).
 //
@@ -138,6 +149,60 @@ public struct ConstraintTable: Sendable, Hashable, Codable {
     /// every constraint touching a component member touches only component members).
     public func constraints(within entityIDs: Set<EntityID>) -> [Constraint] {
         constraints.filter { c in c.entityIDs.allSatisfy { entityIDs.contains($0) } }
+    }
+
+    // MARK: - Dirty-component helper (Wave 3 — incremental)
+
+    /// The DISTINCT connected components that intersect `ids`.
+    ///
+    /// Each returned component is the transitive closure of a seed in `ids`; components
+    /// are disjoint and together comprise exactly the entities whose constraints could
+    /// have been affected by an edit that touched `ids`. Callers that mutate geometry
+    /// should re-solve ONLY these components — the solver is pure and solves one
+    /// component at a time, and the rest of the table needs no work.
+    ///
+    /// - If `ids` is empty or none of its members are constrained, the result is `[]`
+    ///   (nothing to re-solve — the cheap early-out).
+    /// - The order of the returned components follows the first-seen order of `ids`.
+    ///
+    /// Pure, O(constraints × component size) BFS only over the touched region; never
+    /// scans the whole table beyond the BFS frontier.
+    public func touchedComponents(containing ids: Set<EntityID>) -> [Set<EntityID>] {
+        guard !ids.isEmpty, !constraints.isEmpty else { return [] }
+        let constrained = referencedEntityIDs
+        // Keep only seeds that actually participate in a constraint; an unconstrained
+        // edit never dirties a component.
+        let seeds = ids.filter { constrained.contains($0) }
+        guard !seeds.isEmpty else { return [] }
+        var seen: Set<EntityID> = []
+        var result: [Set<EntityID>] = []
+        result.reserveCapacity(seeds.count)
+        for seed in seeds where !seen.contains(seed) {
+            let comp = connectedComponent(of: seed)
+            seen.formUnion(comp)
+            result.append(comp)
+        }
+        return result
+    }
+
+    /// Convenience overload for an array of ids.
+    public func touchedComponents(containing ids: [EntityID]) -> [Set<EntityID>] {
+        touchedComponents(containing: Set(ids))
+    }
+
+    /// All DISTINCT connected components present in the table (the partition of
+    /// `referencedEntityIDs` under `connectedComponent`). Useful for full-table
+    /// operations like `resolveAllConstraints`; prefer `touchedComponents` for
+    /// incremental edits.
+    public var allComponents: [Set<EntityID>] {
+        var seen: Set<EntityID> = []
+        var result: [Set<EntityID>] = []
+        for id in referencedEntityIDs where !seen.contains(id) {
+            let comp = connectedComponent(of: id)
+            seen.formUnion(comp)
+            result.append(comp)
+        }
+        return result
     }
 
     // MARK: - Dangling drop (entity-remove hook)
