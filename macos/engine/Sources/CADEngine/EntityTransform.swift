@@ -221,32 +221,11 @@ public extension EntityKind {
 /// not module-scope free functions — see CONVENTIONS.md fan-out hazard note).
 public enum EntityTransform {
 
-    /// Applies `t` to `kind`, dispatching on the entity case. Exhaustive: every
-    /// `EntityKind` case is handled, so adding a case is a compile error here.
+    /// Applies `t` to `kind`, dispatching on the entity case. Wave 5: the exhaustive
+    /// switch now lives only in `EntityKind.resolver` (Entity.swift); this method
+    /// dispatches via that single factory so adding a kind only touches the factory.
     public static func transform(_ kind: EntityKind, by t: Affine2D) -> EntityKind {
-        switch kind {
-        case .point(let p):           return .point(transformPoint(p, t))
-        case .line(let l):            return .line(transformLine(l, t))
-        case .circle(let c):          return .circle(transformCircle(c, t))
-        case .arc(let a):             return .arc(transformArc(a, t))
-        case .polyline(let pl):       return .polyline(transformPolyline(pl, t))
-        case .ellipse(let e):         return .ellipse(transformEllipse(e, t))
-        case .spline(let s):          return .spline(transformSpline(s, t))
-        case .splinePoints(let sp):   return .splinePoints(transformSplinePoints(sp, t))
-        case .text(let tx):           return .text(transformText(tx, t))
-        case .mtext(let mt):          return .mtext(transformMText(mt, t))
-        case .hatch(let h):           return .hatch(transformHatch(h, t))
-        case .solid(let s):           return .solid(transformSolid(s, t))
-        case .dimension(let dm):      return .dimension(transformDimension(dm, t))
-        case .insert(let ins):        return .insert(transformInsert(ins, t))
-        case .xline(let x):           return .xline(transformXLine(x, t))
-        case .ray(let r):             return .ray(transformRay(r, t))
-        case .leader(let ld):         return .leader(transformLeader(ld, t))
-        case .multileader(let ml):    return .multileader(transformMultiLeader(ml, t))
-        case .image(let im):          return .image(transformImage(im, t))
-        case .wipeout(let w):         return .wipeout(transformWipeout(w, t))
-        case .mline(let m):           return .mline(transformMLine(m, t))
-        }
+        kind.resolver.transformed(by: t)
     }
 
     // MARK: image — the insertion (lower-left) corner transforms (full affine);

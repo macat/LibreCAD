@@ -1685,6 +1685,21 @@ public struct MLineData: Sendable, Hashable, Codable {
     }
 }
 
+// MARK: - Wave 5: Test Stub (open-registry proof)
+
+/// Minimal stub data for the open-registry proof — a single position + label.
+/// Adding this new `EntityKind` case (`.testStub`) only requires extending the
+/// `resolver` switch in this file and providing `TestStubResolver`; `Resolve.swift`
+/// and `EntityTransform.swift` handle it via `kind.resolver` with no switch touch.
+public struct TestStubData: Sendable, Hashable, Codable {
+    public var position: Vector
+    public var label: String
+    public init(position: Vector, label: String = "stub") {
+        self.position = position
+        self.label = label
+    }
+}
+
 // MARK: - The entity-kind sum type
 
 /// The discriminated union of entity geometry. This is the **seed set** for the
@@ -1787,6 +1802,651 @@ public enum EntityKind: Sendable, Hashable, Codable {
     /// `EntityKind`. Behaves like a polyline for the path-vertex switches.
     case mline(MLineData)
 }
+
+// MARK: - Wave 5: EntityKind Open Registry
+
+/// Wave 5 — EntityKind open registry (perf-arch-review-plan.md Wave 5, A3).
+///
+/// The ONLY exhaustive switch over `EntityKind` lives in `EntityKind.resolver` below.
+/// Every other site (`Resolve.swift`, `EntityTransform.swift`, and the 20 follow-up
+/// sites — `Snapping.swift`, `Selection.swift`, `Intersections.swift`,
+/// `DXFReader.swift`/`Writer.swift`, `HitTesting.swift`, `CADDrawing+Quadtree`,
+/// etc.) dispatches via `kind.resolver.resolve(...)` / `boundingBox()` / `transformed(by:)`
+/// instead of switching on `kind` directly, so adding a new `EntityKind` case is an
+/// "add `MyKind.swift` + extend this switch" task, not a 22-file atomic arm.
+/// The `EntityKind` enum itself is kept for now (frozen Codable + exhaustive checking);
+/// a future wave can replace it with an open `String`-keyed registry without touching
+/// those 22 call sites — only this factory changes.
+///
+/// This file is the single authority on the mapping `EntityKind` → resolver. The
+/// per-kind resolver structs (`PointResolver`, `LineResolver`, …) are pure, stateless,
+/// `Sendable` value types that implement `EntityResolver`; `AnyEntityResolver` is the
+/// type-erased box that `kind.resolver` returns, capturing the associated `*Data`
+/// value so call sites don't need to know the concrete `Data` type.
+
+public protocol EntityResolver: Sendable {
+    associatedtype Data: Sendable & Hashable & Codable
+    static func resolve(_ data: Data, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry
+    static func boundingBox(_ data: Data) -> AABB
+    static func boundingBox(_ data: Data, ctx: ResolveContext) -> AABB
+    static func transform(_ data: Data, by t: Affine2D) -> Data
+}
+
+public struct AnyEntityResolver: Sendable {
+    private let _resolve: @Sendable (ResolvedPen, ResolveContext) -> ResolvedGeometry
+    private let _boundingBox: @Sendable () -> AABB
+    private let _boundingBoxWithContext: @Sendable (ResolveContext) -> AABB
+    private let _transformed: @Sendable (Affine2D) -> EntityKind
+
+    public init(
+        resolve: @escaping @Sendable (ResolvedPen, ResolveContext) -> ResolvedGeometry,
+        boundingBox: @escaping @Sendable () -> AABB,
+        boundingBoxWithContext: @escaping @Sendable (ResolveContext) -> AABB,
+        transformed: @escaping @Sendable (Affine2D) -> EntityKind
+    ) {
+        self._resolve = resolve
+        self._boundingBox = boundingBox
+        self._boundingBoxWithContext = boundingBoxWithContext
+        self._transformed = transformed
+    }
+
+    public func resolve(pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        _resolve(pen, ctx)
+    }
+
+    public func boundingBox() -> AABB {
+        _boundingBox()
+    }
+
+    public func boundingBox(ctx: ResolveContext) -> AABB {
+        _boundingBoxWithContext(ctx)
+    }
+
+    public func transformed(by t: Affine2D) -> EntityKind {
+        _transformed(t)
+    }
+
+    /// Fallback for an unknown / unhandled kind — produces empty geometry, an empty
+    /// bounding box, and an identity transform (the kind is returned unchanged by the
+    /// caller; this fallback is for registry-dictionary lookups outside the exhaustive
+    /// enum switch, e.g. a future string-keyed open registry).
+    public static var fallback: AnyEntityResolver {
+        AnyEntityResolver(
+            resolve: { _, _ in ResolvedGeometry() },
+            boundingBox: { .empty },
+            boundingBoxWithContext: { _ in .empty },
+            transformed: { _ in .point(PointData(position: Vector(0, 0))) }
+        )
+    }
+}
+
+// MARK: - Per-kind resolvers (pure, Sendable, stateless)
+
+public enum PointResolver: EntityResolver {
+    public typealias Data = PointData
+    public static func resolve(_ data: PointData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        EntityKind.resolvePoint(data, pen: pen, ctx: ctx)
+    }
+    public static func boundingBox(_ data: PointData) -> AABB {
+        AABB(point: data.position)
+    }
+    public static func boundingBox(_ data: PointData, ctx: ResolveContext) -> AABB {
+        AABB(point: data.position)
+    }
+    public static func transform(_ data: PointData, by t: Affine2D) -> PointData {
+        EntityTransform.transformPoint(data, t)
+    }
+}
+
+public enum LineResolver: EntityResolver {
+    public typealias Data = LineData
+    public static func resolve(_ data: LineData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        ResolvedGeometry(polylines: [ResolvedPolyline(points: [data.start, data.end], closed: false, pen: pen)])
+    }
+    public static func boundingBox(_ data: LineData) -> AABB {
+        AABB(points: [data.start, data.end])
+    }
+    public static func boundingBox(_ data: LineData, ctx: ResolveContext) -> AABB {
+        AABB(points: [data.start, data.end])
+    }
+    public static func transform(_ data: LineData, by t: Affine2D) -> LineData {
+        EntityTransform.transformLine(data, t)
+    }
+}
+
+public enum CircleResolver: EntityResolver {
+    public typealias Data = CircleData
+    public static func resolve(_ data: CircleData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        let pts = Tessellation.circlePoints(center: data.center, radius: data.radius, tolerance: ctx.tessellationTolerance)
+        return ResolvedGeometry(polylines: [ResolvedPolyline(points: pts, closed: true, pen: pen)])
+    }
+    public static func boundingBox(_ data: CircleData) -> AABB {
+        let r = abs(data.radius)
+        return AABB(min: Vector(data.center.x - r, data.center.y - r, data.center.z),
+                    max: Vector(data.center.x + r, data.center.y + r, data.center.z))
+    }
+    public static func boundingBox(_ data: CircleData, ctx: ResolveContext) -> AABB {
+        boundingBox(data)
+    }
+    public static func transform(_ data: CircleData, by t: Affine2D) -> CircleData {
+        EntityTransform.transformCircle(data, t)
+    }
+}
+
+public enum ArcResolver: EntityResolver {
+    public typealias Data = ArcData
+    public static func resolve(_ data: ArcData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        let pts = Tessellation.arcPoints(center: data.center, radius: data.radius, startAngle: data.startAngle, endAngle: data.endAngle, reversed: data.reversed, tolerance: ctx.tessellationTolerance)
+        return ResolvedGeometry(polylines: [ResolvedPolyline(points: pts, closed: false, pen: pen)])
+    }
+    public static func boundingBox(_ data: ArcData) -> AABB {
+        EntityKind.arcBoundingBox(data)
+    }
+    public static func boundingBox(_ data: ArcData, ctx: ResolveContext) -> AABB {
+        EntityKind.arcBoundingBox(data)
+    }
+    public static func transform(_ data: ArcData, by t: Affine2D) -> ArcData {
+        EntityTransform.transformArc(data, t)
+    }
+}
+
+public enum PolylineResolver: EntityResolver {
+    public typealias Data = PolylineData
+    public static func resolve(_ data: PolylineData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        ResolvedGeometry(polylines: [ResolvedPolyline(points: EntityKind.expandPolyline(data, ctx: ctx), closed: data.closed, pen: pen)])
+    }
+    public static func boundingBox(_ data: PolylineData) -> AABB {
+        AABB(points: EntityKind.expandPolyline(data, ctx: .default))
+    }
+    public static func boundingBox(_ data: PolylineData, ctx: ResolveContext) -> AABB {
+        AABB(points: EntityKind.expandPolyline(data, ctx: ctx))
+    }
+    public static func transform(_ data: PolylineData, by t: Affine2D) -> PolylineData {
+        EntityTransform.transformPolyline(data, t)
+    }
+}
+
+public enum EllipseResolver: EntityResolver {
+    public typealias Data = EllipseData
+    public static func resolve(_ data: EllipseData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        let (pts, closed) = Tessellation.ellipsePoints(data, tolerance: ctx.tessellationTolerance)
+        return ResolvedGeometry(polylines: [ResolvedPolyline(points: pts, closed: closed, pen: pen)])
+    }
+    public static func boundingBox(_ data: EllipseData) -> AABB {
+        EntityKind.ellipseBoundingBox(data)
+    }
+    public static func boundingBox(_ data: EllipseData, ctx: ResolveContext) -> AABB {
+        EntityKind.ellipseBoundingBox(data)
+    }
+    public static func transform(_ data: EllipseData, by t: Affine2D) -> EllipseData {
+        EntityTransform.transformEllipse(data, t)
+    }
+}
+
+public enum SplineResolver: EntityResolver {
+    public typealias Data = SplineData
+    public static func resolve(_ data: SplineData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        if let pts = NURBS.tessellate(data, tolerance: ctx.tessellationTolerance) {
+            return ResolvedGeometry(polylines: [ResolvedPolyline(points: pts, closed: data.closed, pen: pen)])
+        }
+        return ResolvedGeometry(polylines: [ResolvedPolyline(points: data.controlPoints, closed: data.closed, pen: pen)])
+    }
+    public static func boundingBox(_ data: SplineData) -> AABB {
+        AABB(points: data.controlPoints)
+    }
+    public static func boundingBox(_ data: SplineData, ctx: ResolveContext) -> AABB {
+        AABB(points: data.controlPoints)
+    }
+    public static func transform(_ data: SplineData, by t: Affine2D) -> SplineData {
+        EntityTransform.transformSpline(data, t)
+    }
+}
+
+public enum SplinePointsResolver: EntityResolver {
+    public typealias Data = SplinePointsData
+    public static func resolve(_ data: SplinePointsData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        if let (pts, closed) = QuadSpline.tessellate(data, tolerance: ctx.tessellationTolerance) {
+            return ResolvedGeometry(polylines: [ResolvedPolyline(points: pts, closed: closed, pen: pen)])
+        }
+        return ResolvedGeometry()
+    }
+    public static func boundingBox(_ data: SplinePointsData) -> AABB {
+        AABB(points: data.controlPoints)
+    }
+    public static func boundingBox(_ data: SplinePointsData, ctx: ResolveContext) -> AABB {
+        AABB(points: data.controlPoints)
+    }
+    public static func transform(_ data: SplinePointsData, by t: Affine2D) -> SplinePointsData {
+        EntityTransform.transformSplinePoints(data, t)
+    }
+}
+
+public enum TextResolver: EntityResolver {
+    public typealias Data = TextData
+    public static func resolve(_ data: TextData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        TextShaper.resolve(EntityKind.applyingFields(data, ctx: ctx), pen: pen, ctx: ctx)
+    }
+    public static func boundingBox(_ data: TextData) -> AABB {
+        EntityKind.textBoundingBox(data)
+    }
+    public static func boundingBox(_ data: TextData, ctx: ResolveContext) -> AABB {
+        if let tight = TextShaper.boundingBox(data, ctx: ctx) { return tight }
+        return EntityKind.textBoundingBox(data)
+    }
+    public static func transform(_ data: TextData, by t: Affine2D) -> TextData {
+        EntityTransform.transformText(data, t)
+    }
+}
+
+public enum MTextResolver: EntityResolver {
+    public typealias Data = MTextData
+    public static func resolve(_ data: MTextData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        MTextShaper.resolve(EntityKind.applyingFields(data, ctx: ctx), pen: pen, ctx: ctx)
+    }
+    public static func boundingBox(_ data: MTextData) -> AABB {
+        EntityKind.mtextBoundingBox(data)
+    }
+    public static func boundingBox(_ data: MTextData, ctx: ResolveContext) -> AABB {
+        if let tight = MTextShaper.boundingBox(data, ctx: ctx) { return tight }
+        return EntityKind.mtextBoundingBox(data)
+    }
+    public static func transform(_ data: MTextData, by t: Affine2D) -> MTextData {
+        EntityTransform.transformMText(data, t)
+    }
+}
+
+public enum HatchResolver: EntityResolver {
+    public typealias Data = HatchData
+    public static func resolve(_ data: HatchData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        EntityKind.resolveHatch(data, pen: pen, ctx: ctx)
+    }
+    public static func boundingBox(_ data: HatchData) -> AABB {
+        let tess = data.loops.flatMap { HatchBoundary.tessellate($0, tolerance: 0.05) }
+        return AABB(points: tess.isEmpty ? data.loops.flatMap { $0.map(\.point) } : tess)
+    }
+    public static func boundingBox(_ data: HatchData, ctx: ResolveContext) -> AABB {
+        let tess = data.loops.flatMap { HatchBoundary.tessellate($0, tolerance: ctx.tessellationTolerance) }
+        return AABB(points: tess.isEmpty ? data.loops.flatMap { $0.map(\.point) } : tess)
+    }
+    public static func transform(_ data: HatchData, by t: Affine2D) -> HatchData {
+        EntityTransform.transformHatch(data, t)
+    }
+}
+
+public enum SolidResolver: EntityResolver {
+    public typealias Data = SolidData
+    public static func resolve(_ data: SolidData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        guard data.corners.count >= 3 else { return ResolvedGeometry() }
+        return ResolvedGeometry(fills: [ResolvedFill(outline: data.corners, color: pen.color)])
+    }
+    public static func boundingBox(_ data: SolidData) -> AABB {
+        AABB(points: data.corners)
+    }
+    public static func boundingBox(_ data: SolidData, ctx: ResolveContext) -> AABB {
+        AABB(points: data.corners)
+    }
+    public static func transform(_ data: SolidData, by t: Affine2D) -> SolidData {
+        EntityTransform.transformSolid(data, t)
+    }
+}
+
+public enum DimensionResolver: EntityResolver {
+    public typealias Data = DimData
+    public static func resolve(_ data: DimData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        EntityKind.resolveDimension(data, pen: pen, ctx: ctx)
+    }
+    public static func boundingBox(_ data: DimData) -> AABB {
+        EntityKind.dimensionBoundingBox(data)
+    }
+    public static func boundingBox(_ data: DimData, ctx: ResolveContext) -> AABB {
+        EntityKind.dimensionBoundingBox(data)
+    }
+    public static func transform(_ data: DimData, by t: Affine2D) -> DimData {
+        EntityTransform.transformDimension(data, t)
+    }
+}
+
+public enum InsertResolver: EntityResolver {
+    public typealias Data = InsertData
+    public static func resolve(_ data: InsertData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        EntityKind.resolveInsert(data, pen: pen, ctx: ctx)
+    }
+    public static func boundingBox(_ data: InsertData) -> AABB {
+        EntityKind.insertBoundingBox(data, ctx: nil)
+    }
+    public static func boundingBox(_ data: InsertData, ctx: ResolveContext) -> AABB {
+        EntityKind.insertBoundingBox(data, ctx: ctx)
+    }
+    public static func transform(_ data: InsertData, by t: Affine2D) -> InsertData {
+        EntityTransform.transformInsert(data, t)
+    }
+}
+
+public enum XLineResolver: EntityResolver {
+    public typealias Data = XLineData
+    public static func resolve(_ data: XLineData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        guard let seg = EntityKind.constructionSegment(base: data.base, direction: data.direction, oneWay: false, clip: ctx.clipBounds) else { return ResolvedGeometry() }
+        return ResolvedGeometry(polylines: [ResolvedPolyline(points: [seg.0, seg.1], closed: false, pen: pen)])
+    }
+    public static func boundingBox(_ data: XLineData) -> AABB {
+        EntityKind.constructionBoundingBox(base: data.base, direction: data.direction, oneWay: false, clip: nil)
+    }
+    public static func boundingBox(_ data: XLineData, ctx: ResolveContext) -> AABB {
+        EntityKind.constructionBoundingBox(base: data.base, direction: data.direction, oneWay: false, clip: ctx.clipBounds)
+    }
+    public static func transform(_ data: XLineData, by t: Affine2D) -> XLineData {
+        EntityTransform.transformXLine(data, t)
+    }
+}
+
+public enum RayResolver: EntityResolver {
+    public typealias Data = RayData
+    public static func resolve(_ data: RayData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        guard let seg = EntityKind.constructionSegment(base: data.base, direction: data.direction, oneWay: true, clip: ctx.clipBounds) else { return ResolvedGeometry() }
+        return ResolvedGeometry(polylines: [ResolvedPolyline(points: [seg.0, seg.1], closed: false, pen: pen)])
+    }
+    public static func boundingBox(_ data: RayData) -> AABB {
+        EntityKind.constructionBoundingBox(base: data.base, direction: data.direction, oneWay: true, clip: nil)
+    }
+    public static func boundingBox(_ data: RayData, ctx: ResolveContext) -> AABB {
+        EntityKind.constructionBoundingBox(base: data.base, direction: data.direction, oneWay: true, clip: ctx.clipBounds)
+    }
+    public static func transform(_ data: RayData, by t: Affine2D) -> RayData {
+        EntityTransform.transformRay(data, t)
+    }
+}
+
+public enum LeaderResolver: EntityResolver {
+    public typealias Data = LeaderData
+    public static func resolve(_ data: LeaderData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        EntityKind.resolveLeader(data, pen: pen, ctx: ctx)
+    }
+    public static func boundingBox(_ data: LeaderData) -> AABB {
+        EntityKind.leaderBoundingBox(data, ctx: nil)
+    }
+    public static func boundingBox(_ data: LeaderData, ctx: ResolveContext) -> AABB {
+        EntityKind.leaderBoundingBox(data, ctx: ctx)
+    }
+    public static func transform(_ data: LeaderData, by t: Affine2D) -> LeaderData {
+        EntityTransform.transformLeader(data, t)
+    }
+}
+
+public enum MultiLeaderResolver: EntityResolver {
+    public typealias Data = MultiLeaderData
+    public static func resolve(_ data: MultiLeaderData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        EntityKind.resolveMultiLeader(data, pen: pen, ctx: ctx)
+    }
+    public static func boundingBox(_ data: MultiLeaderData) -> AABB {
+        EntityKind.multiLeaderBoundingBox(data, ctx: nil)
+    }
+    public static func boundingBox(_ data: MultiLeaderData, ctx: ResolveContext) -> AABB {
+        EntityKind.multiLeaderBoundingBox(data, ctx: ctx)
+    }
+    public static func transform(_ data: MultiLeaderData, by t: Affine2D) -> MultiLeaderData {
+        EntityTransform.transformMultiLeader(data, t)
+    }
+}
+
+public enum ImageResolver: EntityResolver {
+    public typealias Data = ImageData
+    public static func resolve(_ data: ImageData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        EntityKind.resolveImage(data, pen: pen, ctx: ctx)
+    }
+    public static func boundingBox(_ data: ImageData) -> AABB {
+        let corners = data.corners.filter(\.valid)
+        return corners.isEmpty ? AABB(point: data.insertion.valid ? data.insertion : Vector(0, 0)) : AABB(points: corners)
+    }
+    public static func boundingBox(_ data: ImageData, ctx: ResolveContext) -> AABB {
+        let corners = data.corners.filter(\.valid)
+        return corners.isEmpty ? AABB(point: data.insertion.valid ? data.insertion : Vector(0, 0)) : AABB(points: corners)
+    }
+    public static func transform(_ data: ImageData, by t: Affine2D) -> ImageData {
+        EntityTransform.transformImage(data, t)
+    }
+}
+
+public enum WipeoutResolver: EntityResolver {
+    public typealias Data = WipeoutData
+    public static func resolve(_ data: WipeoutData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        EntityKind.resolveWipeout(data, pen: pen, ctx: ctx)
+    }
+    public static func boundingBox(_ data: WipeoutData) -> AABB {
+        let world = data.worldBoundary.filter(\.valid)
+        return world.isEmpty ? AABB(point: data.insertion.valid ? data.insertion : Vector(0, 0)) : AABB(points: world)
+    }
+    public static func boundingBox(_ data: WipeoutData, ctx: ResolveContext) -> AABB {
+        let world = data.worldBoundary.filter(\.valid)
+        return world.isEmpty ? AABB(point: data.insertion.valid ? data.insertion : Vector(0, 0)) : AABB(points: world)
+    }
+    public static func transform(_ data: WipeoutData, by t: Affine2D) -> WipeoutData {
+        EntityTransform.transformWipeout(data, t)
+    }
+}
+
+public enum MLineResolver: EntityResolver {
+    public typealias Data = MLineData
+    public static func resolve(_ data: MLineData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        EntityKind.resolveMLine(data, pen: pen, ctx: ctx)
+    }
+    public static func boundingBox(_ data: MLineData) -> AABB {
+        let verts = data.vertices.filter(\.valid)
+        guard verts.count >= 2, !data.elements.isEmpty else {
+            return AABB(point: verts.first ?? Vector(0, 0))
+        }
+        var all: [Vector] = []
+        for off in data.effectiveOffsets {
+            all.append(contentsOf: EntityKind.offsetPathMitered(verts, offset: off, closed: data.closed))
+        }
+        all.append(contentsOf: verts)
+        return all.isEmpty ? AABB(point: verts[0]) : AABB(points: all)
+    }
+    public static func boundingBox(_ data: MLineData, ctx: ResolveContext) -> AABB {
+        boundingBox(data)
+    }
+    public static func transform(_ data: MLineData, by t: Affine2D) -> MLineData {
+        EntityTransform.transformMLine(data, t)
+    }
+}
+
+public enum TestStubResolver: EntityResolver {
+    public typealias Data = TestStubData
+    public static func resolve(_ data: TestStubData, pen: ResolvedPen, ctx: ResolveContext) -> ResolvedGeometry {
+        ResolvedGeometry(polylines: [ResolvedPolyline(points: [data.position], closed: false, pen: pen)])
+    }
+    public static func boundingBox(_ data: TestStubData) -> AABB {
+        AABB(point: data.position)
+    }
+    public static func boundingBox(_ data: TestStubData, ctx: ResolveContext) -> AABB {
+        AABB(point: data.position)
+    }
+    public static func transform(_ data: TestStubData, by t: Affine2D) -> TestStubData {
+        TestStubData(position: t.apply(data.position), label: data.label)
+    }
+}
+
+// MARK: - The factory (the ONLY exhaustive switch)
+
+public extension EntityKind {
+    /// The open-registry factory — the ONLY exhaustive switch over `EntityKind`.
+    /// Every other site (`Resolve.swift`, `EntityTransform.swift`, and the 20
+    /// follow-up sites) dispatches via this property instead of switching on `kind`
+    /// directly, so adding a new `EntityKind` case is an "add file + extend this
+    /// switch" task, not a 22-file atomic arm.
+    var resolver: AnyEntityResolver {
+        switch self {
+        case .point(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in PointResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { PointResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in PointResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .point(PointResolver.transform(d, by: t)) }
+            )
+        case .line(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in LineResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { LineResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in LineResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .line(LineResolver.transform(d, by: t)) }
+            )
+        case .circle(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in CircleResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { CircleResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in CircleResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .circle(CircleResolver.transform(d, by: t)) }
+            )
+        case .arc(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in ArcResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { ArcResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in ArcResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .arc(ArcResolver.transform(d, by: t)) }
+            )
+        case .polyline(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in PolylineResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { PolylineResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in PolylineResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .polyline(PolylineResolver.transform(d, by: t)) }
+            )
+        case .ellipse(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in EllipseResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { EllipseResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in EllipseResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .ellipse(EllipseResolver.transform(d, by: t)) }
+            )
+        case .spline(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in SplineResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { SplineResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in SplineResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .spline(SplineResolver.transform(d, by: t)) }
+            )
+        case .splinePoints(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in SplinePointsResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { SplinePointsResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in SplinePointsResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .splinePoints(SplinePointsResolver.transform(d, by: t)) }
+            )
+        case .text(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in TextResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { TextResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in TextResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .text(TextResolver.transform(d, by: t)) }
+            )
+        case .mtext(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in MTextResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { MTextResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in MTextResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .mtext(MTextResolver.transform(d, by: t)) }
+            )
+        case .hatch(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in HatchResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { HatchResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in HatchResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .hatch(HatchResolver.transform(d, by: t)) }
+            )
+        case .solid(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in SolidResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { SolidResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in SolidResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .solid(SolidResolver.transform(d, by: t)) }
+            )
+        case .dimension(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in DimensionResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { DimensionResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in DimensionResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .dimension(DimensionResolver.transform(d, by: t)) }
+            )
+        case .insert(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in InsertResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { InsertResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in InsertResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .insert(InsertResolver.transform(d, by: t)) }
+            )
+        case .xline(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in XLineResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { XLineResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in XLineResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .xline(XLineResolver.transform(d, by: t)) }
+            )
+        case .ray(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in RayResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { RayResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in RayResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .ray(RayResolver.transform(d, by: t)) }
+            )
+        case .leader(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in LeaderResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { LeaderResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in LeaderResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .leader(LeaderResolver.transform(d, by: t)) }
+            )
+        case .multileader(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in MultiLeaderResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { MultiLeaderResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in MultiLeaderResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .multileader(MultiLeaderResolver.transform(d, by: t)) }
+            )
+        case .image(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in ImageResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { ImageResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in ImageResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .image(ImageResolver.transform(d, by: t)) }
+            )
+        case .wipeout(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in WipeoutResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { WipeoutResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in WipeoutResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .wipeout(WipeoutResolver.transform(d, by: t)) }
+            )
+        case .mline(let d):
+            return AnyEntityResolver(
+                resolve: { pen, ctx in MLineResolver.resolve(d, pen: pen, ctx: ctx) },
+                boundingBox: { MLineResolver.boundingBox(d) },
+                boundingBoxWithContext: { ctx in MLineResolver.boundingBox(d, ctx: ctx) },
+                transformed: { t in .mline(MLineResolver.transform(d, by: t)) }
+            )
+        }
+    }
+}
+
+// MARK: - Remaining exhaustive-switch sites (Wave 5 follow-up)
+//
+// Migrated this wave:
+//   - `Resolve.swift` (`EntityKind.resolve(pen:ctx:)` + `boundingBox*`) → `kind.resolver`
+//   - `EntityTransform.swift` (`EntityTransform.transform(_:by:)`) → `kind.resolver`
+//
+// Still switching on `kind` (20 sites, follow-up wave — no behavior change here):
+//   - `Snapping.swift` — snap candidate generation per kind
+//   - `Selection.swift` — selection hit-test / window-containment per kind
+//   - `Intersections/…` — per-pair geometric intersection kernels
+//   - `DXFReader.swift` / `DXFWriter.swift` + `DxfBridge/lcdxf.cpp` — per-kind DXF import/export
+//   - `HitTesting.swift` — per-kind hit-test distance
+//   - `CADDrawing.swift` / `BlockTable.swift` — block member enumeration / kind filtering
+//   - `Tool` family — per-kind grip/handle generation (e.g. `Grips.swift`)
+//   - Adding a new `EntityKind` after this wave still requires touching those follow-up
+//     sites, but `Resolve` + `Transform` are now registry-proven — the next wave migrates
+//     the remaining 20 by moving their per-kind logic into the resolvers added here
+//     (e.g. extend `EntityResolver` with `snapPoints` / `hitTest` / `dxfTag`) and changing
+//     each call site to `kind.resolver.*`.
+
+
 
 // MARK: - Per-entity flags
 
