@@ -286,6 +286,18 @@ public final class Quadtree {
         return query(region: probe)
     }
 
+    /// All entity ids whose box overlaps `aabb` (inclusive on edges).
+    ///
+    /// Convenience alias for `query(region:)` — the form the snap fast path
+    /// describes as `query(aabb: AABB)` / `AABB(min: cursor - tol, max: cursor
+    /// + tol)`. Callers that already have a world-space tolerance box can pass it
+    /// directly; it is identical to `query(point:tolerance:)` with the same
+    /// extents. Exists so the snap/fast-path documentation's `query(aabb:)`
+    /// name resolves (the implementation is the same region query).
+    public func query(aabb: AABB) -> [EntityID] {
+        query(region: aabb)
+    }
+
     /// The single entity whose box is closest to `point` (by box-to-point
     /// distance), within `maxDistance` if given, else `nil`.
     ///
