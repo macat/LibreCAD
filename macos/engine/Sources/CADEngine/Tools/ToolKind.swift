@@ -294,108 +294,22 @@ public enum ToolKind: String, Sendable, Hashable, CaseIterable, Codable {
     /// Mints a fresh `Tool` value for this kind, or `nil` for `.select` (which is
     /// not a `Tool` — it is the app's built-in select/pan mode). The app calls
     /// this when the active kind changes.
+    ///
+    /// Wave 7 — DI: this now DELEGATES to `ToolRegistry.shared` (registration,
+    /// not an exhaustive switch). The switch below is the FALLBACK that seeds
+    /// the registry's defaults (see `ToolRegistry.registerDefaults()`); adding a
+    /// tool = register in one place (the registry), not N switches across
+    /// `ToolKind`/`CommandPalette`/`ToolCatalog`. The delegation keeps existing
+    /// call sites (`kind.makeTool()`) working while the UI can inject a custom
+    /// registry (`CommandRegistry.commands(_:registry:)`).
     public func makeTool() -> (any Tool)? {
-        switch self {
-        case .select:    return nil
-        case .line:      return LineTool()
-        case .circle:    return CircleTool()
-        case .arc:       return ArcTool()
-        case .rectangle: return RectangleTool()
-        case .polyline:  return PolylineTool()
-        case .point:     return PointTool()
-        case .move:      return MoveTool()
-        case .copy:      return CopyTool()
-        case .rotate:    return RotateTool()
-        case .scale:     return ScaleTool()
-        case .mirror:    return MirrorTool()
-        case .ellipse:   return EllipseTool()
-        case .polygon:   return PolygonTool()
-        case .offset:    return OffsetTool()
-        case .trim:      return TrimTool()
-        case .extend:    return ExtendTool()
-        case .fillet:    return FilletTool()
-        case .chamfer:   return ChamferTool()
-        case .spline:    return SplineTool()
-        case .array:     return ArrayTool()
-        case .divide:    return DivideTool()
-        case .explode:   return ExplodeTool()
-        case .hatch:     return HatchTool()
-        case .text:        return TextTool()
-        case .linearDim:   return LinearDimTool(orientation: .horizontal)
-        case .alignedDim:  return AlignedDimTool()
-        case .radialDim:   return RadialDimTool(mode: .radius)
-        case .diameterDim: return RadialDimTool(mode: .diameter)
-        case .angularDim:  return AngularDimTool()
-        case .stretch:     return StretchTool()
-        case .lengthen:    return LengthenTool()
-        case .break:       return BreakTool()
-        // InsertTool with no block name is inert (a safe no-op) — the block-picker UI
-        // is a later task; activation never crashes even with no blocks in the drawing.
-        case .insert:      return InsertTool()
-        case .polylineEdit: return PolylineEditTool()
-        // Measure variants: ONE ToolKind per MeasureTool.Mode (menu clarity), each
-        // minting MeasureTool(mode:). All four are read-only (never commit).
-        case .measureDistance: return MeasureTool(mode: .distance)
-        case .measureAngle:    return MeasureTool(mode: .angle)
-        case .measureArea:     return MeasureTool(mode: .areaPerimeter)
-        case .measureLength:   return MeasureTool(mode: .totalLength)
-        case .join:            return JoinTool()
-        case .explodeText:     return ExplodeTextTool()
-        // Wire-wave-2 dimension subtypes (Annotate group).
-        case .ordinateDim:     return OrdinateDimTool()
-        case .arcLengthDim:    return ArcLengthDimTool()
-        case .angular3pDim:    return Angular3pDimTool()
-        // CreateBlockTool with the default "Block" name: it produces a
-        // `pendingCreation` REQUEST the app applies via the undoable
-        // `CADDrawing.makeBlockFromEntities` (see CanvasModel.handleToolInput).
-        case .createBlock:     return CreateBlockTool()
-        // ExplodeInsertTool minted with the inert (no-blocks) provider; the app
-        // injects the real `blockMembers` provider in `CanvasModel.applyToolConfig`
-        // (the same construction-injection InsertTool uses for its preview members).
-        case .explodeInsert:   return ExplodeInsertTool()
-        // Wire-wave-3 construction-line / annotate / chained-dim tools. Each is minted
-        // with its default config; the app pushes the user's options-bar values onto the
-        // configurable ones (Align scale-to-fit, ArrayPath count/tangent, Leader text,
-        // Baseline spacing) via `CanvasModel.applyToolConfig`.
-        case .xline:           return XLineTool()
-        case .ray:             return RayTool()
-        case .align:           return AlignTool()
-        case .arrayPath:       return ArrayPathTool()
-        case .leader:          return LeaderTool()
-        case .multileader:     return MultiLeaderTool()
-        case .baselineDim:     return BaselineDimTool()
-        case .continueDim:     return ContinueDimTool()
-        // ImageTool minted with NO file (inert no-op) — the app presents a file-picker
-        // on activation and re-mints with the chosen path + source pixel size via
-        // `CanvasModel.applyToolConfig` (the same construction-injection InsertTool /
-        // ExplodeInsertTool use). A bare `makeTool()` never crashes: with no path the
-        // tool ignores every input until the picker provides one.
-        case .image:           return ImageTool()
-        // `.viewport` is an OUT-OF-BAND kind (paper-space viewport placement): like
-        // `.select` it mints NO `Tool`. `ViewportTool` is a standalone value type the
-        // app drives directly (its `LayoutViewport` result is not an entity, so it
-        // cannot flow through the `Tool`/`ToolEdit` contract). The app keys off
-        // `activeToolKind == .viewport` and runs `ViewportTool` itself.
-        case .viewport:        return nil
-        // Parity-program W2: Revision Cloud markup tool (UNWIRED — surfaced later).
-        case .revcloud:        return RevisionCloudTool()
-        // Parity-program W2: Line Construction tool (UNWIRED — surfaced later). The
-        // construction-mode picker (which variant) is a later wave; minted with the
-        // default `.perpendicularFoot` mode.
-        case .lineConstruction: return LineConstructionTool()
-        // Parity-program W3: Wipeout masking-polygon tool. Commits the ONE new
-        // `EntityKind.wipeout`; mints a fresh `WipeoutTool`.
-        case .wipeout:         return WipeoutTool()
-        // Parity-program W: Multiline draw tool (UNWIRED — surfaced later). Minted with
-        // the default STANDARD-like style; the wire-wave pushes the options-bar
-        // justification/scale onto it via `CanvasModel.applyToolConfig`.
-        case .mline:           return MLineTool()
-        // Wire-wave-1: Table insert tool. Mints a fresh `TableTool` (default 3×3 grid).
-        // Like `.createBlock`, its result is NOT a `ToolEdit` (a table is not an
-        // `EntityKind`) — the tool records a `TableObject` the app adds via the undoable
-        // `CADDrawing.addTable` after the run finishes (see CanvasModel.handleToolInput).
-        case .table:           return TableTool()
-        // Append a `case <kind>: return <Name>Tool()` arm per new tool.
-        }
+        ToolRegistry.shared.makeTool(for: self)
+    }
+
+    /// DI overload: mint via an explicit registry (injected by the UI/tests).
+    /// Lets a caller supply a bespoke registry (e.g. a test double) without
+    /// touching `shared`.
+    public func makeTool(using registry: ToolRegistry) -> (any Tool)? {
+        registry.makeTool(for: self)
     }
 }

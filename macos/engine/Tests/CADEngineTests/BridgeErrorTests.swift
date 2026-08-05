@@ -315,3 +315,62 @@ struct BridgeErrorTests {
         #expect(msg == "Unknown status")
     }
 }
+
+// MARK: - ToolRegistry DI (Wave 7 — registry resolves a tool)
+
+@Suite("ToolRegistry DI (Wave 7)")
+struct ToolRegistryTests {
+
+    @Test("shared registry resolves every non-out-of-band ToolKind")
+    func sharedResolvesAllTools() {
+        let outOfBand: Set<ToolKind> = [.select, .viewport]
+        for kind in ToolKind.allCases where !outOfBand.contains(kind) {
+            let tool = ToolRegistry.shared.makeTool(for: kind)
+            #expect(tool != nil, "ToolRegistry.shared should resolve \(kind)")
+            #expect(tool?.title == kind.title,
+                    "\(kind) tool title mismatch: \(tool?.title ?? "nil") vs \(kind.title)")
+            // Delegation: ToolKind.makeTool() goes through the registry
+            #expect(kind.makeTool() != nil, "ToolKind.\(kind).makeTool() should delegate to registry")
+            #expect(kind.makeTool(using: ToolRegistry.shared) != nil)
+        }
+        // Out-of-band kinds must NOT resolve (nil)
+        #expect(ToolRegistry.shared.makeTool(for: .select) == nil)
+        #expect(ToolRegistry.shared.makeTool(for: .viewport) == nil)
+        #expect(ToolRegistry.shared.isRegistered(.select) == false)
+        #expect(ToolRegistry.shared.registeredKinds.contains(.select) == false)
+    }
+
+    @Test("custom registry with DI override resolves a stub tool")
+    func customRegistryDIOverride() {
+        // Build a bespoke registry (DI) that overrides .line with a stub.
+        // Proves: adding a tool = register in one place, not N switches.
+        struct StubLineTool: Tool {
+            var title: String { "Stub Line" }
+            var status: String { "Stub" }
+            var preview: [ResolvedPolyline] { [] }
+            mutating func handle(_ input: ToolInput, context: ToolContext) -> ToolOutcome { .none }
+        }
+        let registry = ToolRegistry()
+        registry.register(.line) { StubLineTool() }
+        registry.register(.circle) { CircleTool() }
+
+        let stub = registry.makeTool(for: .line)
+        #expect(stub != nil)
+        #expect(stub?.title == "Stub Line")
+        #expect(registry.isRegistered(.line))
+        #expect(registry.makeTool(for: .line)?.title == "Stub Line")
+        // Explicit registry overload on ToolKind
+        #expect(ToolKind.line.makeTool(using: registry)?.title == "Stub Line")
+        // Un-registered kind is nil
+        #expect(registry.makeTool(for: .arc) == nil)
+        #expect(registry.registeredKinds.count == 2)
+    }
+
+    @Test("registry registeredKinds is stable and sorted by rawValue")
+    func registeredKindsIsSorted() {
+        let kinds = ToolRegistry.shared.registeredKinds
+        #expect(kinds.count > 30, "shared registry should have many tools")
+        let sorted = kinds.sorted { $0.rawValue < $1.rawValue }
+        #expect(kinds == sorted, "registeredKinds should be sorted by rawValue")
+    }
+}
