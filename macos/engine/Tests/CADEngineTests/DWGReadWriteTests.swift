@@ -52,11 +52,20 @@ struct DWGReadWriteTests {
         }
     }
 
-    @Test("missing DWG file throws readFailed")
+    @Test("missing DWG file throws typed badOpen (not generic readFailed)")
     func missingReadFileThrows() async throws {
-        await #expect(throws: CADEngineError.readFailed) {
+        do {
             _ = try await CADEngine.shared.readEntities(
                 dwgPath: "/nonexistent/path/does-not-exist.dwg")
+            Issue.record("expected badOpen for missing DWG")
+        } catch let e as CADEngineError {
+            guard case .badOpen = e else {
+                Issue.record("expected .badOpen for missing DWG, got \(e)")
+                return
+            }
+            #expect(e != CADEngineError.readFailed)
+        } catch {
+            Issue.record("unexpected error type \(error)")
         }
     }
 
@@ -171,8 +180,28 @@ struct DWGReadWriteTests {
         _ = try await CADEngine.shared.writeEntities(
             [line], layers: LayerTable(), toPath: dxfPath)
 
-        await #expect(throws: CADEngineError.readFailed) {
+        // Reading a DXF file via the DWG path must fail with a *typed* error
+        // (e.g. badVersion / badReadFileHeader / badReadMetadata), not the
+        // generic readFailed — proves the DRW::error → LCStatus → CADEngineError
+        // mapping for the DWG branch.
+        do {
             _ = try await CADEngine.shared.readEntities(dwgPath: dxfPath)
+            Issue.record("expected typed error for DXF-as-DWG")
+        } catch let e as CADEngineError {
+            let isTyped: Bool = {
+                switch e {
+                case .badOpen, .badVersion, .badReadMetadata, .badReadFileHeader,
+                     .badReadHeader, .badReadHandles, .badReadClasses, .badReadTables,
+                     .badReadBlocks, .badReadEntities, .badReadObjects, .badReadSection,
+                     .badCodeParsed, .unknown:
+                    return true
+                default: return false
+                }
+            }()
+            #expect(isTyped, "expected typed error for DXF-as-DWG, got \(e)")
+            #expect(e != CADEngineError.readFailed)
+        } catch {
+            Issue.record("unexpected error type \(error)")
         }
     }
 }

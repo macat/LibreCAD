@@ -367,10 +367,19 @@ struct DXFReaderTests {
 
     // MARK: - Error paths.
 
-    @Test("missing file throws readFailed")
+    @Test("missing file throws typed badOpen (not generic readFailed)")
     func missingFileThrows() async throws {
-        await #expect(throws: CADEngineError.readFailed) {
+        do {
             _ = try await CADEngine.shared.readEntities(dxfPath: "/nonexistent/does-not-exist.dxf")
+            Issue.record("expected badOpen for missing file")
+        } catch let e as CADEngineError {
+            guard case .badOpen = e else {
+                Issue.record("expected .badOpen for missing file, got \(e)")
+                return
+            }
+            #expect(e != CADEngineError.readFailed)
+        } catch {
+            Issue.record("unexpected error type \(error)")
         }
     }
 

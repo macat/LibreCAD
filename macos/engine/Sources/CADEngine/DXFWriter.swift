@@ -99,7 +99,8 @@ extension CADEngine {
     /// round-trips the whole table. Runs on the shared engine actor (libdxfrw is
     /// non-reentrant). `format` selects the DXF vs DWG parser.
     ///
-    /// - Throws: `CADEngineError.invalidPath` / `.readFailed`, like `readEntities`.
+    /// - Throws: `CADEngineError.invalidPath` / a typed `CADEngineError` (e.g.
+    ///   `.badOpen` / `.badReadTables`), like `readEntities`.
     public func readDimStyles(path: String, dwg: Bool = false) throws -> DimStyleTable {
         var handle: OpaquePointer?
         let reader = dwg ? lc_dwg_read : lc_dxf_read
@@ -107,7 +108,7 @@ extension CADEngine {
         switch status {
         case LC_OK: break
         case LC_ERR_INVALID_PATH: throw CADEngineError.invalidPath
-        default: throw CADEngineError.readFailed
+        default: throw CADEngineError.from(status: status).withPath(path)
         }
         guard let list = handle else { return DimStyleTable() }
         defer { lc_entity_list_free(list) }
