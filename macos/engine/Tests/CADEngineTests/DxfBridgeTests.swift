@@ -40,13 +40,24 @@ struct DxfBridgeTests {
         #expect(count == DxfBridgeTests.expectedSampleEntityCount)
     }
 
-    @Test("missing file throws readFailed")
+    @Test("missing file throws typed badOpen (not generic readFailed)")
     func missingFileThrows() async throws {
         let engine = CADEngine.shared
-        // A path that points nowhere reaches libdxfrw and fails the read, which
-        // the status ABI maps to LC_ERR_READ_FAILED -> .readFailed.
-        await #expect(throws: CADEngineError.readFailed) {
+        // Wave 7: a missing file is now typed as LC_ERR_BAD_OPEN → .badOpen,
+        // not the legacy generic readFailed. The detail carries the path + the
+        // lc_status_message, suitable for LocalizedError UI.
+        do {
             _ = try await engine.entityCount(atPath: "/nonexistent/path/does-not-exist.dxf")
+            Issue.record("expected badOpen for missing file")
+        } catch let e as CADEngineError {
+            guard case .badOpen = e else {
+                Issue.record("expected .badOpen for missing file, got \(e)")
+                return
+            }
+            // Typed, not generic — proves the LCStatus → CADEngineError mapping.
+            #expect(e.errorDescription?.contains("Cannot open") == true || e.errorDescription?.contains("open") == true)
+            // And it must NOT be the generic fallback.
+            #expect(e != CADEngineError.readFailed)
         }
     }
 

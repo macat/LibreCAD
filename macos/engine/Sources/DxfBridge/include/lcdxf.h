@@ -35,14 +35,51 @@ extern "C" {
  * error-string scheme: every call now returns an explicit, thread-safe status,
  * and outputs are written through out-parameters. Swift maps these to a thrown
  * `CADEngineError`.
+ *
+ * Wave 7 (typed errors): the original 4 codes are preserved verbatim for C ABI
+ * compatibility (rawValue 0..3 never changes). The new LC_ERR_BAD_* cases mirror
+ * `DRW::error` (libdxfrw's `drw_base.h` enum) one-for-one so a read failure
+ * surfaces its phase (open vs header vs tables vs entities …) without relying
+ * on `DRW_DBG` output. A generic `LC_ERR_READ_FAILED` is kept as a fallback for
+ * an unexpected `DRW::error` value or a caught exception. `LC_ERR_UNKNOWN`
+ * covers `DRW::BAD_UNKNOWN` and any future libdxfrw value.
+ *
+ * Every `lc_*_read` / `lc_*_write` maps `DRW::error` → `LCStatus` via
+ * `mapDrwError` in `lcdxf.cpp`; Swift's `CADEngineError.from(status:detail:)`
+ * then maps `LCStatus` → a typed `LocalizedError` that surfaces to UI.
  */
 typedef enum LCStatus {
     LC_OK = 0,                /**< Success. */
     LC_ERR_INVALID_PATH = 1,  /**< path was null or empty. */
-    LC_ERR_READ_FAILED = 2,   /**< libdxfrw could not read the file (bad/missing/corrupt). */
-    LC_ERR_WRITE_FAILED = 3   /**< libdxfrw could not write the file (bad path, I/O, or an
+    LC_ERR_READ_FAILED = 2,   /**< libdxfrw could not read the file (bad/missing/corrupt) — legacy generic; prefer the typed BAD_* below. */
+    LC_ERR_WRITE_FAILED = 3,  /**< libdxfrw could not write the file (bad path, I/O, or an
                                    exception escaping the export). */
+    /* Typed read errors — one per DRW::error (see drw_base.h). Added in Wave 7;
+     * values 4..17 are new, so existing `LCStatus` rawValues 0..3 stay ABI-stable. */
+    LC_ERR_BAD_OPEN = 4,              /**< DRW::BAD_OPEN — file not found / cannot open. */
+    LC_ERR_BAD_VERSION = 5,           /**< DRW::BAD_VERSION — unsupported DXF/DWG version. */
+    LC_ERR_BAD_READ_METADATA = 6,     /**< DRW::BAD_READ_METADATA — DWG metadata / sentinel. */
+    LC_ERR_BAD_READ_FILE_HEADER = 7,  /**< DRW::BAD_READ_FILE_HEADER — DWG file header. */
+    LC_ERR_BAD_READ_HEADER = 8,       /**< DRW::BAD_READ_HEADER — HEADER section vars. */
+    LC_ERR_BAD_READ_HANDLES = 9,      /**< DRW::BAD_READ_HANDLES — object-map / handles. */
+    LC_ERR_BAD_READ_CLASSES = 10,     /**< DRW::BAD_READ_CLASSES — CLASSES section. */
+    LC_ERR_BAD_READ_TABLES = 11,      /**< DRW::BAD_READ_TABLES — TABLES (layers/styles). */
+    LC_ERR_BAD_READ_BLOCKS = 12,      /**< DRW::BAD_READ_BLOCKS — BLOCKS section. */
+    LC_ERR_BAD_READ_ENTITIES = 13,    /**< DRW::BAD_READ_ENTITIES — ENTITIES section (incl. per-entity parse failures; graceful — unsupported entities are skipped, a true parse failure returns this). */
+    LC_ERR_BAD_READ_OBJECTS = 14,     /**< DRW::BAD_READ_OBJECTS — OBJECTS section. */
+    LC_ERR_BAD_READ_SECTION = 15,     /**< DRW::BAD_READ_SECTION — unknown section / EOF. */
+    LC_ERR_BAD_CODE_PARSED = 16,      /**< DRW::BAD_CODE_PARSED — parseCodes failure. */
+    LC_ERR_UNKNOWN = 17               /**< DRW::BAD_UNKNOWN or any unmapped error / caught exception. */
 } LCStatus;
+
+/**
+ * Human-readable message for an `LCStatus`. Returns a static, non-owning
+ * `const char*` (never NULL) valid for the process lifetime; no free needed.
+ * Thread-safe. Backed by string literals (and the per-status intern pool in
+ * `lcdxf.cpp` for any dynamic detail). Use it to surface a typed error to UI
+ * without scraping `DRW_DBG`.
+ */
+const char *lc_status_message(LCStatus status);
 
 /**
  * DXF output version, mirroring the subset of `DRW::Version` the writer accepts.
@@ -1182,6 +1219,59 @@ LCStatus lc_dwg_write(const char *path,
                       const LCTextStyle *textStyles, int textStyleCount,
                       const LCViewport *viewports, int viewportCount,
                       const LCHeaderVar *headerVars, int headerVarCount);
+
+/* ------------------------------------------------------------------------- *
+ *  Streaming read (Wave 7 — additive groundwork for no-copy SAX path)
+ *
+ *  Today the reader builds an owned `LCEntityList` handle (one POD per entity
+ *  plus string/vertex pools, freed together). That's simple and correct but
+ *  holds the whole file in memory before Swift maps it. The streaming path
+ *  lets Swift drive a SAX-style visitor that receives each entity as it is
+ *  parsed, without the intermediate `LCEntityList` copy — the future
+ *  `CADDrawing` builder will feed `EntityRecord`s directly from the callback,
+ *  avoiding the `LCEntity` array + second Swift copy.
+ *
+ *  This header adds the callback typedef and the streaming entry points
+ *  additively; the existing `lc_dxf_read` / `lc_dwg_read` handles remain and
+ *  stay ABI-stable. The streaming implementation in `lcdxf.cpp` is currently a
+ *  thin wrapper over the handle path (it builds the handle, visits each
+ *  entity, then frees) — correct, minimal, and sufficient to prove typed error
+ *  propagation through the callback. A future patch will teach
+ *  `FlatteningReader` to invoke the visitor directly during `dxf.read`/`dwg.read`
+ *  (no handle allocation), at which point `lc_dxf_read` itself can be
+ *  reimplemented atop the streaming core.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Visitor invoked once per flattened entity during a streaming read. `entity`
+ * borrows the reader's intern pools — the pointer and every string/array it
+ * references are valid only for the duration of this callback invocation.
+ * Return is void; to abort the stream, use a flag in `userData`.
+ */
+typedef void (*LCEntityVisitor)(const LCEntity *entity, void *userData);
+
+/**
+ * Streaming DXF read: parse `path` through libdxfrw and invoke `visitor` for
+ * each flattened `LCEntity` (supported + UNSUPPORTED) in file order, without
+ * returning an `LCEntityList` handle. Layer/block/header state is still
+ * collected internally for correctness (and will be surfaced via additional
+ * visitor callbacks in a follow-up), but the caller does not receive a handle
+ * to free.
+ *
+ * Error handling is identical to `lc_dxf_read`: `LC_ERR_INVALID_PATH` for a
+ * null/empty path or null visitor; otherwise the typed `LC_ERR_BAD_*` mirroring
+ * `DRW::error`, or `LC_ERR_UNKNOWN` for a caught exception.
+ *
+ * `visitor` must be non-NULL. `userData` is passed through verbatim and may be
+ * NULL. Threading: libdxfrw is non-reentrant — serialize like `lc_dxf_read`.
+ */
+LCStatus lc_dxf_read_streaming(const char *path, LCEntityVisitor visitor, void *userData);
+
+/**
+ * Streaming DWG read: the DWG counterpart of `lc_dxf_read_streaming`, routing
+ * through `dwgRW` instead of `dxfRW`. Same visitor contract and error mapping.
+ */
+LCStatus lc_dwg_read_streaming(const char *path, LCEntityVisitor visitor, void *userData);
 
 #ifdef __cplusplus
 }

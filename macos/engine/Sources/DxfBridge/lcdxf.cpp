@@ -3334,6 +3334,35 @@ private:
     }
 };
 
+// --------------------------------------------------------------------------
+//  Typed error mapping (Wave 7) — DRW::error -> LCStatus + lc_status_message
+// --------------------------------------------------------------------------
+
+// Map a libdxfrw DRW::error to the public LCStatus. The original 4 LCStatus
+// values are ABI-stable (0..3); typed BAD_* statuses are 4..17. Unknown
+// values fall back to LC_ERR_READ_FAILED (legacy) or LC_ERR_UNKNOWN where
+// appropriate so a future libdxfrw `error` addition does not surface as LC_OK.
+inline LCStatus mapDrwError(DRW::error e) {
+    switch (e) {
+    case DRW::BAD_NONE:             return LC_OK;
+    case DRW::BAD_OPEN:             return LC_ERR_BAD_OPEN;
+    case DRW::BAD_VERSION:          return LC_ERR_BAD_VERSION;
+    case DRW::BAD_READ_METADATA:    return LC_ERR_BAD_READ_METADATA;
+    case DRW::BAD_READ_FILE_HEADER: return LC_ERR_BAD_READ_FILE_HEADER;
+    case DRW::BAD_READ_HEADER:      return LC_ERR_BAD_READ_HEADER;
+    case DRW::BAD_READ_HANDLES:     return LC_ERR_BAD_READ_HANDLES;
+    case DRW::BAD_READ_CLASSES:     return LC_ERR_BAD_READ_CLASSES;
+    case DRW::BAD_READ_TABLES:      return LC_ERR_BAD_READ_TABLES;
+    case DRW::BAD_READ_BLOCKS:      return LC_ERR_BAD_READ_BLOCKS;
+    case DRW::BAD_READ_ENTITIES:    return LC_ERR_BAD_READ_ENTITIES;
+    case DRW::BAD_READ_OBJECTS:     return LC_ERR_BAD_READ_OBJECTS;
+    case DRW::BAD_READ_SECTION:     return LC_ERR_BAD_READ_SECTION;
+    case DRW::BAD_CODE_PARSED:      return LC_ERR_BAD_CODE_PARSED;
+    case DRW::BAD_UNKNOWN:          return LC_ERR_UNKNOWN;
+    default:                        return LC_ERR_READ_FAILED;
+    }
+}
+
 // Map the public LCDxfVersion enum onto libdxfrw's DRW::Version; default R2000.
 inline DRW::Version toDrwVersion(int v) {
     switch (v) {
@@ -3370,13 +3399,41 @@ inline DRW::Version toDwgVersion(int v) {
 //  C ABI
 // --------------------------------------------------------------------------
 
+extern "C" const char *lc_status_message(LCStatus status) {
+    // Static, interned literals — no allocation, thread-safe, valid for the
+    // process lifetime. No DRW_DBG. Each status maps to a human-readable
+    // phrase that Swift's LocalizedError surfaces to UI (file:line+phase).
+    switch (status) {
+    case LC_OK:                       return "OK";
+    case LC_ERR_INVALID_PATH:         return "Invalid path (null or empty)";
+    case LC_ERR_READ_FAILED:          return "Read failed (generic)";
+    case LC_ERR_WRITE_FAILED:         return "Write failed (generic)";
+    case LC_ERR_BAD_OPEN:             return "Cannot open file (not found or unreadable)";
+    case LC_ERR_BAD_VERSION:          return "Unsupported DXF/DWG version";
+    case LC_ERR_BAD_READ_METADATA:    return "Failed to read file metadata";
+    case LC_ERR_BAD_READ_FILE_HEADER: return "Failed to read file header";
+    case LC_ERR_BAD_READ_HEADER:      return "Failed to read HEADER section";
+    case LC_ERR_BAD_READ_HANDLES:     return "Failed to read handle table";
+    case LC_ERR_BAD_READ_CLASSES:     return "Failed to read CLASSES section";
+    case LC_ERR_BAD_READ_TABLES:      return "Failed to read TABLES (layers, styles)";
+    case LC_ERR_BAD_READ_BLOCKS:      return "Failed to read BLOCKS section";
+    case LC_ERR_BAD_READ_ENTITIES:    return "Failed to read ENTITIES (corrupt entity)";
+    case LC_ERR_BAD_READ_OBJECTS:     return "Failed to read OBJECTS section";
+    case LC_ERR_BAD_READ_SECTION:     return "Failed to read section (unknown section or truncated file)";
+    case LC_ERR_BAD_CODE_PARSED:      return "Parse error (invalid DXF group code)";
+    case LC_ERR_UNKNOWN:              return "Unknown error";
+    default:                          return "Unknown status";
+    }
+}
+
 extern "C" LCStatus lc_dxf_read(const char *path, LCEntityList **out) {
     if (path == nullptr || path[0] == '\0' || out == nullptr) {
         return LC_ERR_INVALID_PATH;
     }
-    // try/catch keeps any libdxfrw exception (or std::bad_alloc) from crossing
-    // the C boundary; a clean read failure and an escaping exception both map to
-    // LC_ERR_READ_FAILED.
+    // Graceful degradation: a malformed DXF must never crash or leak.
+    // libdxfrw is non-reentrant but re-entrant-safe within this call; every
+    // early return deletes the partial handle. DRW_DBG is not used for error
+    // reporting — the typed LCStatus + lc_status_message surfaces to Swift.
     try {
         auto *list = new LCEntityList();
         FlatteningReader reader(list);
@@ -3384,8 +3441,13 @@ extern "C" LCStatus lc_dxf_read(const char *path, LCEntityList **out) {
         // ext=false: skip the (slower) extended/raw parse path.
         const bool ok = dxf.read(&reader, /*ext=*/false);
         if (!ok) {
+            const LCStatus mapped = mapDrwError(dxf.getError());
             delete list;
-            return LC_ERR_READ_FAILED;
+            // Preserve the typed phase (BAD_READ_ENTITIES vs BAD_OPEN etc.)
+            // so Swift can throw a specific CADEngineError rather than a
+            // generic readFailed. If libdxfrw returned BAD_NONE despite !ok
+            // (should not happen), fall back to the legacy generic.
+            return (mapped == LC_OK) ? LC_ERR_READ_FAILED : mapped;
         }
         // Link captured IMAGEs to their IMAGEDEFs (path + pixel size) BEFORE block
         // flattening, so a block-embedded image lands in its block's members.
@@ -3401,7 +3463,7 @@ extern "C" LCStatus lc_dxf_read(const char *path, LCEntityList **out) {
         *out = list;
         return LC_OK;
     } catch (...) {
-        return LC_ERR_READ_FAILED;
+        return LC_ERR_UNKNOWN;
     }
 }
 
@@ -3409,18 +3471,18 @@ extern "C" LCStatus lc_dwg_read(const char *path, LCEntityList **out) {
     if (path == nullptr || path[0] == '\0' || out == nullptr) {
         return LC_ERR_INVALID_PATH;
     }
-    // Identical to lc_dxf_read except the parser: DWG is binary, so libdxfrw
-    // routes it through `dwgRW` instead of `dxfRW`. The SAME FlatteningReader
-    // (DRW_Interface subclass) flattens every entity/layer/block into the same
-    // POD model — the read path downstream of this call is byte-for-byte shared.
+    // Graceful: same typed-error + no-crash contract as lc_dxf_read, but via
+    // dwgRW (binary DWG). The SAME FlatteningReader flattens into the same POD
+    // model — downstream Swift is format-agnostic.
     try {
         auto *list = new LCEntityList();
         FlatteningReader reader(list);
         dwgRW dwg(path);
         const bool ok = dwg.read(&reader, /*ext=*/false);
         if (!ok) {
+            const LCStatus mapped = mapDrwError(dwg.getError());
             delete list;
-            return LC_ERR_READ_FAILED;
+            return (mapped == LC_OK) ? LC_ERR_READ_FAILED : mapped;
         }
         reader.finalizeImages();
         reader.finalizeBlocks();
@@ -3428,8 +3490,52 @@ extern "C" LCStatus lc_dwg_read(const char *path, LCEntityList **out) {
         *out = list;
         return LC_OK;
     } catch (...) {
-        return LC_ERR_READ_FAILED;
+        return LC_ERR_UNKNOWN;
     }
+}
+
+// Streaming wrappers (Wave 7 additive groundwork). Currently a thin handle→
+// visitor loop (correct, minimal). A future patch will make FlatteningReader
+// SAX-direct (no handle alloc) and reimplement lc_dxf_read atop it.
+extern "C" LCStatus lc_dxf_read_streaming(const char *path, LCEntityVisitor visitor, void *userData) {
+    if (path == nullptr || path[0] == '\0' || visitor == nullptr) {
+        return LC_ERR_INVALID_PATH;
+    }
+    LCEntityList *list = nullptr;
+    const LCStatus status = lc_dxf_read(path, &list);
+    if (status != LC_OK) return status;
+    // Visit each entity in file order. The LCEntity pointer and its borrowed
+    // strings/arrays are valid only for the duration of this callback (they
+    // alias the handle's deque pools, freed after the loop). Graceful: a null
+    // entity list (empty file) visits nothing and still returns LC_OK.
+    if (list) {
+        for (const auto &e : list->entities) {
+            visitor(&e, userData);
+        }
+        // Also surface block-member entities through the same visitor? For the
+        // groundwork the primary stream is the top-level entities; block
+        // members are reachable via lc_blocks if the caller needs them. A full
+        // SAX that interleaves block-member visits will be added when the
+        // builder feeds CADDrawing directly.
+    }
+    lc_entity_list_free(list);
+    return LC_OK;
+}
+
+extern "C" LCStatus lc_dwg_read_streaming(const char *path, LCEntityVisitor visitor, void *userData) {
+    if (path == nullptr || path[0] == '\0' || visitor == nullptr) {
+        return LC_ERR_INVALID_PATH;
+    }
+    LCEntityList *list = nullptr;
+    const LCStatus status = lc_dwg_read(path, &list);
+    if (status != LC_OK) return status;
+    if (list) {
+        for (const auto &e : list->entities) {
+            visitor(&e, userData);
+        }
+    }
+    lc_entity_list_free(list);
+    return LC_OK;
 }
 
 extern "C" int lc_entity_list_count(const LCEntityList *list) {

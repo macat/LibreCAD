@@ -88,10 +88,23 @@ extension CADEngine {
 
     /// Reads `dxfPath`, flattening every supported entity into `EntityRecord`s
     /// and mapping the layer table. Unsupported entity kinds become warnings
-    /// rather than failures.
+    /// rather than failures. Graceful: a malformed DXF never crashes — the
+    /// bridge maps `DRW::error` → typed `LCStatus` → typed `CADEngineError`
+    /// (via `lc_status_message`) without relying on `DRW_DBG`.
+    ///
+    /// Streaming groundwork (Wave 7): the current path builds an
+    /// `LCEntityList` handle (one POD per entity + string/vertex pools) and
+    /// maps it to `EntityRecord`s. The additive `lc_dxf_read_streaming`
+    /// callback path (see `lcdxf.h`) lays the foundation for a no-copy SAX
+    /// that feeds a `CADDrawing` builder directly from the `LCEntityVisitor`,
+    /// avoiding the intermediate `LCEntity` array. That path is additive and
+    /// reuses the same `CADEngineError` mapping; this handle path stays as the
+    /// primary API until the builder adopts the visitor.
     ///
     /// - Throws: `CADEngineError.invalidPath` for a null/empty path;
-    ///   `CADEngineError.readFailed` if libdxfrw cannot read the file.
+    ///   a typed `CADEngineError` (`.badOpen`, `.badReadEntities`, …) if
+    ///   libdxfrw cannot read the file (detail is `lc_status_message` + path,
+    ///   conforming to `LocalizedError` for UI).
     public func readEntities(dxfPath: String) throws -> DXFReadResult {
         let list = try Self.openList(path: dxfPath, reader: lc_dxf_read)
         defer { lc_entity_list_free(list) }
@@ -106,10 +119,12 @@ extension CADEngine {
     /// (`lc_dwg_read` → libdxfrw `dwgRW`); everything downstream is unchanged.
     ///
     /// libdxfrw reads DWG R2000 (AC1015) and newer; an older/corrupt file fails
-    /// the read and surfaces as `CADEngineError.readFailed`.
+    /// the read and surfaces as a typed `CADEngineError` (e.g.
+    /// `.badVersion` for an old DWG version, `.badReadHeader` for a corrupt
+    /// header).
     ///
     /// - Throws: `CADEngineError.invalidPath` for a null/empty path;
-    ///   `CADEngineError.readFailed` if libdxfrw cannot read the file (also
+    ///   a typed `CADEngineError` if libdxfrw cannot read the file (also
     ///   covers an unsupported/old DWG version).
     public func readEntities(dwgPath: String) throws -> DXFReadResult {
         let list = try Self.openList(path: dwgPath, reader: lc_dwg_read)
@@ -120,6 +135,8 @@ extension CADEngine {
     /// Opens a drawing file through the given bridge reader (`lc_dxf_read` or
     /// `lc_dwg_read`), mapping the C status to a thrown `CADEngineError`. The
     /// caller owns the returned handle and must `lc_entity_list_free` it.
+    /// No `DRW_DBG` — the typed `LCStatus` + `lc_status_message` surfaces to
+    /// `LocalizedError`.
     private static func openList(
         path: String,
         reader: (UnsafePointer<CChar>?, UnsafeMutablePointer<OpaquePointer?>?) -> LCStatus
@@ -132,10 +149,64 @@ extension CADEngine {
         case LC_ERR_INVALID_PATH:
             throw CADEngineError.invalidPath
         default:
-            throw CADEngineError.readFailed
+            // Typed mapping: BAD_OPEN → .badOpen, BAD_READ_ENTITIES → .badReadEntities, etc.
+            // The detail is the static `lc_status_message` plus the file path, so
+            // `LocalizedError.errorDescription` can surface “/tmp/foo.dxf: Failed
+            // to read ENTITIES (corrupt entity)” without scraping debug output.
+            // Graceful: a missing file (BAD_OPEN) now throws `.badOpen`, not a
+            // generic `.readFailed`, so UI can distinguish “not found” from
+            // “corrupt”. Callers that only need “did it fail?” can match
+            // `.readFailed` as the generic fallback or switch exhaustively.
+            throw CADEngineError.from(status: status).withPath(path)
         }
-        guard let list = handle else { throw CADEngineError.readFailed }
+        guard let list = handle else {
+            // Should not happen on LC_OK (the bridge always sets *out on
+            // success), but be defensive: a null handle after LC_OK is an
+            // unknown failure, not a silent empty result.
+            throw CADEngineError.unknown(detail: "\(path): \(String(cString: lc_status_message(LC_ERR_UNKNOWN)))")
+        }
         return list
+    }
+
+    // MARK: - Streaming (Wave 7 additive groundwork)
+
+    /// SAX-style streaming visitor type: invoked once per `LCEntity` in file
+    /// order during `streamEntities`. The entity's borrowed pointers are valid
+    /// only for the duration of the callback.
+    public typealias EntityVisitor = @Sendable (LCEntity) -> Void
+
+    /// Streams a DXF file through the bridge's `lc_dxf_read_streaming`
+    /// visitor, invoking `visitor` for each `LCEntity` without building an
+    /// intermediate `[EntityRecord]` array copy in the bridge. Currently a
+    /// thin wrapper over the handle path (correct, minimal); a future patch
+    /// will make the C++ `FlatteningReader` SAX-direct so the stream avoids
+    /// the `LCEntityList` allocation entirely. Typed errors propagate
+    /// identically to `readEntities`.
+    ///
+    /// This is the additive “no LCEntity intermediate copy” groundwork the
+    /// perf plan calls for — the `CADDrawing` builder can be fed directly
+    /// from the visitor in a follow-up without changing the primary
+    /// `readEntities` API.
+    public func streamEntities(dxfPath: String, visitor: @escaping @Sendable EntityVisitor) throws {
+        // Bridge expects a C function pointer; we trampoline via a Swift
+        // closure box passed as userData. The box outlives the C call.
+        final class Box { let fn: EntityVisitor; init(_ fn: @escaping EntityVisitor) { self.fn = fn } }
+        let box = Box(visitor)
+        let status = dxfPath.withCString { cPath in
+            // withExtendedLifetime keeps `box` alive across the C call.
+            withExtendedLifetime(box) {
+                lc_dxf_read_streaming(cPath, { entityPtr, userData in
+                    guard let entityPtr, let userData else { return }
+                    let fn = Unmanaged<Box>.fromOpaque(userData).takeUnretainedValue().fn
+                    fn(entityPtr.pointee)
+                }, Unmanaged.passUnretained(box).toOpaque())
+            }
+        }
+        switch status {
+        case LC_OK: break
+        case LC_ERR_INVALID_PATH: throw CADEngineError.invalidPath
+        default: throw CADEngineError.from(status: status).withPath(dxfPath)
+        }
     }
 
     /// Maps an opened bridge handle into a `DXFReadResult`. Shared by the DXF and
