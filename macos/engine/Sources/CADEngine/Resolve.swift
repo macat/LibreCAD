@@ -190,6 +190,176 @@ public struct ResolvedGeometry: Sendable, Equatable {
     }
 }
 
+// MARK: - Per-entity resolve cache (Wave 1, P1 — R3 fix)
+
+/// Per-entity geometry cache keyed by `(id, resolveVersion, pen, tolerance, kind)`
+/// so `lineRebuild` does not re-tessellate unchanged entities. The expensive
+/// kernels are arc/ellipse/spline tessellation, Solid/Hatch triangulation, and
+/// text glyph shaping — all captured in the cached `ResolvedGeometry`.
+///
+/// Thread-safe via `NSLock`; the app accesses it on `MainActor` via `CanvasModel`
+/// but the engine type itself is `Sendable` and usable off-main (tests, bench).
+///
+/// Invalidation:
+/// - `resolveVersion` bump on `CADDrawing.replace`/`add` wins (the primary key).
+/// - Different `ResolvedPen` (e.g. layer color change for a `.byLayer` entity)
+///   misses even if the version didn't bump, so a layer edit doesn't need a
+///   per-entity version walk.
+/// - Different `tessellationTolerance` (zoom-bucketed LOD) misses, so a quality
+///   change doesn't serve stale tessellation.
+/// - Different `kind` misses (defensive for cross-drawing `EntityID` reuse in a
+///   single process — the global cache is per-process, not per-drawing).
+///
+/// Metrics: `hits`/`misses` are monotonic counters for tests/bench.
+public final class ResolveCache: @unchecked Sendable {
+    private struct Entry: Sendable {
+        let version: UInt64
+        let pen: ResolvedPen
+        let tolerance: Double
+        let kind: EntityKind
+        let geometry: ResolvedGeometry
+        // Context-dependent scalars that also affect geometry (point/dim/text).
+        // Stored so a different pointStyle / annotationScale / dimStyle correctly
+        // misses even when version/pen/tolerance/kind are identical (the bug that
+        // broke PointStyleResolveTests).
+        let pointModeRaw: Int?
+        let pointSize: Double?
+        let annotationScale: Double
+        let globalLinetypeScale: Double
+        let dimStyle: ResolvedDimStyle?
+        let blockRecursionDepth: Int
+        let clipBounds: AABB?
+    }
+    private let lock = NSLock()
+    private var storage: [EntityID: Entry] = [:]
+    private var _hits: Int = 0
+    private var _misses: Int = 0
+
+    public init() {}
+
+    private func pointFingerprint(_ ctx: ResolveContext) -> (Int?, Double?) {
+        guard let provider = ctx.pointStyleProvider else { return (nil, nil) }
+        let v = provider()
+        return (v.mode.rawMode, v.size)
+    }
+
+    /// Returns a cached geometry when `record`'s version/pen/tolerance/kind match
+    /// the stored entry, otherwise `nil` (a miss). Increments `hits` on hit.
+    public func cachedGeometry(for record: EntityRecord, pen: ResolvedPen,
+                               ctx: ResolveContext) -> ResolvedGeometry? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let e = storage[record.id],
+              e.version == record.resolveVersion,
+              e.pen == pen,
+              e.tolerance == ctx.tessellationTolerance,
+              e.kind == record.kind else { return nil }
+        // Context-dependent checks — only for kinds where they matter, but we
+        // check for all to keep the logic simple and safe.
+        let (modeRaw, size) = pointFingerprint(ctx)
+        guard e.pointModeRaw == modeRaw,
+              e.pointSize == size,
+              e.annotationScale == ctx.annotationScale,
+              e.globalLinetypeScale == ctx.globalLinetypeScale,
+              e.blockRecursionDepth == ctx.blockRecursionDepth,
+              e.clipBounds == ctx.clipBounds else { return nil }
+        // Dim style only matters for dimensions/leaders; comparing it for every
+        // entity is conservative (a dimStyle change will miss for a line, but that
+        // is rare and correctness wins).
+        let dimStyle = ctx.dimStyleProvider?()
+        guard e.dimStyle == dimStyle else { return nil }
+        _hits &+= 1
+        return e.geometry
+    }
+
+    /// Stores `geometry` for `record`/`pen`/`ctx`. Increments `misses`.
+    public func store(_ geometry: ResolvedGeometry, for record: EntityRecord,
+                      pen: ResolvedPen, ctx: ResolveContext) {
+        lock.lock()
+        defer { lock.unlock() }
+        let (modeRaw, size) = pointFingerprint(ctx)
+        let dimStyle = ctx.dimStyleProvider?()
+        storage[record.id] = Entry(version: record.resolveVersion, pen: pen,
+                                   tolerance: ctx.tessellationTolerance,
+                                   kind: record.kind, geometry: geometry,
+                                   pointModeRaw: modeRaw, pointSize: size,
+                                   annotationScale: ctx.annotationScale,
+                                   globalLinetypeScale: ctx.globalLinetypeScale,
+                                   dimStyle: dimStyle,
+                                   blockRecursionDepth: ctx.blockRecursionDepth,
+                                   clipBounds: ctx.clipBounds)
+        _misses &+= 1
+    }
+
+    /// Number of cache hits since init / last `clear`.
+    public var hits: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _hits
+    }
+    /// Number of cache misses (stores) since init / last `clear`.
+    public var misses: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _misses
+    }
+
+    /// Removes the entry for `id` (e.g. on `CADDrawing.remove`).
+    public func remove(id: EntityID) {
+        lock.lock()
+        defer { lock.unlock() }
+        storage.removeValue(forKey: id)
+    }
+
+    /// Clears all entries and resets counters (e.g. on `CADDrawing.load`).
+    public func clear() {
+        lock.lock()
+        defer { lock.unlock() }
+        storage.removeAll(keepingCapacity: true)
+        _hits = 0
+        _misses = 0
+    }
+
+    /// Resets only the hit/miss counters, keeping entries (for per-test measurement).
+    public func resetCounters() {
+        lock.lock()
+        defer { lock.unlock() }
+        _hits = 0
+        _misses = 0
+    }
+
+    /// Current number of cached entries.
+    public var count: Int {
+        lock.lock(); defer { lock.unlock() }
+        return storage.count
+    }
+}
+
+/// The process-wide per-entity resolve cache used by `EntityRecord.resolve(_:)`.
+/// `CADDrawing` bumps `resolveVersion` and evicts on `remove`/`load` so the
+/// shared cache stays coherent across drawings in one process (tests, bench).
+public let sharedResolveCache = ResolveCache()
+
+/// Cached resolve — additive helper that checks `sharedResolveCache` before
+/// computing `record.kind.resolve(pen:ctx:)`. Existing callers that use
+/// `record.resolve(ctx)` already benefit transparently (that method now checks
+/// the cache), but this free function is the explicit seam the renderer will
+/// call when it wants to be explicit about caching.
+public func cachedResolve(for record: EntityRecord, ctx: ResolveContext = .default) -> ResolvedGeometry {
+    record.resolve(ctx)
+}
+
+/// Cached kind-resolve — the low-level seam that caches `kind.resolve(pen:ctx:)`
+/// keyed by the owning record's id/version/pen. Used when the caller already
+/// resolved the pen.
+public func cachedResolve(for record: EntityRecord, pen: ResolvedPen,
+                          ctx: ResolveContext) -> ResolvedGeometry {
+    if let cached = sharedResolveCache.cachedGeometry(for: record, pen: pen, ctx: ctx) {
+        return cached
+    }
+    let geo = record.kind.resolve(pen: pen, ctx: ctx)
+    sharedResolveCache.store(geo, for: record, pen: pen, ctx: ctx)
+    return geo
+}
+
 // MARK: - Document dimension style (the resolved dim defaults)
 
 /// The document-default dimension style (decision D4) — the values a dimension
@@ -923,7 +1093,26 @@ enum QuadSpline {
 extension EntityRecord {
     /// Produces this entity's renderable geometry in world coords. NEVER stored
     /// on the entity (ADR-001) — the caller owns caching by `id` + style/version.
+    ///
+    /// Wave 1 (P1 — R3): this is now **cached** per-entity via `sharedResolveCache`
+    /// keyed by `(id, resolveVersion, pen, tolerance, kind)`. A second `resolve`
+    /// of the same record with the same pen/tolerance/kind hits the cache and
+    /// avoids re-tessellation (arc/ellipse/spline) and hatch/solid triangulation.
+    /// Callers that need to bypass the cache (e.g. measuring raw tessellation
+    /// cost) should call `kind.resolve(pen:ctx:)` directly.
     public func resolve(_ ctx: ResolveContext = .default) -> ResolvedGeometry {
+        let pen = pen.resolved(layer: layer, in: ctx)
+        if let cached = sharedResolveCache.cachedGeometry(for: self, pen: pen, ctx: ctx) {
+            return cached
+        }
+        let geo = kind.resolve(pen: pen, ctx: ctx)
+        sharedResolveCache.store(geo, for: self, pen: pen, ctx: ctx)
+        return geo
+    }
+
+    /// Non-cached resolve — bypasses `sharedResolveCache` (for bench/tests that
+    /// want the raw cost).
+    public func resolveUncached(_ ctx: ResolveContext = .default) -> ResolvedGeometry {
         let pen = pen.resolved(layer: layer, in: ctx)
         return kind.resolve(pen: pen, ctx: ctx)
     }
