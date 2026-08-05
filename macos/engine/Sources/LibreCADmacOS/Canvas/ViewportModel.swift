@@ -125,15 +125,33 @@ final class ViewportModel {
         return quadtree.query(region: worldRect)
     }
 
+    /// When the delta exceeds this many touched entities, fall back to a
+    /// full rebuild (same rationale as CanvasModel.quadtreeIncrementalThreshold).
+    static let incrementalThreshold = 500
+
     /// Incremental quadtree sync after an undo/redo delta (Wave 2 P3).
+    /// Falls back to `rebuildIndex(with:context:)` when the delta size exceeds
+    /// `incrementalThreshold` (the spec's "size > threshold" fallback).
     func syncIncrementally(beforeIDs: Set<EntityID>, beforeBoxes: [EntityID: AABB],
                            afterEntities: [EntityRecord], context: ResolveContext) {
         let afterMap = Dictionary(uniqueKeysWithValues: afterEntities.map { ($0.id, $0) })
         let afterIDs = Set(afterMap.keys)
         var afterBoxes: [EntityID: AABB] = [:]
         for r in afterEntities { afterBoxes[r.id] = r.boundingBox(ctx: context) }
-        for id in beforeIDs.subtracting(afterIDs) { quadtree.remove(id) }
-        for id in afterIDs.subtracting(beforeIDs) {
+        let removed = beforeIDs.subtracting(afterIDs)
+        let added = afterIDs.subtracting(beforeIDs)
+        var changedCount = 0
+        for id in beforeIDs.intersection(afterIDs) {
+            let ob = beforeBoxes[id] ?? .empty
+            let nb = afterBoxes[id] ?? .empty
+            if ob != nb { changedCount += 1 }
+        }
+        if removed.count + added.count + changedCount > Self.incrementalThreshold {
+            rebuildIndex(with: afterEntities, context: context)
+            return
+        }
+        for id in removed { quadtree.remove(id) }
+        for id in added {
             if let b = afterBoxes[id], !b.isEmpty { quadtree.insert(id, bounds: b) }
         }
         for id in beforeIDs.intersection(afterIDs) {

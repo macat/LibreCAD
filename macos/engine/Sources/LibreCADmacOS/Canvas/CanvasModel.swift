@@ -3598,8 +3598,11 @@ final class CanvasModel {
             nearbyEntities: { point, tolerance in
                 guard point.valid else { return [] }
                 let tol = Swift.max(tolerance, 0)
-                // Fast path: AABB prefilter via the live quadtree (MainActor),
-                // then exact analytic distance (shared kernel with `hitTest`).
+                // Fast path: AABB prefilter via the live quadtree (MainActor) —
+                // `quadtree.query(aabbAroundCursor)` where the AABB is the cursor
+                // expanded by `tol` in world units, then exact analytic distance
+                // (shared kernel with `hitTest`). O(log N + k) vs the old O(N)
+                // `snapshot.filter { HitTesting.worldDistance ≤ tol }`.
                 // Off-main fallback (defensive): if the closure is ever invoked
                 // off the main actor (e.g., a tool test driving handle off-main),
                 // fall back to the brute-force `O(N)` scan over the value snapshot
@@ -3611,10 +3614,26 @@ final class CanvasModel {
                         return HitTesting.worldDistance(from: point, to: record) <= tol
                     }
                 }
-                let candidateIDs: [EntityID] = MainActor.assumeIsolated {
-                    qtBox.tree.query(point: point, tolerance: tol)
+                // Build the AABB around the cursor expanded by tolerance (world units)
+                // and query the quadtree for candidates in that probe box.
+                let probe = AABB(min: Vector(point.x - tol, point.y - tol),
+                                 max: Vector(point.x + tol, point.y + tol))
+                let (candidateIDs, treeIsEmpty): ([EntityID], Bool) = MainActor.assumeIsolated {
+                    (qtBox.tree.query(aabb: probe), qtBox.tree.isEmpty)
                 }
-                if candidateIDs.isEmpty { return [] }
+                // Fallback to snapshot only if the quadtree appears not built
+                // (empty index but snapshot has entities — should not happen in
+                // steady state, but keeps correctness if undo/redo fell back to
+                // a rebuild that hasn't yet run).
+                if candidateIDs.isEmpty {
+                    if treeIsEmpty && !snapshot.isEmpty {
+                        return snapshot.filter { record in
+                            guard record.flags.contains(.visible) else { return false }
+                            return HitTesting.worldDistance(from: point, to: record) <= tol
+                        }
+                    }
+                    return []
+                }
                 var out: [EntityRecord] = []
                 out.reserveCapacity(candidateIDs.count)
                 for id in candidateIDs {
@@ -7167,11 +7186,22 @@ final class CanvasModel {
         modelVersion &+= 1
     }
 
+    /// When the undo delta touches more entities than this, a full
+    /// `rebuildIndex()` is cheaper than thousands of individual
+    /// `quadtree.remove/insert` walks. The per-entity incremental path is
+    /// `O(k log n)`; at 1M entities a full rebuild is ~197 ms, so the
+    /// threshold keeps the typical ⌘Z (k = 1…few) on the `O(k log n)` path
+    /// while a massive bulk undo (e.g. deleting a huge selection) takes the
+    /// single `O(N)` rebuild rather than thousands of tree walks.
+    static let quadtreeIncrementalThreshold = 500
+
     /// Incrementally patches the `quadtree` to match the current
     /// `activeSpaceEntities` after an undo/redo, given the *before* snapshot.
     /// `beforeIDs` / `beforeBoxes` are the scoped set + per-id AABB before the
     /// mutation; the *after* state is read live from `drawing` /
     /// `activeSpaceEntities`. Only the delta is touched — see `undo()` header.
+    /// Falls back to a full `rebuildIndex()` when the diff is unavailable or
+    /// the delta size exceeds `quadtreeIncrementalThreshold`.
     private func syncQuadtreeIncrementally(beforeIDs: Set<EntityID>,
                                            beforeBoxes: [EntityID: AABB]) {
         let ctx = drawing.makeResolveContext()
@@ -7180,12 +7210,29 @@ final class CanvasModel {
         let afterIDs = Set(afterMap.keys)
         let afterBoxes = Self.boxesByID(afterScoped, ctx: ctx)
 
+        // Large delta → fall back to a full O(N) rebuild (cheaper than
+        // thousands of individual tree walks, and covers the "diff unavailable"
+        // fallback the spec requires).
+        let removed = beforeIDs.subtracting(afterIDs)
+        let added = afterIDs.subtracting(beforeIDs)
+        var changedCount = 0
+        for id in beforeIDs.intersection(afterIDs) {
+            let oldB = beforeBoxes[id] ?? .empty
+            let newB = afterBoxes[id] ?? .empty
+            if oldB != newB { changedCount += 1 }
+        }
+        let deltaSize = removed.count + added.count + changedCount
+        if deltaSize > Self.quadtreeIncrementalThreshold {
+            rebuildIndex()
+            return
+        }
+
         // Removed entities (were in the index, no longer scoped).
-        for id in beforeIDs.subtracting(afterIDs) {
+        for id in removed {
             quadtree.remove(id)
         }
         // Added entities (newly scoped — e.g. undo of a delete).
-        for id in afterIDs.subtracting(beforeIDs) {
+        for id in added {
             if let b = afterBoxes[id], !b.isEmpty {
                 quadtree.insert(id, bounds: b)
             }
