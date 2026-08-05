@@ -22,4 +22,8 @@ extension UTType {
     /// assigns the file. (The bundle's Info.plist still declares
     /// `org.librecad.dwg` as a CFBundleDocumentType for icon/role association.)
     static let librecadDWG = UTType(importedAs: "com.autodesk.dwg")
+
+    /// Native LibreCAD JSON type (.lcad). Exported so the system knows our
+    /// lossless format that preserves constraints/parameters/tables/layouts.
+    static let librecadLCAD = UTType(exportedAs: "org.librecad.lcad")
 }
