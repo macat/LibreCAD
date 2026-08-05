@@ -121,6 +121,17 @@ enum PaperSpaceLayout {
     }
 }
 
+/// A `@unchecked Sendable` box for the `Quadtree` so a `@Sendable` closure can
+/// capture the live MainActor index and query it via `MainActor.assumeIsolated`.
+/// The box itself is `Sendable` but the underlying `Quadtree` is only accessed
+/// on `MainActor` (the closure is only invoked from `MainActor` code — the tool
+/// `handle` path in `CanvasModel.handleToolInput`). This keeps `ToolContext`
+/// honestly `Sendable` for the engine tests while the live canvas path uses the
+/// real spatial index.
+private struct SendableQuadtree: @unchecked Sendable {
+    let tree: Quadtree
+}
+
 /// Observable canvas state. SwiftUI observes `entityCount`/`cursorWorld` for the
 /// HUD; the renderer reads `drawing`/`viewport`/`quadtree`/`selection`/`snap`.
 @MainActor
@@ -3533,29 +3544,32 @@ final class CanvasModel {
     /// always sees current state (cheap: the selection is usually small / empty
     /// while drawing).
     ///
-    /// ## Why the closures are genuinely `@Sendable` (no `MainActor.assumeIsolated`)
-    /// Every closure captures only an immutable VALUE snapshot of the drawing's
-    /// `entities` (`snapshot`, a copy-on-write array — cheap, no deep copy) and the
-    /// id-keyed `byID` map built from it. They touch no `self`, no actor state, and
-    /// — crucially — NOT the live `quadtree` (a non-`Sendable`, main-actor `final
-    /// class` that must never cross an isolation boundary). That makes the whole
-    /// `ToolContext` honestly `Sendable` with no isolation assumption (CONVENTIONS:
-    /// never `assumeIsolated` on a path the framework may invoke off-main).
-    ///
-    /// ## `nearbyEntities`: prefilter→exact, but over the value snapshot
+    /// ## Why the live canvas path queries the `Quadtree` (Wave 2)
     /// `Selection.hitTest` prefilters with the shared `quadtree`, then runs the
-    /// exact analytic distance. Here the closure can't hold the quadtree
-    /// (non-Sendable) and the (point, tolerance) aren't known until the tool calls
-    /// it, so it runs the EXACT analytic distance test (`HitTesting.worldDistance`)
-    /// over the captured snapshot directly — correct (a returned entity really is
-    /// under the pick), skipping only the cheap AABB prefilter. Tool picks are
-    /// infrequent and drawings settle small enough that the linear scan is fine for
-    /// the editing-tool foundation; a future hot path can capture an immutable
-    /// snapshot index here WITHOUT changing the `ToolContext` contract.
+    /// exact analytic distance. `nearbyEntities` now does the SAME: it queries the
+    /// live `quadtree` for AABB candidates around the pick (`query(point:tolerance:)`
+    /// → `AABB(min: cursor - tol, max: cursor + tol)` probe) and then keeps only
+    /// those whose EXACT `HitTesting.worldDistance` is within `tol`. This is
+    /// `O(k log n)` in the number of candidates, not `O(N)` over the whole
+    /// drawing, and reuses the single index the renderer and `hitTest` already
+    /// maintain.
+    ///
+    /// The `Quadtree` is a non-`Sendable` `MainActor` class that cannot be captured
+    /// directly in a `@Sendable` closure. The closure captures a `SendableQuadtree`
+    /// box (`@unchecked Sendable`) and hops to `MainActor` via
+    /// `MainActor.assumeIsolated` to query — safe because `handleToolInput` (the
+    /// only caller that builds a `ToolContext` from the canvas) is `MainActor` and
+    /// every `nearbyEntities` invocation happens synchronously inside that
+    /// `handle`. Engine unit tests that build a `ToolContext` by hand (no live
+    /// quadtree) use the value-snapshot path and remain off-main safe.
     private func makeToolContext() -> ToolContext {
         let snapshot = drawing.entities          // CoW value snapshot (Sendable)
         let byID = Dictionary(uniqueKeysWithValues: snapshot.map { ($0.id, $0) })
         let selected = selection.ids.compactMap { byID[$0] }
+        // Box the live quadtree for the `@Sendable` closure. The box is
+        // `@unchecked Sendable` but we only touch `tree` on `MainActor` (see
+        // header comment on `SendableQuadtree`).
+        let qtBox = SendableQuadtree(tree: quadtree)
         return ToolContext(
             selected: selected,
             entity: { id in byID[id] },
@@ -3563,11 +3577,32 @@ final class CanvasModel {
             nearbyEntities: { point, tolerance in
                 guard point.valid else { return [] }
                 let tol = Swift.max(tolerance, 0)
-                return snapshot.filter { record in
-                    // Skip what you can't see (mirrors hitTest's `.visible` gate).
-                    guard record.flags.contains(.visible) else { return false }
-                    return HitTesting.worldDistance(from: point, to: record) <= tol
+                // Fast path: AABB prefilter via the live quadtree (MainActor),
+                // then exact analytic distance (shared kernel with `hitTest`).
+                // Off-main fallback (defensive): if the closure is ever invoked
+                // off the main actor (e.g., a tool test driving handle off-main),
+                // fall back to the brute-force `O(N)` scan over the value snapshot
+                // — correct and Sendable, just not fast. The live canvas path is
+                // always MainActor, so this branch is never taken in the app.
+                if !Thread.isMainThread {
+                    return snapshot.filter { record in
+                        guard record.flags.contains(.visible) else { return false }
+                        return HitTesting.worldDistance(from: point, to: record) <= tol
+                    }
                 }
+                let candidateIDs: [EntityID] = MainActor.assumeIsolated {
+                    qtBox.tree.query(point: point, tolerance: tol)
+                }
+                if candidateIDs.isEmpty { return [] }
+                var out: [EntityRecord] = []
+                out.reserveCapacity(candidateIDs.count)
+                for id in candidateIDs {
+                    guard let rec = byID[id], rec.flags.contains(.visible) else { continue }
+                    if HitTesting.worldDistance(from: point, to: rec) <= tol {
+                        out.append(rec)
+                    }
+                }
+                return out
             },
             allEntities: { snapshot }
         )
@@ -7053,30 +7088,105 @@ final class CanvasModel {
     /// Whether a redo is available.
     var canRedo: Bool { undoManager.canRedo }
 
-    /// Undoes the last drawing mutation and re-syncs the spatial index (the
-    /// drawing's value-snapshot undo restores `entities`, but the quadtree is a
-    /// separate index the undo closures don't touch — so rebuild it).
+    /// Undoes the last drawing mutation and incrementally re-syncs the spatial
+    /// index (Wave 2 — P3). The drawing's value-snapshot undo restores
+    /// `entities` (and the layer/block/layout tables), but the `quadtree` is a
+    /// separate index the undo closures don't touch. Instead of a full
+    /// `rebuildIndex()` (`O(N)` clear+insert all), we diff the *scoped* entity
+    /// set before vs after the undo and patch only the delta:
+    ///   - ids that vanished → `quadtree.remove`
+    ///   - ids that appeared → `quadtree.insert`
+    ///   - ids whose AABB changed → `quadtree.update` / `remove`
+    /// This is `O(k log n)` in the size of the change (`k` is the number of
+    /// touched entities), not `O(N)` in the drawing size. A layout-table undo
+    /// that changes the *active* space (the tab pointer dangles) still takes the
+    /// full `setActiveSpace` rebuild path via `rehomeActiveSpaceAfterTableChange`.
     func undo() {
         guard undoManager.canUndo else { return }
+        // Snapshot the *scoped* set before the undo — what the quadtree
+        // currently indexes (paper-space P2 / block-edit scoping included).
+        let beforeScoped = activeSpaceEntities
+        let beforeIDs = Set(beforeScoped.map(\.id))
+        let beforeBoxes = Self.boxesByID(beforeScoped, ctx: drawing.makeResolveContext())
+        let beforeSpace = activeSpace
+        let beforeLayout = activeLayout
+
         undoManager.undo()
         rehomeActiveSpaceAfterTableChange()
-        rebuildIndex()
+        let didRehomeRebuild = (activeSpace != beforeSpace) || (activeLayout != beforeLayout)
+        if !didRehomeRebuild {
+            syncQuadtreeIncrementally(beforeIDs: beforeIDs, beforeBoxes: beforeBoxes)
+        }
         selection.clear()
         clearTransientInteractionState()
         modelDirty = true
         modelVersion &+= 1
     }
 
-    /// Redoes the last undone mutation and re-syncs the spatial index.
+    /// Redoes the last undone mutation and incrementally re-syncs the spatial
+    /// index (mirrors `undo()` — same `O(k log n)` delta patch, not a full
+    /// rebuild, unless the active space itself changed).
     func redo() {
         guard undoManager.canRedo else { return }
+        let beforeScoped = activeSpaceEntities
+        let beforeIDs = Set(beforeScoped.map(\.id))
+        let beforeBoxes = Self.boxesByID(beforeScoped, ctx: drawing.makeResolveContext())
+        let beforeSpace = activeSpace
+        let beforeLayout = activeLayout
+
         undoManager.redo()
         rehomeActiveSpaceAfterTableChange()
-        rebuildIndex()
+        let didRehomeRebuild = (activeSpace != beforeSpace) || (activeLayout != beforeLayout)
+        if !didRehomeRebuild {
+            syncQuadtreeIncrementally(beforeIDs: beforeIDs, beforeBoxes: beforeBoxes)
+        }
         selection.clear()
         clearTransientInteractionState()
         modelDirty = true
         modelVersion &+= 1
+    }
+
+    /// Incrementally patches the `quadtree` to match the current
+    /// `activeSpaceEntities` after an undo/redo, given the *before* snapshot.
+    /// `beforeIDs` / `beforeBoxes` are the scoped set + per-id AABB before the
+    /// mutation; the *after* state is read live from `drawing` /
+    /// `activeSpaceEntities`. Only the delta is touched — see `undo()` header.
+    private func syncQuadtreeIncrementally(beforeIDs: Set<EntityID>,
+                                           beforeBoxes: [EntityID: AABB]) {
+        let ctx = drawing.makeResolveContext()
+        let afterScoped = activeSpaceEntities
+        let afterMap = Dictionary(uniqueKeysWithValues: afterScoped.map { ($0.id, $0) })
+        let afterIDs = Set(afterMap.keys)
+        let afterBoxes = Self.boxesByID(afterScoped, ctx: ctx)
+
+        // Removed entities (were in the index, no longer scoped).
+        for id in beforeIDs.subtracting(afterIDs) {
+            quadtree.remove(id)
+        }
+        // Added entities (newly scoped — e.g. undo of a delete).
+        for id in afterIDs.subtracting(beforeIDs) {
+            if let b = afterBoxes[id], !b.isEmpty {
+                quadtree.insert(id, bounds: b)
+            }
+        }
+        // Existing but geometrically changed (box delta).
+        for id in beforeIDs.intersection(afterIDs) {
+            let oldB = beforeBoxes[id] ?? .empty
+            let newB = afterBoxes[id] ?? .empty
+            if oldB != newB {
+                if newB.isEmpty { quadtree.remove(id) } else { quadtree.update(id, bounds: newB) }
+            }
+        }
+    }
+
+    /// Builds an `id → AABB` map for a scoped entity snapshot using the
+    /// font-aware `ResolveContext` box (same as `rebuildIndex`) — the single
+    /// source of truth for "what box the quadtree indexes for this record".
+    private static func boxesByID(_ records: [EntityRecord], ctx: ResolveContext) -> [EntityID: AABB] {
+        var m: [EntityID: AABB] = [:]
+        m.reserveCapacity(records.count)
+        for r in records { m[r.id] = r.boundingBox(ctx: ctx) }
+        return m
     }
 
     /// Re-homes the active-space tab pointer after the undo/redo value-snapshot restored
