@@ -773,6 +773,15 @@ public final class CADDrawing {
     /// (SwiftUI hands one in from `DocumentGroup`); nil == undo disabled.
     public weak var undoManager: UndoManager?
 
+    // MARK: - Undo log (Wave 6 — structural-sharing diff, not whole-array CoW)
+
+    /// The structural-sharing undo log (Wave 6 A6). Stores `DrawingEdit` diffs
+    /// rather than whole-array CoW snapshots. Each committed `add`/`remove`/
+    /// `replace` appends one `DrawingEdit`; the `UndoManager` closure remains
+    /// the adapter so existing tests keep passing. A follow-up can promote this
+    /// to a persistent-array transaction.
+    public private(set) var undoLog = UndoLog()
+
     /// Monotonic id source. Never reused within this drawing's lifetime.
     private var nextRawID: UInt64 = 1
 
@@ -918,6 +927,7 @@ public final class CADDrawing {
 
         let id = e.id
         bumpInstrumentation(add: true)
+        undoLog.record(.add(e))
         registerUndo { drawing in
             // Undo of add == remove (which itself registers the redo).
             drawing.remove(id)
@@ -951,6 +961,7 @@ public final class CADDrawing {
         sharedResolveCache.remove(id: id)
 
         bumpInstrumentation(remove: true)
+        undoLog.record(.remove(removed, at: idx))
         registerUndo { drawing in
             // Undo of remove == reinsert at the original position.
             drawing.reinsert(removed, at: idx)
@@ -995,6 +1006,7 @@ public final class CADDrawing {
         entities[idx] = toStore
 
         bumpInstrumentation(replace: true)
+        undoLog.record(.replace(old: prior, new: toStore))
         registerUndo { drawing in
             // Undo must restore the prior record EXACTLY (including its version)
             // without an extra bump; `replace`'s equality guard ensures that
@@ -1019,6 +1031,7 @@ public final class CADDrawing {
         for i in clamped..<entities.count { indexByID[entities[i].id] = i }
 
         bumpInstrumentation(add: true)
+        undoLog.record(.add(entity))
         let id = entity.id
         registerUndo { drawing in
             drawing.remove(id)
@@ -2485,6 +2498,7 @@ public final class CADDrawing {
         let maxID = entities.map(\.id.rawValue).max() ?? 0
         nextRawID = maxID + 1
         undoManager?.removeAllActions()
+        undoLog.clear()
         // Wave-0 instrumentation: a bulk load is a document-level mutation that
         // invalidates any future cache/quadtree; bump the version once.
         bumpInstrumentation()

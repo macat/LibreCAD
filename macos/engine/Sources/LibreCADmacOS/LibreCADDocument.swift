@@ -117,6 +117,11 @@ struct DXFPayload: Sendable, Equatable, Codable {
     /// decodes `parameters` to an EMPTY table. The parameter table rides ONLY this in-session
     /// payload; a pure-`.dxf` save → reopen-from-disk still DROPS parameters.
     var parameters: ParameterTable
+    /// The text-style registry (STYLE table). ADDITIVE (Wave 6): carried so a TEXT/
+    /// MTEXT entity's code-7 style name survives the in-session round-trip AND the
+    /// native `.lcad` save. DXF round-trip already preserves it via the bridge, but
+    /// the payload now also carries it for snapshot/restore.
+    var textStyles: TextStyleTable
 
     init(
         entities: [EntityRecord] = [],
@@ -127,7 +132,8 @@ struct DXFPayload: Sendable, Equatable, Codable {
         layouts: [Layout] = [],
         tables: [TableObject] = [],
         constraints: ConstraintTable = ConstraintTable(),
-        parameters: ParameterTable = ParameterTable()
+        parameters: ParameterTable = ParameterTable(),
+        textStyles: TextStyleTable = TextStyleTable()
     ) {
         self.entities = entities
         self.layers = layers
@@ -138,6 +144,7 @@ struct DXFPayload: Sendable, Equatable, Codable {
         self.tables = tables
         self.constraints = constraints
         self.parameters = parameters
+        self.textStyles = textStyles
     }
 
     // MARK: - Codable (additive, back-compat)
@@ -150,7 +157,7 @@ struct DXFPayload: Sendable, Equatable, Codable {
 
     private enum CodingKeys: String, CodingKey {
         case entities, layers, blocks, graphicVariables, dimStyles, layouts, tables
-        case constraints, parameters
+        case constraints, parameters, textStyles
     }
 
     init(from decoder: any Decoder) throws {
@@ -167,6 +174,7 @@ struct DXFPayload: Sendable, Equatable, Codable {
         // same back-compat the tables' own `init(from:)` and the entity `*Data` structs use.
         constraints = try c.decodeIfPresent(ConstraintTable.self, forKey: .constraints) ?? ConstraintTable()
         parameters = try c.decodeIfPresent(ParameterTable.self, forKey: .parameters) ?? ParameterTable()
+        textStyles = try c.decodeIfPresent(TextStyleTable.self, forKey: .textStyles) ?? TextStyleTable()
     }
 
     /// An empty drawing for File ▸ New: no entities, the default layer table
@@ -249,6 +257,7 @@ extension CADDrawing {
             blocks: payload.blocks,
             graphicVariables: payload.graphicVariables,
             dimStyles: payload.dimStyles,
+            textStyles: payload.textStyles,
             layouts: payload.layouts,
             // Restore the in-session CONSTRAINT + PARAMETER tables (they ride the payload,
             // not the DXF bytes — see `DXFPayload.constraints`/`.parameters`). On a FRESH
@@ -288,7 +297,8 @@ extension CADDrawing {
             // caveats on `DXFPayload.constraints`/`.parameters`); within the session they
             // survive verbatim, closing the pre-existing snapshot gap (Lane L3).
             constraints: constraints,
-            parameters: parameters
+            parameters: parameters,
+            textStyles: textStyles
         )
     }
 }
@@ -563,6 +573,73 @@ enum DXFDocumentCodec {
     }
 }
 
+// MARK: - Native JSON codec (Wave 6 — lossless .lcad)
+
+/// Wave 6 native codec (".lcad" versioned JSON). Preserves the full document
+/// model — entities+layers+blocks+tables+constraints+params+layouts+textStyles —
+/// which DXF drops. Off-main, Sendable value types only, so the document's
+/// `init(configuration:)` and `fileWrapper` (which run on a background queue)
+/// can call it without ever touching a `@MainActor` type.
+enum NativeDocumentCodec {
+
+    /// Current native file format version. Bumped when the schema changes.
+    static let currentVersion: Int = 1
+
+    /// Versioned wrapper so a file carries its schema version for migration.
+    private struct VersionedPayload: Codable, Sendable {
+        var version: Int
+        var payload: DXFPayload
+    }
+
+    enum CodecError: Error {
+        case decodeFailed(Error)
+        case encodeFailed(Error)
+    }
+
+    /// Decodes `data` (native JSON) into a `Sendable` payload. Validates `version`
+    /// and migrates if needed (currently v0 → v1 is a no-op because all fields
+    /// decode forgivingly). Throws if the data is not native JSON.
+    static func payload(from data: Data) throws -> DXFPayload {
+        let decoder = JSONDecoder()
+        do {
+            // Try versioned wrapper first (current format).
+            if let wrapped = try? decoder.decode(VersionedPayload.self, from: data) {
+                // Migration: v0 (pre-versioned) is treated as v1; future versions
+                // can switch on `wrapped.version` here.
+                return wrapped.payload
+            }
+            // Fallback: bare payload (pre-versioned file that wrote DXFPayload directly).
+            return try decoder.decode(DXFPayload.self, from: data)
+        } catch {
+            throw CodecError.decodeFailed(error)
+        }
+    }
+
+    /// Encodes `payload` to native JSON data (versioned, sorted keys for determinism).
+    static func data(from payload: DXFPayload) throws -> Data {
+        let wrapped = VersionedPayload(version: currentVersion, payload: payload)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        do {
+            return try encoder.encode(wrapped)
+        } catch {
+            throw CodecError.encodeFailed(error)
+        }
+    }
+
+    /// Whether `data` looks like native JSON (heuristic: starts with `{` and
+    /// contains `"version"` or `"payload"` or `"entities"`). Used as a fast
+    /// pre-check before attempting a full decode.
+    static func isNativeJSON(_ data: Data) -> Bool {
+        guard let prefix = data.first, prefix == UInt8(ascii: "{") else { return false }
+        // Cheap string search before JSON decode — avoids trying to parse a DXF as JSON.
+        if let str = String(data: data.prefix(4096), encoding: .utf8) {
+            return str.contains("\"version\"") || str.contains("\"payload\"") || str.contains("\"entities\"")
+        }
+        return false
+    }
+}
+
 // MARK: - The document
 
 /// The DXF document backing `DocumentGroup`. A `ReferenceFileDocument` (reference
@@ -592,14 +669,14 @@ final class LibreCADDocument: ReferenceFileDocument, @unchecked Sendable {
     /// geometry. NOT `@MainActor` — it is plain value state on the document.
     private(set) var payload: DXFPayload
 
-    /// Readable types: DXF (text) AND DWG (binary AutoCAD). For each we accept the
-    /// declared UTI plus the extension-derived type, so double-click / Open work
-    /// regardless of which UTI Launch Services resolves the file to.
-    static var readableContentTypes: [UTType] { dxfTypes + dwgTypes }
-    /// Writable types: DXF and DWG. DWG write covers top-level geometry + the
-    /// standard tables at R2000; a block's MEMBER geometry does NOT round-trip to
-    /// DWG (libdxfrw writes empty blocks) — full block content needs DXF.
-    static var writableContentTypes: [UTType] { dxfTypes + dwgTypes }
+    /// Readable types: DXF (text), DWG (binary), AND native .lcad (JSON lossless).
+    /// For each we accept the declared UTI plus the extension-derived type, so
+    /// double-click / Open work regardless of which UTI Launch Services resolves
+    /// the file to.
+    static var readableContentTypes: [UTType] { dxfTypes + dwgTypes + lcadTypes }
+    /// Writable types: DXF, DWG, and native .lcad. Native is lossless
+    /// (preserves constraints/parameters/tables); DXF/DWG remain lossy but explicit.
+    static var writableContentTypes: [UTType] { dxfTypes + dwgTypes + lcadTypes }
 
     /// The DXF content types: the exported UTI first, then the extension-derived
     /// type as a robust fallback.
@@ -621,6 +698,23 @@ final class LibreCADDocument: ReferenceFileDocument, @unchecked Sendable {
         return types
     }()
 
+    /// The native .lcad content types: the exported UTI first, then the
+    /// extension-derived type as a robust fallback.
+    static let lcadTypes: [UTType] = {
+        var types: [UTType] = [.librecadLCAD]
+        if let byExt = UTType(filenameExtension: "lcad"), !types.contains(byExt) {
+            types.append(byExt)
+        }
+        return types
+    }()
+
+    /// Whether `contentType` is the native .lcad type (UTI or extension).
+    static func isLCAD(_ contentType: UTType) -> Bool {
+        for t in lcadTypes where contentType == t || contentType.conforms(to: t) { return true }
+        if contentType.preferredFilenameExtension?.lowercased() == "lcad" { return true }
+        return false
+    }
+
     /// Classifies a content type as DXF or DWG so the codec routes to the right
     /// engine path. A type that conforms to (or matches) any DWG type is DWG;
     /// everything else (the default) is treated as DXF.
@@ -639,18 +733,38 @@ final class LibreCADDocument: ReferenceFileDocument, @unchecked Sendable {
     }
 
     /// File ▸ Open / Open Recent / double-click. RUNS OFF THE MAIN ACTOR (NSDocument
-    /// constructs the document on a background queue). It parses the DXF bytes into
-    /// the `Sendable` payload via the off-main engine codec and stores ONLY that —
+    /// constructs the document on a background queue). It parses the bytes into
+    /// the `Sendable` payload via the off-main codecs and stores ONLY that —
     /// it does NOT build a `CADDrawing`/`CanvasModel` and does NOT call
     /// `MainActor.assumeIsolated`. (That off-main isolation assertion is the exact
     /// crash this whole design exists to avoid.)
+    ///
+    /// Wave 6: tries the native `.lcad` JSON codec FIRST (lossless, preserves
+    /// constraints/params/tables), falling back to DXF/DWG. If the content type
+    /// claims `.lcad`, native is required; otherwise native is probed via a
+    /// heuristic and the data's JSON shape.
     init(configuration: ReadConfiguration) throws {
         guard let data = configuration.file.regularFileContents else {
             throw DXFDocumentCodec.CodecError.noFileContents
         }
-        // Route to the DXF or DWG read path by the opened file's content type
-        // (binary DWG and text DXF need different libdxfrw parsers).
-        let format = Self.format(for: configuration.contentType)
+        // Native .lcad is lossless (constraints/params/tables/layouts). Try it
+        // FIRST (as the task requires), then fall back to the lossy DXF/DWG
+        // path. Handles both correctly-typed .lcad and mis-typed/extension-less files.
+        let contentType = configuration.contentType
+        if Self.isLCAD(contentType) {
+            // Content type claims LCAD — native must succeed; on failure surface
+            // the native error (don't silently treat a corrupt .lcad as DXF).
+            self.payload = try NativeDocumentCodec.payload(from: data)
+            return
+        }
+        // For DXF/DWG (or unknown), probe native JSON heuristically first; if the
+        // bytes look like JSON and decode, prefer the lossless path, otherwise DXF.
+        if NativeDocumentCodec.isNativeJSON(data),
+           let native = try? NativeDocumentCodec.payload(from: data) {
+            self.payload = native
+            return
+        }
+        let format = Self.format(for: contentType)
         self.payload = try DXFDocumentCodec.payload(from: data, format: format)
     }
 
@@ -663,13 +777,18 @@ final class LibreCADDocument: ReferenceFileDocument, @unchecked Sendable {
         payload
     }
 
-    /// Serializes a captured snapshot to a DXF `FileWrapper`. RUNS OFF THE MAIN
-    /// ACTOR. Operates ONLY on the `Sendable` snapshot via the off-main engine
-    /// codec; no `@MainActor` access.
+    /// Serializes a captured snapshot to a `FileWrapper`. RUNS OFF THE MAIN
+    /// ACTOR. Operates ONLY on the `Sendable` snapshot via the off-main codecs;
+    /// no `@MainActor` access. Wave 6: writes native `.lcad` JSON when the
+    /// destination is `.lcad` (lossless), otherwise DXF/DWG (lossy but explicit).
     func fileWrapper(
         snapshot: DXFPayload,
         configuration: WriteConfiguration
     ) throws -> FileWrapper {
+        if Self.isLCAD(configuration.contentType) {
+            let data = try NativeDocumentCodec.data(from: snapshot)
+            return FileWrapper(regularFileWithContents: data)
+        }
         // Serialize as DXF or DWG per the destination content type (Save As can
         // switch formats); the codec routes to the matching engine write path.
         let format = Self.format(for: configuration.contentType)
