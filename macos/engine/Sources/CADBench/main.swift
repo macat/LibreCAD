@@ -34,6 +34,9 @@
 import Foundation
 import CoreGraphics
 import CADEngine
+#if canImport(os)
+import os
+#endif
 
 // MARK: - Fixed seed (reproducible numbers)
 
@@ -54,6 +57,14 @@ struct Row {
     let lineRebuildInstances: Int
     let resolveAllMs: Double
     let peakResidentBytes: UInt64
+    // Wave-0 instrumentation (always present; 0 before Wave 1 wires a real cache).
+    let modelVersion: UInt64
+    let cacheHitRatio: Double
+    let quadtreeRebuilds: UInt64
+    let dirtySetSize: Int
+    let perFrameHeapBytes: UInt64
+    let addCount: UInt64
+    let instrumentation: BenchInstrumentation
 }
 
 // MARK: - The single-size benchmark
@@ -71,14 +82,17 @@ func benchmark(count: Int) -> Row {
     // ---- 1. Quadtree build: insert every (id, box). reserveWorld() once up front
     // so we measure steady-state insertion, not the early grow-by-rebuilds (the
     // renderer/engine seeds the index from the drawing bbox the same way).
+    // Wrapped in a Wave-0 signpost so Instruments can isolate the build cost.
     let worldBound = drawing.boundingBox()
     let quadtreeBuildMs = bestOf(iterations: 3, warmup: 1) {
-        let tree = Quadtree()
-        tree.reserveWorld(worldBound)
-        for (id, box) in boxes {
-            tree.insert(id, bounds: box)
+        BenchSignposts.withQuadtreeBuild {
+            let tree = Quadtree()
+            tree.reserveWorld(worldBound)
+            for (id, box) in boxes {
+                tree.insert(id, bounds: box)
+            }
+            blackHole(tree.count)
         }
-        blackHole(tree.count)
     }
 
     // Build the index ONCE more to drive the query/hit benches against a real tree.
@@ -100,9 +114,13 @@ func benchmark(count: Int) -> Row {
     let cullRect = RendererCull.expanded(visibleRect, byFraction: RendererCull.defaultMargin)
 
     // ---- 2. Cull query: the renderer's per-view-change quadtree region query.
+    // Wave-0 signposted via BenchSignposts + CADDrawing.signpostedQuadtreeQuery
+    // so later waves can correlate the per-frame cull cost with the heap.
     var visibleIDs: [EntityID] = []
     let cullQueryMs = bestOf(iterations: 50, warmup: 5) {
-        visibleIDs = tree.query(region: cullRect)
+        visibleIDs = BenchSignposts.withCullQuery {
+            drawing.signpostedQuadtreeQuery { tree.query(region: cullRect) }
+        }
     }
     let cullVisibleCount = visibleIDs.count
 
@@ -130,6 +148,8 @@ func benchmark(count: Int) -> Row {
     // cull → for each visible entity resolve() → RendererGeometry.appendInstances /
     // appendFillVertices into reused scratch (the renderer reuses scratch with
     // keepingCapacity; we mirror that to measure steady-state, not first-alloc).
+    // Wave-0 instruments the cull + each resolve via signposted helpers so the
+    // per-frame breakdown is visible in Instruments.
     let origin = RendererGeometry.renderOrigin(for: worldBound)
     let layers = drawing.layers
     var instanceScratch: [LineInstance] = []
@@ -142,41 +162,53 @@ func benchmark(count: Int) -> Row {
             fillScratch.removeAll(keepingCapacity: true)
         }
     ) {
-        // This block mirrors LineRenderer.rebuildLineInstancesIfNeeded's CPU body.
-        let ids = tree.query(region: cullRect)
-        instanceScratch.reserveCapacity(ids.count * 2)
-        for id in ids {
-            guard let e = drawing.entity(id) else { continue }
-            if layers.layer(e.layer)?.isVisible == false { continue }
-            let geo = e.resolve(ctx)
-            for poly in geo.polylines {
-                RendererGeometry.appendInstances(for: poly, renderOrigin: origin,
-                                                 into: &instanceScratch)
+        BenchSignposts.withLineRebuild {
+            // This block mirrors LineRenderer.rebuildLineInstancesIfNeeded's CPU body.
+            let ids = drawing.signpostedQuadtreeQuery { tree.query(region: cullRect) }
+            instanceScratch.reserveCapacity(ids.count * 2)
+            for id in ids {
+                guard let e = drawing.entity(id) else { continue }
+                if layers.layer(e.layer)?.isVisible == false { continue }
+                let geo = drawing.signpostedResolve(e, ctx: ctx)
+                for poly in geo.polylines {
+                    RendererGeometry.appendInstances(for: poly, renderOrigin: origin,
+                                                     into: &instanceScratch)
+                }
+                for fill in geo.fills {
+                    RendererGeometry.appendFillVertices(for: fill, renderOrigin: origin,
+                                                        into: &fillScratch)
+                }
             }
-            for fill in geo.fills {
-                RendererGeometry.appendFillVertices(for: fill, renderOrigin: origin,
-                                                    into: &fillScratch)
-            }
+            lineInstanceCount = instanceScratch.count
         }
-        lineInstanceCount = instanceScratch.count
     }
 
     // ---- 4b. Pure engine-side resolve() over ALL entities (the "initial cache
     // build" cost the renderer pays once off the main actor — the gap vs. the
     // culled per-frame rebuild above). Measured without packing so it isolates the
     // resolve() kernel cost across the whole drawing.
+    // Wave-0 signposted so the initial-cache cost is an Instruments interval.
     let resolveAllMs = bestOf(iterations: 3, warmup: 1) {
-        var sink = 0
-        for e in drawing.entities {
-            let geo = e.resolve(ctx)
-            sink &+= geo.polylines.count &+ geo.fills.count
+        BenchSignposts.withResolve {
+            var sink = 0
+            for e in drawing.entities {
+                let geo = drawing.signpostedResolve(e, ctx: ctx)
+                sink &+= geo.polylines.count &+ geo.fills.count
+            }
+            blackHole(sink)
         }
-        blackHole(sink)
     }
 
     // ---- 5. Peak memory: resident size with the index + drawing live (sampled at
     // the high-water point — the index is the largest auxiliary structure).
     let peak = MemoryProbe.residentBytes()
+    // Per-frame heap: sample again after the line rebuild so a future
+    // incremental-cache wave can attribute the steady-state heap. Wave-0
+    // just records the same resident size (no heap regression yet); the
+    // dedicated `perfCounters.perFrameHeapBytes` is written here so JSON
+    // consumers can watch it from day 0.
+    drawing.setPerFrameHeap(peak)
+    let perf = BenchInstrumentation.capture(from: drawing)
 
     // Keep the tree alive past the memory sample.
     blackHole(tree.count)
@@ -191,7 +223,14 @@ func benchmark(count: Int) -> Row {
         lineRebuildMs: lineRebuildMs,
         lineRebuildInstances: lineInstanceCount,
         resolveAllMs: resolveAllMs,
-        peakResidentBytes: peak
+        peakResidentBytes: peak,
+        modelVersion: perf.modelVersion,
+        cacheHitRatio: perf.cacheHitRatio,
+        quadtreeRebuilds: perf.quadtreeRebuilds,
+        dirtySetSize: perf.dirtySetSize,
+        perFrameHeapBytes: perf.perFrameHeapBytes,
+        addCount: perf.addCount,
+        instrumentation: perf
     )
 }
 
@@ -207,18 +246,19 @@ func printRows(_ rows: [Row]) {
     print("viewport: 1400x900 pt, centered (0,0), ~2% world span (typical working zoom)")
     print("")
 
-    // Wide table.
+    // Wide table (Wave 0 adds four instrumentation columns: modelVersion, hitRatio, rebuilds, dirty).
     let header = String(
-        format: "%-10@ | %-14@ | %-14@ | %-9@ | %-12@ | %-12@ | %-18@ | %-14@ | %-10@",
+        format: "%-10@ | %-14@ | %-14@ | %-9@ | %-12@ | %-12@ | %-18@ | %-14@ | %-10@ | %-10@ | %-8@ | %-8@ | %-6@",
         "entities" as CVarArg, "quadtree(ms)" as CVarArg, "cull q.(ms)" as CVarArg,
         "visible" as CVarArg, "hitTest(ms)" as CVarArg, "nearest(ms)" as CVarArg,
-        "lineRebuild(ms)" as CVarArg, "resolveAll(ms)" as CVarArg, "peakRSS" as CVarArg
+        "lineRebuild(ms)" as CVarArg, "resolveAll(ms)" as CVarArg, "peakRSS" as CVarArg,
+        "modelVer" as CVarArg, "hitRatio" as CVarArg, "rebuilds" as CVarArg, "dirty" as CVarArg
     )
     print(header)
     print(String(repeating: "-", count: header.count))
     for r in rows {
         let line = String(
-            format: "%-10d | %-14@ | %-14@ | %-9d | %-12@ | %-12@ | %-18@ | %-14@ | %-10@",
+            format: "%-10d | %-14@ | %-14@ | %-9d | %-12@ | %-12@ | %-18@ | %-14@ | %-10@ | %-10llu | %-8@ | %-8llu | %-6d",
             r.count,
             ms(r.quadtreeBuildMs) as CVarArg,
             ms(r.cullQueryMs) as CVarArg,
@@ -227,7 +267,11 @@ func printRows(_ rows: [Row]) {
             msShort(r.nearestMs) as CVarArg,
             "\(msShort(r.lineRebuildMs)) (\(r.lineRebuildInstances))" as CVarArg,
             ms(r.resolveAllMs) as CVarArg,
-            MemoryProbe.mib(r.peakResidentBytes) as CVarArg
+            MemoryProbe.mib(r.peakResidentBytes) as CVarArg,
+            r.modelVersion,
+            String(format: "%.2f", r.cacheHitRatio) as CVarArg,
+            r.quadtreeRebuilds,
+            r.dirtySetSize
         )
         print(line)
     }
@@ -236,10 +280,75 @@ func printRows(_ rows: [Row]) {
     print(" - lineRebuild(ms) shows ms and the packed instance count in parens.")
     print(" - cull q. / hitTest / nearest are best-of-50; quadtree/resolveAll best-of-3.")
     print(" - peakRSS is cumulative resident size (grows across sizes in one process).")
+    print(" - modelVer is CADDrawing.modelVersion after SyntheticDrawing.load (1 for a fresh synthetic draw — one bulk load).")
+    print(" - hitRatio is resolve cache hit ratio (0.00 before Wave 1 wires a cache).")
+    print(" - rebuilds is quadtree rebuild count (0 before Wave 1).")
+    print(" - dirty is dirty-set size (0 before Wave 1).")
     print(" - Budgets (rendering-performance.md §8): cull query < 0.3 ms,")
     print("   build instance list < 1.5 ms, initial 1M cache build a few seconds,")
     print("   single-entity edit < 1 ms.")
     print("")
+
+    // JSON counterpart (for CI / later-wave trend tracking) — printed to stderr when
+    // `--json` is passed so stdout stays the human table.
+    if CommandLine.arguments.contains("--json") {
+        printJSON(rows)
+    }
+}
+
+func printJSON(_ rows: [Row]) {
+    struct JSONRow: Encodable {
+        let entities: Int
+        let quadtreeBuildMs: Double
+        let cullQueryMs: Double
+        let cullVisibleCount: Int
+        let hitTestMs: Double
+        let nearestMs: Double
+        let lineRebuildMs: Double
+        let lineRebuildInstances: Int
+        let resolveAllMs: Double
+        let peakResidentBytes: UInt64
+        let peakRSSMiB: String
+        let modelVersion: UInt64
+        let cacheHitRatio: Double
+        let quadtreeRebuilds: UInt64
+        let dirtySetSize: Int
+        let perFrameHeapBytes: UInt64
+        let addCount: UInt64
+    }
+    let jsonRows: [JSONRow] = rows.map {
+        JSONRow(
+            entities: $0.count,
+            quadtreeBuildMs: $0.quadtreeBuildMs,
+            cullQueryMs: $0.cullQueryMs,
+            cullVisibleCount: $0.cullVisibleCount,
+            hitTestMs: $0.hitTestMs,
+            nearestMs: $0.nearestMs,
+            lineRebuildMs: $0.lineRebuildMs,
+            lineRebuildInstances: $0.lineRebuildInstances,
+            resolveAllMs: $0.resolveAllMs,
+            peakResidentBytes: $0.peakResidentBytes,
+            peakRSSMiB: MemoryProbe.mib($0.peakResidentBytes),
+            modelVersion: $0.modelVersion,
+            cacheHitRatio: $0.cacheHitRatio,
+            quadtreeRebuilds: $0.quadtreeRebuilds,
+            dirtySetSize: $0.dirtySetSize,
+            perFrameHeapBytes: $0.perFrameHeapBytes,
+            addCount: $0.addCount
+        )
+    }
+    let enc = JSONEncoder()
+    enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+    if let data = try? enc.encode(jsonRows), let s = String(data: data, encoding: .utf8) {
+        if CommandLine.arguments.contains("--json-file") {
+            let path = "bench-\(Int(Date().timeIntervalSince1970)).json"
+            try? s.write(toFile: path, atomically: true, encoding: .utf8)
+            FileHandle.standardError.write("JSON written to \(path)\n".data(using: .utf8)!)
+        } else {
+            // Emit JSON to stderr so stdout table is still pipe-friendly; also to stdout after a marker.
+            FileHandle.standardError.write((s + "\n").data(using: .utf8)!)
+        }
+    }
 }
 
 // MARK: - Entry point

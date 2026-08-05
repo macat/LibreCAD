@@ -17,6 +17,9 @@
 
 import Foundation
 import Observation
+#if canImport(os)
+import os
+#endif
 
 // MARK: - Drawing units (RS2::Unit + RS_Units conversion)
 
@@ -505,6 +508,58 @@ public struct GraphicVariables: Sendable, Hashable, Codable {
     }
 }
 
+// MARK: - Baseline instrumentation (Wave 0 — S)
+
+/// Baseline perf counters for Wave-0 instrumentation. All fields default to 0 so
+/// the bench still runs before Wave 1 wires a real cache. Later waves increment
+/// hits/misses/rebuilds via the `record*` hooks on `CADDrawing`; the bench reads
+/// the snapshot and computes the derived `cacheHitRatio`.
+public struct DrawingPerfCounters: Sendable, Equatable, Codable {
+    /// Resolve-cache hits (Wave 1 will wire a real per-entity cache; 0 until then).
+    public var resolveCacheHits: UInt64 = 0
+    /// Resolve-cache misses (0 until Wave 1).
+    public var resolveCacheMisses: UInt64 = 0
+    /// Quadtree rebuild count (Wave 1+ will increment on full rebuilds; 0 until then).
+    public var quadtreeRebuilds: UInt64 = 0
+    /// Current dirty-set size (entities whose cache needs invalidation; 0 until then).
+    public var dirtySetSize: Int = 0
+    /// How many `add(_:)` mutations have committed.
+    public var addCount: UInt64 = 0
+    /// How many `replace(_:)` mutations have committed.
+    public var replaceCount: UInt64 = 0
+    /// How many `remove(_:)` mutations have committed.
+    public var removeCount: UInt64 = 0
+    /// Last sampled per-frame heap (bytes) — updated by bench / later per-frame probe.
+    public var perFrameHeapBytes: UInt64 = 0
+
+    /// Cache hit ratio in [0,1]; 0 when no hits+misses yet (avoids divide-by-zero).
+    public var cacheHitRatio: Double {
+        let total = resolveCacheHits + resolveCacheMisses
+        guard total > 0 else { return 0 }
+        return Double(resolveCacheHits) / Double(total)
+    }
+
+    public init(
+        resolveCacheHits: UInt64 = 0,
+        resolveCacheMisses: UInt64 = 0,
+        quadtreeRebuilds: UInt64 = 0,
+        dirtySetSize: Int = 0,
+        addCount: UInt64 = 0,
+        replaceCount: UInt64 = 0,
+        removeCount: UInt64 = 0,
+        perFrameHeapBytes: UInt64 = 0
+    ) {
+        self.resolveCacheHits = resolveCacheHits
+        self.resolveCacheMisses = resolveCacheMisses
+        self.quadtreeRebuilds = quadtreeRebuilds
+        self.dirtySetSize = dirtySetSize
+        self.addCount = addCount
+        self.replaceCount = replaceCount
+        self.removeCount = removeCount
+        self.perFrameHeapBytes = perFrameHeapBytes
+    }
+}
+
 // MARK: - Named dimension styles (the DXF DIMSTYLE table)
 
 /// One named dimension style — the value-type port of a `DRW_Dimstyle` table
@@ -715,6 +770,84 @@ public final class CADDrawing {
     /// Monotonic id source. Never reused within this drawing's lifetime.
     private var nextRawID: UInt64 = 1
 
+    // MARK: - Baseline instrumentation (Wave 0 — S)
+
+    #if canImport(os)
+    private static let instrumentationLog = OSLog(subsystem: "com.librecad.CADEngine", category: "CADDrawing")
+    private static let resolveLog = OSLog(subsystem: "com.librecad.CADEngine", category: "Resolve")
+    private static let quadtreeLog = OSLog(subsystem: "com.librecad.CADEngine", category: "Quadtree")
+    #endif
+
+    /// Monotonic mutation version — bumps on every committed `add`/`replace`/`remove`/`load`
+    /// and on every table mutation that changes observable document state. Cheap
+    /// `UInt64` wrap-around; observed by bench & later cache invalidation. Wave-0
+    /// adds this with no behavior change: existing callers ignore it, later waves key
+    /// cache invalidation off it.
+    public private(set) var modelVersion: UInt64 = 0
+
+    /// Baseline perf counters (all zero until later waves wire real values). Bench
+    /// reads this snapshot; later waves increment via `recordCacheHit` etc. The
+    /// `addCount`/`replaceCount`/`removeCount` are incremented here on the
+    /// corresponding mutations so the bench can report mutation throughput without a
+    /// future hook. All counters are 0 before Wave 1, so bench still runs.
+    public private(set) var perfCounters = DrawingPerfCounters()
+
+    /// Bumps `modelVersion` and the `add`/`replace`/`remove` counters. Called by
+    /// every committed mutation. Always-on but cheap (one integer add).
+    private func bumpInstrumentation(add: Bool = false, replace: Bool = false, remove: Bool = false) {
+        modelVersion &+= 1
+        if add { perfCounters.addCount &+= 1 }
+        if replace { perfCounters.replaceCount &+= 1 }
+        if remove { perfCounters.removeCount &+= 1 }
+    }
+
+    /// Records a resolve-cache hit (Wave 1+ will call this from the cache layer).
+    /// No-op until then except incrementing the counter, so bench can compute
+    /// `cacheHitRatio`.
+    public func recordCacheHit() {
+        perfCounters.resolveCacheHits &+= 1
+    }
+
+    /// Records a resolve-cache miss.
+    public func recordCacheMiss() {
+        perfCounters.resolveCacheMisses &+= 1
+    }
+
+    /// Records a quadtree full rebuild (Wave 1+). Bench reports `quadtreeRebuilds`.
+    public func recordQuadtreeRebuild() {
+        perfCounters.quadtreeRebuilds &+= 1
+    }
+
+    /// Sets the current dirty-set size (entities whose cache needs invalidation).
+    public func setDirtySetSize(_ n: Int) {
+        perfCounters.dirtySetSize = Swift.max(0, n)
+    }
+
+    /// Sets the last sampled per-frame heap (bytes) for bench reporting.
+    public func setPerFrameHeap(_ bytes: UInt64) {
+        perfCounters.perFrameHeapBytes = bytes
+    }
+
+    /// Resets all counters and `modelVersion` to 0. Useful for isolated bench runs.
+    public func resetInstrumentationCounters() {
+        perfCounters = DrawingPerfCounters()
+        modelVersion = 0
+    }
+
+    /// Executes `body` inside an `os_signpost` interval. Always-on but cheap when
+    /// not recording; caller supplies the interval name. Used by `add`/`replace`/
+    /// `remove`/`resolveAll`/`makeResolveContext`.
+    #if canImport(os)
+    @inline(__always)
+    private func withInstrumentationSignpost<T>(name: StaticString, _ body: () throws -> T) rethrows -> T {
+        let log = Self.instrumentationLog
+        let id = OSSignpostID(log: log)
+        os_signpost(.begin, log: log, name: name, signpostID: id)
+        defer { os_signpost(.end, log: log, name: name, signpostID: id) }
+        return try body()
+    }
+    #endif
+
     public init() {}
 
     // MARK: - ID minting
@@ -761,6 +894,11 @@ public final class CADDrawing {
     ///   guard — it is NOT a recoverable runtime path.
     @discardableResult
     public func add(_ entity: EntityRecord) -> EntityID {
+        #if canImport(os)
+        let _spID = OSSignpostID(log: Self.instrumentationLog)
+        os_signpost(.begin, log: Self.instrumentationLog, name: "CADDrawing.add", signpostID: _spID)
+        defer { os_signpost(.end, log: Self.instrumentationLog, name: "CADDrawing.add", signpostID: _spID) }
+        #endif
         var e = entity
         if e.id.rawValue == 0 { e.id = mintID() }
         precondition(indexByID[e.id] == nil, "duplicate EntityID \(e.id) on add")
@@ -769,6 +907,7 @@ public final class CADDrawing {
         entities.append(e)
 
         let id = e.id
+        bumpInstrumentation(add: true)
         registerUndo { drawing in
             // Undo of add == remove (which itself registers the redo).
             drawing.remove(id)
@@ -785,6 +924,11 @@ public final class CADDrawing {
     /// with the entity restore within the same user-action undo group (matching how
     /// `removeLayer`/`renameLayout` register multiple undo steps that one ⌘Z reverts).
     public func remove(_ id: EntityID) {
+        #if canImport(os)
+        let _spID = OSSignpostID(log: Self.instrumentationLog)
+        os_signpost(.begin, log: Self.instrumentationLog, name: "CADDrawing.remove", signpostID: _spID)
+        defer { os_signpost(.end, log: Self.instrumentationLog, name: "CADDrawing.remove", signpostID: _spID) }
+        #endif
         guard let idx = indexByID[id] else { return }
         let removed = entities[idx]
 
@@ -793,6 +937,7 @@ public final class CADDrawing {
         // Reindex the tail that shifted down.
         for i in idx..<entities.count { indexByID[entities[i].id] = i }
 
+        bumpInstrumentation(remove: true)
         registerUndo { drawing in
             // Undo of remove == reinsert at the original position.
             drawing.reinsert(removed, at: idx)
@@ -810,6 +955,11 @@ public final class CADDrawing {
     /// prior value; redo restores the new value. This is the path single-entity
     /// edits go through — the snapshot is one value copy (ADR-002).
     public func replace(_ entity: EntityRecord) {
+        #if canImport(os)
+        let _spID = OSSignpostID(log: Self.instrumentationLog)
+        os_signpost(.begin, log: Self.instrumentationLog, name: "CADDrawing.replace", signpostID: _spID)
+        defer { os_signpost(.end, log: Self.instrumentationLog, name: "CADDrawing.replace", signpostID: _spID) }
+        #endif
         guard let idx = indexByID[entity.id] else {
             // Replacing something that isn't there falls back to add.
             _ = add(entity)
@@ -818,6 +968,7 @@ public final class CADDrawing {
         let prior = entities[idx]
         entities[idx] = entity
 
+        bumpInstrumentation(replace: true)
         registerUndo { drawing in
             drawing.replace(prior)
         }
@@ -830,6 +981,7 @@ public final class CADDrawing {
         entities.insert(entity, at: clamped)
         for i in clamped..<entities.count { indexByID[entities[i].id] = i }
 
+        bumpInstrumentation(add: true)
         let id = entity.id
         registerUndo { drawing in
             drawing.remove(id)
@@ -867,6 +1019,7 @@ public final class CADDrawing {
         let prior = entities.map(\.id)
         guard order != prior else { return true }   // no-op order: nothing to do
         applyOrder(order)
+        bumpInstrumentation()
         registerUndo { drawing in
             drawing.reorderEntities(prior)           // undo restores the prior order
         }
@@ -970,6 +1123,7 @@ public final class CADDrawing {
         let prior = layers
         body(&layers)
         guard layers != prior else { return }   // no-op edits don't pollute undo
+        bumpInstrumentation()
         registerUndo { drawing in
             drawing.mutateLayers { $0 = prior }
         }
@@ -1063,6 +1217,7 @@ public final class CADDrawing {
         let prior = layerStates
         body(&layerStates)
         guard layerStates != prior else { return }
+        bumpInstrumentation()
         registerUndo { drawing in
             drawing.mutateLayerStates { $0 = prior }
         }
@@ -1119,6 +1274,7 @@ public final class CADDrawing {
         let prior = constraints
         body(&constraints)
         guard constraints != prior else { return }
+        bumpInstrumentation()
         registerUndo { drawing in
             drawing.mutateConstraints { $0 = prior }
         }
@@ -1171,6 +1327,7 @@ public final class CADDrawing {
         let prior = parameters
         body(&parameters)
         guard parameters != prior else { return }
+        bumpInstrumentation()
         registerUndo { drawing in
             drawing.mutateParameters { $0 = prior }
         }
@@ -1304,6 +1461,7 @@ public final class CADDrawing {
         let prior = tables
         body(&tables)
         guard tables != prior else { return }
+        bumpInstrumentation()
         registerUndo { drawing in
             drawing.mutateTables { $0 = prior }
         }
@@ -1347,6 +1505,7 @@ public final class CADDrawing {
         let prior = blocks
         body(&blocks)
         guard blocks != prior else { return }
+        bumpInstrumentation()
         registerUndo { drawing in
             drawing.mutateBlocks { $0 = prior }
         }
@@ -1971,6 +2130,7 @@ public final class CADDrawing {
         working.sort { $0.tabOrder < $1.tabOrder }   // keep ordered by tab position
         guard working != prior else { return }
         layouts = working
+        bumpInstrumentation()
         registerUndo { drawing in
             drawing.mutateLayouts { $0 = prior }
         }
@@ -2177,6 +2337,7 @@ public final class CADDrawing {
         let prior = graphicVariables
         body(&graphicVariables)
         guard graphicVariables != prior else { return }   // no-op edits skip undo
+        bumpInstrumentation()
         registerUndo { drawing in
             drawing.mutateGraphicVariables { $0 = prior }
         }
@@ -2191,6 +2352,7 @@ public final class CADDrawing {
         let prior = dimStyles
         body(&dimStyles)
         guard dimStyles != prior else { return }
+        bumpInstrumentation()
         registerUndo { drawing in
             drawing.mutateDimStyles { $0 = prior }
         }
@@ -2269,6 +2431,9 @@ public final class CADDrawing {
         let maxID = entities.map(\.id.rawValue).max() ?? 0
         nextRawID = maxID + 1
         undoManager?.removeAllActions()
+        // Wave-0 instrumentation: a bulk load is a document-level mutation that
+        // invalidates any future cache/quadtree; bump the version once.
+        bumpInstrumentation()
     }
 
     // MARK: - Derived geometry
@@ -2285,9 +2450,18 @@ public final class CADDrawing {
     /// default). The block hook still defers to `currentBlockPen` (the Insert/
     /// Block-resolve owner sets that when recursing). The text hook is the shared
     /// `.lff` font provider (ADR-004) so text entities resolve to stroked glyphs.
+    ///
+    /// Wave-0 instrumentation: wrapped in an `os_signpost` interval (category
+    /// `Resolve`; always-on but cheap when not recording) so later waves can
+    /// capture the context-build cost in Instruments.
     public func makeResolveContext(tessellationTolerance: Double = 0.05,
                                    annotationScale: Double = 1.0,
                                    fieldContext: FieldContext? = nil) -> ResolveContext {
+        #if canImport(os)
+        let _spID = OSSignpostID(log: Self.resolveLog)
+        os_signpost(.begin, log: Self.resolveLog, name: "CADDrawing.makeResolveContext", signpostID: _spID)
+        defer { os_signpost(.end, log: Self.resolveLog, name: "CADDrawing.makeResolveContext", signpostID: _spID) }
+        #endif
         // Snapshot the layer table into a Sendable closure (value type copy).
         let table = layers
         // Snapshot the STYLE table into a Sendable closure (value type copy).
@@ -2418,9 +2592,49 @@ public final class CADDrawing {
     /// Resolves every entity to renderable geometry against this drawing's layer
     /// table. Convenience for the renderer seam; production rendering caches
     /// per-entity by id + version.
+    ///
+    /// Wave-0 instrumentation: wrapped in an `os_signpost` interval (category
+    /// `Resolve`) so Instruments can isolate the bulk-resolve cost; later waves
+    /// will also increment `perfCounters.resolveCacheHits/Misses` inside the
+    /// cache layer.
     public func resolveAll(_ ctx: ResolveContext? = nil) -> [ResolvedGeometry] {
+        #if canImport(os)
+        let _spID = OSSignpostID(log: Self.resolveLog)
+        os_signpost(.begin, log: Self.resolveLog, name: "CADDrawing.resolveAll", signpostID: _spID)
+        defer { os_signpost(.end, log: Self.resolveLog, name: "CADDrawing.resolveAll", signpostID: _spID) }
+        #endif
         let context = ctx ?? makeResolveContext()
         return entities.map { $0.resolve(context) }
+    }
+
+    // MARK: - Instrumentation helpers (Wave 0 — signposted quadtree query)
+
+    /// Wave-0 helper for bench: a signposted wrapper around a `Quadtree` region
+    /// query. The engine does not yet own the quadtree (`CanvasModel` still does),
+    /// so `CADDrawing` cannot query it directly; this helper lets the bench (and
+    /// later the model-owned index) capture the query cost in Instruments without
+    /// touching `Quadtree.swift` itself. When `modelVersion` tracing lands in the
+    /// model-owned index, the index will call `recordQuadtreeRebuild()` itself.
+    public func signpostedQuadtreeQuery<T>(_ body: () -> T) -> T {
+        #if canImport(os)
+        let _spID = OSSignpostID(log: Self.quadtreeLog)
+        os_signpost(.begin, log: Self.quadtreeLog, name: "Quadtree.query", signpostID: _spID)
+        defer { os_signpost(.end, log: Self.quadtreeLog, name: "Quadtree.query", signpostID: _spID) }
+        #endif
+        return body()
+    }
+
+    /// Resolves a single `EntityRecord` inside a signposted interval (category
+    /// `Resolve`). Bench uses this instead of calling `record.resolve(ctx)` directly
+    /// so the resolve kernel cost is visible in Instruments without touching
+    /// `Resolve.swift`.
+    public func signpostedResolve(_ record: EntityRecord, ctx: ResolveContext) -> ResolvedGeometry {
+        #if canImport(os)
+        let _spID = OSSignpostID(log: Self.resolveLog)
+        os_signpost(.begin, log: Self.resolveLog, name: "Resolve.resolve", signpostID: _spID)
+        defer { os_signpost(.end, log: Self.resolveLog, name: "Resolve.resolve", signpostID: _spID) }
+        #endif
+        return record.resolve(ctx)
     }
 }
 
