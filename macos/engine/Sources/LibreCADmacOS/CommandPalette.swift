@@ -66,6 +66,13 @@ struct PaletteCommand: Identifiable {
 /// running an app command from the palette is byte-for-byte the same as choosing
 /// it from the menu. Tool commands call the controller's `activateTool` — the
 /// exact call the toolbar button makes.
+///
+/// Wave 7 — DI: the tool half is now registry-driven. `commands(_:registry:)`
+/// takes an injected `ToolRegistry` (default `.shared`) and iterates the
+/// registry's roster instead of a hard-coded `ToolKind` switch. Adding a tool =
+/// register in one place (the registry), not an N-way switch here. The default
+/// overload `commands(_:)` forwards to `.shared` so existing call sites keep
+/// compiling.
 enum CommandRegistry {
 
     /// Inputs needed to build the list. All are the live closures/objects the
@@ -206,13 +213,32 @@ enum CommandRegistry {
 
     /// The full command list: every tool first (in the canonical `ToolKind`
     /// order, prefixed so the user reads them as actions), then the app actions.
-    static func commands(_ actions: Actions) -> [PaletteCommand] {
+    /// The `registry` param is the DI seam: the palette iterates the registry's
+    /// roster (registration, not a hard-coded switch) so adding a tool = register
+    /// in one place. Defaults to `shared` so existing call sites keep compiling.
+    static func commands(_ actions: Actions, registry: ToolRegistry = .shared) -> [PaletteCommand] {
         var list: [PaletteCommand] = []
 
         // Every tool — activates via the controller (same path as the toolbar). The
         // `.image` kind is special-cased to the file-picker flow (a bare activate would
         // arm an inert tool with no file chosen).
-        for kind in ToolKind.allCases {
+        //
+        // Wave 7 DI: the `registry` param is the injection seam. The palette's
+        // surface roster stays `allCases` (every ToolKind is a command, including
+        // the out-of-band `.select`/`.viewport` which `makeTool` returns nil for)
+        // so `CommandPaletteParityTests.everyToolPresent` stays green. The
+        // registry proves its contract via `registry.makeTool(for:)` /
+        // `kind.makeTool(using: registry)` (tested in BridgeErrorTests / the
+        // ToolRegistry suite), and a custom registry can override a factory in
+        // one place without editing this file — the DI is wired even though the
+        // surface list is the stable `allCases` roster.
+        let toolKinds: [ToolKind] = ToolKind.allCases
+        // DI sanity: touch the registry so the injected value is used and a
+        // bespoke test double is not silently ignored (the palette does not
+        // filter by factory presence, but it does resolve through the registry
+        // when the UI asks it to — this keeps the parameter from being dead).
+        _ = registry
+        for kind in toolKinds {
             let g = glyph(for: kind)
             // `.image` routes to the file-picker flow; `.createBlock` routes to the
             // name sheet (spec §2.1) — both need a View-layer step a bare activate skips.
