@@ -138,15 +138,30 @@ private struct SendableQuadtree: @unchecked Sendable {
 @Observable
 final class CanvasModel {
 
-    // MARK: Model + view state
+    // MARK: - Decomposed models (Wave 4 Phase 1)
 
-    /// The engine drawing (entities + layers). Replaced wholesale on File>Open /
-    /// the launch load; mutated in place by edits (none yet in this gate).
-    var drawing: CADDrawing
+    /// The document-owned slice: CADDrawing + undo + version/dirty.
+    let documentModel: DocumentModel
 
-    /// The viewport transform. Pan/zoom mutate ONLY this (matrix-only; the f32
-    /// instance buffers are never rebuilt for a view change — ADR-003).
-    var viewport: Viewport
+    /// The viewport-owned slice: Viewport matrix + quadtree + renderOrigin.
+    let viewportModel: ViewportModel
+
+    /// The interaction-owned slice: Selection + SnapResult + cursor + tool routing.
+    let interactionModel: InteractionModel
+
+    // MARK: Model + view state (facade forwards)
+
+    /// The engine drawing — facade over `documentModel.drawing` (single source).
+    var drawing: CADDrawing {
+        get { documentModel.drawing }
+        set { documentModel.drawing = newValue }
+    }
+
+    /// The viewport transform — facade over `viewportModel.viewport`.
+    var viewport: Viewport {
+        get { viewportModel.viewport }
+        set { viewportModel.viewport = newValue }
+    }
 
     // MARK: Active space (paper-space P2 — Model / Layout tab)
 
@@ -164,40 +179,50 @@ final class CanvasModel {
     /// key off this so only the named layout's paper-space entities participate.
     private(set) var activeLayout: String?
 
-    /// The shared spatial index over entity AABBs (culling + snapping). Rebuilt
-    /// when the model is replaced; incrementally updated on edits.
-    @ObservationIgnored
-    var quadtree = Quadtree()
+    /// The shared spatial index — facade over `viewportModel.quadtree`.
+    var quadtree: Quadtree {
+        get { viewportModel.quadtree }
+        set { viewportModel.quadtree = newValue }
+    }
 
-    /// The current selection (toggled by click → hitTest).
-    var selection = Selection()
+    /// The current selection — facade over `interactionModel.selection`.
+    var selection: Selection {
+        get { interactionModel.selection }
+        set { interactionModel.selection = newValue }
+    }
 
-    /// Whether anything is currently selected — the gate the "Create Block from
-    /// Selection…" command (WAVE BW, Ask #1) and the context menu read (the verb is
-    /// meaningless with nothing selected). A thin, observed accessor over `selection`.
-    var hasSelection: Bool { !selection.isEmpty }
+    /// Whether anything is currently selected — facade over interactionModel.
+    var hasSelection: Bool { interactionModel.hasSelection }
 
-    /// The latest snap result under the cursor (drives the snap marker overlay).
-    var snap: SnapResult?
+    /// The latest snap result — facade over `interactionModel.snap`.
+    var snap: SnapResult? {
+        get { interactionModel.snap }
+        set { interactionModel.snap = newValue }
+    }
 
-    /// The cursor's world position (for the coordinate HUD). `nil` when outside.
-    var cursorWorld: Vector?
+    /// The cursor's world position — facade over `interactionModel.cursorWorld`.
+    var cursorWorld: Vector? {
+        get { interactionModel.cursorWorld }
+        set { interactionModel.cursorWorld = newValue }
+    }
 
-    /// The per-view f64 floating origin the f32 instance buffers are relative to
-    /// (ADR-003). Chosen near the drawing centroid when a model loads so f32
-    /// offsets stay small.
-    @ObservationIgnored
-    var renderOrigin: Vector = Vector(0, 0)
+    /// The per-view floating origin — facade over `viewportModel.renderOrigin`.
+    var renderOrigin: Vector {
+        get { viewportModel.renderOrigin }
+        set { viewportModel.renderOrigin = newValue }
+    }
 
-    /// Whether the GPU model buffer needs a rebuild (set on model replace/edit;
-    /// cleared by the renderer after it rebuilds). View changes do NOT set this.
-    @ObservationIgnored
-    var modelDirty = true
+    /// Whether the GPU model buffer needs a rebuild — facade over documentModel.
+    var modelDirty: Bool {
+        get { documentModel.modelDirty }
+        set { documentModel.modelDirty = newValue }
+    }
 
-    /// Bumped whenever the model is replaced, so the renderer (which holds a
-    /// snapshot reference) can detect "new model" cheaply.
-    @ObservationIgnored
-    var modelVersion = 0
+    /// Bumped whenever the model is replaced — facade over documentModel.
+    var modelVersion: Int {
+        get { documentModel.modelVersion }
+        set { documentModel.modelVersion = newValue }
+    }
 
     /// The ids of constraints that, after the most recent re-solve, live in a
     /// component the solver could NOT satisfy (`.failed` — over-constrained / non-
@@ -459,23 +484,26 @@ final class CanvasModel {
     @ObservationIgnored
     private var lastGridSpacing: Double?
 
-    // MARK: Tool state
+    // MARK: Tool state (facade over interactionModel)
 
-    /// The active interaction mode: `.select` (default click-to-select / pan) or a
-    /// concrete draw tool. Set via `activateTool(_:)` so the live `tool` value is
-    /// kept in sync; observed by the HUD/toolbar for the active-tool indicator.
-    private(set) var activeToolKind: ToolKind = .select
+    /// The active interaction mode — facade over `interactionModel.activeToolKind`.
+    private(set) var activeToolKind: ToolKind {
+        get { interactionModel.activeToolKind }
+        set { interactionModel.activeToolKind = newValue }
+    }
 
-    /// The live tool value for `activeToolKind`, or `nil` in `.select` mode. A
-    /// value type the model owns; canvas events are forwarded to it via
-    /// `handleToolInput(_:)`. `@ObservationIgnored` because its mutation is driven
-    /// through explicit methods that also publish the HUD-visible derived state.
+    /// The live tool value — facade over `interactionModel.tool`.
     @ObservationIgnored
-    private(set) var tool: (any Tool)?
+    private(set) var tool: (any Tool)? {
+        get { interactionModel.tool }
+        set { interactionModel.tool = newValue }
+    }
 
-    /// The tool's current prompt for the status HUD ("Specify first point" …), or
-    /// empty in select mode. Republished on every tool input so SwiftUI updates.
-    private(set) var toolStatus: String = ""
+    /// The tool's current prompt — facade over `interactionModel.toolStatus`.
+    private(set) var toolStatus: String {
+        get { interactionModel.toolStatus }
+        set { interactionModel.toolStatus = newValue }
+    }
 
     /// The "relative-zero" — by default the last point the active tool actually
     /// PLACED (clicked or typed), the origin that the command line's `@dx,dy`, polar
@@ -1176,34 +1204,30 @@ final class CanvasModel {
     /// Whether a draw tool is active (vs select/pan mode).
     var isToolActive: Bool { activeToolKind != .select }
 
-    /// The window's `UndoManager`. Defaults to a fresh instance the model owns and
-    /// injects into the drawing so tool commits register undo (ADR-002); re-injected
-    /// on `setDrawing`. Under `DocumentGroup` the view swaps in SwiftUI's environment
-    /// `UndoManager` via `adoptUndoManager(_:)` so edits ALSO mark the native
-    /// document dirty (and ⌘Z/Revert route through the document) — that is why this
-    /// is a `var`, not a `let`. All existing call sites (and the 973 unit tests) keep
-    /// the default fresh manager and are unaffected.
+    /// The window's `UndoManager` — facade over `documentModel.undoManager`.
     @ObservationIgnored
-    private(set) var undoManager = UndoManager()
+    private(set) var undoManager: UndoManager {
+        get { documentModel.undoManager }
+        set { documentModel.adoptUndoManager(newValue) }
+    }
 
-    /// Swaps in an externally-owned `UndoManager` (SwiftUI's environment manager
-    /// under `DocumentGroup`) so drawing mutations register against IT — which is
-    /// how the native document learns it is dirty. Idempotent: a no-op if the same
-    /// manager is already adopted. Repoints the drawing's `undoManager` (a `weak var`)
-    /// and clears the new manager's stack so a freshly-opened document starts clean.
+    /// Swaps in an externally-owned `UndoManager` — forwards to documentModel.
     func adoptUndoManager(_ manager: UndoManager) {
-        guard manager !== undoManager else { return }
-        undoManager = manager
-        drawing.undoManager = manager
-        manager.removeAllActions()
+        documentModel.adoptUndoManager(manager)
     }
 
     // MARK: Init
 
     init(drawing: CADDrawing = CADDrawing(), viewSize: CGSize = CGSize(width: 800, height: 600)) {
-        self.drawing = drawing
-        self.viewport = Viewport(size: viewSize)
-        drawing.undoManager = undoManager
+        // Instantiate the decomposed slices first (the single source of truth).
+        let doc = DocumentModel(drawing: drawing)
+        let vp = ViewportModel(viewport: Viewport(size: viewSize))
+        let inter = InteractionModel(document: doc, viewport: vp)
+        self.documentModel = doc
+        self.viewportModel = vp
+        self.interactionModel = inter
+        // Keep the drawing's undoManager parented (DocumentModel init already did).
+        drawing.undoManager = doc.undoManager
         rebuildIndex()
     }
 
@@ -2352,18 +2376,15 @@ final class CanvasModel {
     /// The pick/snap aperture in GUI points (LibreCAD `m_catchEntityGuiRange`).
     static let catchPoints: Double = 8
 
-    /// The LIVE pick/snap aperture in GUI points for THIS window. Defaults to the
-    /// historical `catchPoints` (8) so existing behavior + tests are unchanged; a NEW
-    /// window seeds it from `AppSettings.snapAperturePx` (clamped) via
-    /// `seedSnapSettingsFromAppSettings()` / `applySnapSeed(_:)` (Wave-3D wires the call
-    /// at window creation). `worldTolerance` reads THIS, so the seed actually changes the
-    /// catch range. A live interaction policy (not persisted to the document).
-    var pickAperturePoints: Double = CanvasModel.catchPoints
+    /// The LIVE pick/snap aperture — facade over `interactionModel.pickAperturePoints`
+    /// (single source for catch range). Seeded via `seedSnapSettingsFromAppSettings`.
+    var pickAperturePoints: Double {
+        get { interactionModel.pickAperturePoints }
+        set { interactionModel.pickAperturePoints = newValue }
+    }
 
-    /// Snap tolerance in world units for the current zoom (the live aperture × the
-    /// current world-per-pixel). Reads `pickAperturePoints` so a seeded/edited aperture
-    /// takes effect immediately.
-    var worldTolerance: Double { pickAperturePoints * viewport.worldPerPixel }
+    /// Snap tolerance in world units — facade over `interactionModel.worldTolerance`.
+    var worldTolerance: Double { interactionModel.worldTolerance }
 
     /// Runs snapping for a cursor screen point, updating `cursorWorld` + `snap`.
     /// Returns whether the snap result changed (so the caller can skip a redraw).
