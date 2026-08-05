@@ -27,6 +27,9 @@ import CADEngine
 #if canImport(Darwin)
 import Darwin
 #endif
+#if canImport(os)
+import os
+#endif
 
 // MARK: - Deterministic PRNG (SplitMix64)
 
@@ -210,4 +213,109 @@ enum SyntheticDrawing {
         }
         return Generated(drawing: drawing, boxes: boxes)
     }
+}
+
+// MARK: - Baseline instrumentation snapshot (Wave 0 — S)
+
+/// A snapshot of the Wave-0 baseline counters that the bench reports as extra
+/// columns / JSON. All fields default to 0 so the bench still runs before Wave 1
+/// wires a real cache (the `DrawingPerfCounters` on `CADDrawing` are 0-initialized).
+/// When a later wave starts incrementing `resolveCacheHits`/`Misses` etc, this
+/// snapshot will automatically surface the real hit ratio / rebuild count.
+public struct BenchInstrumentation: Sendable, Equatable {
+    /// The drawing's `modelVersion` at snapshot time.
+    public var modelVersion: UInt64 = 0
+    /// Resolve-cache hits (0 before Wave 1).
+    public var resolveCacheHits: UInt64 = 0
+    /// Resolve-cache misses (0 before Wave 1).
+    public var resolveCacheMisses: UInt64 = 0
+    /// Derived hit ratio in [0,1]; 0 when no hits+misses yet.
+    public var cacheHitRatio: Double = 0
+    /// Quadtree full rebuild count (0 before Wave 1).
+    public var quadtreeRebuilds: UInt64 = 0
+    /// Current dirty-set size (entities needing cache invalidation; 0 before Wave 1).
+    public var dirtySetSize: Int = 0
+    /// Last sampled per-frame heap bytes (from `MemoryProbe` or `perfCounters`).
+    public var perFrameHeapBytes: UInt64 = 0
+    /// Mutation counts captured from `perfCounters`.
+    public var addCount: UInt64 = 0
+    public var replaceCount: UInt64 = 0
+    public var removeCount: UInt64 = 0
+
+    /// Captures the current counters from `drawing`. Always succeeds; before Wave 1
+    /// the cache/rebuild fields are 0 but the mutation counts and `modelVersion`
+    /// already increment on every `add`/`replace`/`remove`.
+    @MainActor
+    public static func capture(from drawing: CADDrawing) -> BenchInstrumentation {
+        let c = drawing.perfCounters
+        let total = c.resolveCacheHits + c.resolveCacheMisses
+        let ratio: Double = total > 0 ? Double(c.resolveCacheHits) / Double(total) : 0
+        return BenchInstrumentation(
+            modelVersion: drawing.modelVersion,
+            resolveCacheHits: c.resolveCacheHits,
+            resolveCacheMisses: c.resolveCacheMisses,
+            cacheHitRatio: ratio,
+            quadtreeRebuilds: c.quadtreeRebuilds,
+            dirtySetSize: c.dirtySetSize,
+            perFrameHeapBytes: c.perFrameHeapBytes,
+            addCount: c.addCount,
+            replaceCount: c.replaceCount,
+            removeCount: c.removeCount
+        )
+    }
+
+    /// A zero snapshot (no drawing available or before any mutation).
+    public static var zero: BenchInstrumentation { BenchInstrumentation() }
+}
+
+/// Signpost helpers for the bench hot paths. Always-on but cheap when not
+/// recording; lets later waves attribute bench time to the right category in
+/// Instruments without touching `Quadtree.swift` / `Resolve.swift` directly.
+public enum BenchSignposts {
+    #if canImport(os)
+    private static let benchLog = OSLog(subsystem: "com.librecad.CADBench", category: "Bench")
+    private static let quadtreeLog = OSLog(subsystem: "com.librecad.CADBench", category: "Quadtree")
+    private static let resolveLog = OSLog(subsystem: "com.librecad.CADBench", category: "Resolve")
+
+    @inline(__always)
+    public static func withQuadtreeBuild<T>(_ body: () throws -> T) rethrows -> T {
+        let id = OSSignpostID(log: quadtreeLog)
+        os_signpost(.begin, log: quadtreeLog, name: "Bench.quadtreeBuild", signpostID: id)
+        defer { os_signpost(.end, log: quadtreeLog, name: "Bench.quadtreeBuild", signpostID: id) }
+        return try body()
+    }
+
+    @inline(__always)
+    public static func withCullQuery<T>(_ body: () throws -> T) rethrows -> T {
+        let id = OSSignpostID(log: benchLog)
+        os_signpost(.begin, log: benchLog, name: "Bench.cullQuery", signpostID: id)
+        defer { os_signpost(.end, log: benchLog, name: "Bench.cullQuery", signpostID: id) }
+        return try body()
+    }
+
+    @inline(__always)
+    public static func withResolve<T>(_ body: () throws -> T) rethrows -> T {
+        let id = OSSignpostID(log: resolveLog)
+        os_signpost(.begin, log: resolveLog, name: "Bench.resolve", signpostID: id)
+        defer { os_signpost(.end, log: resolveLog, name: "Bench.resolve", signpostID: id) }
+        return try body()
+    }
+
+    @inline(__always)
+    public static func withLineRebuild<T>(_ body: () throws -> T) rethrows -> T {
+        let id = OSSignpostID(log: benchLog)
+        os_signpost(.begin, log: benchLog, name: "Bench.lineRebuild", signpostID: id)
+        defer { os_signpost(.end, log: benchLog, name: "Bench.lineRebuild", signpostID: id) }
+        return try body()
+    }
+    #else
+    @inline(__always)
+    public static func withQuadtreeBuild<T>(_ body: () throws -> T) rethrows -> T { try body() }
+    @inline(__always)
+    public static func withCullQuery<T>(_ body: () throws -> T) rethrows -> T { try body() }
+    @inline(__always)
+    public static func withResolve<T>(_ body: () throws -> T) rethrows -> T { try body() }
+    @inline(__always)
+    public static func withLineRebuild<T>(_ body: () throws -> T) rethrows -> T { try body() }
+    #endif
 }
