@@ -684,12 +684,16 @@ public final class CADDrawing {
     /// uses a style when it is edited (text-system-design §1.1). Always contains
     /// "Standard" (native default font). The DXF reader/writer STYLE round-trip is
     /// a Phase-3 bridge pass; until then this defaults to a native "Standard".
-    public var textStyles = TextStyleTable()
+    public var textStyles = TextStyleTable() {
+        didSet { if textStyles != oldValue { sharedResolveCache.clear() } }
+    }
 
     /// The drawing's graphic variables (`RS_VariableDict` + `LC_GraphicVariables`).
     /// Use the typed accessors (`graphicVariables.unit`, `.linearFormat`, ...) or
     /// `convenience` `drawingUnit` below.
-    public var graphicVariables = GraphicVariables()
+    public var graphicVariables = GraphicVariables() {
+        didSet { if graphicVariables != oldValue { sharedResolveCache.clear() } }
+    }
 
     /// The named DIMSTYLE table (the DXF DIMSTYLE table). A dimension references a
     /// style by `styleName` (DXF code 3); `makeResolveContext` wires this into the
@@ -697,7 +701,9 @@ public final class CADDrawing {
     /// dimension does not carry per-entity (precedence D4: per-entity > named style
     /// > header default). Populated on load (from the bridge's `lc_dimstyles`) and
     /// emitted on write so save preserves named styles + their ext-line offsets.
-    public var dimStyles = DimStyleTable()
+    public var dimStyles = DimStyleTable() {
+        didSet { if dimStyles != oldValue { sharedResolveCache.clear() } }
+    }
 
     /// The drawing's paper-space LAYOUT table — the named printed sheets (paper-
     /// space P0, paperspace-plan §2). Each `Layout` is a named sheet plus its page
@@ -902,6 +908,10 @@ public final class CADDrawing {
         var e = entity
         if e.id.rawValue == 0 { e.id = mintID() }
         precondition(indexByID[e.id] == nil, "duplicate EntityID \(e.id) on add")
+        // Bump the per-entity resolve cache version so a fresh record starts at 1
+        // (legacy records decoded with 0 become 1 here). The increment is
+        // wrapping so it never traps.
+        e.resolveVersion &+= 1
 
         indexByID[e.id] = entities.count
         entities.append(e)
@@ -936,6 +946,9 @@ public final class CADDrawing {
         indexByID.removeValue(forKey: id)
         // Reindex the tail that shifted down.
         for i in idx..<entities.count { indexByID[entities[i].id] = i }
+        // Evict the per-entity resolve cache entry so a later add with the same
+        // id (not normally reused, but tests may) doesn't hit a stale entry.
+        sharedResolveCache.remove(id: id)
 
         bumpInstrumentation(remove: true)
         registerUndo { drawing in
@@ -954,6 +967,15 @@ public final class CADDrawing {
     /// Replaces an existing entity's full record (same id). Undo restores the
     /// prior value; redo restores the new value. This is the path single-entity
     /// edits go through — the snapshot is one value copy (ADR-002).
+    ///
+    /// The per-entity `resolveVersion` is bumped exactly once per logical edit:
+    /// if the caller passed a record whose version already equals the stored
+    /// version, it is incremented (`&+ 1`) so the cache invalidates; if the
+    /// caller already bumped it (its version != stored version), it is kept as-is
+    /// so an explicit version is honored. This makes undo correct: undo stores
+    /// the prior record (old version) and when it calls `replace(prior)` the
+    /// version differs from the current stored version, so no extra bump occurs
+    /// and the prior version is restored byte-for-byte.
     public func replace(_ entity: EntityRecord) {
         #if canImport(os)
         let _spID = OSSignpostID(log: Self.instrumentationLog)
@@ -966,12 +988,27 @@ public final class CADDrawing {
             return
         }
         let prior = entities[idx]
-        entities[idx] = entity
+        var toStore = entity
+        if toStore.resolveVersion == prior.resolveVersion {
+            toStore.resolveVersion &+= 1
+        }
+        entities[idx] = toStore
 
         bumpInstrumentation(replace: true)
         registerUndo { drawing in
+            // Undo must restore the prior record EXACTLY (including its version)
+            // without an extra bump; `replace`'s equality guard ensures that
+            // because `prior.resolveVersion != currentVersion` (it is the old
+            // version), so no increment happens on the undo path.
             drawing.replace(prior)
         }
+    }
+
+    /// The per-entity resolve cache version for `id`, or `nil` if absent.
+    /// Exposed so the renderer/tests can observe cache invalidation.
+    public func resolveVersion(for id: EntityID) -> UInt64? {
+        guard let idx = indexByID[id] else { return nil }
+        return entities[idx].resolveVersion
     }
 
     // MARK: - Internal reinsert (undo of remove, preserves draw order)
@@ -1501,11 +1538,19 @@ public final class CADDrawing {
 
     /// Whole-table block mutation with undo (same value-snapshot scheme as
     /// `mutateLayers`).
+    ///
+    /// An insert's resolved geometry depends on its block's member list, so any
+    /// block-table edit that changes membership or a block's dynamic bundle may
+    /// make cached insert geometry stale. The per-entity `resolveVersion` on the
+    /// insert itself does NOT bump for a block-table edit, so we clear the
+    /// shared resolve cache here (the next insert resolve will miss and rebuild).
     public func mutateBlocks(_ body: (inout BlockTable) -> Void) {
         let prior = blocks
         body(&blocks)
         guard blocks != prior else { return }
         bumpInstrumentation()
+        // Block-table edits can stale any cached `.insert` (its members changed).
+        sharedResolveCache.clear()
         registerUndo { drawing in
             drawing.mutateBlocks { $0 = prior }
         }
@@ -2333,6 +2378,11 @@ public final class CADDrawing {
     /// defaults, snap modes…) through this so each change is undoable and SwiftUI
     /// sees the `graphicVariables` mutation. No-op edits don't pollute undo (D3:
     /// live-apply, one undo step per field).
+    ///
+    /// Dimension defaults (`$DIM*`) and point-style defaults (`$PDMODE`/`$PDSIZE`)
+    /// feed `ResolveContext` providers, so a variable change may stale cached
+    /// dimension/point geometry. The `didSet` on `graphicVariables` clears the
+    /// shared cache.
     public func mutateGraphicVariables(_ body: (inout GraphicVariables) -> Void) {
         let prior = graphicVariables
         body(&graphicVariables)
@@ -2348,6 +2398,10 @@ public final class CADDrawing {
     /// Whole-table DIMSTYLE mutation with undo — the same value-snapshot scheme as
     /// `mutateLayers`/`mutateBlocks` (`DimStyleTable` is a value type, so the undo
     /// snapshot is one struct copy, ADR-002). No-op edits don't pollute undo.
+    ///
+    /// Named dim styles feed `ResolveContext.namedDimStyleProvider`, so a style
+    /// edit may stale cached dimension geometry. The `didSet` on `dimStyles`
+    /// clears the shared cache.
     public func mutateDimStyles(_ body: (inout DimStyleTable) -> Void) {
         let prior = dimStyles
         body(&dimStyles)
@@ -2434,6 +2488,10 @@ public final class CADDrawing {
         // Wave-0 instrumentation: a bulk load is a document-level mutation that
         // invalidates any future cache/quadtree; bump the version once.
         bumpInstrumentation()
+        // Bulk load replaces the entire model — any cached geometry from the
+        // prior drawing is stale (different ids/kinds). Clear the shared resolve
+        // cache so the new drawing's entities rebuild from scratch.
+        sharedResolveCache.clear()
     }
 
     // MARK: - Derived geometry

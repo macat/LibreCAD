@@ -1831,6 +1831,13 @@ public struct EntityRecord: Sendable, Hashable, Codable, Identifiable {
     /// `nil` for model-space entities (and for paper-space entities not yet bound to
     /// a named layout). ADDITIVE: born `nil`, old files decode `nil`.
     public var layoutName: String?
+    /// Per-entity resolve cache version — bumped on every `CADDrawing.replace`/`add`
+    /// that touches this entity so `ResolveCache` can invalidate without re-hashing
+    /// the whole `kind`. `0` for a freshly-minted or legacy record (decoded from
+    /// an old file); the first `add`/`replace` bumps it to `1`. ADDITIVE: old files
+    /// decode to `0`, so existing drawings are unaffected and the cache simply
+    /// treats `0` as the initial version.
+    public var resolveVersion: UInt64
 
     public init(
         id: EntityID,
@@ -1839,7 +1846,8 @@ public struct EntityRecord: Sendable, Hashable, Codable, Identifiable {
         flags: EntityFlags = .default,
         kind: EntityKind,
         space: EntitySpace = .model,
-        layoutName: String? = nil
+        layoutName: String? = nil,
+        resolveVersion: UInt64 = 0
     ) {
         self.id = id
         self.layer = layer
@@ -1848,6 +1856,7 @@ public struct EntityRecord: Sendable, Hashable, Codable, Identifiable {
         self.kind = kind
         self.space = space
         self.layoutName = layoutName
+        self.resolveVersion = resolveVersion
     }
 
     /// Convenience: is this entity currently selected?
@@ -1869,7 +1878,7 @@ public struct EntityRecord: Sendable, Hashable, Codable, Identifiable {
 
 extension EntityRecord {
     private enum CodingKeys: String, CodingKey {
-        case id, layer, pen, flags, kind, space, layoutName
+        case id, layer, pen, flags, kind, space, layoutName, resolveVersion
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1882,5 +1891,7 @@ extension EntityRecord {
         // Additive paper-space fields: absent in old files ⇒ model space, no layout.
         space = try c.decodeIfPresent(EntitySpace.self, forKey: .space) ?? .model
         layoutName = try c.decodeIfPresent(String.self, forKey: .layoutName)
+        // ADDITIVE: old files have no resolveVersion ⇒ 0 (initial cache version).
+        resolveVersion = try c.decodeIfPresent(UInt64.self, forKey: .resolveVersion) ?? 0
     }
 }
