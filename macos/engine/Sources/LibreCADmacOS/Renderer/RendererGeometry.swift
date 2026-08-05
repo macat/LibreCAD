@@ -835,4 +835,284 @@ enum RendererGeometry {
     static func offset(_ world: Vector, from origin: Vector) -> SIMD2<Float> {
         SIMD2<Float>(Float(world.x - origin.x), Float(world.y - origin.y))
     }
+
+    // MARK: - Dirty-set incremental rebuild (Wave P5)
+
+    /// Per-entity cached GPU geometry (the packed instances/fills that one
+    /// entity contributes). Stored in the renderer's persistent cache so a
+    /// dirty rebuild only re-resolves `dirty ∩ visible` and reuses the rest.
+    struct CachedEntityGeometry: Sendable {
+        var instances: [LineInstance]
+        var fillVerts: [FlatVertex]
+        var wipeoutVerts: [FlatVertex]
+        var imageQuads: [ImageQuad]
+        var version: UInt64
+    }
+
+    /// Result of an incremental rebuild: the fully ordered visible arrays
+    /// (byte-identical to a full rebuild) plus the ranges that changed.
+    struct DirtyRebuildResult: Sendable {
+        var lineInstances: [LineInstance]
+        var fillVerts: [FlatVertex]
+        var wipeoutVerts: [FlatVertex]
+        var imageQuads: [ImageQuad]
+        /// Ranges in `lineInstances` that were repacked (for partial memcpy).
+        var dirtyLineRanges: [Range<Int>]
+        /// Whether this result fell back to a full rebuild.
+        var didFallback: Bool
+    }
+
+    /// Packs one entity into a `CachedEntityGeometry`, applying the same
+    /// visibility/space/block guards as `LineRenderer.packEntity`. Returns
+    /// `nil` if the entity is hidden (filtered) — the caller should not
+    /// cache it and should not append its old geometry.
+    static func cachedGeometry(
+        for record: EntityRecord,
+        ctx: ResolveContext,
+        renderOrigin: Vector,
+        layers: LayerTable,
+        activeSpace: EntitySpace,
+        activeLayout: String?,
+        blockMembers: Set<EntityID>,
+        halfWidthPx: Float,
+        backingScale: CGFloat,
+        colorTransform: (SIMD4<Float>) -> SIMD4<Float>
+    ) -> CachedEntityGeometry? {
+        // Space gate.
+        if activeSpace == .paper {
+            guard let layoutName = activeLayout, !layoutName.isEmpty else { return nil }
+            guard record.space == .paper,
+                  record.layoutName?.caseInsensitiveCompare(layoutName) == .orderedSame else { return nil }
+        } else {
+            guard record.space == .model else { return nil }
+        }
+        if blockMembers.contains(record.id) { return nil }
+        // Layer visibility (inline `RendererVisibility.isRendered` so the file
+        // remains self-contained for the CADBench symlink).
+        if let layer = layers.layer(record.layer), !layer.isVisible { return nil }
+
+        let geo = record.resolve(ctx)
+        var instances: [LineInstance] = []
+        instances.reserveCapacity(geo.polylines.reduce(0) { $0 + max($1.points.count, 1) })
+        for poly in geo.polylines {
+            appendInstances(for: poly, renderOrigin: renderOrigin,
+                            halfWidthPx: halfWidthPx, backingScale: backingScale,
+                            colorTransform: colorTransform, into: &instances)
+        }
+        var fills: [FlatVertex] = []
+        var wipeouts: [FlatVertex] = []
+        for fill in geo.fills {
+            if fill.isMask {
+                appendFillVertices(for: fill, renderOrigin: renderOrigin, into: &wipeouts)
+            } else {
+                appendFillVertices(for: fill, renderOrigin: renderOrigin, into: &fills)
+            }
+        }
+        var quads: [ImageQuad] = []
+        for image in geo.images {
+            if let q = imageQuad(for: image, renderOrigin: renderOrigin) {
+                quads.append(q)
+            }
+        }
+        return CachedEntityGeometry(instances: instances, fillVerts: fills,
+                                    wipeoutVerts: wipeouts, imageQuads: quads,
+                                    version: record.resolveVersion)
+    }
+
+    /// Full rebuild via the per-entity cache (used by tests and as the
+    /// fallback path). Populates `cache` and returns the fully ordered
+    /// visible arrays.
+    static func fullRebuild(
+        visibleIDs: [EntityID],
+        lookup: (EntityID) -> EntityRecord?,
+        ctx: ResolveContext,
+        renderOrigin: Vector,
+        layers: LayerTable,
+        activeSpace: EntitySpace,
+        activeLayout: String?,
+        blockMembers: Set<EntityID>,
+        halfWidthPx: Float,
+        backingScale: CGFloat,
+        colorTransform: (SIMD4<Float>) -> SIMD4<Float>,
+        cache: inout [EntityID: CachedEntityGeometry]
+    ) -> DirtyRebuildResult {
+        var outInstances: [LineInstance] = []
+        var outFills: [FlatVertex] = []
+        var outWipeouts: [FlatVertex] = []
+        var outQuads: [ImageQuad] = []
+        outInstances.reserveCapacity(visibleIDs.count * 2)
+        for id in visibleIDs {
+            guard let rec = lookup(id) else { continue }
+            if let cached = cachedGeometry(for: rec, ctx: ctx, renderOrigin: renderOrigin,
+                                           layers: layers, activeSpace: activeSpace,
+                                           activeLayout: activeLayout,
+                                           blockMembers: blockMembers,
+                                           halfWidthPx: halfWidthPx, backingScale: backingScale,
+                                           colorTransform: colorTransform) {
+                cache[id] = cached
+                outInstances.append(contentsOf: cached.instances)
+                outFills.append(contentsOf: cached.fillVerts)
+                outWipeouts.append(contentsOf: cached.wipeoutVerts)
+                outQuads.append(contentsOf: cached.imageQuads)
+            } else {
+                cache.removeValue(forKey: id)
+            }
+        }
+        // Evict stale entries that are no longer visible (keeps cache bounded;
+        // they will be recomputed if they re-enter).
+        let visibleSet = Set(visibleIDs)
+        for key in Array(cache.keys) where !visibleSet.contains(key) {
+            // Keep it for future re-entry? For correctness we keep it, but to
+            // bound memory we could evict. Keep for now — cheap.
+        }
+        return DirtyRebuildResult(lineInstances: outInstances, fillVerts: outFills,
+                                  wipeoutVerts: outWipeouts, imageQuads: outQuads,
+                                  dirtyLineRanges: [0..<outInstances.count],
+                                  didFallback: true)
+    }
+
+    /// Incremental rebuild: only re-packs `dirtyIDs ∩ visibleIDs`, reuses
+    /// cached geometry for the rest. Returns arrays byte-identical to a
+    /// full rebuild, plus the line ranges that were repacked.
+    ///
+    /// Falls back to `fullRebuild` when `cache` is empty or when the
+    /// caller signals fallback (dirty empty/oversized) — the caller decides
+    /// fallback via `DirtySet.shouldFallback`.
+    static func rebuildDirty(
+        visibleIDs: [EntityID],
+        dirtyIDs: Set<EntityID>,
+        lookup: (EntityID) -> EntityRecord?,
+        ctx: ResolveContext,
+        renderOrigin: Vector,
+        layers: LayerTable,
+        activeSpace: EntitySpace,
+        activeLayout: String?,
+        blockMembers: Set<EntityID>,
+        halfWidthPx: Float,
+        backingScale: CGFloat,
+        colorTransform: (SIMD4<Float>) -> SIMD4<Float>,
+        cache: inout [EntityID: CachedEntityGeometry]
+    ) -> DirtyRebuildResult {
+        // Empty cache ⇒ first frame: must full-build.
+        if cache.isEmpty {
+            return fullRebuild(visibleIDs: visibleIDs, lookup: lookup, ctx: ctx,
+                               renderOrigin: renderOrigin, layers: layers,
+                               activeSpace: activeSpace, activeLayout: activeLayout,
+                               blockMembers: blockMembers, halfWidthPx: halfWidthPx,
+                               backingScale: backingScale, colorTransform: colorTransform,
+                               cache: &cache)
+        }
+        // Empty dirty set ⇒ fallback (correctness first).
+        if dirtyIDs.isEmpty {
+            return fullRebuild(visibleIDs: visibleIDs, lookup: lookup, ctx: ctx,
+                               renderOrigin: renderOrigin, layers: layers,
+                               activeSpace: activeSpace, activeLayout: activeLayout,
+                               blockMembers: blockMembers, halfWidthPx: halfWidthPx,
+                               backingScale: backingScale, colorTransform: colorTransform,
+                               cache: &cache)
+        }
+
+        // Oversized check: reuse DirtySet's threshold.
+        if dirtyIDs.count > visibleIDs.count / 2 || (dirtyIDs.count > 256 && Double(dirtyIDs.count) > Double(visibleIDs.count) * 0.3) {
+            return fullRebuild(visibleIDs: visibleIDs, lookup: lookup, ctx: ctx,
+                               renderOrigin: renderOrigin, layers: layers,
+                               activeSpace: activeSpace, activeLayout: activeLayout,
+                               blockMembers: blockMembers, halfWidthPx: halfWidthPx,
+                               backingScale: backingScale, colorTransform: colorTransform,
+                               cache: &cache)
+        }
+
+        var outInstances: [LineInstance] = []
+        var outFills: [FlatVertex] = []
+        var outWipeouts: [FlatVertex] = []
+        var outQuads: [ImageQuad] = []
+        outInstances.reserveCapacity(visibleIDs.count * 2)
+        var dirtyRanges: [Range<Int>] = []
+        var currentLineOffset = 0
+
+        for id in visibleIDs {
+            let isDirty = dirtyIDs.contains(id)
+            let needsRecompute = isDirty || cache[id] == nil
+            // Also recompute if the entity's version changed since cache.
+            var cachedNeedsRefresh = false
+            if !needsRecompute, let rec = lookup(id), let entry = cache[id] {
+                if rec.resolveVersion != entry.version {
+                    cachedNeedsRefresh = true
+                }
+            }
+            if needsRecompute || cachedNeedsRefresh {
+                guard let rec = lookup(id),
+                      let fresh = cachedGeometry(for: rec, ctx: ctx, renderOrigin: renderOrigin,
+                                                 layers: layers, activeSpace: activeSpace,
+                                                 activeLayout: activeLayout,
+                                                 blockMembers: blockMembers,
+                                                 halfWidthPx: halfWidthPx, backingScale: backingScale,
+                                                 colorTransform: colorTransform) else {
+                    // Now hidden (layer frozen, space gate): ensure cache evicted and contribute nothing.
+                    cache.removeValue(forKey: id)
+                    continue
+                }
+                cache[id] = fresh
+                let start = outInstances.count
+                outInstances.append(contentsOf: fresh.instances)
+                outFills.append(contentsOf: fresh.fillVerts)
+                outWipeouts.append(contentsOf: fresh.wipeoutVerts)
+                outQuads.append(contentsOf: fresh.imageQuads)
+                if !fresh.instances.isEmpty {
+                    dirtyRanges.append(start..<(start + fresh.instances.count))
+                }
+                currentLineOffset += fresh.instances.count
+            } else {
+                // Reuse cached.
+                if let entry = cache[id] {
+                    outInstances.append(contentsOf: entry.instances)
+                    outFills.append(contentsOf: entry.fillVerts)
+                    outWipeouts.append(contentsOf: entry.wipeoutVerts)
+                    outQuads.append(contentsOf: entry.imageQuads)
+                    currentLineOffset += entry.instances.count
+                }
+            }
+        }
+        return DirtyRebuildResult(lineInstances: outInstances, fillVerts: outFills,
+                                  wipeoutVerts: outWipeouts, imageQuads: outQuads,
+                                  dirtyLineRanges: dirtyRanges, didFallback: false)
+    }
+
+    /// Pure helper for tests: builds the full visible instance array
+    /// without any cache (the reference "full rebuild" that dirty must match).
+    static func referenceInstances(
+        visibleIDs: [EntityID],
+        lookup: (EntityID) -> EntityRecord?,
+        ctx: ResolveContext,
+        renderOrigin: Vector,
+        layers: LayerTable,
+        activeSpace: EntitySpace,
+        activeLayout: String?,
+        blockMembers: Set<EntityID>,
+        halfWidthPx: Float,
+        backingScale: CGFloat,
+        colorTransform: (SIMD4<Float>) -> SIMD4<Float>
+    ) -> [LineInstance] {
+        var out: [LineInstance] = []
+        for id in visibleIDs {
+            guard let rec = lookup(id) else { continue }
+            // Apply same visibility gates as cachedGeometry.
+            if activeSpace == .paper {
+                guard let layoutName = activeLayout, !layoutName.isEmpty else { continue }
+                guard rec.space == .paper,
+                      rec.layoutName?.caseInsensitiveCompare(layoutName) == .orderedSame else { continue }
+            } else {
+                guard rec.space == .model else { continue }
+            }
+            if blockMembers.contains(rec.id) { continue }
+            if let layer = layers.layer(rec.layer), !layer.isVisible { continue }
+            let geo = rec.resolve(ctx)
+            for poly in geo.polylines {
+                appendInstances(for: poly, renderOrigin: renderOrigin,
+                                halfWidthPx: halfWidthPx, backingScale: backingScale,
+                                colorTransform: colorTransform, into: &out)
+            }
+        }
+        return out
+    }
 }
