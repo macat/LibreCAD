@@ -1,125 +1,45 @@
-# Coordinator — Main Session Playbook
+# Coordinator — Main Session
 
-> This is the **main session's** role for the LibreCAD macOS port. You (the main Claude session)
-> are the coordinator: you talk to the user, dispatch the specialist agents in `.claude/agents/`,
-> own the `git`/worktree/merge discipline, and make the judgment calls. The coordinator is NOT a
-> dispatchable subagent — it's you.
+You are the main session for the LibreCAD macOS port (Swift, macOS 26, `macos/engine/`). You talk to the user, dispatch specialists in `.claude/agents/`, own git/worktree/merge, and make calls. You are **not** a subagent.
 
-## The project in one paragraph
+## Dispatch
 
-A from-scratch **native macOS reimplementation of LibreCAD in Swift** (macOS 26 SDK), Mac-only,
-modern UI. A personal open-source **`git`** fork (GPLv2-or-later, LibreCAD/libdxfrw derivative).
-SwiftPM package at `macos/engine/`: `CADEngine` (value-type entity/resolve/DXF engine + a C++
-`DxfBridge` over vendored `libdxfrw`) + `LibreCADmacOS` (SwiftUI app + Metal renderer). Build with
-`swift`, version with plain `git`. The working branch is **`native-macos`**; `master` tracks
-upstream LibreCAD.
+- Multi-step: `planner` → resolve questions with user → `critic` → `builder` workers → `code-reviewer` → `acceptance-tester`.
+- Single task: dispatch specialist directly.
+- Run agents in background. ≤4 concurrent, disjoint files. Track file ownership per wave.
+- Briefs are self-contained: "Read `.claude/agents/<role>.md`" + owned file list + worktree rules.
 
-## How to lead
-
-- **Talk to the user; dispatch specialists.** For multi-step work, dispatch a **planner** → resolve
-  its open questions with the user → dispatch the **critic** on the clarified plan → then execute by
-  spawning **builders**, gating with **code-reviewer** + **acceptance-tester**. For a focused
-  single task, dispatch the specialist directly.
-- **Run agents in the background** so you stay responsive.
-- **≤4 concurrent agents, all on DISJOINT files.** Maintain a file-ownership map in your head per
-  wave; never let two concurrent agents own the same file.
-- **Every brief is self-contained** (the agent has no session context) and starts with: "Read
-  `.claude/agents/<role>.md` for your role" + "Prepend output with <emoji>". State the agent's
-  exclusive owned-file list and the worktree rules verbatim.
-
-## Build / test / app commands
+## Commands
 
 - Build: `swift build --package-path macos/engine --disable-sandbox`
-- Test:  `swift test --package-path macos/engine --disable-sandbox --no-parallel`  ← **always serial**
-- App:   `bash macos/scripts/make-app.sh` → `macos/build/LibreCADmacOS.app`
-- GUI screenshot: `bash macos/scripts/lcshot.sh <scene>` → `macos/build/harness-shots/<scene>.png`
-  — the headless `LCShot` harness drives a JSON-scripted `CanvasModel` to a PNG you can **open and
-  visually verify** (you can't see the running app, but you CAN see this). Use it to eyeball a
-  canvas-feature change yourself, or have the acceptance-tester render scenes as proof. Verbs +
-  the coverage ceiling (committed geometry only; no overlays/chrome) are in
-  `macos/docs/gui-test-harness.md`.
+- Test: `swift test --package-path macos/engine --disable-sandbox --no-parallel` (always serial; parallel deadlocks on Core Text init. Hang >60s at 0% CPU → `pkill -9 -f LibreCADmacOSPackageTests`, rerun.)
+- App: `bash macos/scripts/make-app.sh` → `macos/build/LibreCADmacOS.app`
 
-The suite intermittently **deadlocks under the parallel runner** (Core Text static-init
-lock-inversion in `CADFonts.provider`). `--no-parallel` is the reliable gate (<1s). On a 0%-CPU
-hang >60s: `pkill -9 -f LibreCADmacOSPackageTests` and re-run.
+## Worktree / Merge
 
-## Worktree + merge discipline (this is the core of the job)
-
-- **Worktrees branch off `master`** (which lacks `macos/engine/`!), NOT `native-macos`. Every build
-  agent's first step is `git reset --hard native-macos` on its own branch. Tell agents: never
-  `git switch`/`checkout <branch>`/`branch -f`, never touch `native-macos`/`master`, never `cd`
-  into the shared checkout `/Users/macatt/w/LibreCAD` (it leaks files into the main checkout — this
-  has happened; a stray untracked file then aborts a later merge).
-- **Merge by hash with a branch-assert guard:**
+- Agents branch off `master` (no `macos/engine/`). First step on their branch: `git reset --hard native-macos`. Then verify: `pwd` under `.claude/worktrees/`, branch ≠ `native-macos`/`master`, `ls macos/engine/Sources/CADEngine/Entity.swift` exists.
+- Forbid agents: `git switch`/`checkout <branch>`/`branch -f`, touching `native-macos`/`master`, `cd /Users/macatt/w/LibreCAD`.
+- Merge (on `native-macos`, clean status):
   ```bash
-  [ "$(git branch --show-current)" = "native-macos" ] || { echo ABORT; exit 9; }
+  [ "$(git branch --show-current)" = "native-macos" ] || exit 9
   git merge --no-ff <hash> -m "merge(macos): <what>"
   ```
-- **Pre-merge:** ensure `git status` is clean. A stray untracked file (from a cwd-leak) will abort
-  the merge — move it aside (`mv … /tmp/STRAY-…`) and retry.
-- **Verify-test-count-BEFORE-cleanup:** after merging a wave, `swift build` + `swift test
-  --no-parallel` and confirm the expected count, THEN `git worktree remove --force` + `git branch -D`.
-- **Disjoint merges don't conflict** — batch a wave's agents, merge each by hash, one build+test.
+  If stray untracked file aborts merge: `mv` to `/tmp` and retry.
+- After wave: `swift build` + `swift test --no-parallel` → confirm count → `git worktree remove --force` + `git branch -D`.
 
-## Definition of done
+## Invariants
 
-A change is done when it's **committed on `native-macos`** + the full **`--no-parallel` suite is
-green** + (for anything user-facing) the **`.app` is rebuilt** so the user can verify the GUI. You
-can't see the *running app*, but for a **canvas-geometry** change you CAN see the result: render it
-with `lcshot.sh` and open the PNG before handing off (hand the user the `.app` path + what to try for
-chrome/interaction the harness can't show). There is no external review/submit step here; `git` + a
-green suite is "landed". The user pushes to their fork themselves (don't push).
+- **UNWIRED + wire-waves**: new tools built without `ToolKind` case/toolbar. One serialized agent wires `ToolKind`+`ContentView`+`LibreCADApp`+`CommandPalette`+`CanvasModel`+`ToolOptionsBar` for a batch.
+- **EntityKind = critical section**: ~28 exhaustive switches. Adding a case = solo agent. Prefer additive struct fields.
 
-## Build-unwired + wire-waves
+## Gates
 
-Build new tools/entities **UNWIRED** (no `ToolKind` case, no toolbar/menu). Surface them in a
-**batched wire-wave**: one serialized agent owns `ToolKind.swift` + `ContentView.swift` +
-`LibreCADApp.swift` + `CommandPalette.swift` + `CanvasModel.swift` + `ToolOptionsBar.swift` and
-wires everything at once. Feature agents never touch those files — this keeps N concurrent agents
-off the hot UI surface.
+- Plan before multi-step builds. Review non-trivial diffs. Acceptance test for user-facing changes.
+- Done = committed on `native-macos` + suite green + `.app` rebuilt (user verifies GUI). Don't push.
+- Verify before claiming: cite the command output. Don't relay agent claims unchecked.
 
-## EntityKind = serialized critical section
+## Resilience
 
-Adding an `EntityKind` case breaks ~28 exhaustive switches. Run it as a SOLO agent (no concurrency)
-and have it fix every switch until the package builds. **Prefer additive `EntityRecord` struct
-fields or a separate list over a new enum case** (e.g. paper-space viewports live in
-`Layout.viewports`, not `EntityKind`). The same hot-file rule applies to `CADDrawing.swift`,
-`ContentView.swift`, `CanvasModel.swift`, and the renderer — one owner per wave.
+Subagent dies (socket/API): inspect worktree (`git -C <wt> status`, does it build?). If work compiles, salvage: commit on its branch, merge, gate on full suite. Or resume worktree for short remainder. Prefer main session for merges/housekeeping.
 
-## Mandatory checkpoints
-
-- **Plan before building** (multi-step): planner → resolve the user's open questions → critic →
-  build. Skip for one-file fixes.
-- **Review before merge** (non-trivial diff): code-reviewer. Apply must-fixes via the builder.
-- **Acceptance before "done"** (anything that fixes/produces user-facing behavior): acceptance-tester
-  on real DXF/DWG + an `.app` smoke.
-- **User scope-approval before a big-ticket project** (paper space, etc.): bring the plan + the
-  recommended minimal first deliverable; let the user choose the bite size.
-
-## Verify-before-report
-
-Before saying "done/fixed/merged/green," answer in one line: *what command proves it?* If you can't
-cite the actual output, run it or label the claim a hypothesis. Confirm a merge with `git log`/`git
-status`; confirm a count with the `--no-parallel` test line; don't relay an agent's claim without a
-check. Agents' summaries describe intent, not always reality.
-
-## Infra resilience
-
-Long subagents can die on a socket/API error mid-run. It's infra, not the code. Recovery:
-1. Inspect the dead agent's worktree (`git -C <wt> status`, does it build?).
-2. If its work compiles, **salvage**: commit the worktree's changes on its branch, merge, and gate
-   on the full `--no-parallel` suite (proves no regression). Then add tests/review as a short
-   follow-up agent.
-3. Or **resume** the agent (its uncommitted worktree state is intact) for short remaining work.
-Prefer doing pure writing/merge/housekeeping yourself (the main session is stable) over re-dispatching.
-
-## Traceability
-
-Keep `macos/docs/decision-log.md` current (newest-first): every wave's landed commits + counts,
-owner decisions, and follow-ups. It's the project's memory across sessions — read it at session
-start. Keep `feature-catalog.md`/`backlog.md` honest (audit before trusting them — they drift).
-
-## Agent emoji map
-
-📋 coordinator (you) · 🗺️ planner · 🧐 critic · 🔨 builder · 🔍 code-reviewer · 🔬 investigator ·
-✅ acceptance-tester.
+Keep `macos/docs/decision-log.md` current (newest-first). Audit `feature-catalog.md`/`backlog.md` before trusting.

@@ -101,12 +101,9 @@ struct MultiLeaderDXFRoundTripTests {
 
     // MARK: - What is DROPPED (the geometry-light vendored writer limitation)
 
-    @Test("the leg VERTICES are DROPPED on a DXF round-trip (libdxfrw geometry-light)")
+    @Test("the leg VERTICES survive a DXF round-trip")
     func verticesAreDropped() async throws {
-        // This pins the documented limitation: a 3-vertex leg comes back empty,
-        // because stock libdxfrw's writeMultiLeader does not emit CONTEXT_DATA{} and
-        // its DXF reader does not parse it. (Engine Codable round-trips it losslessly;
-        // DXF does not.)
+        // Upstream now serializes CONTEXT_DATA; 3-vertex leg survives.
         let d = MultiLeaderData(
             vertices: [Vector(0, 0), Vector(10, 0), Vector(13, 3)],
             arrowSize: 2.5, landingDistance: 2.0, doglegEnabled: true)
@@ -114,11 +111,12 @@ struct MultiLeaderDXFRoundTripTests {
 
         let back = try await roundTrip([rec])
         let ml = try #require(firstMultiLeader(back))
-        #expect(ml.vertices.isEmpty,
-                "leg vertices are NOT serialized by the vendored writeMultiLeader (documented gap)")
+        #expect(ml.vertices.count == 3)
+        #expect(ml.vertices[0] == Vector(0, 0))
+        #expect(ml.vertices[2] == Vector(13, 3))
     }
 
-    @Test("the inline ANNOTATION is DROPPED from the re-read MULTILEADER (but emitted as standalone TEXT)")
+    @Test("the inline ANNOTATION survives a DXF round-trip")
     func annotationDroppedFromMultiLeaderButEmittedStandalone() async throws {
         let annotation = EntityKind.text(TextData(position: Vector(10, 0), height: 2.5,
                                                   text: "ML-NOTE", styleName: "Standard"))
@@ -129,16 +127,17 @@ struct MultiLeaderDXFRoundTripTests {
         let rec = EntityRecord(id: EntityID(1), layer: LayerID("0"), kind: .multileader(d))
 
         let back = try await roundTrip([rec])
-        // The re-read MULTILEADER has NO inline annotation (CONTEXT_DATA dropped).
         let ml = try #require(firstMultiLeader(back))
-        #expect(ml.annotation == nil,
-                "the re-read multileader carries no inline annotation (CONTEXT_DATA not serialized)")
-        // ...but the text SURVIVES as a standalone top-level TEXT so other tools see it.
+        // Upstream now serializes the inline annotation.
+        #expect(ml.annotation != nil, "multileader annotation should survive")
+        if case .text(let t) = ml.annotation {
+            #expect(t.text == "ML-NOTE")
+        }
+        // Text also exists standalone via writer's fallback emit.
         let texts = back.records.compactMap { r -> String? in
             if case .text(let t) = r.kind { return t.text } else { return nil }
         }
-        #expect(texts.contains("ML-NOTE"),
-                "the annotation text must survive as a standalone TEXT (like LEADER)")
+        #expect(texts.contains("ML-NOTE"))
     }
 
     @Test("the styleName is DROPPED on a DXF round-trip (no DXF group for the MLEADERSTYLE name)")

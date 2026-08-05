@@ -234,8 +234,10 @@ public:
     virtual void addText(const DRW_Text& data) = 0;
 
     /** Called for every attribute definition in a BLOCK. The default preserves
-     * source compatibility for consumers that do not model attribute metadata. */
-    virtual void addAttDef(const DRW_Attdef& data) { (void) data; }
+     * source compatibility for consumers that do not model attribute metadata.
+     * Forwards to addAttdef (lowercase) so code overriding the historic
+     * lower-case hook (LibreCAD-macOS) also receives the upstream path. */
+    virtual void addAttDef(const DRW_Attdef& data) { addAttdef(data); }
 
     /**
      * Called for every aligned dimension entity.

@@ -46,15 +46,17 @@ let package = Package(
             // example/test trees are excluded by simply not listing them.
             sources: [
                 "lcdxf.cpp",
-                // libdxfrw/src/*.cpp (7)
+                // libdxfrw/src/*.cpp (9)
+                "libdxfrw/drw_acis.cpp",
                 "libdxfrw/drw_base.cpp",
                 "libdxfrw/drw_classes.cpp",
+                "libdxfrw/drw_datastorage.cpp",
                 "libdxfrw/drw_entities.cpp",
                 "libdxfrw/drw_header.cpp",
                 "libdxfrw/drw_objects.cpp",
                 "libdxfrw/libdwgr.cpp",
                 "libdxfrw/libdxfrw.cpp",
-                // libdxfrw/src/intern/*.cpp (21)
+                // libdxfrw/src/intern/*.cpp (23)
                 "libdxfrw/intern/drw_dbg.cpp",
                 "libdxfrw/intern/drw_textcodec.cpp",
                 "libdxfrw/intern/dwgbuffer.cpp",
@@ -78,6 +80,8 @@ let package = Package(
                 "libdxfrw/intern/dwgreader24.cpp",
                 "libdxfrw/intern/dwgreader27.cpp",
                 "libdxfrw/intern/dwgreader32.cpp",
+                "libdxfrw/intern/dwgreaderR11.cpp",
+                "libdxfrw/intern/dwgreaderR1_40.cpp",
                 "libdxfrw/intern/dwgutil.cpp",
                 "libdxfrw/intern/dxfreader.cpp",
                 "libdxfrw/intern/dxfwriter.cpp",

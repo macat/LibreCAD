@@ -1072,7 +1072,7 @@ public:
     // size imgSizeU/V) and the masking polygon is `DRW_Image::clipPath` (codes 91 +
     // 14/24), copied into the flat `vertices` array; the clip mode (code 290) is
     // `DRW_Image::clipMode`.
-    void addWipeout(const DRW_Image *data) override {
+    void addWipeout(const DRW_Wipeout *data) override {
         ++m_out->geometryCount;
         LCEntity e = makeEntity(LC_ENT_WIPEOUT);
         if (data != nullptr) {
@@ -2658,7 +2658,7 @@ private:
     // path — both skipped + counted, exactly like IMAGE.
     void writeWipeout(const LCEntity &e) {
         if (m_dwg != nullptr || writerVersion() <= DRW::AC1009) { ++m_skipped; return; }
-        DRW_Image img;
+        DRW_Wipeout img;
         fillCommon(img, e);
         img.basePoint.x = e.p1x; img.basePoint.y = e.p1y; img.basePoint.z = e.p1z;
         img.secPoint.x  = e.p2x; img.secPoint.y  = e.p2y; img.secPoint.z  = e.p2z;

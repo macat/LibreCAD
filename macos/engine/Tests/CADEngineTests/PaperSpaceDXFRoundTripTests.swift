@@ -214,33 +214,25 @@ struct PaperSpaceDXFRoundTripTests {
         #expect(model.count + paper.count == 2,
                 "a DWG round-trip lost one of the two line geometries")
 
-        // KNOWN LOSS: libdxfrw's DWG writer (`dwgWriter15`) does NOT author a
-        // `*Paper_Space` block / DXF code 67, so EVERY record reads back as MODEL space —
-        // the paper line keeps its (50,0) geometry but its `.paper` tag is dropped. This
-        // is the same honest, pre-existing DWG-writer gap pinned by `SaveRoundTripTests`
-        // (custom layers / dim-style tables / block members are likewise DWG-only losses).
-        // Full paper-space fidelity round-trips on DXF (tests 1–2 above). When a future
-        // libdxfrw upgrade adds DWG paper-space write, FLIP this to assert the paper line
-        // returns `.paper` (and re-enable the single-layout DWG assertion below).
-        #expect(back.records.allSatisfy { $0.space == .model },
-                "DWG unexpectedly preserved a paper-space tag — libdxfrw gained DWG paper-space write; promote the DXF paper-space asserts to DWG too")
-        #expect(!back.records.contains { $0.space == .paper },
-                "no DWG-read record should be paper space until libdxfrw writes DWG paper space")
+        // DWG paper-space now round-trips (upstream added paper-space DWG support).
+        // Both the model and paper lines survive with their space tags intact, mirroring DXF.
+        #expect(paper.count == 1, "paper line should remain .paper through DWG")
+        #expect(model.count == 1, "model line should remain .model through DWG")
+        #expect(back.records.contains { $0.space == .paper })
+        #expect(back.records.contains { $0.space == .model })
     }
 
-    @Test("DWG reconstructs NO layout even with paper content (dwgWriter15 paper-space gap); model-only is unaffected")
+    @Test("DWG reconstructs layout through DWG (paper-space now supported)")
     func noLayoutReconstructedThroughDWG() async throws {
-        // (a) WITH paper content: because the DWG writer drops paper space (above), the
-        // re-read file has no `*Paper_Space` block, so NO layout reconstructs. (On DXF
-        // the same content reconstructs "Layout1" — see `singleLayoutReconstructionDXF`.)
+        // (a) WITH paper content: DWG paper-space now round-trips, so the re-read file
+        // reconstructs Layout1 (mirrors DXF single-layout case).
         let withPaper = tempPath(ext: "dwg")
         defer { removeFile(withPaper) }
         _ = try await CADEngine.shared.writeEntities(
             [paperLine(), modelLine()], layers: layer0(), toDWGPath: withPaper)
         let pRes = try await CADEngine.shared.readEntities(dwgPath: withPaper)
-        // KNOWN LOSS (paired with the test above): no DWG paper-space ⇒ no layout.
-        #expect(pRes.layouts.isEmpty,
-                "DWG unexpectedly reconstructed a layout — libdxfrw gained DWG paper-space write; promote the DXF single-layout assert to DWG too")
+        #expect(pRes.layouts.count == 1)
+        #expect(pRes.layouts.first?.name == "Layout1")
 
         // (b) Model-ONLY → no layouts (the model-space common case is unaffected by DWG).
         let modelOnly = tempPath(ext: "dwg")
